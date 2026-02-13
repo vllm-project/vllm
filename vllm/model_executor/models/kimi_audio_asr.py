@@ -856,24 +856,15 @@ class KimiAudioForConditionalGeneration(
         return cleaned
 
     def forward(self, *args, **kwargs):  # type: ignore[override]
-        # Pull out our extra multimodal tensors
-
-        # (added by KimiAudioASRMultiModalProcessor).
-
+        # Pull out multimodal tensors added by KimiAudioASRMultiModalProcessor.
         whisper_input_features = kwargs.pop("whisper_input_features", None)
-
         is_continuous_mask = kwargs.pop("is_continuous_mask", None)
-
         text_input_ids = kwargs.pop("text_input_ids", None)
-
         audio_input_ids = kwargs.pop("audio_input_ids", None)
 
         # vLLM forward provides input_ids (bookkeeping ids). For Kimi-Audio we
-
         # may also receive `audio_input_ids` containing the true ids.
-
         input_ids = kwargs.get("input_ids")
-
         if input_ids is None and len(args) > 0:
             input_ids = args[0]
 
@@ -892,20 +883,15 @@ class KimiAudioForConditionalGeneration(
         if isinstance(true_input_ids, torch.Tensor) and true_input_ids.dim() == 3:
             true_input_ids = true_input_ids.squeeze(0)
 
-        # IMPORTANT (V1): vLLM may provide `inputs_embeds` computed from
-        # placeholder token ids. If we have Kimi-Audio multimodal tensors,
-        # rebuild `inputs_embeds` using the native embed_input_ids mixing path.
+        # Rebuild inputs_embeds using Kimi-Audio mixing if multimodal tensors present.
         if (
             isinstance(true_input_ids, torch.Tensor)
             and whisper_input_features is not None
         ):
-            # Get the original inputs_embeds from the base model if not provided
             original_inputs_embeds = kwargs.get("inputs_embeds")
             if original_inputs_embeds is None and len(args) > 2:
-                # inputs_embeds is the third argument in some model signatures
                 original_inputs_embeds = args[2] if len(args) > 2 else None
 
-            # Compute the new embeddings using our mixing path
             mixed_embeds = self.embed_input_ids(
                 true_input_ids,
                 whisper_input_features=whisper_input_features,
@@ -914,7 +900,7 @@ class KimiAudioForConditionalGeneration(
                 audio_input_ids=audio_input_ids,
             )
 
-            # Ensure the mixed embeddings match the expected sequence length
+            # Ensure mixed embeddings match expected sequence length.
             # to avoid rotary embedding mismatches with positions tensor
             if original_inputs_embeds is not None:
                 if mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 2:
@@ -985,16 +971,11 @@ class KimiAudioForConditionalGeneration(
 
         return out
 
-    # Weights loading: reuse Qwen2's loader, but skip unsupported audio-specific parts.
-
+    # Weights loading: reuse Qwen2's loader with audio-specific skipping.
     hf_to_vllm_mapper = WeightsMapper()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        # Reuse the existing text-only skipping logic: ignore audio towers if present.
-
-        # Kimi-Audio checkpoints include audio-specific modules that vLLM doesn't
-
-        # instantiate in this text-only/transcription-only path.
+        # Skip audio-specific modules not instantiated in this text-only path.
 
         # Weight names can appear at the root level or under the Qwen2 `model.` prefix.
 
