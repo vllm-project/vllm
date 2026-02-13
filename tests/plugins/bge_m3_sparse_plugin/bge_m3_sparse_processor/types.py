@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Annotated
 
 from pydantic import BaseModel, Field
 
@@ -9,7 +8,6 @@ from vllm.entrypoints.pooling.base.protocol import CompletionRequestMixin
 
 
 class SparseEmbeddingCompletionRequestMixin(CompletionRequestMixin):
-    truncate_prompt_tokens: Annotated[int, Field(ge=-1)] | None = None
     return_token_id_texts_map: bool | None = Field(
         default=None,
         description="Whether to return dict shows the mapping of token_id to text."
@@ -17,13 +15,18 @@ class SparseEmbeddingCompletionRequestMixin(CompletionRequestMixin):
     )
 
 
+class SparseEmbeddingTokenWeight(BaseModel):
+    token_id: int
+    weight: float
+    token: str | None
+
+
 class SparseEmbeddingResponseData(BaseModel):
     index: int
     object: str = "sparse-embedding"
-    sparse_embedding: dict[int, float]
+    sparse_embedding: list[SparseEmbeddingTokenWeight]
 
 
 class SparseEmbeddingResponse(BaseModel):
-    request_id: str | None
     data: list[SparseEmbeddingResponseData]
     usage: UsageInfo
