@@ -7,6 +7,7 @@ from typing import Annotated, Any, Literal
 import torch
 from torch import nn
 from transformers import BatchFeature, Gemma3Config, Gemma3Processor
+from transformers.models.gemma3.image_processing_gemma3 import Gemma3ImageProcessor
 from transformers.models.gemma3.processing_gemma3 import Gemma3ProcessorKwargs
 
 from vllm.config import VllmConfig
@@ -84,54 +85,35 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def _resolve_image_kwargs(
-        self,
-        processor: Gemma3Processor,
-        keys: set[str],
-    ) -> dict[str, Any]:
-        image_processor = processor.image_processor
-        kwargs = processor._merge_kwargs(
-            Gemma3ProcessorKwargs,
-            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
-        )
-
-        images_kwargs = kwargs["images_kwargs"]
-
-        def _resolve_kw(key: str):
-            val = getattr(image_processor, key)
-            if val is None:
-                val = images_kwargs[key]
-
-            return val
-
-        return {k: _resolve_kw(k) for k in keys}
-
     def get_num_crops(
         self,
         *,
         image_width: int,
         image_height: int,
-        processor: Gemma3Processor | None,
+        processor: Gemma3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
+        image_processor: Gemma3ImageProcessor = processor.image_processor
 
-        images_kwargs = self._resolve_image_kwargs(
-            processor,
-            {
-                "do_pan_and_scan",
-                "pan_and_scan_min_crop_size",
-                "pan_and_scan_max_num_crops",
-                "pan_and_scan_min_ratio_to_activate",
-            },
+        images_kwargs = processor._merge_kwargs(
+            Gemma3ProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs(mm_kwargs),
+        )["images_kwargs"]
+
+        do_pan_and_scan = images_kwargs.get(
+            "do_pan_and_scan", image_processor.do_pan_and_scan
         )
-
-        do_pan_and_scan = images_kwargs["do_pan_and_scan"]
-        pan_and_scan_min_crop_size = images_kwargs["pan_and_scan_min_crop_size"]
-        pan_and_scan_max_num_crops = images_kwargs["pan_and_scan_max_num_crops"]
-        pan_and_scan_min_ratio_to_activate = images_kwargs[
-            "pan_and_scan_min_ratio_to_activate"
-        ]
+        pan_and_scan_min_crop_size = images_kwargs.get(
+            "pan_and_scan_min_crop_size", image_processor.pan_and_scan_min_crop_size
+        )
+        pan_and_scan_max_num_crops = images_kwargs.get(
+            "pan_and_scan_max_num_crops", image_processor.pan_and_scan_max_num_crops
+        )
+        pan_and_scan_min_ratio_to_activate = images_kwargs.get(
+            "pan_and_scan_min_ratio_to_activate",
+            image_processor.pan_and_scan_min_ratio_to_activate,
+        )
 
         if not do_pan_and_scan:
             return 0
@@ -180,17 +162,16 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Gemma3Processor | None,
+        processor: Gemma3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> PromptUpdateDetails[str]:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         boi_token = processor.boi_token
 
         num_crops = self.get_num_crops(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
 
         if num_crops == 0:
@@ -215,15 +196,14 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Gemma3Processor | None,
+        processor: Gemma3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         num_crops = self.get_num_crops(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
         image_seq_len = processor.image_seq_length
 
@@ -231,11 +211,17 @@ class Gemma3ProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         processor = self.get_hf_processor()
+        image_processor: Gemma3ImageProcessor = processor.image_processor
 
-        images_kwargs = self._resolve_image_kwargs(
-            processor, {"pan_and_scan_max_num_crops"}
+        images_kwargs = processor._merge_kwargs(
+            Gemma3ProcessorKwargs,
+            tokenizer_init_kwargs=processor.tokenizer.init_kwargs,
+            **self.ctx.get_merged_mm_kwargs({}),
+        )["images_kwargs"]
+
+        max_num_crops = images_kwargs.get(
+            "pan_and_scan_max_num_crops", image_processor.pan_and_scan_max_num_crops
         )
-        max_num_crops = images_kwargs["pan_and_scan_max_num_crops"]
 
         vision_config = self.get_hf_config().vision_config
         native_size = vision_config.image_size
@@ -256,6 +242,7 @@ class Gemma3DummyInputsBuilder(BaseDummyInputsBuilder[Gemma3ProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -302,6 +289,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                     image_width=size.width,
                     image_height=size.height,
                     processor=hf_processor,
+                    mm_kwargs=mm_kwargs,
                 )
                 for size in image_sizes
             ]
@@ -338,6 +326,7 @@ class Gemma3MultiModalProcessor(BaseMultiModalProcessor[Gemma3ProcessingInfo]):
                 image_width=image_size.width,
                 image_height=image_size.height,
                 processor=hf_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
 
         return [

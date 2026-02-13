@@ -66,7 +66,6 @@ def test_incremental_detokenization(
             external_req_id=f"request-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -487,7 +486,6 @@ def test_logprobs_processor(
             external_req_id=request_id_list[idx],
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -663,6 +661,19 @@ def test_stop_token(
     prompt_string = dummy_test_vectors.prompt_strings[0]
     prompt_tokens = dummy_test_vectors.prompt_tokens[0]
 
+    sampling_params = SamplingParams(
+        skip_special_tokens=False,
+        spaces_between_special_tokens=False,
+        output_kind=RequestOutputKind.DELTA,
+        stop=[],
+        stop_token_ids=stop_token_ids,
+        include_stop_str_in_output=include_stop_str_in_output,
+        logprobs=num_sample_logprobs,
+        prompt_logprobs=None,
+        ignore_eos=ignore_eos,
+    )
+    sampling_params.update_from_generation_config({}, eos_token_id)
+
     # Make request.
     request_id = "request-0"
     request = EngineCoreRequest(
@@ -670,22 +681,11 @@ def test_stop_token(
         external_req_id=request_id + "-ext",
         prompt_token_ids=prompt_tokens,
         mm_features=None,
-        eos_token_id=eos_token_id,
         arrival_time=0,
         lora_request=None,
         cache_salt=None,
         data_parallel_rank=None,
-        sampling_params=SamplingParams(
-            skip_special_tokens=False,
-            spaces_between_special_tokens=False,
-            output_kind=RequestOutputKind.DELTA,
-            stop=[],
-            stop_token_ids=stop_token_ids,
-            include_stop_str_in_output=include_stop_str_in_output,
-            logprobs=num_sample_logprobs,
-            prompt_logprobs=None,
-            ignore_eos=ignore_eos,
-        ),
+        sampling_params=sampling_params,
         pooling_params=None,
     )
 
@@ -693,9 +693,8 @@ def test_stop_token(
         tokens_list=[generation_tokens],
         generated_logprobs_raw=[generation_logprobs] if do_logprobs else None,
         prompt_logprobs_raw=None,
-        eos_token_id=eos_token_id,
-        stop_token_ids=stop_token_ids,
-        ignore_eos=ignore_eos,
+        eos_token_id=sampling_params.eos_token_id,
+        stop_token_ids=sampling_params.stop_token_ids,
         request_ids=[request.request_id],
     )
 
@@ -775,7 +774,6 @@ def test_stop_string(
             external_req_id=request_id_list[idx],
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -907,7 +905,6 @@ def test_iteration_stats(dummy_test_vectors):
             external_req_id=f"request-{idx}-ext",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,
@@ -994,7 +991,6 @@ def test_lora_request_tracking(log_stats: bool, dummy_test_vectors):
             external_req_id=f"request-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=lora_assignments[idx],
             cache_salt=None,
@@ -1315,7 +1311,6 @@ def test_abort_requests(runner: str, abort_by: str, dummy_test_vectors):
             external_req_id=f"external-{idx}",
             prompt_token_ids=prompt_tokens,
             mm_features=None,
-            eos_token_id=None,
             arrival_time=0,
             lora_request=None,
             cache_salt=None,

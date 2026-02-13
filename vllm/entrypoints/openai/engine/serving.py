@@ -5,7 +5,7 @@ import json
 import sys
 import time
 import traceback
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
@@ -106,7 +106,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
 from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import (
-    SingletonDictPrompt,
     extract_prompt_components,
     extract_prompt_len,
     parse_model_prompt,
@@ -243,11 +242,10 @@ class OpenAIServing:
 
         self.log_error_stack = log_error_stack
 
-        self.input_processor = self.models.input_processor
-        self.io_processor = self.models.io_processor
-        self.renderer = self.models.renderer
-        self.model_config = self.models.model_config
-        self.max_model_len = self.model_config.max_model_len
+        self.model_config = engine_client.model_config
+        self.renderer = engine_client.renderer
+        self.io_processor = engine_client.io_processor
+        self.input_processor = engine_client.input_processor
 
     async def beam_search(
         self,
@@ -538,7 +536,7 @@ class OpenAIServing:
 
         if (
             truncate_prompt_tokens is not None
-            and truncate_prompt_tokens > self.max_model_len
+            and truncate_prompt_tokens > self.model_config.max_model_len
         ):
             return self.create_error_response(
                 "truncate_prompt_tokens value is "
@@ -845,6 +843,7 @@ class OpenAIServing:
         input_text: str,
     ) -> TokensPrompt:
         token_num = len(input_ids)
+        max_model_len = self.model_config.max_model_len
 
         # Note: EmbeddingRequest, ClassificationRequest,
         # and ScoreRequest doesn't have max_tokens
@@ -863,7 +862,7 @@ class OpenAIServing:
         ):
             # Note: input length can be up to the entire model context length
             # since these requests don't generate tokens.
-            if token_num > self.max_model_len:
+            if token_num > max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreDataRequest: "score",
                     ScoreTextRequest: "score",
@@ -874,7 +873,7 @@ class OpenAIServing:
                 operation = operations.get(type(request), "embedding generation")
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for {operation}. "
                     f"Please reduce the length of the input.",
                     parameter="input_tokens",
@@ -899,22 +898,22 @@ class OpenAIServing:
 
         # Note: input length can be up to model context length - 1 for
         # completion-like requests.
-        if token_num >= self.max_model_len:
+        if token_num >= max_model_len:
             raise VLLMValidationError(
                 f"This model's maximum context length is "
-                f"{self.max_model_len} tokens. However, your request has "
+                f"{max_model_len} tokens. However, your request has "
                 f"{token_num} input tokens. Please reduce the length of "
                 "the input messages.",
                 parameter="input_tokens",
                 value=token_num,
             )
 
-        if max_tokens is not None and token_num + max_tokens > self.max_model_len:
+        if max_tokens is not None and token_num + max_tokens > max_model_len:
             raise VLLMValidationError(
                 "'max_tokens' or 'max_completion_tokens' is too large: "
                 f"{max_tokens}. This model's maximum context length is "
-                f"{self.max_model_len} tokens and your request has "
-                f"{token_num} input tokens ({max_tokens} > {self.max_model_len}"
+                f"{max_model_len} tokens and your request has "
+                f"{token_num} input tokens ({max_tokens} > {max_model_len}"
                 f" - {token_num}).",
                 parameter="max_tokens",
                 value=max_tokens,
@@ -960,16 +959,21 @@ class OpenAIServing:
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
     ) -> list[TokPrompt]:
-        renderer = self.renderer
-        model_config = self.model_config
-
-        tok_params = request.build_tok_params(model_config)
-
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
+
+        return await self._preprocess_cmpl(request, prompts)
+
+    async def _preprocess_cmpl(
+        self,
+        request: RendererRequest,
+        prompts: Sequence[PromptType | bytes],
+    ) -> list[TokPrompt]:
+        renderer = self.renderer
+        model_config = self.model_config
 
         parsed_prompts = [
             (
@@ -979,22 +983,17 @@ class OpenAIServing:
             )
             for prompt in prompts
         ]
-        in_prompts = await renderer.render_prompts_async(parsed_prompts)
+        tok_params = request.build_tok_params(model_config)
 
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        for in_prompt in in_prompts:
-            target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
-                "encoder_prompt", in_prompt
-            )
-            target_prompt.update(extra_items)  # type: ignore
-
-        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
-
-        return engine_prompts
+        return await renderer.render_cmpl_async(
+            parsed_prompts,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
 
     async def _preprocess_chat(
         self,
@@ -1023,21 +1022,16 @@ class OpenAIServing:
             default_template, default_template_content_format
         ).with_defaults(default_template_kwargs)
 
-        conversation, in_prompt = await renderer.render_messages_async(
-            messages, chat_params
+        (conversation,), (engine_prompt,) = await renderer.render_chat_async(
+            [messages],
+            chat_params,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
         )
-        target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
-            "encoder_prompt", in_prompt
-        )
-
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        target_prompt.update(extra_items)  # type: ignore
-
-        engine_prompt = await renderer.tokenize_prompt_async(target_prompt, tok_params)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -1102,6 +1096,7 @@ class OpenAIServing:
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
     ):
+        max_model_len = self.model_config.max_model_len
         prompt_text = self._extract_prompt_text(engine_prompt)
 
         orig_priority = priority
@@ -1161,7 +1156,7 @@ class OpenAIServing:
                 token_ids = context.render_for_completion()
                 engine_prompt = TokensPrompt(prompt_token_ids=token_ids)
 
-                sampling_params.max_tokens = self.max_model_len - len(token_ids)
+                sampling_params.max_tokens = max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
                 engine_prompts = await self._render_next_turn(
                     context.request,
@@ -1175,8 +1170,8 @@ class OpenAIServing:
                 prompt_text = self._extract_prompt_text(engine_prompt)
 
                 sampling_params.max_tokens = get_max_tokens(
-                    self.max_model_len,
-                    context.request,
+                    max_model_len,
+                    context.request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,  # type: ignore
                 )

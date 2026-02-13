@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from fastapi import APIRouter, FastAPI, Request
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
 from vllm.engine.protocol import EngineClient
@@ -55,7 +55,3 @@ async def get_server_load_metrics(request: Request):
 async def show_version():
     ver = {"version": VLLM_VERSION}
     return JSONResponse(content=ver)
-
-
-def register_basic_api_routers(app: FastAPI):
-    app.include_router(router)

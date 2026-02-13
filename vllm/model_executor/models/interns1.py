@@ -197,20 +197,18 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: GotOcr2ImageProcessorFast | None = None,
+        processor: InternVLProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor().image_processor
+        image_processor: GotOcr2ImageProcessorFast = processor.image_processor
 
-        if not isinstance(processor, GotOcr2ImageProcessorFast):
-            raise ValueError(
-                f"GotOcr2ImageProcessorFast is expected but got {type(processor)}"
-            )
-        num_image_patches = processor.get_number_of_image_patches(
-            image_height, image_width, images_kwargs=dict()
+        num_image_patches = image_processor.get_number_of_image_patches(
+            image_height,
+            image_width,
+            self.ctx.get_merged_mm_kwargs(mm_kwargs),
         )
-        num_image_tokens = self.get_hf_processor().image_seq_length * num_image_patches
-        return num_image_tokens
+
+        return processor.image_seq_length * num_image_patches
 
     def resolve_target_ratios(self, use_thumbnail: bool | None = None):
         image_processor = self.get_hf_processor().image_processor
@@ -243,7 +241,8 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
             feat_size = self.get_num_image_tokens(
                 image_width=width,
                 image_height=height,
-                processor=processor.image_processor,
+                processor=processor,
+                mm_kwargs={},
             )
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
@@ -262,7 +261,8 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            processor=processor.image_processor,
+            processor=processor,
+            mm_kwargs={},
         )
 
     def get_num_frames_with_most_features(
@@ -298,6 +298,7 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(

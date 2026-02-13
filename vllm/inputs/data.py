@@ -298,6 +298,7 @@ which can be passed to
 
 
 SingletonInputs: TypeAlias = DecoderOnlyInputs | MultiModalEncDecInputs
+"""The inputs for a single encoder/decoder prompt."""
 
 
 @dataclass

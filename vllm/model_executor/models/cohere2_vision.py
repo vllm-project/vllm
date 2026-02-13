@@ -11,7 +11,7 @@ from torch import nn
 from transformers import BatchFeature, PretrainedConfig
 from transformers.models.cohere2_vision import Cohere2VisionConfig
 from transformers.models.cohere2_vision.image_processing_cohere2_vision_fast import (  # noqa: E501
-    get_optimal_tiled_canvas,
+    Cohere2VisionImageProcessorFast,
 )
 from transformers.models.cohere2_vision.processing_cohere2_vision import (
     Cohere2VisionProcessor,
@@ -166,43 +166,20 @@ class Cohere2VisionProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Cohere2VisionProcessor | None,
+        processor: Cohere2VisionProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         """
         Calculate the number of image patches for a given image.
         Uses the HF processor to determine the actual number of patches.
         """
-        if processor is None:
-            processor = self.get_hf_processor()
+        image_processor: Cohere2VisionImageProcessorFast = processor.image_processor
 
-        image_processor = processor.image_processor
-
-        # The current implementation of get_number_of_image_patches
-        # is incorrect, so we patch it here.
-        # TODO: Revert once
-        # https://github.com/huggingface/transformers/pull/40312 is released.
-        # return image_processor.get_number_of_image_patches(image_height,
-        #                                                    image_width, {})
-
-        min_patches = image_processor.min_patches
-        max_patches = image_processor.max_patches
-        patch_size = image_processor.size
-        crop_to_patches = image_processor.crop_to_patches
-
-        if not crop_to_patches:
-            return 1
-
-        num_columns, num_rows = get_optimal_tiled_canvas(
-            (image_height, image_width),
-            (patch_size["height"], patch_size["width"]),
-            min_patches,
-            max_patches,
+        return image_processor.get_number_of_image_patches(
+            image_height,
+            image_width,
+            self.ctx.get_merged_mm_kwargs(mm_kwargs),
         )
-        num_patches = num_columns * num_rows
-        if num_patches > 1:
-            num_patches += 1  # Thumbnail image
-
-        return num_patches
 
 
 class Cohere2VisionDummyInputsBuilder(
@@ -221,6 +198,7 @@ class Cohere2VisionDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = self.info.get_image_size_with_most_features()
@@ -270,6 +248,7 @@ class Cohere2VisionMultiModalProcessor(
                     image_width=parsed_images.get_image_size(i).width,
                     image_height=parsed_images.get_image_size(i).height,
                     processor=hf_processor,
+                    mm_kwargs=mm_kwargs,
                 )
                 for i in range(len(parsed_images))
             ]
@@ -310,6 +289,7 @@ class Cohere2VisionMultiModalProcessor(
                 image_width=image_size.width,
                 image_height=image_size.height,
                 processor=hf_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
             patch_tokens = image_token * img_tokens_per_tile + img_line_break_token
             repl = f"{boi_token}{patch_tokens * num_patches}{eoi_token}"

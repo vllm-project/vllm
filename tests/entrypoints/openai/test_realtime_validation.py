@@ -27,15 +27,6 @@ MISTRAL_FORMAT_ARGS = [
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 
 
-def _audio_to_base64_pcm16(path: str, target_sr: int = 16000) -> str:
-    """Load audio file, convert to PCM16 @ target sample rate, base64 encode."""
-    audio, _ = librosa.load(path, sr=target_sr, mono=True)
-    # Convert float32 [-1, 1] to int16 [-32768, 32767]
-    audio_int16 = (audio * 32767).astype(np.int16)
-    audio_bytes = audio_int16.tobytes()
-    return base64.b64encode(audio_bytes).decode("utf-8")
-
-
 def _get_websocket_url(server: RemoteOpenAIServer) -> str:
     """Convert HTTP URL to WebSocket URL for realtime endpoint."""
     http_url = server.url_root
@@ -74,12 +65,11 @@ def mary_had_lamb_audio_chunks() -> list[str]:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
-@pytest.mark.skip(reason="Voxtral streaming is not yet public")
 async def test_multi_chunk_streaming(
     model_name, mary_had_lamb_audio_chunks, rocm_aiter_fa_attention
 ):
     """Test streaming multiple audio chunks before committing."""
-    server_args = ["--enforce-eager"]
+    server_args = ["--enforce-eager", "--max-model-len", "2048"]
 
     if model_name.startswith("mistralai"):
         server_args += MISTRAL_FORMAT_ARGS
@@ -129,5 +119,5 @@ async def test_multi_chunk_streaming(
                 " First words I spoke in the original phonograph."
                 " A little piece of practical poetry. Mary had a little lamb,"
                 " it sleeps with quite a flow, and everywhere that Mary went,"
-                " the lamb was sure to go"
+                " the lamb was sure to go."
             )

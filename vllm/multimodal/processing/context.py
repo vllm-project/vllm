@@ -409,6 +409,10 @@ class InputProcessingContext:
 
         return json_map_leaves(_postprocess_one, output)
 
+    def get_merged_mm_kwargs(self, kwargs: Mapping[str, object]):
+        mm_config = self.model_config.get_multimodal_config()
+        return mm_config.merge_mm_processor_kwargs(kwargs)
+
     def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
@@ -424,8 +428,7 @@ class InputProcessingContext:
         """
         assert callable(hf_processor)
 
-        mm_config = self.model_config.get_multimodal_config()
-        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
@@ -681,16 +684,22 @@ class BaseProcessingInfo:
         mm_items = self.data_parser.parse_mm_data(mm_data)
 
         if validate:
-            mm_config = self.ctx.model_config.get_multimodal_config()
-            if not mm_config.enable_mm_embeds:
-                for modality, items in mm_items.items():
-                    if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+            mm_config = self.ctx.get_mm_config()
+
+            for modality, items in mm_items.items():
+                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                    if not mm_config.enable_mm_embeds:
                         raise ValueError(
                             f"You must set `--enable-mm-embeds` to input "
                             f"`{modality}_embeds`"
                         )
-
-            for modality, items in mm_items.items():
+                    if mm_config.get_limit_per_prompt(modality) == 0:
+                        logger.debug(
+                            "Skipping count validation for modality "
+                            "'%s' (embeddings with limit=0)",
+                            modality,
+                        )
+                        continue
                 self.validate_num_items(modality, len(items))
 
         return mm_items

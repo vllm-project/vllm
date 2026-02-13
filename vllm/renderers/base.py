@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any, overload
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 
@@ -16,14 +17,17 @@ from .inputs import (
     EncoderDecoderTokPrompt,
     TokPrompt,
 )
+from .inputs.preprocess import extract_target_prompt
 from .params import ChatParams, TokenizeParams
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig
+    from vllm.config import VllmConfig
     from vllm.entrypoints.chat_utils import (
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+
+logger = init_logger(__name__)
 
 
 class BaseRenderer(ABC):
@@ -31,15 +35,15 @@ class BaseRenderer(ABC):
     @abstractmethod
     def from_config(
         cls,
-        config: "ModelConfig",
+        config: "VllmConfig",
         tokenizer_kwargs: dict[str, Any],
     ) -> "BaseRenderer":
         raise NotImplementedError
 
-    def __init__(self, config: "ModelConfig") -> None:
+    def __init__(self, config: "VllmConfig") -> None:
         super().__init__()
 
-        self.config = config
+        self.model_config = config.model_config
 
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
@@ -62,13 +66,31 @@ class BaseRenderer(ABC):
 
         return self._async_tokenizer
 
+    def get_bos_token_id(self) -> int | None:
+        if self.tokenizer is None:
+            logger.warning_once(
+                "Using None for BOS token id because tokenizer is not initialized"
+            )
+            return None
+
+        return self.tokenizer.bos_token_id
+
+    def get_eos_token_id(self) -> int | None:
+        if self.tokenizer is None:
+            logger.warning_once(
+                "Using None for EOS token id because tokenizer is not initialized"
+            )
+            return None
+
+        return self.tokenizer.eos_token_id
+
     # Step 1: Convert raw inputs to prompts
     def render_prompt(
         self,
         prompt: DictPrompt | bytes,
     ) -> DictPrompt:
         if isinstance(prompt, bytes):
-            embeds = safe_load_prompt_embeds(self.config, prompt)
+            embeds = safe_load_prompt_embeds(self.model_config, prompt)
             prompt = EmbedsPrompt(prompt_embeds=embeds)
 
         return prompt
@@ -277,3 +299,109 @@ class BaseRenderer(ABC):
         return await asyncio.gather(
             *(self.tokenize_prompt_async(prompt, params) for prompt in prompts)
         )
+
+    # Step 3: Add extra keys to the prompts
+    def _apply_prompt_extras(
+        self,
+        prompts: Sequence[DictPrompt | TokPrompt],
+        prompt_extras: dict[str, Any] | None,
+    ):
+        if not prompt_extras:
+            return
+
+        for prompt in prompts:
+            target_prompt = extract_target_prompt(self.model_config, prompt)
+            target_prompt.update(prompt_extras)  # type: ignore[arg-type]
+
+    # Top-level methods
+    def render_cmpl(
+        self,
+        prompts: Sequence[DictPrompt | bytes],
+        tok_params: TokenizeParams,
+        *,
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        dict_prompts = self.render_prompts(prompts)
+
+        # NOTE: Some MM models have non-default `add_special_tokens`
+        # so we handle tokenization in multi-modal processor
+        if self.model_config.is_multimodal_model:
+            self._apply_prompt_extras(dict_prompts, prompt_extras)
+            return dict_prompts
+
+        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
+
+        self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        # TODO: Apply multi-modal processor
+        return tok_prompts
+
+    async def render_cmpl_async(
+        self,
+        prompts: Sequence[DictPrompt | bytes],
+        tok_params: TokenizeParams,
+        *,
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        dict_prompts = await self.render_prompts_async(prompts)
+
+        # NOTE: MM data cannot be passed to online Completions API
+        # so we don't have the special case that is in the offline version
+        tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+
+        self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        # TODO: Apply multi-modal processor
+        return tok_prompts
+
+    def render_chat(
+        self,
+        conversations: Sequence[list["ChatCompletionMessageParam"]],
+        chat_params: ChatParams,
+        tok_params: TokenizeParams,
+        *,
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        rendered = [
+            self.render_messages(conversation, chat_params)
+            for conversation in conversations
+        ]
+
+        out_conversations = list[list["ConversationMessage"]]()
+        dict_prompts = list[DictPrompt]()
+        for conv, prompt in rendered:
+            out_conversations.append(conv)
+            dict_prompts.append(prompt)
+
+        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
+
+        self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        # TODO: Apply multi-modal processor
+        return out_conversations, tok_prompts
+
+    async def render_chat_async(
+        self,
+        conversations: Sequence[list["ChatCompletionMessageParam"]],
+        chat_params: ChatParams,
+        tok_params: TokenizeParams,
+        *,
+        prompt_extras: dict[str, Any] | None = None,
+    ):
+        rendered = [
+            self.render_messages_async(conversation, chat_params)
+            for conversation in conversations
+        ]
+
+        out_conversations = list[list["ConversationMessage"]]()
+        dict_prompts = list[DictPrompt]()
+        for conv, prompt in await asyncio.gather(*rendered):
+            out_conversations.append(conv)
+            dict_prompts.append(prompt)
+
+        tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
+
+        self._apply_prompt_extras(tok_prompts, prompt_extras)
+
+        # TODO: Apply multi-modal processor
+        return out_conversations, tok_prompts

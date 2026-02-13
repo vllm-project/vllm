@@ -39,6 +39,7 @@ from vllm.lora.utils import get_adapter_absolute_path
 from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
@@ -56,11 +57,6 @@ try:
     import librosa
 except ImportError:
     librosa = PlaceholderModule("librosa")
-
-try:
-    from vllm.utils.argparse_utils import FlexibleArgumentParser
-except ImportError:
-    from argparse import ArgumentParser as FlexibleArgumentParser
 
 logger = logging.getLogger(__name__)
 
@@ -384,7 +380,7 @@ def gen_prompt_decode_to_target_len(
     max_retry: int = 10,
     add_special_tokens: bool = False,
     rng: np.random.Generator | None = None,
-) -> tuple[str, list[int]]:
+) -> tuple[str, list[int], int]:
     """
     Ensure decoded-then-encoded prompt length matches the target token length.
 
@@ -396,7 +392,9 @@ def gen_prompt_decode_to_target_len(
     [6880, 6881] -> ['Ġcalls', 'here'] ->
     [1650, 939, 486] -> ['Ġcall', 'sh', 'ere']
 
-    Returns a tuple of the final prompt string and the adjusted token sequence.
+    Returns a tuple of the final prompt string, the adjusted token sequence,
+    and the token mismatch (final_len - target_token_len) if the retry budget
+    is exhausted.
     """
     remain_num_try = max_retry
     token_mismatch = 0
@@ -503,7 +501,7 @@ class RandomDataset(BenchmarkDataset):
         allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
 
         # Generate prefix once
-        prefix_token_ids = self.get_prefix(allowed_tokens, prefix_len)
+        prefix_token_ids = self.get_prefix(tokenizer, allowed_tokens, prefix_len)
 
         requests = []
         token_mismatch_total = 0
@@ -558,19 +556,36 @@ class RandomDataset(BenchmarkDataset):
 
     def get_prefix(
         self,
+        tokenizer: TokenizerLike,
         allowed_tokens: np.ndarray,
         prefix_len: int,
     ) -> list[int]:
         """
         Get the prefix for the dataset.
         """
-        return (
-            allowed_tokens[
-                self._rng.integers(0, len(allowed_tokens), size=prefix_len)
-            ].tolist()
-            if prefix_len > 0
-            else []
+        if prefix_len <= 0:
+            return []
+
+        prefix_tokens = allowed_tokens[
+            self._rng.integers(0, len(allowed_tokens), size=prefix_len)
+        ].tolist()
+        _, adjusted_tokens, token_mismatch = gen_prompt_decode_to_target_len(
+            tokenizer=tokenizer,
+            token_sequence=prefix_tokens,
+            target_token_len=prefix_len,
+            add_special_tokens=False,
+            rng=self._rng,
         )
+        if token_mismatch != 0:
+            sign = "more" if token_mismatch > 0 else "fewer"
+            logger.warning(
+                "Prefix tokenization produced %d %s tokens than expected "
+                "after decoding and re-encoding. This is expected due to "
+                "the imperfect nature of the sampling procedure",
+                abs(token_mismatch),
+                sign,
+            )
+        return adjusted_tokens
 
     def get_sampling_params(
         self,
@@ -1132,7 +1147,7 @@ class RandomMultiModalDataset(RandomDataset):
             "Sampling from %d out of %d (vocab size)", len(allowed_tokens), vocab_size
         )
         # Generate prefix once
-        prefix_token_ids = self.get_prefix(allowed_tokens, prefix_len)
+        prefix_token_ids = self.get_prefix(tokenizer, allowed_tokens, prefix_len)
         # Add synthetic multimodal items to each request
         mm_requests = []
         token_mismatch_total = 0
@@ -1314,6 +1329,11 @@ class _ValidateDatasetArgs(argparse.Action):
 
 
 def add_dataset_parser(parser: FlexibleArgumentParser):
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code from huggingface",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--num-prompts",
@@ -1441,6 +1461,20 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=float,
         default=1.0,
         help="Maximum distance for blazedit dataset. Min: 0, Max: 1.0",
+    )
+
+    asr_group = parser.add_argument_group("asr dataset options")
+    asr_group.add_argument(
+        "--asr-max-audio-len-sec",
+        type=float,
+        default=float("inf"),
+        help="Maximum audio length in seconds for ASR dataset.",
+    )
+    asr_group.add_argument(
+        "--asr-min-audio-len-sec",
+        type=float,
+        default=0.0,
+        help="Minimum audio length in seconds for ASR dataset.",
     )
 
     random_group = parser.add_argument_group("random dataset options")
@@ -1744,27 +1778,27 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             or args.hf_name in VisionArenaDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = VisionArenaDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
             args.hf_subset = None
         elif (
             args.dataset_path in MMVUDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MMVUDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MMVUDataset
-            args.hf_split = "validation"
+            args.hf_split = args.hf_split if args.hf_split else "validation"
             args.hf_subset = None
         elif (
             args.dataset_path in InstructCoderDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in InstructCoderDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = InstructCoderDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in MTBenchDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MTBenchDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MTBenchDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MultiModalConversationDataset.SUPPORTED_DATASET_PATHS
@@ -1780,22 +1814,26 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             or args.hf_name in AIMODataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = AIMODataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS  # noqa: E501
             or args.hf_name in NextEditPredictionDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = NextEditPredictionDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in ASRDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in ASRDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = ASRDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
+            hf_kwargs = {
+                "asr_min_audio_len_sec": args.asr_min_audio_len_sec,
+                "asr_max_audio_len_sec": args.asr_max_audio_len_sec,
+            }
         elif args.dataset_path in BlazeditDataset.SUPPORTED_DATASET_PATHS:
             dataset_class = BlazeditDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
             hf_kwargs = {
                 "min_distance": args.blazedit_min_distance,
                 "max_distance": args.blazedit_max_distance,
@@ -1805,13 +1843,13 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             or args.hf_name in MLPerfDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MLPerfDataset
-            args.hf_split = "train"
+            args.hf_split = args.hf_split if args.hf_split else "train"
         elif (
             args.dataset_path in MMStarDataset.SUPPORTED_DATASET_PATHS
             or args.hf_name in MMStarDataset.SUPPORTED_DATASET_PATHS
         ):
             dataset_class = MMStarDataset
-            args.hf_split = "val"
+            args.hf_split = args.hf_split if args.hf_split else "val"
             args.hf_subset = None
         else:
             supported_datasets = set(
@@ -1847,6 +1885,7 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
             no_stream=args.no_stream,
             hf_name=args.hf_name,
             disable_shuffle=args.disable_shuffle,
+            trust_remote_code=args.trust_remote_code,
         ).sample(
             num_requests=args.num_prompts,
             tokenizer=tokenizer,
@@ -2057,32 +2096,38 @@ class CustomDataset(BenchmarkDataset):
                 break
             prompt = item["prompt"]
 
-            new_output_len = output_len
-            if output_len is None or output_len == -1:
-                # check that the request has an 'output_tokens' field
-                if "output_tokens" not in item:
-                    raise ValueError(
-                        "If no output length is provided the "
-                        "custom dataset must contain an 'output_tokens' field."
+            if tokenizer is None:
+                new_output_len = 1
+            else:
+                new_output_len = output_len
+                if output_len is None or output_len == -1:
+                    # check that the request has an 'output_tokens' field
+                    if "output_tokens" not in item:
+                        raise ValueError(
+                            "If no output length is provided the "
+                            "custom dataset must contain an 'output_tokens' field."
+                        )
+                    # Use number of output tokens from the request data
+                    try:
+                        new_output_len = int(item["output_tokens"])
+                    except (ValueError, TypeError) as e:
+                        raise ValueError(
+                            f"Invalid value for 'output_tokens' in custom dataset: "
+                            f"'{item['output_tokens']}'. Must be an integer."
+                        ) from e
+
+            if tokenizer is None:
+                prompt_len = 1
+            else:
+                # apply template
+                if not skip_chat_template:
+                    prompt = tokenizer.apply_chat_template(
+                        [{"role": "user", "content": prompt}],
+                        add_generation_prompt=True,
+                        tokenize=False,
                     )
-                # Use number of output tokens from the request data
-                try:
-                    new_output_len = int(item["output_tokens"])
-                except (ValueError, TypeError) as e:
-                    raise ValueError(
-                        f"Invalid value for 'output_tokens' in custom dataset: "
-                        f"'{item['output_tokens']}'. Must be an integer."
-                    ) from e
 
-            # apply template
-            if not skip_chat_template:
-                prompt = tokenizer.apply_chat_template(
-                    [{"role": "user", "content": prompt}],
-                    add_generation_prompt=True,
-                    tokenize=False,
-                )
-
-            prompt_len = len(tokenizer(prompt).input_ids)
+                prompt_len = len(tokenizer(prompt).input_ids)
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -2405,6 +2450,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         no_stream: bool = False,
         dataset_subset: str | None = None,
         hf_name: str | None = None,
+        trust_remote_code: bool = False,
         **kwargs,
     ) -> None:
         super().__init__(dataset_path=dataset_path, **kwargs)
@@ -2413,6 +2459,7 @@ class HuggingFaceDataset(BenchmarkDataset):
         self.dataset_subset = dataset_subset
         self.load_stream = not no_stream
         self.hf_name = hf_name or dataset_path
+        self.trust_remote_code = trust_remote_code
         self.load_data()
 
     def load_data(self) -> None:
@@ -2422,6 +2469,7 @@ class HuggingFaceDataset(BenchmarkDataset):
             name=self.dataset_subset,
             split=self.dataset_split,
             streaming=self.load_stream,
+            trust_remote_code=self.trust_remote_code,
         )
         if not getattr(self, "disable_shuffle", False):
             self.data = self.data.shuffle(seed=self.random_seed)
@@ -3071,12 +3119,8 @@ class ASRDataset(HuggingFaceDataset):
         "kensho/spgispeech",
     }
 
-    DEFAULT_OUTPUT_LEN = 128
+    DEFAULT_OUTPUT_LEN = 1024
     IS_MULTIMODAL = True
-
-    # TODO Whisper-specific. Abstract interface when more models are supported.
-    TRANSCRIPTION_PREAMBLE = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
-    skip_long_audios: bool = True
 
     def sample(
         self,
@@ -3088,22 +3132,28 @@ class ASRDataset(HuggingFaceDataset):
         **kwargs,
     ) -> list:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        prompt = ASRDataset.TRANSCRIPTION_PREAMBLE
+        if "openai" in tokenizer.name_or_path:
+            prompt = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
+        else:
+            prompt = ""
         prompt_len = len(tokenizer(prompt).input_ids)
         sampled_requests = []
         ind = 0
         skipped = 0
+        asr_min_audio_len_sec = kwargs.get("asr_min_audio_len_sec")
+        asr_max_audio_len_sec = kwargs.get("asr_max_audio_len_sec")
+        durations = []
         for item in self.data:
             if len(sampled_requests) >= num_requests:
                 break
             audio = item["audio"]
             y, sr = audio["array"], audio["sampling_rate"]
             duration_s = librosa.get_duration(y=y, sr=sr)
-            # Whisper max supported duration
-            if self.skip_long_audios and duration_s > 30:
+            if duration_s < asr_min_audio_len_sec or duration_s > asr_max_audio_len_sec:
                 skipped += 1
                 continue
 
+            durations.append(duration_s)
             mm_content = {"audio": (y, sr)}
             sampled_requests.append(
                 SampleRequest(
@@ -3122,6 +3172,20 @@ class ASRDataset(HuggingFaceDataset):
                 " what Whisper supports.",
                 skipped,
             )
+
+        logger.info("Number of audio samples: %d", len(durations))
+        avg_duration = sum(durations) / len(durations) if durations else 0
+        min_duration = min(durations) if durations else 0
+        max_duration = max(durations) if durations else 0
+        median_duration = np.median(durations) if durations else 0
+        logger.info(
+            "Audio duration statistics (s): avg=%.2f, min=%.2f, max=%.2f, median=%.2f",
+            avg_duration,
+            min_duration,
+            max_duration,
+            median_duration,
+        )
+
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )

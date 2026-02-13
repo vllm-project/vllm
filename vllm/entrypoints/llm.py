@@ -73,7 +73,7 @@ from vllm.outputs import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.renderers.inputs import DictPrompt, SingletonDictPrompt, TokPrompt
+from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
     extract_prompt_components,
@@ -85,7 +85,6 @@ from vllm.tasks import PoolingTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.usage.usage_lib import UsageContext
-from vllm.utils.collection_utils import as_iter, is_list_of
 from vllm.utils.counter import Counter
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
@@ -95,6 +94,7 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _R = TypeVar("_R", default=Any)
 
 
@@ -356,8 +356,9 @@ class LLM:
         self.supported_tasks = supported_tasks
 
         self.model_config = self.llm_engine.model_config
-        self.input_processor = self.llm_engine.input_processor
+        self.renderer = self.llm_engine.renderer
         self.io_processor = self.llm_engine.io_processor
+        self.input_processor = self.llm_engine.input_processor
 
         # Cache for __repr__ to avoid repeated collective_rpc calls
         self._cached_repr: str | None = None
@@ -455,6 +456,93 @@ class LLM:
             priority=priority,
         )
 
+        return self.engine_class.validate_outputs(outputs, RequestOutput)
+
+    def enqueue(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
+        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Enqueue prompts for generation without waiting for completion.
+
+        This method adds requests to the engine queue but does not start
+        processing them. Use wait_for_completion() to process the queued
+        requests and get results.
+
+        Args:
+            prompts: The prompts to the LLM. See generate() for details.
+            sampling_params: The sampling parameters for text generation.
+            lora_request: LoRA request to use for generation, if any.
+            priority: The priority of the requests, if any.
+            use_tqdm: If True, shows a tqdm progress bar while adding requests.
+            tokenization_kwargs: Overrides for `tokenizer.encode`.
+
+        Returns:
+            A list of request IDs for the enqueued requests.
+        """
+        model_config = self.model_config
+        runner_type = model_config.runner_type
+        if runner_type != "generate":
+            raise ValueError("LLM.enqueue() is only supported for generative models.")
+
+        if sampling_params is None:
+            sampling_params = self.get_default_sampling_params()
+
+        # Use the same preprocessing as _run_completion
+        seq_prompts = prompt_to_seq(prompts)
+        seq_params = self._params_to_seq(sampling_params, len(seq_prompts))
+
+        if any(param.truncate_prompt_tokens is not None for param in seq_params):
+            engine_prompts: Sequence[DictPrompt | TokPrompt] = [
+                engine_prompt
+                for prompt, param in zip(seq_prompts, seq_params)
+                for engine_prompt in self._preprocess_cmpl(
+                    [prompt],
+                    tokenization_kwargs=merge_kwargs(
+                        tokenization_kwargs,
+                        dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
+                    ),
+                )
+            ]
+        else:
+            engine_prompts = self._preprocess_cmpl(
+                seq_prompts,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+        request_ids = self._validate_and_add_requests(
+            prompts=engine_prompts,
+            params=seq_params,
+            use_tqdm=use_tqdm,
+            lora_request=self._get_modality_specific_lora_reqs(
+                engine_prompts, lora_request
+            ),
+            tokenization_kwargs=tokenization_kwargs,
+            priority=priority,
+        )
+
+        return request_ids
+
+    def wait_for_completion(
+        self,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+    ) -> list[RequestOutput]:
+        """Wait for all enqueued requests to complete and return results.
+
+        This method processes all requests currently in the engine queue
+        and returns their outputs. Use after enqueue() to get results.
+
+        Args:
+            use_tqdm: If True, shows a tqdm progress bar.
+
+        Returns:
+            A list of RequestOutput objects for all completed requests.
+        """
+        outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
     def _get_modality_specific_lora_reqs(
@@ -801,11 +889,11 @@ class LLM:
             add_special_tokens=not model_config.is_encoder_decoder,
         ).with_kwargs(tokenization_kwargs)
 
-    def _preprocess_completion(
+    def _preprocess_cmpl(
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> list[DictPrompt | TokPrompt]:
+    ) -> Sequence[DictPrompt | TokPrompt]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
@@ -813,28 +901,18 @@ class LLM:
         Refer to [LLM.generate][] for a complete description of the arguments.
 
         Returns:
-            A list of `TokensPrompts` objects containing the tokenized prompt
+            A list of `TokPrompt` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        renderer = self.llm_engine.renderer
+        renderer = self.renderer
         model_config = self.model_config
 
+        parsed_prompts = [
+            parse_model_prompt(model_config, prompt) for prompt in prompts
+        ]
         tok_params = self._get_cmpl_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[DictPrompt | TokPrompt]()
-        for prompt in prompts:
-            parsed_prompt = parse_model_prompt(model_config, prompt)
-            in_prompt = renderer.render_prompt(parsed_prompt)
-
-            # Some MM models have non-default `add_special_tokens`
-            # TODO: Move multi-modal processor into tokenization
-            engine_prompts.append(
-                in_prompt
-                if model_config.is_multimodal_model
-                else renderer.tokenize_prompt(in_prompt, tok_params)
-            )
-
-        return engine_prompts
+        return renderer.render_cmpl(parsed_prompts, tok_params)
 
     def _get_chat_tok_params(self, tokenization_kwargs: dict[str, Any] | None):
         model_config = self.model_config
@@ -857,7 +935,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> list[DictPrompt | TokPrompt]:
+    ) -> Sequence[TokPrompt]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -865,10 +943,10 @@ class LLM:
         Refer to [LLM.chat][] for a complete description of the arguments.
 
         Returns:
-            A list of `TokensPrompts` objects containing the tokenized prompt
+            A list of `TokPrompt` objects containing the tokenized prompt
             after chat template interpolation, and the raw multi-modal inputs.
         """
-        renderer = self.llm_engine.renderer
+        renderer = self.renderer
 
         chat_params = ChatParams(
             chat_template=chat_template,
@@ -885,16 +963,12 @@ class LLM:
         )
         tok_params = self._get_chat_tok_params(tokenization_kwargs)
 
-        engine_prompts = list[DictPrompt | TokPrompt]()
-        for conversation in conversations:
-            _, in_prompt = renderer.render_messages(conversation, chat_params)
-            if mm_processor_kwargs is not None:
-                target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
-                    "encoder_prompt", in_prompt
-                )
-                target_prompt["mm_processor_kwargs"] = mm_processor_kwargs  # type: ignore
-
-            engine_prompts.append(renderer.tokenize_prompt(in_prompt, tok_params))
+        _, engine_prompts = renderer.render_chat(
+            conversations,
+            chat_params,
+            tok_params,
+            prompt_extras={"mm_processor_kwargs": mm_processor_kwargs},
+        )
 
         return engine_prompts
 
@@ -1070,9 +1144,7 @@ class LLM:
                 dict(truncate_prompt_tokens=truncate_prompt_tokens),
             )
 
-        io_processor_prompt = False
-        if isinstance(prompts, dict) and "data" in prompts:
-            io_processor_prompt = True
+        if use_io_processor := (isinstance(prompts, dict) and "data" in prompts):
             if self.io_processor is None:
                 raise ValueError(
                     "No IOProcessor plugin installed. Please refer "
@@ -1082,40 +1154,42 @@ class LLM:
                 )
 
             # Validate the request data is valid for the loaded plugin
-            validated_prompt = self.io_processor.parse_request(prompts)
+            validated_prompt = self.io_processor.parse_data(prompts)
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)
+            prompts_seq = prompt_to_seq(prompts)
 
-        if io_processor_prompt:
-            assert self.io_processor is not None
-            if is_list_of(pooling_params, PoolingParams):
-                validated_pooling_params: list[PoolingParams] = []
-                for param in as_iter(pooling_params):
-                    validated_pooling_params.append(
-                        self.io_processor.validate_or_generate_params(param)
-                    )
-                pooling_params = validated_pooling_params
-            else:
-                assert not isinstance(pooling_params, Sequence)
-                pooling_params = self.io_processor.validate_or_generate_params(
-                    pooling_params
+            params_seq: Sequence[PoolingParams] = [
+                self.io_processor.merge_pooling_params(param)
+                for param in self._params_to_seq(
+                    pooling_params,
+                    len(prompts_seq),
                 )
+            ]
+            for p in params_seq:
+                if p.task is None:
+                    p.task = "plugin"
+        else:
+            if pooling_params is None:
+                # Use default pooling params.
+                pooling_params = PoolingParams()
 
-        if pooling_params is None:
-            # Use default pooling params.
-            pooling_params = PoolingParams()
+            prompts_seq = prompt_to_seq(prompts)
+            params_seq = self._params_to_seq(pooling_params, len(prompts_seq))
 
-        for param in as_iter(pooling_params):
-            if param.task is None:
-                param.task = pooling_task
-            elif param.task != pooling_task:
-                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                raise ValueError(msg)
+            for param in params_seq:
+                if param.task is None:
+                    param.task = pooling_task
+                elif param.task != pooling_task:
+                    msg = (
+                        f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                    )
+                    raise ValueError(msg)
 
         outputs = self._run_completion(
-            prompts=prompts,
-            params=pooling_params,
+            prompts=prompts_seq,
+            params=params_seq,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
@@ -1125,12 +1199,10 @@ class LLM:
             outputs, PoolingRequestOutput
         )
 
-        if io_processor_prompt:
+        if use_io_processor:
             # get the post-processed model outputs
             assert self.io_processor is not None
-            processed_outputs = self.io_processor.post_process(
-                model_output=model_outputs
-            )
+            processed_outputs = self.io_processor.post_process(model_outputs)
 
             return [
                 PoolingRequestOutput[Any](
@@ -1613,8 +1685,15 @@ class LLM:
                 tokenization_kwargs=encode_kwargs,
             )
 
-    def start_profile(self) -> None:
-        self.llm_engine.start_profile()
+    def start_profile(self, profile_prefix: str | None = None) -> None:
+        """Start profiling with optional custom trace prefix.
+
+        Args:
+            profile_prefix: Optional prefix for the trace file names. If provided,
+                           trace files will be named as "<prefix>_dp<X>_pp<Y>_tp<Z>".
+                           If not provided, default naming will be used.
+        """
+        self.llm_engine.start_profile(profile_prefix)
 
     def stop_profile(self) -> None:
         self.llm_engine.stop_profile()
@@ -1633,19 +1712,22 @@ class LLM:
         during the sleep period, before `wake_up` is called.
 
         Args:
-            level: The sleep level. Level 1 sleep will offload the model
-                weights and discard the kv cache. The content of kv cache
-                is forgotten. Level 1 sleep is good for sleeping and waking
-                up the engine to run the same model again. The model weights
-                are backed up in CPU memory. Please make sure there's enough
-                CPU memory to store the model weights. Level 2 sleep will
-                discard both the model weights and the kv cache. The content
-                of both the model weights and kv cache is forgotten. Level 2
-                sleep is good for sleeping and waking up the engine to run a
-                different model or update the model, where previous model
-                weights are not needed. It reduces CPU memory pressure.
+            level: The sleep level.
+                - Level 0: Pause scheduling but continue accepting requests.
+                           Requests are queued but not processed.
+                - Level 1: Offload model weights to CPU, discard KV cache.
+                           The content of kv cache is forgotten. Good for
+                           sleeping and waking up the engine to run the same
+                           model again. Please make sure there's enough CPU
+                           memory to store the model weights.
+                - Level 2: Discard all GPU memory (weights + KV cache).
+                           Good for sleeping and waking up the engine to run
+                           a different model or update the model, where
+                           previous model weights are not needed. It reduces
+                           CPU memory pressure.
         """
-        self.reset_prefix_cache()
+        if level > 0:
+            self.reset_prefix_cache()
         self.llm_engine.sleep(level=level)
 
     def wake_up(self, tags: list[str] | None = None):
@@ -1656,9 +1738,10 @@ class LLM:
         Args:
             tags: An optional list of tags to reallocate the engine memory
                 for specific memory allocations. Values must be in
-                `("weights", "kv_cache")`. If None, all memory is reallocated.
-                wake_up should be called with all tags (or None) before the
-                engine is used again.
+                `("weights", "kv_cache", "scheduling")`. If None, all memory
+                is reallocated. wake_up should be called with all tags
+                (or None) before the engine is used again.
+                Use tags=["scheduling"] to resume from level 0 sleep.
         """
         self.llm_engine.wake_up(tags)
 
@@ -1676,11 +1759,9 @@ class LLM:
 
     def _params_to_seq(
         self,
-        params: SamplingParams
-        | PoolingParams
-        | Sequence[SamplingParams | PoolingParams],
+        params: _P | Sequence[_P],
         num_requests: int,
-    ) -> Sequence[SamplingParams | PoolingParams]:
+    ) -> Sequence[_P]:
         if isinstance(params, Sequence):
             if len(params) != num_requests:
                 raise ValueError(
@@ -1742,11 +1823,11 @@ class LLM:
         if any(param.truncate_prompt_tokens is not None for param in seq_params):
             # TODO: Remove this after deprecating `param.truncate_prompt_tokens`
             # Then, move the code from the `else` block to the top and let
-            # `self._preprocess_completion` handle prompt normalization
-            engine_prompts = [
+            # `self._preprocess_cmpl` handle prompt normalization
+            engine_prompts: Sequence[DictPrompt | TokPrompt] = [
                 engine_prompt
                 for prompt, param in zip(seq_prompts, seq_params)
-                for engine_prompt in self._preprocess_completion(
+                for engine_prompt in self._preprocess_cmpl(
                     [prompt],
                     tokenization_kwargs=merge_kwargs(
                         tokenization_kwargs,
@@ -1755,7 +1836,7 @@ class LLM:
                 )
             ]
         else:
-            engine_prompts = self._preprocess_completion(
+            engine_prompts = self._preprocess_cmpl(
                 seq_prompts,
                 tokenization_kwargs=tokenization_kwargs,
             )
@@ -1827,7 +1908,7 @@ class LLM:
         lora_request: Sequence[LoRARequest | None] | LoRARequest | None,
         tokenization_kwargs: dict[str, Any] | None = None,
         priority: list[int] | None = None,
-    ) -> None:
+    ) -> list[str]:
         num_requests = len(prompts)
         seq_params = self._params_to_seq(params, num_requests)
         seq_lora_requests = self._lora_request_to_seq(lora_request, num_requests)
@@ -1860,6 +1941,8 @@ class LLM:
             if added_request_ids:
                 self.llm_engine.abort_request(added_request_ids, internal=True)
             raise e
+
+        return added_request_ids
 
     def _add_request(
         self,
@@ -1912,7 +1995,9 @@ class LLM:
         return engine_request.request_id
 
     def _run_engine(
-        self, *, use_tqdm: bool | Callable[..., tqdm] = True
+        self,
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> list[RequestOutput | PoolingRequestOutput]:
         # Initialize tqdm.
         if use_tqdm:

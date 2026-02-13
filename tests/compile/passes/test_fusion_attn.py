@@ -92,6 +92,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
     def build_attn_metadata(self, batch_size: int) -> AttentionMetadata:
         """Initialize attention metadata."""
 
+        # TODO (Rohan138) reuse utils from vllm/v1/worker/gpu/attn_utils.py
+
         # Create common attn metadata
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(
@@ -100,58 +102,31 @@ class AttentionQuantPatternModel(torch.nn.Module):
 
         max_blocks = (max(batch_spec.seq_lens) + self.block_size - 1) // self.block_size
         num_blocks = batch_size * max_blocks
-        backend = self.attn.backend
 
-        # TODO(luka) use get_kv_cache_stride_order
-        # Create dummy KV cache for the selected backend
-        if backend == AttentionBackendEnum.ROCM_ATTN:
-            # k/v as 1st dimention
-            # HND: [num_blocks, num_kv_heads, block_size, head_size]
-            kv_cache = torch.zeros(
-                2,
-                num_blocks,
-                self.num_kv_heads,
-                self.block_size,
-                self.head_size,
-                dtype=self.kv_cache_dtype,
-                device=self.device,
-            )
-        elif backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
-            # k/v as 1st dimention
-            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
-            kv_cache = torch.zeros(
-                2,
-                num_blocks,
-                self.block_size,
-                self.num_kv_heads,
-                self.head_size,
-                dtype=self.kv_cache_dtype,
-                device=self.device,
-            )
-        elif backend == AttentionBackendEnum.TRITON_ATTN:
-            # k/v as 2nd dimention
-            # NHD: [num_blocks, block_size, num_kv_heads, head_size]
-            kv_cache = torch.zeros(
-                num_blocks,
-                2,
-                self.num_kv_heads,
-                self.block_size,
-                self.head_size,
-                dtype=self.kv_cache_dtype,
-                device=self.device,
-            )
-        elif backend == AttentionBackendEnum.FLASHINFER:
-            kv_cache = torch.zeros(
-                num_blocks,
-                2,
-                self.num_kv_heads,
-                self.block_size,
-                self.head_size,
-                dtype=self.kv_cache_dtype,
-                device=self.device,
-            ).permute(0, 1, 3, 2, 4)
-        else:
-            raise ValueError(f"Unsupported backend: {backend}")
+        # Fetch the attention backend and kv cache shape and stride order
+        attn_backend = self.attn.attn_backend
+        kv_cache_shape = attn_backend.get_kv_cache_shape(
+            num_blocks, self.block_size, self.num_kv_heads, self.head_size
+        )
+        try:
+            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+        except (AttributeError, NotImplementedError):
+            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+
+        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+        inv_order = [
+            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
+        ]
+
+        # Create dummy KV cache
+        raw_tensor = torch.zeros(
+            2 * num_blocks * self.block_size * self.num_kv_heads * self.head_size,
+            dtype=self.kv_cache_dtype,
+            device=self.device,
+        )
+        raw_tensor = raw_tensor.view(kv_cache_shape)
+        kv_cache = raw_tensor.permute(*inv_order)
+
         self.attn.kv_cache = [kv_cache]
 
         # Build attn metadata
@@ -267,7 +242,7 @@ elif current_platform.is_rocm():
     PATTERN_TEST_MODELS_FP8 = [
         ("amd/Llama-3.1-8B-Instruct-FP8-KV", TestAttentionFp8StaticQuantPatternModel)
     ]
-    BACKENDS = [
+    BACKENDS_FP8 = [
         AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN,
         AttentionBackendEnum.ROCM_ATTN,
         AttentionBackendEnum.TRITON_ATTN,
@@ -474,6 +449,17 @@ def test_attention_quant_pattern(
     assert attn_nodes_pre[0].kwargs.get("output_block_scale") is None, (
         "Attention should not have output_block_scale before fusion"
     )
+
+    kv_cache_dummy_dep_pre_is_none = (
+        attn_nodes_pre[0].kwargs.get("kv_cache_dummy_dep") is None
+    )
+    kv_cache_dummy_dep_post_is_none = (
+        attn_nodes_post[0].kwargs.get("kv_cache_dummy_dep") is None
+    )
+    assert not (kv_cache_dummy_dep_pre_is_none ^ kv_cache_dummy_dep_post_is_none), (
+        "The kv_cache_dummy_dep should be consistent before and after fusion"
+    )
+
     if quant_key.dtype == FP8_DTYPE:
         assert attn_nodes_post[0].kwargs.get("output_block_scale") is None, (
             "Attention should not have output_block_scale after FP8 fusion"

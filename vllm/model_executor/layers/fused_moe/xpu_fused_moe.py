@@ -3,14 +3,18 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
     FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kFp8DynamicTensorSym,
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
@@ -20,6 +24,21 @@ if current_platform.is_xpu():
 
 
 class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        self.is_fp8 = False
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         return True
@@ -37,8 +56,12 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return False
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "gelu", "swigluoai"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -49,10 +72,10 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # TODO: dispatch based on device.
         SUPPORTED_W_A = [
             (None, None),
             (kFp8StaticTensorSym, None),
+            (kFp8StaticTensorSym, kFp8DynamicTensorSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
@@ -74,7 +97,7 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         workspace1 = (0,)
         workspace2 = (0,)
@@ -89,7 +112,7 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -103,18 +126,35 @@ class XPUExperts(mk.FusedMoEPermuteExpertsUnpermute):
         xpu_fused_moe(
             hidden_states=hidden_states,
             w13=w1,
-            w13_scales=a1q_scale,
+            w13_scales=self.w1_scale,
             w13_bias=self.w1_bias,
             w2=w2,
-            w2_scales=a2_scale,
+            w2_scales=self.w2_scale,
             w2_bias=self.w2_bias,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             n_experts_per_token=topk,
-            activation=activation,
+            activation=activation.value,
             num_experts=self.moe_config.num_local_experts,
             ep_rank=self.moe_config.ep_rank,
             ep_size=self.moe_config.ep_size,
             output=output,
+            is_fp8=self.is_fp8,
         )
-        return
+
+
+class XPUExpertsFp8(XPUExperts):
+    def __init__(
+        self,
+        moe_config: FusedMoEConfig,
+        quant_config: FusedMoEQuantConfig,
+        max_num_tokens: int | None = None,
+        num_dispatchers: int | None = None,
+    ):
+        super().__init__(
+            moe_config,
+            quant_config,
+            max_num_tokens,
+            num_dispatchers,
+        )
+        self.is_fp8 = True

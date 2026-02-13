@@ -524,3 +524,43 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     """
     pg.shutdown()
     _unregister_process_group(pg.group_name)
+
+
+def get_worker_rank_suffix(global_rank: int | None = None) -> str:
+    """Generate a descriptive rank suffix for worker identification.
+
+    Returns a string like 'dp0_pp0_tp0_dcp0_ep0_rank0' including all
+    parallel dimensions: DP, PP, TP, DCP, EP.
+
+    Args:
+        global_rank: Optional global rank to append. If not provided,
+                     only parallel dimension ranks are included.
+
+    Returns:
+        A string suffix identifying the worker's position in the
+        distributed topology.
+    """
+    from vllm.distributed.parallel_state import (
+        get_dcp_group,
+        get_dp_group,
+        get_ep_group,
+        get_pp_group,
+        get_tp_group,
+    )
+
+    try:
+        dp_rank = get_dp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        tp_rank = get_tp_group().rank_in_group
+        dcp_rank = get_dcp_group().rank_in_group
+        ep_rank = get_ep_group().rank_in_group
+
+        suffix = f"dp{dp_rank}_pp{pp_rank}_tp{tp_rank}_dcp{dcp_rank}_ep{ep_rank}"
+        if global_rank is not None:
+            suffix = f"{suffix}_rank{global_rank}"
+        return suffix
+    except Exception:
+        # Fallback if parallel state not initialized
+        if global_rank is not None:
+            return f"rank{global_rank}"
+        return ""
