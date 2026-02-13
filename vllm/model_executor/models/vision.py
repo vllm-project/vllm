@@ -502,6 +502,27 @@ def compute_encoder_metadata(
     }
 
 
+@dataclass
+class DPVisionShardingMeta:
+    """Metadata for data-parallel vision encoder execution.
+
+    Stores assignment and sizing information from load balancing, used by
+    dp_gather_vision_outputs() to reconstruct outputs in original order.
+
+    Used when mm_encoder_tp_mode="data" and tp_size > 1.
+    """
+    image_rank_assignment: list[int]
+    images_per_rank: list[int]
+    input_patches_per_rank: list[int]
+    patches_per_image: list[int]
+    spatial_merge_size_squared: int
+    max_output_tokens_per_rank: int
+    tp_size: int
+    current_rank: int
+    local_image_indices: list[int]
+    total_images: int
+
+
 def run_dp_sharded_mrope_vision_model(
     vision_model: torch.nn.Module,
     pixel_values: torch.Tensor,
