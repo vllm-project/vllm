@@ -22,6 +22,7 @@ from vllm.distributed import (
     set_custom_all_reduce,
 )
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
     ensure_kv_transfer_shutdown,
@@ -102,20 +103,14 @@ class Worker(WorkerBase):
         )
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
+        # Profiler wrapper is created lazily in profile() when start is called,
+        # so we have all the information needed for proper trace naming.
         self.profiler: Any | None = None
-        profiler_config = vllm_config.profiler_config
-        if profiler_config.profiler == "torch":
-            worker_name = f"{vllm_config.instance_id}-rank-{self.rank}"
-            self.profiler = TorchProfilerWrapper(
-                profiler_config,
-                worker_name=worker_name,
-                local_rank=self.local_rank,
-                activities=["CPU", "CUDA"],
-            )
-        elif profiler_config.profiler == "cuda":
-            self.profiler = CudaProfilerWrapper(profiler_config)
-        else:
-            self.profiler = None
+        self.profiler_config = vllm_config.profiler_config
+
+        # Only validate profiler config is valid, don't instantiate yet
+        if self.profiler_config.profiler not in ("torch", "cuda", None):
+            raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
 
@@ -286,9 +281,10 @@ class Worker(WorkerBase):
     # to hijack tensor allocation.
     def load_model(self) -> None:
         eep_scale_up = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        with self._maybe_get_memory_pool_context(
-            tag="weights"
-        ) and set_current_vllm_config(self.vllm_config):
+        with (
+            self._maybe_get_memory_pool_context(tag="weights"),
+            set_current_vllm_config(self.vllm_config),
+        ):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
     def update_config(self, overrides: dict[str, Any]) -> None:
@@ -675,17 +671,52 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True):
-        if self.profiler is None:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        # Check if profiling is enabled
+        if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
                 "Profiling is not enabled. Please set --profiler-config to enable "
                 "profiling. Example: "
                 "'--profiler-config.profiler=torch --profiler-config.torch_profiler_dir"
                 "=YOUR_DIR_PATH_TO_DUMP_TRACE'"
             )
+
         if is_start:
-            self.profiler.start()
+            # Generate the trace name by combining prefix with comprehensive rank suffix
+            from vllm.distributed.utils import get_worker_rank_suffix
+
+            rank_suffix = get_worker_rank_suffix(global_rank=self.rank)
+
+            # Build the full trace name
+            if profile_prefix:
+                trace_name = f"{profile_prefix}_{rank_suffix}"
+            else:
+                trace_name = rank_suffix
+
+            # Create the profiler wrapper only on the first start call
+            if self.profiler is None:
+                if self.profiler_config.profiler == "torch":
+                    self.profiler = TorchProfilerWrapper(
+                        self.profiler_config,
+                        worker_name=trace_name,
+                        local_rank=self.local_rank,
+                        activities=["CPU", "CUDA"],
+                    )
+                    logger.debug(
+                        "Starting torch profiler with trace name: %s", trace_name
+                    )
+                elif self.profiler_config.profiler == "cuda":
+                    self.profiler = CudaProfilerWrapper(self.profiler_config)
+                    logger.debug("Starting CUDA profiler")
+                self.profiler.start()
+            else:
+                # Profiler already initialized. Restart profiling but keep
+                # the original trace name from the first initialization.
+                self.profiler.start()
         else:
+            if self.profiler is None:
+                logger.warning("Profiler was not started, nothing to stop.")
+                return
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
@@ -814,10 +845,14 @@ class Worker(WorkerBase):
             for module in moe_modules:
                 module.moe_config.num_experts = num_local_experts * new_ep_size
                 module.global_num_experts = module.moe_config.num_experts
+                tp_size = get_tp_group().world_size
+                is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+                sp_size = tp_size if is_sequence_parallel else 1
                 module.moe_parallel_config = FusedMoEParallelConfig.make(
-                    tp_size_=get_tp_group().world_size,
+                    tp_size_=tp_size,
                     pcp_size_=get_pcp_group().world_size,
                     dp_size_=get_dp_group().world_size,
+                    sp_size_=sp_size,
                     vllm_parallel_config=parallel_config,
                 )
                 module.moe_config.moe_parallel_config = module.moe_parallel_config
@@ -1034,6 +1069,7 @@ def init_worker_distributed_environment(
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
     init_batch_invariance(attention_config.backend)
+    override_envs_for_eplb(parallel_config)
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"

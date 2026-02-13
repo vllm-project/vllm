@@ -261,6 +261,7 @@ def get_quant_config(
     if (
         hf_quant_config is not None
         and hf_quant_config.get("quant_method") == "compressed-tensors"
+        and "config_groups" in hf_quant_config
     ):
         if hf_text_config is not None:
             n_heads = getattr(hf_text_config, "num_attention_heads", None)
@@ -826,6 +827,7 @@ def fastsafetensors_weights_iterator(
         pg = SingleGroup()
 
     device = torch.device(f"cuda:{current_platform.current_device()}")
+    hf_weights_files = sorted(hf_weights_files, key=_natural_sort_key)
     weight_files_sub_lists = [
         hf_weights_files[i : i + pg.size()]
         for i in range(0, len(hf_weights_files), pg.size())
