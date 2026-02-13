@@ -239,7 +239,6 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
         quant_scales = None
-        a1q_scale = None
         fc1_expert_weights = None
         fc2_expert_weights = None
         fc1_expert_biases = None
@@ -297,6 +296,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 ]
 
                 assert w1.is_contiguous() and w2.is_contiguous()
+                assert self.gemm1_alpha is not None
+                assert self.gemm1_beta is not None
+                assert self.gemm1_clamp_limit is not None
 
                 use_mxfp8_act_scaling = True
                 fc1_expert_biases = self.w1_bias
