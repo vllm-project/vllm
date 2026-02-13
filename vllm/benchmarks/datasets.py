@@ -1892,7 +1892,6 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 enable_multimodal_chat=args.enable_multimodal_chat,
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
-                skip_chat_template=args.skip_chat_template,
             ),
             "sharegpt": lambda: ShareGPTDataset(
                 random_seed=args.seed,
