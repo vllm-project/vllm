@@ -12,15 +12,15 @@ from typing import Any, Literal, TypeAlias
 import huggingface_hub
 from huggingface_hub import get_safetensors_metadata
 from packaging.version import Version
+from transformers import GenerationConfig, PretrainedConfig
 from transformers.models.auto.image_processing_auto import get_image_processor_config
 from transformers.models.auto.modeling_auto import (
     MODEL_FOR_CAUSAL_LM_MAPPING_NAMES,
     MODEL_MAPPING_NAMES,
 )
 from transformers.models.auto.tokenization_auto import get_tokenizer_config
-
-from transformers import GenerationConfig, PretrainedConfig
 from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
+
 from vllm import envs
 from vllm.logger import init_logger
 from vllm.transformers_utils.repo_utils import is_mistral_model_repo
