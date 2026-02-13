@@ -264,9 +264,13 @@ class OpenAISpeechToText(OpenAIServing):
                 audio_chunk,
                 self.asr_config,
             )
+            allowed_token_ids = self.model_cls.get_language_token_ids(
+                self.tokenizer,
+            )
             sampling_params = SamplingParams(
                 max_tokens=1,
                 temperature=0.0,
+                allowed_token_ids=allowed_token_ids,
             )
 
             result_generator = self.engine_client.generate(

@@ -1113,7 +1113,8 @@ class SupportsTranscription(Protocol):
     (e.g. Whisper needs a separate forward pass to predict the language
     token) should set this to ``True`` and implement
     :meth:`get_language_detection_prompt` and
-    :meth:`parse_language_detection_output`.
+    :meth:`parse_language_detection_output` and
+    :meth:`get_language_token_ids`.
     """
 
     def __init_subclass__(cls, **kwargs):
@@ -1231,6 +1232,20 @@ class SupportsTranscription(Protocol):
         tokenizer: object,
     ) -> str | None:
         """Parse the detected language from model output token IDs.
+
+        Only needs to be implemented when
+        ``supports_explicit_language_detection`` is ``True``.
+        """
+        raise NotImplementedError
+
+    @classmethod
+    def get_language_token_ids(
+        cls,
+        tokenizer: object,
+    ) -> list[int] | None:
+        """Return token IDs that represent valid language tokens.
+
+        Used to constrain language detection to only produce valid language tokens.
 
         Only needs to be implemented when
         ``supports_explicit_language_detection`` is ``True``.
