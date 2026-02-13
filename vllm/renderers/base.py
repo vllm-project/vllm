@@ -158,7 +158,7 @@ class BaseRenderer(ABC):
 
     @cached_property
     def default_cmpl_tok_params(self) -> TokenizeParams:
-        mm_processor = self.get_mm_processor()
+        mm_processor = self.mm_processor
         if mm_processor is not None:
             return mm_processor.info.default_tok_params
 
@@ -173,7 +173,7 @@ class BaseRenderer(ABC):
 
     @cached_property
     def default_chat_tok_params(self) -> TokenizeParams:
-        mm_processor = self.get_mm_processor()
+        mm_processor = self.mm_processor
         if mm_processor is not None:
             return mm_processor.info.default_tok_params
 
