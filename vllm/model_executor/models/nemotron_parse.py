@@ -610,13 +610,7 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
         )
 
     def get_default_tok_params(self) -> TokenizeParams:
-        return (
-            super()
-            .get_default_tok_params()
-            .with_kwargs(
-                add_special_tokens=False,
-            )
-        )
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     @property
     def skip_prompt_length_check(self) -> bool:

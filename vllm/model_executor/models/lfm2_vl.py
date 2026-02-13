@@ -92,13 +92,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_default_tok_params(self) -> TokenizeParams:
-        return (
-            super()
-            .get_default_tok_params()
-            .with_kwargs(
-                add_special_tokens=False,
-            )
-        )
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}

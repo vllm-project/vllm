@@ -556,13 +556,7 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         )
 
     def get_default_tok_params(self) -> TokenizeParams:
-        return (
-            super()
-            .get_default_tok_params()
-            .with_kwargs(
-                add_special_tokens=False,
-            )
-        )
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability

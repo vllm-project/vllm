@@ -135,13 +135,7 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         return feature_extractor
 
     def get_default_tok_params(self) -> TokenizeParams:
-        return (
-            super()
-            .get_default_tok_params()
-            .with_kwargs(
-                add_special_tokens=False,
-            )
-        )
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()

@@ -266,13 +266,7 @@ class OvisProcessingInfo(BaseProcessingInfo):
         )
 
     def get_default_tok_params(self) -> TokenizeParams:
-        return (
-            super()
-            .get_default_tok_params()
-            .with_kwargs(
-                add_special_tokens=False,
-            )
-        )
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_image_segment_len(self) -> int:
         visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config

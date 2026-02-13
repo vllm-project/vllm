@@ -649,13 +649,7 @@ class WhisperProcessingInfo(BaseProcessingInfo):
         # Special tokens should be provided by the user based on the
         # task and language of their request. Also needed to avoid
         # appending an EOS token to the prompt which disrupts generation.
-        return (
-            super()
-            .get_default_tok_params()
-            .with_kwargs(
-                add_special_tokens=False,
-            )
-        )
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()
