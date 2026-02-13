@@ -15,20 +15,47 @@ from pathlib import Path
 from typing import NamedTuple
 
 from vllm import LLM, EngineArgs
-from vllm.entrypoints.score_utils import ScoreMultiModalParam
+from vllm.multimodal.utils import encode_image_url, fetch_image
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 TEMPLATE_HOME = Path(__file__).parent / "template"
 
 
+query = "A woman playing with her dog on a beach at sunset."
+document = (
+    "A woman shares a joyful moment with her golden retriever on a sun-drenched "
+    "beach at sunset, as the dog offers its paw in a heartwarming display of "
+    "companionship and trust."
+)
+image_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
+video_url = "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
+documents = [
+    {
+        "type": "text",
+        "text": document,
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": image_url},
+    },
+    {
+        "type": "image_url",
+        "image_url": {"url": encode_image_url(fetch_image(image_url))},
+    },
+    {
+        "type": "video_url",
+        "video_url": {"url": video_url},
+    },
+]
+
+
 class RerankModelData(NamedTuple):
     engine_args: EngineArgs
     chat_template: str | None = None
+    modality: set[str] = {}
 
 
-def run_jinavl_reranker(modality: str) -> RerankModelData:
-    assert modality == "image"
-
+def run_jinavl_reranker() -> RerankModelData:
     engine_args = EngineArgs(
         model="jinaai/jina-reranker-m0",
         runner="pooling",
@@ -38,19 +65,15 @@ def run_jinavl_reranker(modality: str) -> RerankModelData:
             "min_pixels": 3136,
             "max_pixels": 602112,
         },
-        limit_mm_per_prompt={modality: 1},
     )
-    return RerankModelData(
-        engine_args=engine_args,
-    )
+    return RerankModelData(engine_args=engine_args, modality={"image"})
 
 
-def run_qwen3_vl_reranker(modality: str) -> RerankModelData:
+def run_qwen3_vl_reranker() -> RerankModelData:
     engine_args = EngineArgs(
         model="Qwen/Qwen3-VL-Reranker-2B",
         runner="pooling",
         max_model_len=16384,
-        limit_mm_per_prompt={modality: 1},
         # HuggingFace model configuration overrides required for compatibility
         hf_overrides={
             # Manually route to sequence classification architecture
@@ -71,10 +94,11 @@ def run_qwen3_vl_reranker(modality: str) -> RerankModelData:
     return RerankModelData(
         engine_args=engine_args,
         chat_template=chat_template,
+        modality={"image", "video"},
     )
 
 
-model_example_map: dict[str, Callable[[str], RerankModelData]] = {
+model_example_map: dict[str, Callable[[], RerankModelData]] = {
     "jinavl_reranker": run_jinavl_reranker,
     "qwen3_vl_reranker": run_qwen3_vl_reranker,
 }
@@ -93,78 +117,67 @@ def parse_args():
         choices=model_example_map.keys(),
         help="The name of the reranker model.",
     )
-    parser.add_argument(
-        "--modality",
-        type=str,
-        default="image",
-        choices=["image", "video"],
-        help="Modality of the multimodal input (image or video).",
-    )
     return parser.parse_args()
-
-
-def get_multi_modal_input(modality: str) -> tuple[str, ScoreMultiModalParam]:
-    # Sample query for testing the reranker
-    if modality == "image":
-        query = "A woman playing with her dog on a beach at sunset."
-        # Sample multimodal documents to be scored against the query
-        # Each document contains an image URL that will be fetched and processed
-        documents: ScoreMultiModalParam = {
-            "content": [
-                {
-                    "type": "text",
-                    "text": (
-                        "A woman shares a joyful moment with her golden retriever on a sun-drenched beach at sunset, "  # noqa: E501
-                        "as the dog offers its paw in a heartwarming display of companionship and trust."  # noqa: E501
-                    ),
-                },
-                {
-                    "type": "image_url",
-                    "image_url": {
-                        "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen-VL/assets/demo.jpeg"
-                    },
-                },
-            ]
-        }
-    elif modality == "video":
-        query = "A girl is drawing pictures on an ipad."
-        # Sample video documents to be scored against the query
-        documents: ScoreMultiModalParam = {
-            "content": [
-                {
-                    "type": "text",
-                    "text": "A girl is drawing a guitar on her ipad with Apple Pencil.",
-                },
-                {
-                    "type": "video_url",
-                    "video_url": {
-                        "url": "https://qianwen-res.oss-cn-beijing.aliyuncs.com/Qwen3-Omni/demo/draw.mp4"
-                    },
-                },
-            ]
-        }
-    else:
-        raise ValueError(f"Unsupported modality: {modality}")
-    return query, documents
 
 
 def main(args: Namespace):
     # Run the selected reranker model
-    modality = args.modality
-    model_request = model_example_map[args.model_name](modality)
+    model_request = model_example_map[args.model_name]()
     engine_args = model_request.engine_args
 
     llm = LLM(**asdict(engine_args))
 
-    query, documents = get_multi_modal_input(modality)
-    outputs = llm.score(query, documents, chat_template=model_request.chat_template)
-
-    print("-" * 50)
-    print(f"Model: {engine_args.model}")
-    print(f"Modality: {modality}")
-    print(f"Query: {query}")
+    print("Query: string & Document: string")
+    outputs = llm.score(query, document)
     print("Relevance scores:", [output.outputs.score for output in outputs])
-    print("-" * 50)
+
+    print("Query: string & Document: text")
+    outputs = llm.score(
+        query, {"content": [documents[0]]}, chat_template=model_request.chat_template
+    )
+    print("Relevance scores:", [output.outputs.score for output in outputs])
+
+    print("Query: string & Document: image url")
+    outputs = llm.score(
+        query, {"content": [documents[1]]}, chat_template=model_request.chat_template
+    )
+    print("Relevance scores:", [output.outputs.score for output in outputs])
+
+    print("Query: string & Document: image base64")
+    outputs = llm.score(
+        query, {"content": [documents[2]]}, chat_template=model_request.chat_template
+    )
+    print("Relevance scores:", [output.outputs.score for output in outputs])
+
+    if "video" in model_request.modality:
+        print("Query: string & Document: video url")
+        outputs = llm.score(
+            query,
+            {"content": [documents[3]]},
+            chat_template=model_request.chat_template,
+        )
+        print("Relevance scores:", [output.outputs.score for output in outputs])
+
+    print("Query: string & Document: text + image url")
+    outputs = llm.score(
+        query,
+        {"content": [documents[0], documents[1]]},
+        chat_template=model_request.chat_template,
+    )
+    print("Relevance scores:", [output.outputs.score for output in outputs])
+
+    print("Query: string & Document: list")
+    outputs = llm.score(
+        query,
+        [
+            document,
+            {"content": [documents[0]]},
+            {"content": [documents[1]]},
+            {"content": [documents[0], documents[1]]},
+        ],
+        chat_template=model_request.chat_template,
+    )
+    print("Relevance scores:", [output.outputs.score for output in outputs])
 
 
 if __name__ == "__main__":

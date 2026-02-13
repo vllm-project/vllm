@@ -114,6 +114,10 @@ void top_k_per_row_decode(const torch::Tensor& logits, int64_t next_n,
                           int64_t numRows, int64_t stride0, int64_t stride1,
                           int64_t topK);
 
+void large_context_topk(const torch::Tensor& score, torch::Tensor& indices,
+                        const torch::Tensor& lengths,
+                        std::optional<torch::Tensor> row_starts_opt);
+
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,
                                double epsilon);
@@ -260,12 +264,6 @@ void get_cutlass_moe_mm_data(
     const int64_t num_experts, const int64_t n, const int64_t k,
     const std::optional<torch::Tensor>& blockscale_offsets);
 
-void get_cutlass_moe_mm_problem_sizes(
-    const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
-    torch::Tensor& problem_sizes2, const int64_t num_experts, const int64_t n,
-    const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets,
-    std::optional<bool> force_swap_ab = std::nullopt);
-
 void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     const torch::Tensor& expert_first_token_offset,
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
@@ -299,7 +297,8 @@ std::vector<torch::Tensor> cutlass_sparse_compress(torch::Tensor const& a);
 
 void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
                       torch::Tensor& output_scale,
-                      torch::Tensor const& input_scale);
+                      torch::Tensor const& input_scale,
+                      bool is_sf_swizzled_layout);
 
 void scaled_fp4_experts_quant(
     torch::Tensor& output, torch::Tensor& output_scale,

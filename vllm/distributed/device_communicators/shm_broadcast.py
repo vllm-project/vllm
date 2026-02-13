@@ -488,6 +488,12 @@ class MessageQueue:
                 for i in range(1, self.buffer.n_reader + 1):
                     # set read flag to 0, meaning it is not read yet
                     metadata_buffer[i] = 0
+                # Memory fence here ensures the order of the buffer and flag
+                # writes. This guarantees that when `metadata_buffer[0] = 1` is
+                # visible to readers, `buf` can be completely ready. Without
+                # this, some CPU architectures with weak ordering may incur
+                # memory inconsistency.
+                memory_fence()
                 # mark the block as written
                 metadata_buffer[0] = 1
                 # Memory fence ensures the write is visible to readers on other cores

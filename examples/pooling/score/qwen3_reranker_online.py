@@ -50,8 +50,8 @@ documents = [
 # Request payload for the score API
 data = {
     "model": "Qwen/Qwen3-Reranker-0.6B",
-    "text_1": queries,
-    "text_2": documents,
+    "queries": queries,
+    "documents": documents,
 }
 
 

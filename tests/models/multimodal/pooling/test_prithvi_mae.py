@@ -7,14 +7,6 @@ import torch
 from ....conftest import VllmRunner
 
 
-def generate_test_mm_data():
-    mm_data = {
-        "pixel_values": torch.full((6, 512, 512), 1.0, dtype=torch.float16),
-        "location_coords": torch.full((1, 2), 1.0, dtype=torch.float16),
-    }
-    return mm_data
-
-
 def _run_test(
     vllm_runner: type[VllmRunner],
     model: str,
@@ -23,7 +15,12 @@ def _run_test(
         {
             # This model deals with no text input
             "prompt_token_ids": [1],
-            "multi_modal_data": generate_test_mm_data(),
+            "multi_modal_data": {
+                "image": {
+                    "pixel_values": torch.ones((6, 512, 512), dtype=torch.float16),
+                    "location_coords": torch.ones((1, 2), dtype=torch.float16),
+                }
+            },
         }
         for _ in range(10)
     ]

@@ -15,9 +15,6 @@ class InputBuffers:
         self,
         max_num_reqs: int,
         max_num_tokens: int,
-        inputs_embeds_size: int,
-        vocab_size: int,
-        dtype: torch.dtype,
         device: torch.device,
     ):
         self.max_num_reqs = max_num_reqs
@@ -31,19 +28,6 @@ class InputBuffers:
         )
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
 
-        # NOTE: `mrope_positions` is implemented with one additional dummy
-        # position on purpose to make it non-contiguous so that it can work
-        # with torch compile.
-        # See detailed explanation in https://github.com/vllm-project/vllm/pull/12128#discussion_r1926431923
-        # NOTE: When M-RoPE is enabled, position ids are 3D regardless of
-        # the modality of inputs. For text-only inputs, each dimension has
-        # identical position IDs, making M-RoPE functionally equivalent to
-        # 1D-RoPE.
-        # See page 5 of https://arxiv.org/abs/2409.12191
-        self.mrope_positions = torch.zeros(
-            (3, max_num_tokens + 1), dtype=torch.int64, device=device
-        )
-
 
 @dataclass
 class InputBatch:
@@ -56,6 +40,8 @@ class InputBatch:
     idx_mapping_np: np.ndarray
     # Identical to idx_mapping except for spec decoding.
     expanded_idx_mapping: torch.Tensor
+    # [total_num_logits] position within request for each logit
+    expanded_local_pos: torch.Tensor
 
     # [num_reqs]
     # batch_idx -> num_scheduled_tokens
@@ -76,16 +62,23 @@ class InputBatch:
     # [num_tokens_after_padding]
     positions: torch.Tensor
     # [3, num_tokens_after_padding]
-    mrope_positions: torch.Tensor
+    mrope_positions: torch.Tensor | None
+    # [num_tokens_after_padding, hidden_size]
+    inputs_embeds: torch.Tensor | None
 
     # layer_name -> Metadata
     attn_metadata: dict[str, Any]
+    # layer_name -> slot_mapping
+    slot_mappings: dict[str, torch.Tensor]
 
     # [total_num_logits]
     logits_indices: torch.Tensor
     # [num_reqs + 1]
     cu_num_logits: torch.Tensor
     cu_num_logits_np: np.ndarray
+
+    # Whether any requests in batch use structured output.
+    has_structured_output_reqs: bool
 
     @classmethod
     def make_dummy(
@@ -100,6 +93,7 @@ class InputBatch:
         idx_mapping_np = np.arange(num_reqs, dtype=np.int32)
         idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=device)
         expanded_idx_mapping = idx_mapping
+        expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
         num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
         num_scheduled_tokens[-1] += num_tokens % num_reqs
         assert int(num_scheduled_tokens.sum()) == num_tokens
@@ -124,8 +118,6 @@ class InputBatch:
 
         input_ids = input_buffers.input_ids[:num_tokens].zero_()
         positions = input_buffers.positions[:num_tokens].zero_()
-        input_buffers.mrope_positions.zero_()
-        mrope_positions = input_buffers.mrope_positions[:, :num_tokens]
 
         # attn_metadata = defaultdict(lambda: None)
         logits_indices = query_start_loc[1:] - 1
@@ -137,6 +129,7 @@ class InputBatch:
             idx_mapping=idx_mapping,
             idx_mapping_np=idx_mapping_np,
             expanded_idx_mapping=expanded_idx_mapping,
+            expanded_local_pos=expanded_local_pos,
             num_scheduled_tokens=num_scheduled_tokens,
             num_tokens=num_tokens,
             num_tokens_after_padding=num_tokens,
@@ -146,11 +139,14 @@ class InputBatch:
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
-            mrope_positions=mrope_positions,
+            mrope_positions=None,
+            inputs_embeds=None,
             attn_metadata=None,  # type: ignore
+            slot_mappings=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
+            has_structured_output_reqs=False,
         )
 
 
@@ -495,6 +491,7 @@ def post_update(
 def _expand_idx_mapping_kernel(
     idx_mapping_ptr,
     expanded_idx_mapping_ptr,
+    expanded_local_pos_ptr,
     cu_num_logits_ptr,
     BLOCK_SIZE: tl.constexpr,
 ):
@@ -507,6 +504,7 @@ def _expand_idx_mapping_kernel(
     mask = block < num_tokens
     req_state_idx = tl.load(idx_mapping_ptr + req_idx)
     tl.store(expanded_idx_mapping_ptr + start_idx + block, req_state_idx, mask=mask)
+    tl.store(expanded_local_pos_ptr + start_idx + block, block, mask=mask)
 
 
 def expand_idx_mapping(
@@ -514,13 +512,17 @@ def expand_idx_mapping(
     total_num_logits: int,
     cu_num_logits: torch.Tensor,
     max_expand_len: int,
-) -> torch.Tensor:
+) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
     expanded_idx_mapping = idx_mapping.new_empty(total_num_logits)
+    expanded_local_pos = torch.empty(
+        total_num_logits, dtype=torch.int32, device=idx_mapping.device
+    )
     _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,
+        expanded_local_pos,
         cu_num_logits,
         BLOCK_SIZE=triton.next_power_of_2(max_expand_len),
     )
-    return expanded_idx_mapping
+    return expanded_idx_mapping, expanded_local_pos

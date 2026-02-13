@@ -49,11 +49,6 @@ class GGUFModelLoader(BaseModelLoader):
         model_name_or_path = model_config.model
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
-        # for raw HTTPS link
-        if model_name_or_path.startswith(
-            ("http://", "https://")
-        ) and model_name_or_path.endswith(".gguf"):
-            return hf_hub_download(url=model_name_or_path)
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
@@ -71,7 +66,7 @@ class GGUFModelLoader(BaseModelLoader):
 
         raise ValueError(
             f"Unrecognised GGUF reference: {model_name_or_path} "
-            "(expected local file, raw URL, <repo_id>/<filename>.gguf, "
+            "(expected local file, <repo_id>/<filename>.gguf, "
             "or <repo_id>:<quant_type>)"
         )
 
@@ -335,7 +330,7 @@ class GGUFModelLoader(BaseModelLoader):
         )
 
     def load_model(
-        self, vllm_config: VllmConfig, model_config: ModelConfig
+        self, vllm_config: VllmConfig, model_config: ModelConfig, prefix: str = ""
     ) -> nn.Module:
         device_config = vllm_config.device_config
         local_model_path = self._prepare_weights(model_config)
@@ -364,7 +359,7 @@ class GGUFModelLoader(BaseModelLoader):
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
             with target_device:
-                model = initialize_model(vllm_config=vllm_config)
+                model = initialize_model(vllm_config=vllm_config, prefix=prefix)
             self.load_weights(model, model_config)
 
             process_weights_after_loading(model, model_config, target_device)

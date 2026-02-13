@@ -17,6 +17,7 @@ from packaging.version import Version
 from torch.library import Library, infer_schema
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
@@ -25,9 +26,7 @@ else:
     ModelConfig = object
     IntermediateTensors = object
 
-import logging
-
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 
 STR_DTYPE_TO_TORCH_DTYPE = {
@@ -104,12 +103,36 @@ def set_default_torch_dtype(dtype: torch.dtype):
 
 
 @contextlib.contextmanager
-def set_default_torch_num_threads(num_threads: int):
-    """Sets the default number of threads for PyTorch to the given value."""
+def set_default_torch_num_threads(num_threads: int | None = None):
+    """
+    Sets the default number of threads for PyTorch to the given value.
+
+    `None` means using the value of the environment variable `OMP_NUM_THREADS`
+    (or `1` if that is not available).
+    """
+    if num_threads is None:
+        num_threads = 1
+
+        try:
+            num_threads = int(os.environ["OMP_NUM_THREADS"])
+        except KeyError:
+            logger.debug_once(
+                "OMP_NUM_THREADS is not set; defaulting Torch threads to %d.",
+                num_threads,
+            )
+        except ValueError:
+            logger.warning_once(
+                "OMP_NUM_THREADS is invalid; defaulting Torch threads to %d.",
+                num_threads,
+            )
+
     old_num_threads = torch.get_num_threads()
     torch.set_num_threads(num_threads)
-    yield
-    torch.set_num_threads(old_num_threads)
+
+    try:
+        yield
+    finally:
+        torch.set_num_threads(old_num_threads)
 
 
 @contextlib.contextmanager
@@ -333,6 +356,8 @@ def set_random_seed(seed: int | None) -> None:
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
 
 
 def create_kv_caches_with_random_flash(
@@ -613,8 +638,9 @@ def weak_ref_tensor(tensor: Any) -> Any:
     Create a weak reference to a tensor.
     The new tensor will share the same data as the original tensor,
     but will not keep the original tensor alive.
+    This ignores 0-size tensors as those don't allocate any memory.
     """
-    if isinstance(tensor, torch.Tensor):
+    if isinstance(tensor, torch.Tensor) and tensor.numel() > 0:
         return torch.ops._C.weak_ref_tensor(tensor)
     else:
         return tensor
@@ -648,11 +674,15 @@ def weak_ref_tensors(
     raise ValueError("Invalid type for tensors")
 
 
-def get_cuda_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
+def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tensor:
     """
-    Get a CUDA view of a CPU tensor using Unified Virtual Addressing (UVA).
+    Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
     assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
+    from vllm.platforms import current_platform
+
+    if current_platform.is_xpu():
+        return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
     return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
 
 
@@ -706,9 +736,7 @@ def is_torch_equal(target: str) -> bool:
 
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
-    return (
-        is_torch_equal_or_newer("2.8.0.dev") and torch.distributed.is_xccl_available()
-    )
+    return torch.distributed.is_xccl_available()
 
 
 # create a library to hold the custom op

@@ -4,8 +4,10 @@ depends_on:
 steps:
 - label: V1 attention (H100)
   timeout_in_minutes: 30
-  gpu: h100
+  device: h100
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
@@ -13,9 +15,11 @@ steps:
 
 - label: V1 attention (B200)
   timeout_in_minutes: 30
-  gpu: b200
+  device: b200
   source_file_dependencies:
+    - vllm/config/attention.py
+    - vllm/model_executor/layers/attention
     - vllm/v1/attention
     - tests/v1/attention
   commands:
-    - VLLM_DISABLE_FLASHINFER_PREFILL=1 pytest -v -s v1/attention # TODO: FI prefill is bugged and causes incorrectness, fix this
+    - pytest -v -s v1/attention

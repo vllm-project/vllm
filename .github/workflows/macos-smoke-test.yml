@@ -29,8 +29,9 @@ jobs:
 
       - name: Install dependencies and build vLLM
         run: |
+          uv pip install -r requirements/cpu-build.txt --index-strategy unsafe-best-match
           uv pip install -r requirements/cpu.txt --index-strategy unsafe-best-match
-          uv pip install -e .
+          uv pip install -e . --no-build-isolation
         env:
           CMAKE_BUILD_PARALLEL_LEVEL: 4
 

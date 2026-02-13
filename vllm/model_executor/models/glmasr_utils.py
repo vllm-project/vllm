@@ -18,8 +18,8 @@ def _calculate_conv_output_length(
     input_length: torch.Tensor, padding: int, kernel_size: int, stride: int
 ) -> torch.Tensor:
     """Calculate Conv1d output length using standard formula."""
-    # Standard formula: floor((input + 2*padding - kernel_size) / stride) + 1
-    return (input_length + 2 * padding - kernel_size) // stride + 1
+    # in sync with `hf_processor._get_audio_token_length`
+    return (input_length + 2 * padding - (kernel_size - 1) - 1) // stride + 1
 
 
 def _as_list_chunk_counts(
@@ -166,23 +166,3 @@ def _extract_mask_for_item(
         return feature_attention_mask[start_idx:end_idx]
     mask_slice = feature_attention_mask[start_idx:end_idx]
     return _normalize_to_tensor(mask_slice)
-
-
-def _get_num_features_for_item(
-    feature_attention_mask: torch.Tensor | None,
-    chunk_counts: torch.Tensor | list[int] | None,
-    item_idx: int,
-    audio_embeds: list[torch.Tensor] | None,
-    merge_factor: int,
-    conv_params: list[tuple[int, int, int]],
-) -> int:
-    """Get number of features for a specific audio item."""
-    if feature_attention_mask is not None:
-        mask = _extract_mask_for_item(feature_attention_mask, chunk_counts, item_idx)
-        audio_output_lengths = _get_audio_output_lengths_from_mask(
-            mask, merge_factor, conv_params
-        )
-        return audio_output_lengths.sum().item()
-    if audio_embeds is not None:
-        return audio_embeds[item_idx].shape[0]
-    raise ValueError("Either feature_attention_mask or audio_embeds must be provided")

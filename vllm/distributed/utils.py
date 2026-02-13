@@ -31,7 +31,6 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import suppress_stdout
-from vllm.utils.torch_utils import is_torch_equal_or_newer
 
 logger = init_logger(__name__)
 
@@ -429,20 +428,11 @@ def init_gloo_process_group(
     different torch versions.
     """
     with suppress_stdout():
-        if is_torch_equal_or_newer("2.6"):
-            pg = ProcessGroup(
-                prefix_store,
-                group_rank,
-                group_size,
-            )
-        else:
-            options = ProcessGroup.Options(backend="gloo")
-            pg = ProcessGroup(
-                prefix_store,
-                group_rank,
-                group_size,
-                options,
-            )
+        pg = ProcessGroup(
+            prefix_store,
+            group_rank,
+            group_size,
+        )
         from torch.distributed.distributed_c10d import ProcessGroupGloo
 
         backend_class = ProcessGroupGloo(
@@ -450,9 +440,7 @@ def init_gloo_process_group(
         )
         backend_type = ProcessGroup.BackendType.GLOO
         device = torch.device("cpu")
-        if is_torch_equal_or_newer("2.6"):
-            # _set_default_backend is supported in torch >= 2.6
-            pg._set_default_backend(backend_type)
+        pg._set_default_backend(backend_type)
         backend_class._set_sequence_number_for_group()
 
         pg._register_backend(device, backend_type, backend_class)
@@ -534,12 +522,45 @@ def stateless_destroy_torch_distributed_process_group(pg: ProcessGroup) -> None:
     Destroy ProcessGroup returned by
         stateless_init_torch_distributed_process_group().
     """
-    if is_torch_equal_or_newer("2.7"):
-        pg.shutdown()
-    else:
-        # Lazy import for non-CUDA backends.
-        from torch.distributed.distributed_c10d import _shutdown_backend
-
-        _shutdown_backend(pg)
-
+    pg.shutdown()
     _unregister_process_group(pg.group_name)
+
+
+def get_worker_rank_suffix(global_rank: int | None = None) -> str:
+    """Generate a descriptive rank suffix for worker identification.
+
+    Returns a string like 'dp0_pp0_tp0_dcp0_ep0_rank0' including all
+    parallel dimensions: DP, PP, TP, DCP, EP.
+
+    Args:
+        global_rank: Optional global rank to append. If not provided,
+                     only parallel dimension ranks are included.
+
+    Returns:
+        A string suffix identifying the worker's position in the
+        distributed topology.
+    """
+    from vllm.distributed.parallel_state import (
+        get_dcp_group,
+        get_dp_group,
+        get_ep_group,
+        get_pp_group,
+        get_tp_group,
+    )
+
+    try:
+        dp_rank = get_dp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        tp_rank = get_tp_group().rank_in_group
+        dcp_rank = get_dcp_group().rank_in_group
+        ep_rank = get_ep_group().rank_in_group
+
+        suffix = f"dp{dp_rank}_pp{pp_rank}_tp{tp_rank}_dcp{dcp_rank}_ep{ep_rank}"
+        if global_rank is not None:
+            suffix = f"{suffix}_rank{global_rank}"
+        return suffix
+    except Exception:
+        # Fallback if parallel state not initialized
+        if global_rank is not None:
+            return f"rank{global_rank}"
+        return ""

@@ -18,6 +18,7 @@ class PenaltiesState:
         self.repetition_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.presence_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
+        self.use_penalty = np.zeros(max_num_reqs, dtype=bool)
 
         # Initialize repetition penalty manually because 0 is an invalid value for it.
         self.repetition_penalty.np.fill(1.0)
@@ -42,7 +43,10 @@ class PenaltiesState:
         self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
         self.frequency_penalty.np[req_idx] = sampling_params.frequency_penalty
         self.presence_penalty.np[req_idx] = sampling_params.presence_penalty
-        if use_penalty(sampling_params):
+
+        do_penalty = use_penalty(sampling_params)
+        self.use_penalty[req_idx] = do_penalty
+        if do_penalty:
             self._penalties_reqs.append(req_idx)
 
     def apply_staged_writes(
@@ -66,127 +70,147 @@ class PenaltiesState:
         self.frequency_penalty.copy_to_uva()
         self.presence_penalty.copy_to_uva()
 
-    def apply_penalties_and_temperature(
+    def apply_penalties(
         self,
         logits: torch.Tensor,
         idx_mapping: torch.Tensor,
-        temperature: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+        input_ids: torch.Tensor,
+        expanded_local_pos: torch.Tensor,
+        num_speculative_tokens: int,
     ) -> None:
-        apply_penalties_and_temperature(
+        if not np.any(self.use_penalty[idx_mapping_np]):
+            # No request uses penalties. Skip the kernel launch.
+            return
+
+        apply_penalties(
             logits,
             idx_mapping,
-            temperature,
+            input_ids,
+            expanded_local_pos,
             self.repetition_penalty.gpu,
             self.frequency_penalty.gpu,
             self.presence_penalty.gpu,
             self.prompt_bin_mask,
             self.output_bin_counts,
+            num_speculative_tokens,
         )
 
 
 @triton.jit
-def _penalties_and_temperature_kernel(
+def _penalties_kernel(
     logits_ptr,
     logits_stride,
     idx_mapping_ptr,
+    token_ids_ptr,
+    expanded_local_pos_ptr,
     repetition_penalty_ptr,
     frequency_penalty_ptr,
     presence_penalty_ptr,
-    temperature_ptr,
     prompt_bin_mask_ptr,
     prompt_bin_mask_stride,
     output_bin_counts_ptr,
     output_bin_counts_stride,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
+    MAX_SPEC_LEN: tl.constexpr,
 ):
-    batch_idx = tl.program_id(0)
-    req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
+    token_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + token_idx)
     rep_penalty = tl.load(repetition_penalty_ptr + req_state_idx)
     freq_penalty = tl.load(frequency_penalty_ptr + req_state_idx)
     pres_penalty = tl.load(presence_penalty_ptr + req_state_idx)
-    temperature = tl.load(temperature_ptr + req_state_idx)
-    temperature = tl.where(temperature == 0.0, 1.0, temperature)
 
     use_rep_penalty = rep_penalty != 1.0
     use_freq_penalty = freq_penalty != 0.0
     use_pres_penalty = pres_penalty != 0.0
     use_penalty = use_rep_penalty or use_freq_penalty or use_pres_penalty
-    use_temperature = temperature != 1.0
-    if not (use_penalty or use_temperature):
+    if not use_penalty:
         # Early return to avoid loading logits.
         return
 
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
-    logits = tl.load(logits_ptr + batch_idx * logits_stride + block, mask=mask)
+    logits = tl.load(logits_ptr + token_idx * logits_stride + block, mask=mask)
     logits = logits.to(tl.float32)
 
-    if use_penalty:
-        output_bin_counts = tl.load(
-            output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
-            mask=mask,
+    base_output_counts = tl.load(
+        output_bin_counts_ptr + req_state_idx * output_bin_counts_stride + block,
+        mask=mask,
+        other=0,
+    )
+
+    # Compute cumulative draft_counts from previous positions in this request
+    pos = tl.load(expanded_local_pos_ptr + token_idx)
+    start_idx = token_idx - pos
+    draft_counts = tl.zeros((BLOCK_SIZE,), dtype=tl.int32)
+    for prev_pos in tl.static_range(MAX_SPEC_LEN):
+        if prev_pos < pos:
+            prev_token = tl.load(token_ids_ptr + start_idx + prev_pos + 1)
+            token_match = block == prev_token
+            draft_counts = draft_counts + token_match.to(tl.int32)
+
+    # Total counts = base output counts + cumulative draft counts
+    output_bin_counts = base_output_counts + draft_counts
+    output_bin_mask = output_bin_counts > 0
+
+    # Apply repetition penalties.
+    if use_rep_penalty:
+        packed_block = block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
+        packed_mask = tl.load(
+            prompt_bin_mask_ptr + req_state_idx * prompt_bin_mask_stride + packed_block,
+            mask=packed_block < tl.cdiv(vocab_size, 32),
+            other=0,
         )
-        output_bin_mask = output_bin_counts > 0
+        prompt_bin_mask = (packed_mask[:, None] >> (tl.arange(0, 32)[None, :])) & 1
+        prompt_bin_mask = prompt_bin_mask.to(tl.int1)
+        prompt_bin_mask = prompt_bin_mask.reshape(BLOCK_SIZE)
 
-        # Apply repetition penalties.
-        if use_rep_penalty:
-            packed_block = block_idx * BLOCK_SIZE // 32 + tl.arange(0, BLOCK_SIZE // 32)
-            packed_mask = tl.load(
-                prompt_bin_mask_ptr
-                + req_state_idx * prompt_bin_mask_stride
-                + packed_block,
-                mask=packed_block < tl.cdiv(vocab_size, 32),
-            )
-            prompt_bin_mask = (packed_mask[:, None] >> (tl.arange(0, 32)[None, :])) & 1
-            prompt_bin_mask = prompt_bin_mask.to(tl.int1)
-            prompt_bin_mask = prompt_bin_mask.reshape(BLOCK_SIZE)
+        # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
+        scale = tl.where(prompt_bin_mask | output_bin_mask, rep_penalty, 1.0)
+        # If logits are positive, divide by penalty, otherwise multiply by penalty.
+        logits *= tl.where(logits > 0, 1.0 / scale, scale)
 
-            # If token appears in prompt or output, apply, otherwise use 1.0 for no-op.
-            scale = tl.where(prompt_bin_mask | output_bin_mask, rep_penalty, 1.0)
-            # If logits are positive, divide by penalty, otherwise multiply by penalty.
-            logits *= tl.where(logits > 0, 1.0 / scale, scale)
-
-        # Apply frequency penalties.
-        logits -= freq_penalty * output_bin_counts
-        # Apply presence penalties.
-        logits -= pres_penalty * output_bin_mask
-
-    # Apply temperature.
-    logits = logits / temperature
-
+    # Apply frequency penalties.
+    logits -= freq_penalty * output_bin_counts
+    # Apply presence penalties.
+    logits -= pres_penalty * output_bin_mask
     # Store back to logits.
-    tl.store(logits_ptr + batch_idx * logits_stride + block, logits, mask=mask)
+    tl.store(logits_ptr + token_idx * logits_stride + block, logits, mask=mask)
 
 
-def apply_penalties_and_temperature(
+def apply_penalties(
     logits: torch.Tensor,
     idx_mapping: torch.Tensor,
-    temperature: torch.Tensor,
+    token_ids: torch.Tensor,
+    expanded_local_pos: torch.Tensor,
     repetition_penalty: torch.Tensor,
     frequency_penalty: torch.Tensor,
     presence_penalty: torch.Tensor,
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
+    num_speculative_tokens: int,
 ) -> None:
-    num_reqs, vocab_size = logits.shape
+    num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _penalties_and_temperature_kernel[(num_reqs, num_blocks)](
+    _penalties_kernel[(num_tokens, num_blocks)](
         logits,
         logits.stride(0),
         idx_mapping,
+        token_ids,
+        expanded_local_pos,
         repetition_penalty,
         frequency_penalty,
         presence_penalty,
-        temperature,
         prompt_bin_mask,
         prompt_bin_mask.stride(0),
         output_bin_counts,
         output_bin_counts.stride(0),
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
+        MAX_SPEC_LEN=num_speculative_tokens,
     )
 
 

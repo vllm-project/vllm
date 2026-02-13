@@ -27,7 +27,7 @@ import threading
 from collections.abc import Generator
 from contextlib import nullcontext
 from enum import Enum
-from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING
+from typing import Any, Callable, TypedDict, TypeVar, cast, TYPE_CHECKING, Optional
 
 import numpy as np
 import pytest
@@ -63,7 +63,7 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.base import MediaWithBytes
+from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import BeamSearchParams
@@ -365,6 +365,7 @@ class HfRunner:
             self.config,
             dtype=dtype,
             is_pooling_model=is_sentence_transformer or is_cross_encoder,
+            config_format="hf",
         )
 
         model_kwargs = model_kwargs if model_kwargs is not None else {}
@@ -1023,7 +1024,9 @@ class VllmRunner:
             **kwargs,
         )
 
-    def generate_prompt_perplexity(self, prompts: list[str]) -> list[float]:
+    def generate_prompt_perplexity(
+        self, prompts: list[str], mask: Optional[list[str]] = None
+    ) -> list[float]:
         """
         Return the perplexity score associated with generating the prompts
 
@@ -1034,13 +1037,20 @@ class VllmRunner:
             prompts, max_tokens=1, num_logprobs=None, num_prompt_logprobs=0
         )
 
+        mask_prefix_lens = (
+            [len(self.llm.get_tokenizer()(prefix)["input_ids"]) for prefix in mask]
+            if mask is not None
+            else [0 for _ in range(len(prompts))]
+        )
+
         perplexities = []
-        for output in outputs:
+        for output, mask_prefix_len in zip(outputs, mask_prefix_lens):
             output = cast(TokensTextLogprobsPromptLogprobs, output)
             token_datas = cast(list[dict[int, Logprob] | None], output[3])
             assert token_datas[0] is None
+
             token_log_probs = []
-            for token_data in token_datas[1:]:
+            for token_data in token_datas[mask_prefix_len + 1 :]:
                 assert token_data is not None
                 assert len(token_data) == 1
                 token_log_prob = list(token_data.values())[0].logprob
@@ -1120,6 +1130,9 @@ class VllmRunner:
 
     def get_llm(self) -> LLM:
         return self.llm
+
+    def collective_rpc(self, *args, **kwargs):
+        return self.llm.collective_rpc(*args, **kwargs)
 
     def __enter__(self):
         return self
@@ -1531,3 +1544,9 @@ def use_fresh_inductor_cache():
     """
     with fresh_cache():
         yield
+
+
+@pytest.fixture(scope="function")
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
