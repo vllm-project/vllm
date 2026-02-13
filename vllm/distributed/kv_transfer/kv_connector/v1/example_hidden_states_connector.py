@@ -128,6 +128,10 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         logger.info(self._kv_transfer_config)
         logger.info("Shared storage path is %s", self._storage_path)
 
+        assert self._vllm_config.speculative_config is not None, (
+            "ExampleHiddenStatesConnector only works when using "
+            "'extract_hidden_states' speculative method"
+        )
         spec_config = self._vllm_config.speculative_config.draft_model_config.hf_config
         self.num_hidden_states = len(
             getattr(spec_config, "eagle_aux_hidden_state_layer_ids", [])
