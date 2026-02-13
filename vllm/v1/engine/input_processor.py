@@ -59,7 +59,7 @@ class InputProcessor:
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
-        self.renderer = renderer or renderer_from_config(model_config)
+        self.renderer = renderer or renderer_from_config(vllm_config)
         self.mm_registry = mm_registry
         self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
 
@@ -75,8 +75,7 @@ class InputProcessor:
             mm_budget.reset_cache()  # Not used anymore
 
         self.input_preprocessor = InputPreprocessor(
-            model_config,
-            self.observability_config,
+            vllm_config,
             renderer=renderer,
             mm_registry=mm_registry,
             mm_processor_cache=self.mm_processor_cache,

@@ -1000,6 +1000,8 @@ class MambaManager(SingleTypeKVCacheManager):
             for block in self.req_to_blocks[request.request_id][
                 num_cached_blocks_before:num_cached_blocks_after
             ]:
+                if block.is_null:
+                    continue
                 assert block.block_hash is not None
                 self.cached_blocks_this_step.add(block.block_hash)
 
