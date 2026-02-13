@@ -378,10 +378,10 @@ An example can be found here: [examples/pooling/score/colbert_rerank_online.py](
 
 ColQwen3 is based on [ColPali](https://arxiv.org/abs/2407.01449), which extends ColBERT's late interaction approach to **multi-modal** inputs. While ColBERT operates on text-only token embeddings, ColPali/ColQwen3 can embed both **text and images** (e.g. PDF pages, screenshots, diagrams) into per-token L2-normalized vectors and compute relevance via MaxSim scoring. ColQwen3 specifically uses Qwen3-VL as its vision-language backbone.
 
-Supported model families:
-
-- [`TomoroAI/tomoro-colqwen3-embed-4b`](https://huggingface.co/TomoroAI/tomoro-colqwen3-embed-4b) (also 8b)
-- [`OpenSearch-AI/Ops-Colqwen3-4B`](https://huggingface.co/OpenSearch-AI/Ops-Colqwen3-4B) (also 8b)
+| Architecture | Backbone | Example HF Models |
+|---|---|---|
+| `ColQwen3` | Qwen3-VL | `TomoroAI/tomoro-colqwen3-embed-4b`, `TomoroAI/tomoro-colqwen3-embed-8b` |
+| `OpsColQwen3Model` | Qwen3-VL | `OpenSearch-AI/Ops-Colqwen3-4B`, `OpenSearch-AI/Ops-Colqwen3-8B` |
 
 Start the server:
 
