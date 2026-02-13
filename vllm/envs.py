@@ -180,6 +180,7 @@ if TYPE_CHECKING:
     VLLM_KV_CACHE_LAYOUT: Literal["NHD", "HND"] | None = None
     VLLM_COMPUTE_NANS_IN_LOGITS: bool = False
     VLLM_USE_NVFP4_CT_EMULATIONS: bool = False
+    VLLM_EMULATION_DEQUANT_WEIGHTS_AOT: bool = False
     VLLM_ROCM_QUICK_REDUCE_QUANTIZATION: Literal[
         "FP", "INT8", "INT6", "INT4", "NONE"
     ] = "NONE"
@@ -1326,6 +1327,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # models
     "VLLM_USE_NVFP4_CT_EMULATIONS": lambda: bool(
         int(os.getenv("VLLM_USE_NVFP4_CT_EMULATIONS", "0"))
+    ),
+    # When set, dequantize weights ahead of time during model loading
+    # instead of on each forward pass during quantization emulation
+    # (OCP MX, NVFP4). Trades higher memory for faster inference.
+    "VLLM_EMULATION_DEQUANT_WEIGHTS_AOT": lambda: bool(
+        int(os.getenv("VLLM_EMULATION_DEQUANT_WEIGHTS_AOT", "0"))
     ),
     # Time (in seconds) after which the KV cache on the producer side is
     # automatically cleared if no READ notification is received from the

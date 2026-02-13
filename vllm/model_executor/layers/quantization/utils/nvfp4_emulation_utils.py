@@ -111,6 +111,7 @@ def run_nvfp4_emulations(
     weight: torch.Tensor,
     weight_scale_swizzled: torch.Tensor,
     weight_global_scale: torch.Tensor,
+    weights_dequantized_aot: bool = False,
 ):
     group_size = 16
     x_m, x_k = x.shape
@@ -125,16 +126,19 @@ def run_nvfp4_emulations(
     x_dq = (x_fp4 * x_blockscale).reshape(x_m, x_k).to(output_dtype)
     del x_fp4, x_blockscale
 
-    # dequantize weight
-    w_fp4 = weight.data.view(torch.uint8)
-    w_dq = dequantize_to_dtype(
-        w_fp4,
-        weight_scale_swizzled.data,
-        weight_global_scale,
-        output_dtype,
-        x.device,
-        group_size,
-    )
+    if weights_dequantized_aot:
+        w_dq = weight
+    else:
+        # dequantize weight
+        w_fp4 = weight.data.view(torch.uint8)
+        w_dq = dequantize_to_dtype(
+            w_fp4,
+            weight_scale_swizzled.data,
+            weight_global_scale,
+            output_dtype,
+            x.device,
+            group_size,
+        )
 
     # matmul
     out = torch.matmul(x_dq, w_dq.t())

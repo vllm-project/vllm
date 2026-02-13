@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_fp4_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
     run_nvfp4_emulations,
 )
 from vllm.platforms import current_platform
@@ -140,6 +141,22 @@ def convert_to_nvfp4_linear_kernel_format(
     # Default to no padding
     layer.weights_padding_cols = 0
 
+    if (
+        backend == NvFp4LinearBackend.EMULATION
+        and envs.VLLM_EMULATION_DEQUANT_WEIGHTS_AOT
+    ):
+        dq_weight = dequantize_to_dtype(
+            layer.weight.data.view(torch.uint8),
+            layer.weight_scale.data,
+            layer.weight_global_scale,
+            torch.get_default_dtype(),
+            layer.weight.device,
+            16,
+        )
+        layer.weight = torch.nn.Parameter(dq_weight, requires_grad=False)
+        layer.weight_scale = None
+        return
+
     if backend == NvFp4LinearBackend.MARLIN:
         prepare_fp4_layer_for_marlin(layer)
     elif backend == NvFp4LinearBackend.FLASHINFER_TRTLLM:
@@ -202,6 +219,7 @@ def apply_nvfp4_linear(
             weight=weight,
             weight_scale_swizzled=weight_scale,
             weight_global_scale=weight_global_scale,
+            weights_dequantized_aot=envs.VLLM_EMULATION_DEQUANT_WEIGHTS_AOT,
         )
         if bias is not None:
             out = out + bias
