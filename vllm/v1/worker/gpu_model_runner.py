@@ -4103,7 +4103,6 @@ class GPUModelRunner(
                 next_token_ids, valid_sampled_tokens_count
             )
 
-            # todo(fynn) combine drafter_kv_connector_output with existing
         elif spec_config.use_eagle() or spec_config.uses_draft_model():
             assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
 
