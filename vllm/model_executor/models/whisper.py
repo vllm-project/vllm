@@ -55,6 +55,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.renderers import TokenizeParams
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -643,6 +644,12 @@ class WhisperModel(nn.Module):
 class WhisperProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> WhisperConfig:
         return self.ctx.get_hf_config(WhisperConfig)
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        # Special tokens should be provided by the user based on the
+        # task and language of their request. Also needed to avoid
+        # appending an EOS token to the prompt which disrupts generation.
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()
