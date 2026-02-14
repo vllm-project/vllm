@@ -17,6 +17,9 @@ from .otel import (
     otel_import_error_traceback,
 )
 from .utils import (
+    HIDE_TOKEN_IDS,
+    NORMAL_TRACE,
+    TOKEN_LEVEL_TRACE,
     SpanAttributes,
     contains_trace_headers,
     extract_trace_headers,
@@ -36,6 +39,9 @@ __all__ = [
     "log_tracing_disabled_warning",
     "contains_trace_headers",
     "otel_import_error_traceback",
+    "NORMAL_TRACE",
+    "TOKEN_LEVEL_TRACE",
+    "HIDE_TOKEN_IDS",
 ]
 
 BackendAvailableFunc: TypeAlias = Callable[[], bool]
@@ -125,6 +131,7 @@ def instrument_manual(
     attributes: dict[str, Any] | None = None,
     context: Any = None,
     kind: Any = None,
+    events: list[dict[str, Any]] | None = None,
 ):
     """Manually create a span with explicit timestamps.
 
@@ -135,11 +142,12 @@ def instrument_manual(
         attributes: Optional dict of span attributes.
         context: Optional trace context (e.g., from extract_trace_context).
         kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        events: Optional list of event dicts with 'name', 'timestamp', and 'attributes'.
     """
     is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():
         return manual_instrument_fn(
-            span_name, start_time, end_time, attributes, context, kind
+            span_name, start_time, end_time, attributes, context, kind, events
         )
     else:
         return None
