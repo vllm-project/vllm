@@ -170,9 +170,9 @@ def recompute_mrope_positions(
     multimodal_embeddings may contain zero, some or even some part of all
     multimodal_embeddings for a given prompt.
 
-    Each multimodal_positions has 4 extra channels
-    (First 3 channels corresponds to original 3 mrope positions, last channel
-    is the maximum width of the media repeated). Provided multimodal_positions
+    Each multimodal_positions has 4 or 5 extra channels
+    (first 3 channels correspond to the original 3 mrope positions;
+    remaining channels vary by model — see below). Provided multimodal_positions
     do not reflect location of media position in sequence - they are computed
     like the media is in the 0-th position in the sequence.
 
@@ -195,7 +195,7 @@ def recompute_mrope_positions(
             of e.g. Qwen3 VL, where each video inputs are comprised of individual
             frames' embeddings, interleaved with embeddings for timestamp tokens,
             and vision start / end tokens. The expected channels are
-            [t, h, w, max_width, is_vision].
+            [t, h, w, is_vision_start, is_vision].
         mrope_positions: Existing mrope positions (4, N) for entire sequence.
         num_computed_tokens: A number of computed tokens so far.
         vision_start_token_id: Token indicating start of vision media.
@@ -250,11 +250,13 @@ def recompute_mrope_positions(
             # If there are no video embeddings, skip timestamp adjustment.
             has_video_tokens = torch.any(mm_pos[4, :]).item()
             if has_video_tokens:
-                # argmax gives the first video embedding index. The token right
-                # before it is the vision_start token, so subtract 1 to get
-                # the number of timestamp tokens.
-                first_video_idx = torch.argmax(mm_pos[4, :]).item()
-                num_timestamp_tokens = max(0, first_video_idx - 1)
+                # Channel 3 flags VISION_START tokens.  Timestamp tokens
+                # precede the first VISION_START, so its index gives us the
+                # exact timestamp count.  This is robust even when early
+                # frames have all their video tokens pruned (which would
+                # push argmax(channel 4) far into a later frame).
+                first_vs = (mm_pos[3, :] == 1).nonzero(as_tuple=True)[0]
+                num_timestamp_tokens = first_vs[0].item() if len(first_vs) > 0 else 0
 
         seen_vision_start_indices = vision_start_indices[
             vision_start_indices < num_computed_tokens
@@ -335,9 +337,9 @@ def recompute_mrope_positions(
         local_end = local_start + mm_pos.shape[1]
         positions[:, local_start:local_end] = mm_pos[0:3] + base
 
-        # mm_pos[3, 0] is the max width of the media
-        # For Qwen3 VL, use the maximum position reached across all tokens
-        # (both video and text) in all dimensions (t, h, w)
+        # For Qwen3 VL (5-channel), use the maximum position reached across
+        # all tokens (both video and text) in all dimensions (t, h, w).
+        # For Qwen2.5 VL (4-channel), mm_pos[3, 0] is the max width.
         if mm_pos.shape[0] == 5:
             offset = mm_pos[0:3, :].max() + base + 1
         else:

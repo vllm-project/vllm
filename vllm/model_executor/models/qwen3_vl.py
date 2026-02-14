@@ -1748,6 +1748,7 @@ class Qwen3VLForConditionalGeneration(
 
         expanded_positions = None
         if self.is_multimodal_pruning_enabled:
+            is_vision_start = repl_token_ids.eq(self.config.vision_start_token_id)
             expanded_positions = self._get_expanded_positions(
                 device=merged_embeddings.device,
                 seq_len=merged_embeddings.shape[0],
@@ -1755,6 +1756,7 @@ class Qwen3VLForConditionalGeneration(
                 num_tokens_per_frame=num_tokens_per_frame,
                 timestamps=timestamps,
                 is_video_embed=is_video_embed,
+                is_vision_start=is_vision_start,
                 retention_mask=retention_mask,
             )
             to_concat.append(expanded_positions)
@@ -1771,18 +1773,22 @@ class Qwen3VLForConditionalGeneration(
         num_tokens_per_frame,
         timestamps,
         is_video_embed,
+        is_vision_start,
         retention_mask,
     ):
         embed_token_id = _cached_tensor(self.config.video_token_id, device=device)
 
         # Expand positions to match the full sequence length
         # (includes both video tokens and indicator tokens)
-        # Shape: [full_length, 4] where positions are filled for video tokens
-        # and zeros for indicator tokens, EXCEPT channel 3 (max width) which
-        # must be filled for all tokens so recompute_mrope_positions can extract it
+        # Shape: [full_length, 5] where positions are filled for video tokens
+        # and zeros for indicator tokens.
+        # Channel 3 flags VISION_START tokens so that
+        # recompute_mrope_positions can reliably count timestamp tokens
+        # (even when early frames have all video tokens pruned).
+        # Channel 4 flags video-embedding tokens.
         expanded_positions = torch.zeros(
             seq_len,
-            5,  # 5 channels: [t_index, h_index, w_index, max_width, is_video]
+            5,  # [t_index, h_index, w_index, is_vision_start, is_video]
             device=device,
             dtype=torch.long,
         )
@@ -1824,7 +1830,7 @@ class Qwen3VLForConditionalGeneration(
             retention_mask
         ]
         expanded_positions[~is_video_embed, :3] = original_mrope[~full_is_video_embed]
-        expanded_positions[..., 3] = w // merge_size
+        expanded_positions[..., 3] = is_vision_start
         expanded_positions[..., 4] = is_video_embed
 
         return expanded_positions

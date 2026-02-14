@@ -15,6 +15,17 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 
+
+@pytest.fixture(autouse=True, scope="module")
+def _force_cpu_default_device():
+    # _get_mrope_input_positions returns CPU tensors (via torch.from_numpy).
+    # Ensure the default device is CPU so the rest of the test tensors match.
+    original = torch.get_default_device()
+    torch.set_default_device("cpu")
+    yield
+    torch.set_default_device(original)
+
+
 IMAGE_TOKEN_ID = 999
 VIDEO_TOKEN_ID = 888
 VISION_START_TOKEN_ID = 777
@@ -88,6 +99,7 @@ def make_video_embedding(
 @pytest.mark.parametrize("num_suffix_tokens", [0, 7])
 @pytest.mark.parametrize("video_pruning_rate", [0, 0.25, 0.75])
 @pytest.mark.parametrize("interleave_text_tokens", [(0, 0), (1, 4)])
+@pytest.mark.parametrize("attempt", list(range(10)))
 def test_match_qwen3vl_mrope_evs_on(
     spatial_merge_size: int,
     num_prefix_tokens: int,
@@ -95,6 +107,7 @@ def test_match_qwen3vl_mrope_evs_on(
     num_suffix_tokens: int,
     video_pruning_rate: float,
     interleave_text_tokens: tuple[int, int],
+    attempt,
 ):
     hf_config = DummyConfig()
     hf_config.vision_config.spatial_merge_size = spatial_merge_size
@@ -182,7 +195,8 @@ def test_match_qwen3vl_mrope_evs_on(
         ~is_video_embed
     ]
 
-    expanded_positions[..., 3] = w // hf_config.vision_config.spatial_merge_size
+    is_vision_start = video_tokens_pruned == VISION_START_TOKEN_ID
+    expanded_positions[..., 3] = is_vision_start
     expanded_positions[..., 4] = is_video_embed
 
     # Check that all positions were filled, since we initialized them as negative.
