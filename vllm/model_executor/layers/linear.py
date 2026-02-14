@@ -894,6 +894,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             return
 
         assert loaded_shard_id < len(self.output_sizes)
+
         shard_offset = sum(self.output_sizes[:loaded_shard_id])
         shard_size = self.output_sizes[loaded_shard_id]
 
