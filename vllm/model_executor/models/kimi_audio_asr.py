@@ -972,12 +972,9 @@ class KimiAudioForConditionalGeneration(
 
         # Also skip nested model prefixes if any.
 
-        mapped = []
-
-        for name, tensor in weights:
-            if any(name.startswith(p) for p in skip_prefixes):
-                continue
-
-            mapped.append((name, tensor))
-
-        return super().load_weights(mapped)
+        # Use a generator to avoid putting all weights in memory at once
+        return super().load_weights(
+            (name, tensor)
+            for name, tensor in weights
+            if not any(name.startswith(p) for p in skip_prefixes)
+        )
