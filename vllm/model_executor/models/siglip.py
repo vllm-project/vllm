@@ -53,7 +53,6 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
