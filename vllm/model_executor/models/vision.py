@@ -5,6 +5,7 @@ import itertools
 import math
 from abc import ABC, abstractmethod
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Final, Generic, Literal, Protocol, TypeAlias, TypeVar
 
 import numpy as np
