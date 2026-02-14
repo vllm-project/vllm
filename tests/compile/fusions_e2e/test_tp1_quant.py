@@ -53,25 +53,9 @@ from .models import (
     "attn_backend",
     [
         TRITON_ATTN,
-        pytest.param(
-            FLASHINFER_ATTN,
-            marks=pytest.mark.skipif(
-                not current_platform.is_cuda(),
-                reason="FlashInfer only supported on CUDA",
-            ),
-        ),
-        pytest.param(
-            ROCM_ATTN,
-            marks=pytest.mark.skipif(
-                current_platform.is_cuda(), reason="ROCm attention only for AMD"
-            ),
-        ),
-        pytest.param(
-            ROCM_AITER_UNIFIED_ATTN,
-            marks=pytest.mark.skipif(
-                current_platform.is_cuda(), reason="ROCm AIter only for AMD"
-            ),
-        ),
+        FLASHINFER_ATTN,
+        ROCM_ATTN,
+        ROCM_AITER_UNIFIED_ATTN,
     ],
 )
 @pytest.mark.parametrize("n_layers", [6])

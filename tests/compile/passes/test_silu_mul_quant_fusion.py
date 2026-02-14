@@ -195,7 +195,9 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
             TestSiluMulGroupFp8QuantModel,
             False,
             None,
-            skipif=not current_platform.is_cuda(),
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="CUDA only"
+            ),
         ),
         # GroupFP8Quant fusion only works with AITER on ROCm.
         # and the enable_quant_fp8_custom_op must be True.
@@ -203,7 +205,9 @@ TEST_KERNELS = ROCM_KERNELS if current_platform.is_rocm() else CUDA_KERNELS
             TestSiluMulGroupFp8QuantModel,
             True,
             None,
-            skipif=not current_platform.is_rocm(),
+            marks=pytest.mark.skipif(
+                not current_platform.is_rocm(), reason="ROCm only"
+            ),
         ),
     ],
 )

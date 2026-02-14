@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
+from vllm._aiter_ops import is_aiter_found_and_supported
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -25,14 +26,22 @@ TRITON_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.TRITON_ATTN), id="TRITON_ATTN"
 )
 
-# ROCm backends
 ROCM_ATTN = pytest.param(
-    AttentionBackendCase(backend=AttentionBackendEnum.ROCM_ATTN), id="ROCM_ATTN"
+    AttentionBackendCase(backend=AttentionBackendEnum.ROCM_ATTN),
+    id="ROCM_ATTN",
+    marks=pytest.mark.skipif(
+        not current_platform.is_rocm(),
+        reason="ROCm attention only for AMD",
+    ),
 )
 
 ROCM_AITER_UNIFIED_ATTN = pytest.param(
     AttentionBackendCase(backend=AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN),
     id="ROCM_AITER_UNIFIED_ATTN",
+    marks=pytest.mark.skipif(
+        not is_aiter_found_and_supported(),
+        reason="ROCM_AITER_UNIFIED_ATTN only for AMD when AITER is installed",
+    ),
 )
 
 # Models
