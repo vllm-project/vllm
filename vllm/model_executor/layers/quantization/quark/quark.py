@@ -337,6 +337,13 @@ class QuarkConfig(QuantizationConfig):
             )
             return False
 
+        if isinstance(weight_quant, list):
+            logger.debug(
+                "Quark model's weight quantization is incompatible with OCP_MX format: "
+                "weight_quant is a list (e.g. fp8_w4a8), OCP_MX requires a single dict."
+            )
+            return False
+
         # Input and weight qscheme needs to be per group.
         if weight_quant.get("qscheme") != "per_group":
             logger.debug(

@@ -937,10 +937,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
         # TODO(rob): this validation should happen at kernel selection
         # time in the oracle rather than here.
-        assert layer.activation == MoEActivation.SILU, (
-            f"Expected 'silu' activation but got {layer.activation}"
+        SUPPORTED_ACTIVATIONS = [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert layer.activation in SUPPORTED_ACTIVATIONS, (
+            f"Only {SUPPORTED_ACTIVATIONS} activations are supported for FlashInfer "
+            f"TRTLLM FP4 MoE, {layer.activation} found instead."
         )
-        assert not layer.renormalize
         return apply_fi_trtllm_fp8_per_tensor_moe(
             layer=layer,
             hidden_states=x,
