@@ -5,9 +5,11 @@ import json
 
 import pytest
 import pytest_asyncio
+import torch
 from mistral_common.audio import Audio
 from mistral_common.protocol.instruct.chunk import AudioChunk, RawAudio, TextChunk
 from mistral_common.protocol.instruct.messages import UserMessage
+from packaging.version import Version
 
 from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -111,5 +113,23 @@ async def test_online_serving(client, audio_assets: AudioTestAssets):
 
     assert len(chat_completion.choices) == 1
     choice = chat_completion.choices[0]
-    assert choice.message.content == "In the first audio clip, you hear a brief"
+
+    # The expected output depends on PyTorch version due to cuBLAS workspace
+    # size changes in pytorch/pytorch#173002 (landed in PyTorch 2.11).
+    # Larger workspace enables different cuBLAS algorithm selection,
+    # resulting in slightly different but equally valid outputs.
+    # Note: We use base_version to handle alpha/dev versions like "2.11.0a0"
+    # which would otherwise compare as less than "2.11" due to pre-release
+    # semantics in packaging.version.
+    pytorch_version = Version(torch.__version__.split("+")[0])
+    pytorch_base_version = Version(pytorch_version.base_version)
+    if pytorch_base_version >= Version("2.11"):
+        expected = "You're hearing a conversational context. In the"
+    else:
+        expected = "In the first audio clip, you hear a brief"
+
+    assert choice.message.content == expected, (
+        f"Unexpected output: {choice.message.content!r}. "
+        f"Expected: {expected!r} (PyTorch {pytorch_version})"
+    )
     assert choice.finish_reason == "length"
