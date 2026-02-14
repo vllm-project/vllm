@@ -248,6 +248,7 @@ _EMBEDDING_MODELS = {
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     # [Multimodal]
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
+    "ColQwen3": ("colqwen3_vl", "ColQwen3ForRetrieval"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
         "LlavaNextForConditionalGeneration",
