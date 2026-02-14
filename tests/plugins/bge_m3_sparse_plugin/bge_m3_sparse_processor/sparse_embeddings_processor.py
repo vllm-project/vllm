@@ -6,6 +6,7 @@ from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
+from vllm.entrypoints.pooling.pooling.protocol import IOProcessorRequest
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -42,7 +43,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
         if params is None:
             params = PoolingParams()
         # refer to PoolingCompletionRequest.to_pooling_params
-        if request is not None:
+        if request is not None and isinstance(request, IOProcessorRequest):
             if params.task is None:
                 params.task = request.task
             if params.truncate_prompt_tokens is None:
