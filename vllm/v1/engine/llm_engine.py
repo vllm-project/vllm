@@ -320,7 +320,7 @@ class LLMEngine:
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
-                    mm_cache_stats=self.input_processor.stat_mm_cache(),
+                    mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
                 self.do_log_stats_with_interval()
 
@@ -333,7 +333,7 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.input_processor.clear_mm_cache()
+        self.renderer.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(

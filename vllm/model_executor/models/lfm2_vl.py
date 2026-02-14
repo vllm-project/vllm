@@ -42,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -89,6 +90,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
 
     def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessorFast:
         return self.get_hf_processor(**kwargs).image_processor
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}

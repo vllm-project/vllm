@@ -50,23 +50,14 @@ def safe_apply_chat_template(
         raise ValueError(str(e)) from e
 
 
-class MistralRenderer(BaseRenderer):
+class MistralRenderer(BaseRenderer[MistralTokenizer]):
     @classmethod
-    def from_config(
+    def from_config(  # type: ignore[override]
         cls,
         config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
-        return cls(config, tokenizer_kwargs)
-
-    def __init__(
-        self,
-        config: VllmConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> None:
-        super().__init__(config)
-
-        model_config = self.model_config
+    ) -> "MistralRenderer":
+        model_config = config.model_config
         if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
@@ -75,23 +66,19 @@ class MistralRenderer(BaseRenderer):
                 **tokenizer_kwargs,
             )
 
-        self._tokenizer = tokenizer
+        return cls(config, tokenizer)
+
+    def __init__(
+        self,
+        config: VllmConfig,
+        tokenizer: MistralTokenizer | None,
+    ) -> None:
+        super().__init__(config, tokenizer)
 
         self._apply_chat_template_executor = ThreadPoolExecutor(max_workers=1)
         self._apply_chat_template_async = make_async(
             safe_apply_chat_template, executor=self._apply_chat_template_executor
         )
-
-    @property
-    def tokenizer(self) -> MistralTokenizer | None:
-        return self._tokenizer
-
-    def get_tokenizer(self) -> MistralTokenizer:
-        tokenizer = self.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
-
-        return tokenizer
 
     def render_messages(
         self,

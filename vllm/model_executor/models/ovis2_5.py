@@ -35,6 +35,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -182,6 +183,9 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
             hidden_stride=vit_config.hidden_stride,
             temporal_patch_size=vit_config.temporal_patch_size,
         )
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_image_processor(self) -> BaseImageProcessor:
         return self.get_hf_processor().image_processor  # type: ignore

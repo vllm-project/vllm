@@ -19,8 +19,8 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
-from vllm.inputs import PromptType, StreamingInput
+from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -268,11 +268,11 @@ class AsyncLLM(EngineClient):
 
         shutdown_prometheus()
 
+        if renderer := getattr(self, "renderer", None):
+            renderer.shutdown()
+
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
-
-        if input_processor := getattr(self, "input_processor", None):
-            input_processor.close()
 
         handler = getattr(self, "output_handler", None)
         if handler is not None:
@@ -654,7 +654,7 @@ class AsyncLLM(EngineClient):
         output_processor = self.output_processor
         log_stats = self.log_stats
         logger_manager = self.logger_manager
-        input_processor = self.input_processor
+        renderer = self.renderer
         chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
@@ -702,7 +702,7 @@ class AsyncLLM(EngineClient):
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                            mm_cache_stats=input_processor.stat_mm_cache(),
+                            mm_cache_stats=renderer.stat_mm_cache(),
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -881,7 +881,7 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.input_processor.clear_mm_cache()
+        self.renderer.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
     async def reset_prefix_cache(
