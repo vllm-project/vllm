@@ -68,8 +68,8 @@ class SamplingStates:
         idx_mapping_np: np.ndarray,
     ) -> None:
         temp_np = self.temperature.np[idx_mapping_np]
-        if np.all(temp_np == 0.0) or np.all(temp_np == 1.0):
-            # No request uses temperature. Skip the kernel launch.
+        if np.all((temp_np == 0.0) | (temp_np == 1.0)):
+            # No request requires temperature. Skip the kernel launch.
             return
 
         apply_temperature(logits, idx_mapping, self.temperature.gpu)
