@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import Future
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING, Any
 
 import cloudpickle
@@ -454,6 +455,11 @@ class RayDistributedExecutor(Executor):
 
         return self._execute_dag(scheduler_output, grammar_output, non_block)
 
+    @staticmethod
+    def _get_async_refs(refs, worker, timeout=None):
+        ray.get(refs, timeout=timeout)
+        return worker.execute_method.remote("get_execute_model_output")
+
     def _execute_dag(
         self,
         scheduler_output: SchedulerOutput,
@@ -465,6 +471,19 @@ class RayDistributedExecutor(Executor):
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=False)
 
         refs = self.forward_dag.execute((scheduler_output, grammar_output))  # type: ignore
+
+        if self.scheduler_config.async_scheduling:
+            assert non_block
+            assert self.parallel_config.pipeline_parallel_size == 1, (
+                "Async scheduling is not supported with pipeline parallelism."
+            )
+
+            # Delay getting the model runner output until next step execute_model
+            # returns.
+            refs = [
+                partial(RayDistributedExecutor._get_async_refs, ref, worker)
+                for ref, worker in zip(refs, self.workers)
+            ]
 
         if not self.has_connector:
             # Get output only from a single worker (output_rank)
