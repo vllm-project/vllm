@@ -414,9 +414,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         obs_config = vllm_config.observability_config
         custom_ttft_buckets = obs_config.histogram_buckets_ttft
         custom_itl_buckets = obs_config.histogram_buckets_itl
-        custom_request_latency_buckets = (
-            obs_config.histogram_buckets_request_latency
-        )
+        custom_request_latency_buckets = obs_config.histogram_buckets_request_latency
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
