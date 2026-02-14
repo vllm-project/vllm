@@ -285,13 +285,13 @@ class KVCacheManager:
         if (
             num_blocks_to_allocate == 0
             and new_computed_blocks is None
-            and request.num_output_tokens > 0
+            and request.num_output_tokens > 1
         ):
             # Early return: no new blocks needed to be allocated for decode steps
-            # (excluding the first decode steps). DO NOT early return for
+            # (excluding the first decode step). DO NOT early return for
             # - prefill steps: to ensure cache_blocks are running
-            # - first decode steps: to ensure remove_skipped_blocks remove
-            #   prompt token blocks slided out of the context window
+            # - first decode step: to ensure remove_skipped_blocks removes
+            #   prompt token blocks that slid out of the sliding window
             #
             # NOTE: This optimization may delay block cleanup (remove_skipped_blocks)
             # in rare edge cases, but the impact is negligible.
