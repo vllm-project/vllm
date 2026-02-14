@@ -69,6 +69,13 @@ print(response)
 Note: avoid instructing the model to emit raw JSON as a normal message.
 Rely on the tool call output (`file_search_call.results`) instead.
 
+### Custom handlers
+
+The provided `tools.llama_stack_file_search_demo` handler works with Llama Stack.
+To use a different file search system, you can implement a custom handler.
+Custom handlers must be added to `_ALLOWED_FILE_SEARCH_HANDLER_MODULES`
+in the vLLM source code.
+
 ## Inference using Embedded vLLM
 
 An [inline provider](https://github.com/llamastack/llama-stack/tree/main/llama_stack/providers/inline/inference)

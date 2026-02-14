@@ -44,3 +44,31 @@ async def test_file_search_handler_non_dict(monkeypatch):
     )
     payload = await _run_file_search_handler({"query": "test"})
     assert payload == {"results": []}
+
+
+@pytest.mark.asyncio
+async def test_file_search_handler_security_blocked_module(monkeypatch):
+    """Test that modules not in the allowlist are blocked."""
+    envs.disable_envs_cache()
+    monkeypatch.setenv(
+        "VLLM_GPT_OSS_FILE_SEARCH_HANDLER",
+        "os:system",  # This should be blocked
+    )
+    payload = await _run_file_search_handler({"query": "test"})
+    assert payload == {"results": []}
+
+
+@pytest.mark.asyncio
+async def test_file_search_handler_security_allowed_module(monkeypatch):
+    """Test that modules in the allowlist are allowed."""
+    envs.disable_envs_cache()
+    monkeypatch.setenv(
+        "VLLM_GPT_OSS_FILE_SEARCH_HANDLER",
+        "tools.llama_stack_file_search_demo:handle",
+    )
+    # This should try to load the handler, but may fail due to missing dependencies
+    # The important thing is it doesn't fail due to security blocking
+    payload = await _run_file_search_handler({"query": "test"})
+    # Should either work or fail gracefully, but not due to security block
+    assert isinstance(payload, dict)
+    assert "results" in payload

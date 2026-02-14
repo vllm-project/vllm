@@ -265,6 +265,10 @@ OpenAI-compatible payload shaped like the vector store search response
 Results are only included in Responses output when the request includes
 `include=["file_search_call.results"]`.
 
+!!! note
+    Custom handler modules must be added to the allowlist in vLLM's source code.
+    See `_ALLOWED_FILE_SEARCH_HANDLER_MODULES` in the codebase to register your module.
+
 #### Extra parameters
 
 The following extra parameters in the request object are supported:
