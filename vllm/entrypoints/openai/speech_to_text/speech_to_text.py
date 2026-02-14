@@ -298,9 +298,7 @@ class OpenAISpeechToText(OpenAIServing):
                 request_prompt=request.prompt,
                 to_language=to_language,
                 decoder_prefix=getattr(request, "decoder_prefix", None),
-                custom_task_tokens=getattr(
-                    request, "custom_task_tokens", None
-                ),
+                custom_task_tokens=getattr(request, "custom_task_tokens", None),
             )
             if request.response_format == "verbose_json":
                 prompt = self._preprocess_verbose_prompt(parse_enc_dec_prompt(prompt))

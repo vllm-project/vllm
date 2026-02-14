@@ -837,9 +837,7 @@ class WhisperForConditionalGeneration(
             )
 
         # Build prompt conditioning (style guidance via <|prev|>)
-        decoder_text = (
-            f"<|prev|>{request_prompt}" if request_prompt else ""
-        )
+        decoder_text = f"<|prev|>{request_prompt}" if request_prompt else ""
 
         # Build task token sequence
         decoder_text += f"<|startoftranscript|><|{language}|><|{task_type}|>"
