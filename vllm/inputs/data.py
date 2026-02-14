@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, TypeAlias
 
 import torch
 from typing_extensions import NotRequired, TypedDict
-
-from vllm.sampling_params import SamplingParams
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import (
@@ -299,15 +296,3 @@ which can be passed to
 
 SingletonInputs: TypeAlias = DecoderOnlyInputs | MultiModalEncDecInputs
 """The inputs for a single encoder/decoder prompt."""
-
-
-@dataclass
-class StreamingInput:
-    """Input data for a streaming generation request.
-
-    This is used with generate() to support multi-turn streaming sessions
-    where inputs are provided via an async generator.
-    """
-
-    prompt: PromptType
-    sampling_params: SamplingParams | None = None

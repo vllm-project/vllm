@@ -8,11 +8,11 @@ from typing import Literal, cast
 
 import numpy as np
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.inputs.data import PromptType, StreamingInput
+from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsRealtime
 
