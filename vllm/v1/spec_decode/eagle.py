@@ -409,13 +409,11 @@ class SpecDecodeBaseProposer:
 
         assert self.runner is not None
 
-        # Build attention metadata for all draft attention groups
         per_layer_attn_metadata: dict[str, object] = {}
         for attn_group in self.draft_attn_groups:
             attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                 common_attn_metadata=common_attn_metadata, draft_index=0
             )
-            # Add metadata for ALL layers in this group
             for layer_name in attn_group.layer_names:
                 per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -624,13 +622,12 @@ class SpecDecodeBaseProposer:
                 exceeds_max_model_len, PADDING_SLOT_ID
             )
 
-            # Rebuild attention metadata for all draft attention groups
+            # Rebuild attention metadata
             for attn_group in self.draft_attn_groups:
                 attn_metadata = attn_group.get_metadata_builder().build_for_drafting(
                     common_attn_metadata=common_attn_metadata,
                     draft_index=token_index + 1,
                 )
-                # Add metadata for ALL layers in this group
                 for layer_name in attn_group.layer_names:
                     per_layer_attn_metadata[layer_name] = attn_metadata
 
@@ -796,7 +793,7 @@ class SpecDecodeBaseProposer:
             # Recompute the slot mapping based on the new positions and
             # rejection mask.
             # Use the first draft attention group's kv_cache_spec for block_size
-            # (all draft layers share the same KVC)
+            # (all draft layers share the same kv-cache group)
             assert len(self.draft_attn_groups) > 0
             block_size = self.draft_attn_groups[0].kv_cache_spec.block_size
             new_slot_mapping = compute_new_slot_mapping(
