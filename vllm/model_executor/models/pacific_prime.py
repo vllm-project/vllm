@@ -24,7 +24,11 @@ from transformers import PretrainedConfig
 
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -38,6 +42,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.layers.token_routed_i64 import TokenRoutedMLP
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
@@ -112,104 +117,7 @@ class INLDynamics(nn.Module):
         return h_next, v_next, mu_contextual
 
 
-# =============================================================================
-# Token-Routed MLP
-# =============================================================================
-
-
-class TokenRoutedMLP(nn.Module):
-    """
-    Token-Routed MLP - Deterministic expert routing.
-    Routes tokens to experts based on: expert_id = token_id % num_experts
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        num_experts: int,
-        vocab_size: int,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.num_experts = num_experts
-        self.vocab_size = vocab_size
-        self.expert_intermediate_size = intermediate_size // num_experts
-
-        # Expert weights
-        self.gate_up_proj = nn.Parameter(
-            torch.empty(num_experts, hidden_size, 2 * self.expert_intermediate_size)
-        )
-        self.down_proj = nn.Parameter(
-            torch.empty(num_experts, self.expert_intermediate_size, hidden_size)
-        )
-
-        # Mu-guided routing
-        self.mu_router = nn.Linear(hidden_size, num_experts, bias=False)
-        nn.init.zeros_(self.mu_router.weight)
-
-        self.register_buffer(
-            "token_to_expert",
-            torch.arange(vocab_size, dtype=torch.long) % num_experts,
-        )
-
-        nn.init.kaiming_uniform_(self.gate_up_proj, a=5**0.5)
-        nn.init.kaiming_uniform_(self.down_proj, a=5**0.5)
-
-    def forward(
-        self,
-        x: torch.Tensor,
-        token_ids: torch.Tensor | None = None,
-        mu: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        num_tokens = x.shape[0]
-
-        if token_ids is None:
-            expert_ids = torch.zeros(num_tokens, dtype=torch.long, device=x.device)
-        else:
-            token_ids_clamped = token_ids.clamp(0, self.vocab_size - 1)
-            base_expert_ids = self.token_to_expert.to(x.device)[token_ids_clamped]
-
-            if mu is not None:
-                mu_logits = self.mu_router(mu)
-                base_one_hot = F.one_hot(base_expert_ids, self.num_experts).float()
-                combined_logits = base_one_hot * 10.0 + mu_logits
-                expert_ids = combined_logits.argmax(dim=-1)
-            else:
-                expert_ids = base_expert_ids
-
-        # Memory-efficient: process by expert groups instead of per-token bmm
-        output = torch.zeros(
-            num_tokens, self.hidden_size, device=x.device, dtype=x.dtype
-        )
-
-        for expert_id in range(self.num_experts):
-            # Find tokens routed to this expert
-            mask = expert_ids == expert_id
-            if not mask.any():
-                continue
-
-            # Get tokens for this expert
-            x_expert = x[mask]  # [num_tokens_for_expert, hidden_size]
-
-            # Get expert weights
-            gate_up_w = self.gate_up_proj[expert_id]  # [hidden_size, 2*intermediate]
-            down_w = self.down_proj[expert_id]  # [intermediate, hidden_size]
-
-            # Forward through expert (matmul instead of bmm)
-            gate_up_out = x_expert @ gate_up_w  # [n, 2*intermediate]
-            gate_out = gate_up_out[..., : self.expert_intermediate_size]
-            up_out = gate_up_out[..., self.expert_intermediate_size :]
-            intermediate = F.silu(gate_out) * up_out  # [n, intermediate]
-            expert_output = intermediate @ down_w  # [n, hidden_size]
-
-            # Scatter back to output
-            output[mask] = expert_output
-
-        return output
-
+# TokenRoutedMLP imported from vllm.model_executor.layers.token_routed_i64
 
 # =============================================================================
 # Standard MLP (fallback)
@@ -443,7 +351,6 @@ class ComplexityDecoderLayer(nn.Module):
                 intermediate_size=config.intermediate_size,
                 num_experts=getattr(config, "num_experts", 4),
                 vocab_size=config.vocab_size,
-                quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
             )
         else:
@@ -719,12 +626,21 @@ class ComplexityForCausalLM(nn.Module):
                     loaded_params.add(orig_name)
                 continue
 
-            # Handle TokenRoutedMLP weights (expert weights [num_experts, ...])
+            # Handle TokenRoutedMLP weights - TP-aware sharding via I64 layer
             if ".mlp.gate_up_proj" in name or ".mlp.down_proj" in name:
                 if name in params_dict:
                     param = params_dict[name]
-                    with torch.no_grad():
-                        param.copy_(loaded_weight)
+                    # Find the TokenRoutedMLP module for this layer
+                    # e.g. "model.layers.0.mlp.gate_up_proj" -> layer 0
+                    parts = name.split(".")
+                    layer_idx = int(parts[2])
+                    mlp = self.model.layers[layer_idx].mlp
+                    param_name = parts[-1]  # "gate_up_proj" or "down_proj"
+                    if isinstance(mlp, TokenRoutedMLP):
+                        mlp.load_tp_weight(param_name, param, loaded_weight)
+                    else:
+                        with torch.no_grad():
+                            param.copy_(loaded_weight)
                     loaded_params.add(orig_name)
                 continue
 
