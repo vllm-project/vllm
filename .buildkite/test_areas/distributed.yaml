@@ -181,10 +181,10 @@ steps:
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
-    - tests/v1/kv_connector/nixl_integration/
+    - tests/v1/kv_connector/pd_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - bash v1/kv_connector/pd_integration/config_sweep_accuracy_test.sh
 
 - label: DP EP Distributed NixlConnector PD accuracy tests (4 GPUs)
   timeout_in_minutes: 30
@@ -192,10 +192,22 @@ steps:
   num_devices: 4
   source_file_dependencies:
     - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
-    - tests/v1/kv_connector/nixl_integration/
+    - tests/v1/kv_connector/pd_integration/
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+    - DP_EP=1 bash v1/kv_connector/pd_integration/config_sweep_accuracy_test.sh
+
+- label: P2pNccl Connector PD accuracy (2 GPUs)
+  timeout_in_minutes: 25
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  optional: true
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/p2p/
+    - tests/v1/kv_connector/pd_integration/
+    - benchmarks/disagg_benchmarks/disagg_prefill_proxy_server.py
+  commands:
+    - GPU_MEMORY_UTILIZATION=0.4 bash v1/kv_connector/pd_integration/run_p2p_nccl_accuracy_test.sh
 
 - label: Pipeline + Context Parallelism (4 GPUs))
   timeout_in_minutes: 60
