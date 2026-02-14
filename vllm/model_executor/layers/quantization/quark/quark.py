@@ -125,7 +125,11 @@ class QuarkConfig(QuantizationConfig):
         if should_ignore_layer(
             prefix, ignore=exclude_layers, fused_mapping=self.packed_modules_mapping
         ):
-            if prefix == "lm_head" or not getattr(self, "dynamic_mxfp4_quant", False):
+            if (
+                "self_attn" not in prefix  # only quantize attention projections
+                or not getattr(self, "dynamic_mxfp4_quant", False)
+                or not isinstance(layer, LinearBase)  # Ignore other methods
+            ):
                 return UnquantizedLinearMethod()
 
             scheme = self.get_scheme(
@@ -494,7 +498,9 @@ class QuarkConfig(QuantizationConfig):
                 input_symmetric=input_config.get("symmetric"),
             )
         elif self._is_w_ocp_mx_a_x(weight_config, input_config):
-            return QuarkOCP_MX(weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant)
+            return QuarkOCP_MX(
+                weight_config, input_config, dynamic_mxfp4_quant=dynamic_mxfp4_quant
+            )
 
         raise NotImplementedError(
             "No quark compatible scheme was found. "
