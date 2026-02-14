@@ -48,6 +48,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
         if request is not None:
             params.task = request.task
             params.truncate_prompt_tokens = request.truncate_prompt_tokens
+        return params
 
     def parse_request(self, request_data: Any) -> IOProcessorInput:
         # for vllm.entrypoints.llm.LLM, offline mode, calls `encode` directly.
