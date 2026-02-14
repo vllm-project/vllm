@@ -462,17 +462,19 @@ class ClientSentinel(BaseSentinel):
         self.engine_core_sentinel_identities = engine_core_sentinel_identities
 
         threading.Thread(
-            target=self.run, daemon=True, name="ClientSentinelMonitorThread"
+            target=self.run, daemon=True, name="ClientSentinelCmdAndFaultReceiverThread"
         ).start()
 
         threading.Thread(
-            target=self.recv_msg_and_dispatch_cmd,
+            target=self._process_ft_requests_loop,
             daemon=True,
-            name="ClientSentinelCmdAndFaultReceiverThread",
+            name="ClientSentinelFtRequestsLoopThread",
         ).start()
 
-    def run(self) -> None:
-        """Execute fault tolerance commands from the queue serially."""
+    def _process_ft_requests_loop(self) -> None:
+        """
+        Worker loop to process Fault Tolerance (FT) requests
+        """
         try:
             while not self.sentinel_dead:
                 try:
@@ -601,7 +603,7 @@ class ClientSentinel(BaseSentinel):
             return False
         return True
 
-    def recv_msg_and_dispatch_cmd(self):
+    def run(self):
         """Poll for fault messages and commands, dispatch to handlers."""
         poller = zmq.Poller()
         poller.register(self.fault_receiver_socket, zmq.POLLIN)
