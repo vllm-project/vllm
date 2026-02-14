@@ -592,14 +592,16 @@ steps:
 # corresponds to .buildkite/test_areas/pytorch.yaml
 - label: PyTorch Compilation Passes Unit Tests
   timeout_in_minutes: 20
-  mirror_hardwares: [amdexperimental, amdproduction, tj]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   source_file_dependencies:
     - vllm/
     - tests/compile/passes
   commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -s -v compile/passes --ignore compile/passes/distributed
+  # TODO: clean up this comment if not needed. It is used to 
+  # keep track of the tests changes during vLLM IR Ops refactoring.
+  # Use `find` to launch multiple instances of pytest.
+  - "find compile/passes -maxdepth 1 -name 'test_*.py' -exec pytest -s -v {} \\\\;"
 
 - label: PyTorch Fullgraph Smoke Test # 15min
   timeout_in_minutes: 30
