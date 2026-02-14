@@ -12,6 +12,7 @@ from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .embed_utils import safe_load_prompt_embeds
@@ -61,22 +62,22 @@ class BaseRenderer(ABC, Generic[_T]):
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
         self.mm_processor: BaseMultiModalProcessor | None = None
-        self._mm_processor_cache: BaseMultiModalProcessorCache | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
-            self.mm_processor = mm_registry.create_processor(
-                config.model_config,
-                config.observability_config,
-                tokenizer=self.tokenizer,
-                cache=mm_processor_cache,
-            )
-            self._mm_processor_cache = mm_processor_cache
-            self._mm_cache_stats = (
-                MultiModalCacheStats() if mm_processor_cache else None
-            )
+
+            with set_default_torch_num_threads():
+                self.mm_processor = mm_registry.create_processor(
+                    config.model_config,
+                    config.observability_config,
+                    tokenizer=tokenizer,
+                    cache=mm_processor_cache,
+                )
+
+            if mm_processor_cache:
+                self._mm_cache_stats = MultiModalCacheStats()
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -97,6 +98,13 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return self.mm_processor
 
+    @property
+    def mm_processor_cache(self) -> "BaseMultiModalProcessorCache | None":
+        if self.mm_processor is None:
+            return None
+
+        return self.mm_processor.cache
+
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         mm_cache_stats = self._mm_cache_stats
         if mm_cache_stats is None:
@@ -107,7 +115,7 @@ class BaseRenderer(ABC, Generic[_T]):
         return mm_cache_stats
 
     def update_mm_cache_stats(self) -> None:
-        mm_processor_cache = self._mm_processor_cache
+        mm_processor_cache = self.mm_processor_cache
         mm_cache_stats = self._mm_cache_stats
 
         if mm_processor_cache and mm_cache_stats:
@@ -115,7 +123,7 @@ class BaseRenderer(ABC, Generic[_T]):
             mm_cache_stats.record(delta.total, delta.hits)
 
     def clear_mm_cache(self) -> None:
-        mm_processor_cache = self._mm_processor_cache
+        mm_processor_cache = self.mm_processor_cache
         if mm_processor_cache is not None:
             mm_processor_cache.clear_cache()
 
@@ -123,7 +131,7 @@ class BaseRenderer(ABC, Generic[_T]):
             self._mm_cache_stats.reset = True
 
     def shutdown(self) -> None:
-        mm_processor_cache = self._mm_processor_cache
+        mm_processor_cache = self.mm_processor_cache
         if mm_processor_cache is not None:
             mm_processor_cache.close()
 
