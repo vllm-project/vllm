@@ -219,15 +219,17 @@ class TestBaseThinkingReasoningParserExtraction:
         assert content == "This is content"
 
     def test_extract_reasoning_no_end_token(self, test_tokenizer):
-        """Test extraction when no end token is present."""
+        """Test extraction when no end token is present (truncated output)."""
         parser = TestThinkingReasoningParser(test_tokenizer)
         request = ChatCompletionRequest(messages=[], model="test-model")
 
         model_output = "This is just content"
         reasoning, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == "This is just content"
-        assert content is None
+        # When end token is missing (likely truncated by max_tokens),
+        # treat output as content so users can see generated text
+        assert reasoning is None
+        assert content == "This is just content"
 
     def test_extract_reasoning_empty_output(self, test_tokenizer):
         """Test extraction with empty output."""
@@ -237,8 +239,9 @@ class TestBaseThinkingReasoningParserExtraction:
         model_output = ""
         reasoning, content = parser.extract_reasoning(model_output, request)
 
-        assert reasoning == ""
-        assert content is None
+        # Empty output without end token is treated as content
+        assert reasoning is None
+        assert content == ""
 
     def test_extract_reasoning_only_tokens(self, test_tokenizer):
         """Test extraction with only tokens and no content."""
@@ -417,5 +420,6 @@ class TestBaseThinkingReasoningParserEdgeCases:
         reasoning, content = run_reasoning_extraction(parser, [model_output])
 
         # Should treat as regular content since tokens don't match exactly
-        assert reasoning == ("<test:thinking>Not a real token</test:thinking>Content")
-        assert content is None
+        # (end token is missing, so treated as truncated output)
+        assert reasoning is None
+        assert content == "<test:thinking>Not a real token</test:thinking>Content"

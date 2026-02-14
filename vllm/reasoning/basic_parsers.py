@@ -169,7 +169,10 @@ class BaseThinkingReasoningParser(ReasoningParser):
         # For models that may not generate start token,
         # assume the reasoning content is always at the start.
         if self.end_token not in model_output:
-            return model_output, None
+            # If end token not found, treat output as content since reasoning
+            # was not properly closed (likely truncated by max_tokens).
+            # This ensures users see output even when generation is cut off.
+            return None, model_output
         else:
             reasoning, _, content = model_output.partition(self.end_token)
             # If generation stops right after end-of-think, return null content
