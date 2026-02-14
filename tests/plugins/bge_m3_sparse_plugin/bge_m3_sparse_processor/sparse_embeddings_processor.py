@@ -107,7 +107,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
     ) -> IOProcessorOutput:
         num_prompt_tokens = 0
         response_data = []
-        return_tokens = self._get_sparse_embedding_request(request_id).return_token
+        return_tokens = self._get_sparse_embedding_request(request_id).return_tokens
         for idx in range(len(model_output)):
             mo = model_output[idx]
             sparse_embedding: dict[int, float] = {}
