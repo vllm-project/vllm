@@ -25,15 +25,9 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        gemm1_alpha,
-        gemm1_beta,
-        gemm1_clamp_limit,
         max_capture_size,
     ):
         super().__init__(moe_config, quant_config)
-        self.gemm1_alpha = gemm1_alpha
-        self.gemm1_beta = gemm1_beta
-        self.gemm1_clamp_limit = gemm1_clamp_limit
         self.max_capture_size = max_capture_size
 
     @staticmethod
