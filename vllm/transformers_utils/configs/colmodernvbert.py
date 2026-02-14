@@ -42,9 +42,7 @@ class ColModernVBertConfig(PretrainedConfig):
             num_hidden_layers=text_cfg.get("num_hidden_layers", 22),
             num_attention_heads=text_cfg.get("num_attention_heads", 12),
             mlp_bias=text_cfg.get("mlp_bias", False),
-            max_position_embeddings=vlm_config.get(
-                "max_position_embeddings", 8192
-            ),
+            max_position_embeddings=vlm_config.get("max_position_embeddings", 8192),
         )
 
         # Vision config (SigLIP)
@@ -61,7 +59,7 @@ class ColModernVBertConfig(PretrainedConfig):
     @property
     def image_seq_len(self) -> int:
         ps = self.vision_config.image_size // self.vision_config.patch_size
-        return (ps * ps) // (self.pixel_shuffle_factor ** 2)
+        return (ps * ps) // (self.pixel_shuffle_factor**2)
 
     def get_text_config(self, **kwargs):
         return self.text_config
