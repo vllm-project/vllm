@@ -214,9 +214,9 @@ def test_rocm_wvsplitk_kernel(
         BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
 
     if padded_a:
-        A = pad_weights_fp8(A)
+        A = pad_fp8(A)
     if padded_b:
-        B = pad_weights_fp8(B)
+        B = pad_fp8(B)
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
