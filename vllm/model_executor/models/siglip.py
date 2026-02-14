@@ -195,7 +195,7 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         if mm_items:
-            if isinstance(prompt, str):
+            if isinstance(prompt, str) and len(prompt) > 0:
                 raise ValueError(
                     "SigLIP accepts text-only or image-only inputs, not both! "
                     "You must pass an image with an empty text prompt."
