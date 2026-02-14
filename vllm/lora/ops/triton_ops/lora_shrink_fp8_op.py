@@ -219,8 +219,8 @@ def _lora_shrink_fp8(
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
     num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
     scaling: float,
+    b_scale: list[torch.Tensor],  # LoRA weight scale per slice
     a_scale: torch.Tensor | None = None,  # Activation scale - per-token or block-wise
-    b_scale: list[torch.Tensor] | None = None,  # LoRA weight scale per slice
     group_k: int = 0,  # Block size for K in block-wise quantization (0 = tensor-wise)
     group_n: int = 0,  # Block size for N in block-wise quantization
     use_fp8_w8a8: bool = False,
@@ -403,8 +403,8 @@ def _lora_shrink_fp8_fake(
     no_lora_flag_cpu: torch.Tensor,
     num_active_loras: int,
     scaling: float,
+    b_scale: list[torch.Tensor],  # LoRA weight scale per slice
     a_scale: torch.Tensor | None = None,  # Activation scale - per-token or block-wise
-    b_scale: list[torch.Tensor] | None = None,  # LoRA weight scale per slice
     group_k: int = 0,  # Block size for K in block-wise quantization (0 = tensor-wise)
     group_n: int = 0,  # Block size for N in block-wise quantization
     use_fp8_w8a8: bool = False,
