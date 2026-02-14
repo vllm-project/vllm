@@ -32,21 +32,47 @@ from .models import (
     [
         (*llama3_8b_fp8, False),
         (*qwen3_a3b_fp8, False),
-    ]
-    + (
-        [
-            (*llama4_scout_fp8, False),
-            (*qwen3_a3b_fp8, True),  # only supported on CUDA
-        ]
-        if current_platform.is_cuda()
-        else []
-    ),
+        pytest.param(
+            *llama4_scout_fp8,
+            False,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="Llama4 Scout FP8 only supported on CUDA",
+            ),
+        ),
+        pytest.param(
+            *qwen3_a3b_fp8,
+            True,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(), reason="DeepGemm only supported on CUDA"
+            ),
+        ),
+    ],
 )
 @pytest.mark.parametrize(
     "attn_backend",
-    [TRITON_ATTN, FLASHINFER_ATTN]
-    if current_platform.is_cuda()
-    else [TRITON_ATTN, ROCM_ATTN, ROCM_AITER_UNIFIED_ATTN],
+    [
+        TRITON_ATTN,
+        pytest.param(
+            FLASHINFER_ATTN,
+            marks=pytest.mark.skipif(
+                not current_platform.is_cuda(),
+                reason="FlashInfer only supported on CUDA",
+            ),
+        ),
+        pytest.param(
+            ROCM_ATTN,
+            marks=pytest.mark.skipif(
+                current_platform.is_cuda(), reason="ROCm attention only for AMD"
+            ),
+        ),
+        pytest.param(
+            ROCM_AITER_UNIFIED_ATTN,
+            marks=pytest.mark.skipif(
+                current_platform.is_cuda(), reason="ROCm AIter only for AMD"
+            ),
+        ),
+    ],
 )
 @pytest.mark.parametrize("n_layers", [6])
 @pytest.mark.parametrize("custom_ops", custom_ops_combos("quant_fp8", "rms_norm"))
@@ -102,7 +128,7 @@ def test_tp1_fp8_fusions(
     ]
 
     if use_aiter:
-        matches_check.append("aiter_rms_quant_fusion")
+        matches_check[0] = "aiter_rms_quant_fusion"
 
     run_e2e_fusion_test(
         model_name,
