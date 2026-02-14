@@ -19,7 +19,6 @@ from vllm.plugins.io_processors.interface import (
 )
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
-from vllm.sampling_params import SamplingParams
 
 from .types import (
     SparseEmbeddingCompletionRequestMixin,
@@ -38,10 +37,17 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
         self.online_requests: dict[str, SparseEmbeddingCompletionRequestMixin] = {}
         self.renderer: BaseRenderer = None
 
-    def validate_or_generate_params(
-        self, params: SamplingParams | PoolingParams | None = None
-    ) -> SamplingParams | PoolingParams:
-        return params
+    def merge_pooling_params(
+        self,
+        params: PoolingParams | None = None,
+        request: Any = None,
+    ) -> PoolingParams:
+        if params is None:
+            params = PoolingParams()
+        # refer to PoolingCompletionRequest.to_pooling_params
+        if request is not None:
+            params.task = request.task
+            params.truncate_prompt_tokens = request.truncate_prompt_tokens
 
     def parse_request(self, request_data: Any) -> IOProcessorInput:
         # for vllm.entrypoints.llm.LLM, offline mode, calls `encode` directly.
