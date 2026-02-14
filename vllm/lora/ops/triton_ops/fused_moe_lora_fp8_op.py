@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from typing import List  # noqa: UP035
+
 import torch
 
 from vllm.distributed import (
@@ -371,15 +373,15 @@ def _fused_moe_lora_shrink_fp8(
     num_stages: int,
     split_k: int,
     num_active_loras: int,
+    lora_a_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
-    lora_a_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: list[int] | None = None,
+    block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
     if use_fp8_w8a8 or use_int8_w8a8:
         assert lora_a_scale_stacked is not None, (
@@ -537,16 +539,16 @@ def _fused_moe_lora_expand_fp8(
     num_stages: int,
     split_k: int,
     num_active_loras: int,
+    lora_b_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
-    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: list[int] | None = None,
+    block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
     if use_fp8_w8a8 or use_int8_w8a8:
         assert lora_b_scale_stacked is not None, (
@@ -714,18 +716,18 @@ def _fused_moe_lora_fp8(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
+    lora_a_scale_stacked: list[torch.Tensor],
+    lora_b_scale_stacked: list[torch.Tensor],
+    shrink_act_scale: torch.Tensor | None = None,
+    expand_act_scale: torch.Tensor | None = None,
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
-    shrink_act_scale: torch.Tensor | None = None,
-    expand_act_scale: torch.Tensor | None = None,
-    lora_a_scale_stacked: list[torch.Tensor] | None = None,
-    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: list[int] | None = None,
+    block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
     assert len(lora_a_stacked) == len(lora_b_stacked) > 0
     assert topk_weights.dim() == qcurr_hidden_states.dim() == 2
@@ -800,10 +802,10 @@ def _fused_moe_lora_fp8(
         shrink_num_stages,
         shrink_split_k,
         num_active_loras,
-        mul_routed_weight,
+        lora_a_scale_stacked,
+        mul_routed_weight=mul_routed_weight,
         use_gdc=use_gdc,
         act_scale=shrink_act_scale,
-        lora_a_scale_stacked=lora_a_scale_stacked,
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
@@ -855,11 +857,11 @@ def _fused_moe_lora_fp8(
         expand_num_stages,
         expand_split_k,
         num_active_loras,
-        mul_routed_weight,
-        offset,
+        lora_b_scale_stacked,
+        mul_routed_weight=mul_routed_weight,
+        offset=offset,
         use_gdc=use_gdc,
         act_scale=expand_act_scale,
-        lora_b_scale_stacked=lora_b_scale_stacked,
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a8=use_int8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
@@ -897,18 +899,18 @@ def _fused_moe_lora_fp8_fake(
     expand_num_warps: int,
     expand_num_stages: int,
     expand_split_k: int,
+    lora_a_scale_stacked: list[torch.Tensor],
+    lora_b_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     fully_sharded: bool = False,
     offset: int = 0,
     shrink_act_scale: torch.Tensor | None = None,
     expand_act_scale: torch.Tensor | None = None,
-    lora_a_scale_stacked: list[torch.Tensor] | None = None,
-    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: list[int] | None = None,
+    block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
     return
 
@@ -941,15 +943,15 @@ def _fused_moe_lora_shrink_fp8_fake(
     num_stages: int,
     split_k: int,
     num_active_loras: int,
+    lora_a_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
-    lora_a_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: list[int] | None = None,
+    block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
     return
 
@@ -984,16 +986,16 @@ def _fused_moe_lora_expand_fp8_fake(
     num_stages: int,
     split_k: int,
     num_active_loras: int,
+    act_scale: torch.Tensor,
+    lora_b_scale_stacked: list[torch.Tensor],
     mul_routed_weight: bool = False,
     offset: int = 0,
-    use_gdc: bool = False,
-    act_scale: torch.Tensor | None = None,
-    lora_b_scale_stacked: list[torch.Tensor] | None = None,
     use_fp8_w8a8: bool = False,
     use_int8_w8a8: bool = False,
     use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
-    block_shape: list[int] | None = None,
+    block_shape: List[int] | None = None,  # noqa: UP006, UP007
+    use_gdc: bool = False,
 ) -> None:
     return
 
