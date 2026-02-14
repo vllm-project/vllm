@@ -1,19 +1,19 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
-import warnings
-warnings.filterwarnings("ignore", category=DeprecationWarning, message=".*SwigPy.*")
-
 import os
 import torch
 import torch.distributed as dist
-
+import pytest
 from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
     helion_all_gather_fp8_gemm  # This triggers the direct_register_custom_op call
 )
 
-
-def test_helion_fp8_all_gather_matmul():
+TEST_SHAPES = [
+    (512, 8192, 2048),
+    (128, 32, 64)
+]
+@pytest.mark.parametrize("M,N,K", TEST_SHAPES)
+def test_helion_fp8_all_gather_matmul(M, K, N):
     """Test Helion FP8 all-gather followed by matmul operation.
     
     Run with:
@@ -55,24 +55,25 @@ def test_helion_fp8_all_gather_matmul():
     _groups[dist_group.group_name] = weakref.ref(world_group)
     
     # Test parameters
-    M, N, K = 128, 64, 32
     M_per_rank = M // world_size
 
     # Create inputs
-    a_shared = torch.rand(M_per_rank, K, device=device, dtype=torch.float32) * 0.1
+    a_shared = torch.rand(M_per_rank, K, device=device, dtype=torch.float32) * 0.05
     a_shared = a_shared.to(torch.float8_e4m3fn)
 
-    b = (torch.rand(K, N, device=device, dtype=torch.float32) * 0.1).T.contiguous().T
+    b = (torch.rand(K, N, device=device, dtype=torch.float32)  * 0.05).T.contiguous().T
     b= b.to(torch.float8_e4m3fn)
-    scale_a = torch.rand((M_per_rank, 1), device=device, dtype=torch.float32)
-    scale_b = torch.rand((1, N), device=device, dtype=torch.float32)
-    
-
-    # Call your registered op
+    scale_a = torch.rand((M_per_rank, 1), device=device, dtype=torch.float32) * 0.1 + 0.05
+    scale_b = torch.rand((1, N), device=device, dtype=torch.float32) * 0.1 + 0.05
+    # call the HelionOp
     a_out, c = torch.ops.vllm.helion_all_gather_fp8_gemm(
-        a_shared, b, scale_a, scale_b, world_size, dist_group.group_name
+        a_shared,
+        b,
+        scale_a,
+        scale_b,
+        world_size,
+        dist_group.group_name,
     )
-    
     # Compute golden reference
     ag_golden, mm_golden = torch.ops.symm_mem.fused_all_gather_scaled_matmul(
         a_shared,
@@ -86,8 +87,8 @@ def test_helion_fp8_all_gather_matmul():
         use_fast_accum=[False],
         group_name=dist_group.group_name,
     )
+    # Compare results
     torch.testing.assert_close(a_out, ag_golden)
-
     torch.testing.assert_close(
         c, mm_golden[0].to(torch.bfloat16), 
         rtol=1e-1, 
