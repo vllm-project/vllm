@@ -638,7 +638,7 @@ class EngineArgs:
     def _normalize_hf_overrides(self) -> None:
         """Normalize hf_overrides to a dict or callable.
 
-        Supports JSON strings and JSON files when prefixed with '@'.
+        Supports JSON object strings.
         """
         if self.hf_overrides is None or callable(self.hf_overrides):
             return
@@ -650,21 +650,6 @@ class EngineArgs:
             )
 
         raw = self.hf_overrides.strip()
-        if raw.startswith("@"):
-            path = raw[1:]
-            if not path:
-                raise ValueError("hf_overrides file path is empty.")
-            try:
-                with open(path, encoding="utf-8") as handle:
-                    self.hf_overrides = json.load(handle)
-            except FileNotFoundError as exc:
-                raise FileNotFoundError(f"hf_overrides file not found: {path}") from exc
-            except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"hf_overrides file is not valid JSON: {path}"
-                ) from exc
-            return
-
         if re.match(r"(?s)^\s*{.*}\s*$", raw):
             try:
                 self.hf_overrides = json.loads(raw)
@@ -672,9 +657,7 @@ class EngineArgs:
             except json.JSONDecodeError as exc:
                 raise ValueError("hf_overrides is not valid JSON.") from exc
 
-        raise ValueError(
-            "hf_overrides must be a JSON object string or '@' followed by a JSON file."
-        )
+        raise ValueError("hf_overrides must be a JSON object string.")
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
