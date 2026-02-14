@@ -12,11 +12,7 @@ import base64
 import requests
 import torch
 
-from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
-    ENDIANNESS,
-    binary2tensor,
-)
+from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
 
 def post_http_request(prompt: dict, api_url: str) -> requests.Response:
@@ -45,7 +41,7 @@ def main(args):
     ] * 2
 
     # The OpenAI client does not support the embed_dtype and endianness parameters.
-    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             prompt = {
                 "model": model,

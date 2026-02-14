@@ -9,6 +9,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.tracing import instrument
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -51,6 +52,7 @@ class CPUModelRunner(GPUModelRunner):
                 if isinstance(v, CpuGpuBuffer):
                     v.gpu = v.cpu
 
+    @instrument(span_name="Loading (CPU)")
     def load_model(self, eep_scale_up: bool = False) -> None:
         logger.info("Starting to load model %s...", self.model_config.model)
         self.model = get_model(vllm_config=self.vllm_config)
@@ -61,6 +63,7 @@ class CPUModelRunner(GPUModelRunner):
     def get_model(self) -> nn.Module:
         return self.model
 
+    @instrument(span_name="Warmup (CPU)")
     def warming_up_model(self) -> None:
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape

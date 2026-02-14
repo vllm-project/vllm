@@ -6,7 +6,6 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, SkipValidation, field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -37,7 +36,6 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
-@dataclass
 class CacheConfig:
     """Configuration for the KV cache."""
 
@@ -102,6 +100,17 @@ class CacheConfig:
     load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
     Note that this requires fast CPU-GPU interconnect, as part of the model is
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
+    """
+    cpu_offload_params: set[str] = Field(default_factory=set)
+    """ The set of parameter name segments to target for CPU offloading.
+    Unmatched parameters are not offloaded. If this set is empty, parameters
+    are offloaded non-selectively until the memory limit defined by
+    `cpu_offload_gb` is reached.
+    Examples:
+        - For parameter name "mlp.experts.w2_weight":
+            - "experts" or "experts.w2_weight" will match.
+            - "expert" or "w2" will NOT match (must be exact segments).
+    This allows distinguishing parameters like "w2_weight" and "w2_weight_scale".
     """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
