@@ -220,9 +220,10 @@ def decorate_logs(process_name: str | None = None) -> None:
     if process_name is None:
         process_name = get_mp_context().current_process().name
 
-    pid = os.getpid()
-    _add_prefix(sys.stdout, process_name, pid)
-    _add_prefix(sys.stderr, process_name, pid)
+    if envs.VLLM_ENABLE_PREFIX_PROC_LOGS:
+        pid = os.getpid()
+        _add_prefix(sys.stdout, process_name, pid)
+        _add_prefix(sys.stderr, process_name, pid)
 
 
 def kill_process_tree(pid: int):
