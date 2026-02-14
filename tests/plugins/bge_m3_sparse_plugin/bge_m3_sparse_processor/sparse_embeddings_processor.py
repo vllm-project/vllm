@@ -17,6 +17,7 @@ from vllm.plugins.io_processors.interface import (
 )
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
+from vllm.tokenizers.detokenizer_utils import convert_ids_list_to_tokens
 
 from .types import (
     SparseEmbeddingCompletionRequestMixin,
@@ -86,7 +87,9 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
         tokens = [None] * len(token_ids)
 
         if return_tokens:
-            tokens = self.renderer.get_tokenizer().convert_ids_to_tokens(token_ids)
+            tokens = convert_ids_list_to_tokens(
+                self.renderer.get_tokenizer(), token_ids
+            )
         sparse_embedding_output: list[SparseEmbeddingTokenWeight] = []
         for token_id, weight, token in zip(token_ids, token_weights, tokens):
             sparse_embedding_output.append(
@@ -104,9 +107,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
     ) -> IOProcessorOutput:
         num_prompt_tokens = 0
         response_data = []
-        return_tokens = self._get_sparse_embedding_request(
-            request_id
-        ).return_token_id_texts_map
+        return_tokens = self._get_sparse_embedding_request(request_id).return_token
         for idx in range(len(model_output)):
             mo = model_output[idx]
             sparse_embedding: dict[int, float] = {}
