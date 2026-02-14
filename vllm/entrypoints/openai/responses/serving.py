@@ -121,6 +121,7 @@ from vllm.entrypoints.openai.responses.utils import (
     construct_tool_dicts,
     extract_tool_types,
 )
+from vllm.entrypoints.openai.structured_outputs import merge_structured_outputs
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs.data import TokensPrompt
@@ -513,10 +514,14 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         and struct_out.all_non_structural_tag_constraints_none()
                     ):
-                        sampling_params.structured_outputs = struct_out.updated(
-                            structural_tag=reasoning_parser.prepare_structured_tag(
+                        prepared_structural_tag = (
+                            reasoning_parser.prepare_structured_tag(
                                 struct_out.structural_tag, self.tool_server
-                            ),
+                            )
+                        )
+                        sampling_params.structured_outputs = merge_structured_outputs(
+                            struct_out,
+                            {"structural_tag": prepared_structural_tag},
                         )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
@@ -1940,6 +1945,27 @@ class OpenAIServingResponses(OpenAIServing):
             )
         return events
 
+    def _consume_file_search_tool_results(
+        self,
+        previous_item: OpenAIHarmonyMessage,
+        state: HarmonyStreamingState,
+    ) -> list[StreamingResponsesResponse]:
+        """Capture file_search tool results and emit done events if pending."""
+        try:
+            payload = json.loads(previous_item.content[0].text)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            state.file_search_results = payload.get("results")
+            state.file_search_results_seen = True
+        if state.pending_file_search_item is None or not state.file_search_results_seen:
+            return []
+        events = self._emit_file_search_call_done_events(
+            state.pending_file_search_item, state
+        )
+        state.pending_file_search_item = None
+        return events
+
     def _emit_final_channel_delta_events(
         self,
         ctx: StreamingHarmonyContext,
@@ -2590,22 +2616,10 @@ class OpenAIServingResponses(OpenAIServing):
                         previous_item.author.role == OpenAIHarmonyRole.TOOL
                         and previous_item.author.name == "functions.file_search"
                     ):
-                        try:
-                            payload = json.loads(previous_item.content[0].text)
-                        except json.JSONDecodeError:
-                            payload = {}
-                        if isinstance(payload, dict):
-                            state.file_search_results = payload.get("results")
-                            state.file_search_results_seen = True
-                        if (
-                            state.pending_file_search_item is not None
-                            and state.file_search_results_seen
+                        for event in self._consume_file_search_tool_results(
+                            previous_item, state
                         ):
-                            for event in self._emit_file_search_call_done_events(
-                                state.pending_file_search_item, state
-                            ):
-                                yield _increment_sequence_number_and_return(event)
-                            state.pending_file_search_item = None
+                            yield _increment_sequence_number_and_return(event)
                     for event in self._emit_previous_item_done_events(
                         previous_item, state
                     ):

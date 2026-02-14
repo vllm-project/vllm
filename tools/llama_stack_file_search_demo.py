@@ -3,6 +3,7 @@
 """Llama Stack file_search demo handler for vLLM.
 
 Use:
+  # Allowlist this module in vllm/entrypoints/openai/responses/context.py
   export VLLM_GPT_OSS_FILE_SEARCH_HANDLER="tools.llama_stack_file_search_demo:handle"
   export LLAMA_STACK_URL="http://localhost:8321"
 """
@@ -13,6 +14,10 @@ import os
 from typing import Any
 
 import httpx
+
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 
 def _get_base_url() -> str:
@@ -70,35 +75,40 @@ def handle(args: dict[str, Any]) -> dict[str, Any]:
     timeout = _get_timeout()
 
     try:
-        print(f"[llama_stack_file_search_demo] POST {url}")
-        print(f"[llama_stack_file_search_demo] payload={payload}")
+        logger.info("[llama_stack_file_search_demo] POST %s", url)
+        logger.info("[llama_stack_file_search_demo] payload=%s", payload)
         with httpx.Client(timeout=timeout) as client:
             response = client.post(url, json=payload)
-            print(f"[llama_stack_file_search_demo] status={response.status_code}")
+            logger.info(
+                "[llama_stack_file_search_demo] status=%s", response.status_code
+            )
             response.raise_for_status()
             data = response.json()
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code
         body = exc.response.text
-        print(
-            "[llama_stack_file_search_demo] request failed; "
-            f"status={status} body={body}"
+        logger.warning(
+            "[llama_stack_file_search_demo] request failed; status=%s body=%s",
+            status,
+            body,
         )
         return {"results": []}
     except Exception as exc:
-        print(
-            "[llama_stack_file_search_demo] request failed; "
-            f"error={type(exc).__name__} message={exc}"
+        logger.exception(
+            "[llama_stack_file_search_demo] request failed; error=%s message=%s",
+            type(exc).__name__,
+            exc,
         )
         return {"results": []}
 
     items = data.get("data") if isinstance(data, dict) else None
     if not isinstance(items, list):
-        print(
-            "[llama_stack_file_search_demo] unexpected response shape; "
-            f"type={type(data)} keys={list(data) if isinstance(data, dict) else None}"
+        logger.warning(
+            "[llama_stack_file_search_demo] unexpected response shape; type=%s keys=%s",
+            type(data),
+            list(data) if isinstance(data, dict) else None,
         )
         return {"results": []}
 
-    print(f"[llama_stack_file_search_demo] data_len={len(items)}")
+    logger.info("[llama_stack_file_search_demo] data_len=%s", len(items))
     return {"results": _to_results(items)}

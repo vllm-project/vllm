@@ -4,10 +4,10 @@
 
 import copy
 import json
-from dataclasses import field, fields
+from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any, cast
+from typing import Annotated, Any
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -73,16 +73,6 @@ class StructuredOutputsParams:
                 "You must use one kind of structured outputs constraint "
                 f"but none are specified: {self.__dict__}"
             )
-
-    def updated(self, **updates: Any) -> "StructuredOutputsParams":
-        """Return a new instance with updated fields, preserving validation."""
-        base = {
-            data_field.name: getattr(self, data_field.name)
-            for data_field in fields(cast(Any, self))
-            if data_field.init
-        }
-        base.update(updates)
-        return StructuredOutputsParams(**base)
 
     def all_constraints_none(self) -> bool:
         """

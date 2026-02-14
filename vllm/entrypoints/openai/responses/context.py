@@ -64,6 +64,12 @@ _TOOL_NAME_TO_TYPE_MAP = {
     "container": "container",
 }
 
+# Allowlist of handler modules that can be safely imported.
+# This prevents arbitrary code execution via VLLM_GPT_OSS_FILE_SEARCH_HANDLER.
+# Add your handler module here if needed, for example:
+# "tools.llama_stack_file_search_demo",
+_ALLOWED_FILE_SEARCH_HANDLER_MODULES: set[str] = set()
+
 
 def _map_tool_name_to_tool_type(tool_name: str) -> str:
     if tool_name not in _TOOL_NAME_TO_TYPE_MAP:
@@ -89,6 +95,17 @@ def _load_file_search_handler() -> Callable[[dict], object] | None:
         )
         return None
     module_path, attr_name = handler_path.split(":", 1)
+
+    # Security check: only allow importing from approved modules
+    if module_path not in _ALLOWED_FILE_SEARCH_HANDLER_MODULES:
+        available_modules = ", ".join(sorted(_ALLOWED_FILE_SEARCH_HANDLER_MODULES))
+        logger.error(
+            "file_search handler module '%s' not in allowlist. Available modules: %s",
+            module_path,
+            available_modules,
+        )
+        return None
+
     try:
         module = importlib.import_module(module_path)
     except Exception:

@@ -42,6 +42,9 @@ from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreated
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
+from openai.types.responses.response_file_search_tool_call import (
+    ResponseFileSearchToolCall,
+)
 from openai.types.responses.tool import Tool
 from openai_harmony import Message as OpenAIHarmonyMessage
 
@@ -82,6 +85,10 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 _LONG_INFO = torch.iinfo(torch.long)
+
+__all__ = [
+    "ResponseFileSearchToolCall",
+]
 
 
 class InputTokensDetails(OpenAIBaseModel):

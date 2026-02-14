@@ -583,6 +583,37 @@ def _parse_function_call(message: Message, recipient: str) -> list[ResponseOutpu
     return output_items
 
 
+def _parse_file_search_call(message: Message) -> list[ResponseOutputItem]:
+    """Parse file_search function calls into file_search tool call items."""
+    output_items: list[ResponseOutputItem] = []
+    for content in message.content:
+        queries = _parse_file_search_queries(content.text)
+        output_items.append(
+            ResponseFileSearchToolCall(
+                type="file_search_call",
+                id=f"fs_{random_uuid()}",
+                queries=queries,
+                results=None,
+                status="completed",
+            )
+        )
+    return output_items
+
+
+def _parse_file_search_queries(text: str) -> list[str]:
+    try:
+        args = json.loads(text)
+    except json.JSONDecodeError:
+        args = {}
+    if not isinstance(args, dict):
+        return []
+    if isinstance(args.get("queries"), list):
+        return args["queries"]
+    if "query" in args:
+        return [args["query"]]
+    return []
+
+
 def _parse_reasoning(message: Message) -> list[ResponseOutputItem]:
     """Parse reasoning/analysis content into reasoning items."""
     output_items = []
@@ -685,26 +716,7 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
         # Function calls (should only happen on commentary channel)
         elif message.channel == "commentary" and recipient.startswith("functions."):
             if recipient == "functions.file_search":
-                for content in message.content:
-                    try:
-                        args = json.loads(content.text)
-                    except json.JSONDecodeError:
-                        args = {}
-                    queries = []
-                    if isinstance(args, dict):
-                        if isinstance(args.get("queries"), list):
-                            queries = args["queries"]
-                        elif "query" in args:
-                            queries = [args["query"]]
-                    output_items.append(
-                        ResponseFileSearchToolCall(
-                            type="file_search_call",
-                            id=f"fs_{random_uuid()}",
-                            queries=queries,
-                            results=None,
-                            status="completed",
-                        )
-                    )
+                output_items.extend(_parse_file_search_call(message))
             else:
                 output_items.extend(_parse_function_call(message, recipient))
 
@@ -746,16 +758,7 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
     if current_recipient and parser.current_channel in ("commentary", "analysis"):
         if current_recipient == "functions.file_search":
             rid = random_uuid()
-            try:
-                args = json.loads(parser.current_content)
-            except json.JSONDecodeError:
-                args = {}
-            queries = []
-            if isinstance(args, dict):
-                if isinstance(args.get("queries"), list):
-                    queries = args["queries"]
-                elif "query" in args:
-                    queries = [args["query"]]
+            queries = _parse_file_search_queries(parser.current_content)
             return [
                 ResponseFileSearchToolCall(
                     type="file_search_call",
