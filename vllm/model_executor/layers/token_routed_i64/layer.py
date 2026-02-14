@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # SPDX-FileCopyrightText: Copyright INL Dynamics / Complexity-ML
 """
 Token-Routed MLP (I64) - Deterministic expert routing for vLLM.
@@ -100,9 +101,7 @@ class TokenRoutedMLP(nn.Module):
             )
         )
         self.down_proj = nn.Parameter(
-            torch.empty(
-                self.local_num_experts, self.intermediate_per_tp, hidden_size
-            )
+            torch.empty(self.local_num_experts, self.intermediate_per_tp, hidden_size)
         )
 
         # Mu-guided routing (replicated - small tensor)
@@ -137,9 +136,7 @@ class TokenRoutedMLP(nn.Module):
         # Mu-guided bias (INL innovation)
         if mu is not None:
             mu_logits = self.mu_router(mu)
-            base_one_hot = F.one_hot(
-                base_expert_ids, self.num_experts
-            ).float()
+            base_one_hot = F.one_hot(base_expert_ids, self.num_experts).float()
             combined_logits = base_one_hot * self._BASE_ROUTING_SCALE + mu_logits
             return combined_logits.argmax(dim=-1)
 
@@ -242,14 +239,13 @@ class TokenRoutedMLP(nn.Module):
         ep_rank_for_token = expert_ids // self.local_num_experts
 
         # Count tokens going to each EP rank
-        send_counts = torch.bincount(
-            ep_rank_for_token, minlength=self.ep_size
-        )
+        send_counts = torch.bincount(ep_rank_for_token, minlength=self.ep_size)
 
         # Gather counts from all ranks (all-to-all metadata)
         recv_counts = torch.empty_like(send_counts)
         torch.distributed.all_to_all_single(
-            recv_counts, send_counts,
+            recv_counts,
+            send_counts,
             group=self._get_ep_group(),
         )
 
@@ -267,13 +263,15 @@ class TokenRoutedMLP(nn.Module):
         recv_expert_ids = torch.empty(total_recv, dtype=torch.long, device=device)
 
         torch.distributed.all_to_all_single(
-            recv_x, sorted_x,
+            recv_x,
+            sorted_x,
             output_split_sizes=recv_splits,
             input_split_sizes=send_splits,
             group=self._get_ep_group(),
         )
         torch.distributed.all_to_all_single(
-            recv_expert_ids, sorted_expert_ids,
+            recv_expert_ids,
+            sorted_expert_ids,
             output_split_sizes=recv_splits,
             input_split_sizes=send_splits,
             group=self._get_ep_group(),
@@ -291,7 +289,8 @@ class TokenRoutedMLP(nn.Module):
             num_tokens, self.hidden_size, device=device, dtype=dtype
         )
         torch.distributed.all_to_all_single(
-            result_sorted, local_output,
+            result_sorted,
+            local_output,
             output_split_sizes=send_splits,
             input_split_sizes=recv_splits,
             group=self._get_ep_group(),
@@ -306,6 +305,7 @@ class TokenRoutedMLP(nn.Module):
     def _get_ep_group(self):
         """Get the EP process group. Lazy import to avoid circular deps."""
         from vllm.distributed import get_ep_group
+
         return get_ep_group().device_group
 
     def load_tp_weight(

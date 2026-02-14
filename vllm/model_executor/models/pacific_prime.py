@@ -25,9 +25,7 @@ from transformers import PretrainedConfig
 from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
-    get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
-    tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -38,11 +36,11 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
+from vllm.model_executor.layers.token_routed_i64 import TokenRoutedMLP
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.layers.token_routed_i64 import TokenRoutedMLP
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
