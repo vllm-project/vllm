@@ -45,7 +45,7 @@ class EncoderCudaGraphManager:
         dtype: torch.dtype,
         vision_model: torch.nn.Module,
     ):
-        """Initialize CUDA graph manager."""
+        """Initialize CUDA graph manager with provided token budgets and max batch size."""
         self.vllm_config = vllm_config
         self.device = device
         self.dtype = dtype
@@ -63,6 +63,7 @@ class EncoderCudaGraphManager:
         self.budget_graphs: dict[int, BudgetGraphMetadata] = {}
         self.graph_hits = 0
         self.graph_misses = 0
+        self.log_stats_interval = 100
 
         logger.info(
             f"EncoderCudaGraphManager initialized with budgets={self.token_budgets}, "
@@ -83,8 +84,6 @@ class EncoderCudaGraphManager:
 
     def _capture_budget_graph(self, token_budget: int):
         """Capture CUDA graph for a single token budget."""
-        logger.info(f"Capturing CUDA graph for token_budget={token_budget}")
-
         # Generate dummy grid config for capture only (not used for runtime batching).
         # This is just one arbitrary example configuration that produces token_budget tokens.
         # At runtime, actual images will be packed in any combination that fits the budget.
@@ -146,11 +145,6 @@ class EncoderCudaGraphManager:
             metadata_buffers=encoder_metadata,
         )
 
-        logger.info(
-            f"Captured CUDA graph for budget {token_budget}: "
-            f"output_shape={output_buffer.shape}"
-        )
-
     def _generate_grid_config_for_budget(
         self, token_budget: int, max_batch_size: int
     ) -> list[list[int]]:
@@ -198,7 +192,7 @@ class EncoderCudaGraphManager:
 
         return dummy_pixel_values, grid_config
 
-    def find_budget_graph(self, total_tokens: int) -> Optional[int]:
+    def _find_budget_graph(self, total_tokens: int) -> Optional[int]:
         """Find smallest budget >= total_tokens.
 
         Returns:
@@ -209,7 +203,7 @@ class EncoderCudaGraphManager:
                 return budget
         return None
 
-    def run_budget_graph(
+    def _run_budget_graph(
         self,
         pixel_values: torch.Tensor,
         grid_thw_list: list[list[int]],
@@ -251,14 +245,25 @@ class EncoderCudaGraphManager:
     ) -> list[torch.Tensor] | None:
         """Execute encoder on local inputs using CUDA graph."""
         spatial_merge_size = self.vision_model.spatial_merge_size
+        num_images = len(grid_thw_list)
         total_tokens = sum(
             (t * (h // spatial_merge_size) * (w // spatial_merge_size))
             for t, h, w in grid_thw_list
         )
 
-        token_budget = self.find_budget_graph(total_tokens)
+        token_budget = self._find_budget_graph(total_tokens)
         if token_budget is None:
+            logger.debug(
+                "Encoder CUDA graph fallback to eager: no budget found for %d tokens from %d images",
+                total_tokens, num_images
+            )
             return None
+
+        waste_pct = (token_budget - total_tokens) / token_budget * 100
+        logger.debug(
+            "Encoder CUDA graph: batch_size=%d, tokens=%d, budget=%d, waste=%.1f%%",
+            num_images, total_tokens, token_budget, waste_pct
+        )
 
         encoder_metadata = {}
         encoder_metadata['pos_embeds'] = self.vision_model.fast_pos_embed_interpolate(
@@ -281,7 +286,7 @@ class EncoderCudaGraphManager:
         # when .item() is called during CUDA graph capture
         encoder_metadata['max_seqlen'] = seq_metadata['max_seqlen']
 
-        output = self.run_budget_graph(
+        output = self._run_budget_graph(
             pixel_values,
             grid_thw_list,
             token_budget,
@@ -335,12 +340,24 @@ class EncoderCudaGraphManager:
             outputs = dp_gather_vision_outputs(
                 local_outputs, dp_meta, self.device, self.dtype, hidden_size
             )
-            return list(outputs)
+            result = list(outputs)
         else:
-            return self._execute_local(pixel_values, grid_thw_list)
+            result = self._execute_local(pixel_values, grid_thw_list)
 
-    def get_stats(self) -> dict[str, Any]:
-        """Get CUDA graph statistics."""
+        # Log cumulative stats periodically
+        if result is not None:
+            stats = self.get_cumulative_stats()
+            total_requests = self.graph_hits + self.graph_misses
+            if total_requests > 0 and total_requests % self.log_stats_interval == 0:
+                logger.debug(
+                    "Encoder CUDA graph cumulative stats: hits=%d, misses=%d, hit_rate=%.1f%%",
+                    stats["graph_hits"], stats["graph_misses"], stats["hit_rate"] * 100
+                )
+
+        return result
+
+    def get_cumulative_stats(self) -> dict[str, Any]:
+        """Get cumulative CUDA graph statistics."""
         total_requests = self.graph_hits + self.graph_misses
         hit_rate = (
             self.graph_hits / total_requests if total_requests > 0 else 0.0
