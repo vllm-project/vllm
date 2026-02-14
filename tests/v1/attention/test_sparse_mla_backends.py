@@ -23,27 +23,27 @@ from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
+
+# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
+# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
+# forward_mqa interface but needs validation on ROCm hardware.
+if not current_platform.is_cuda():
+    pytest.skip(
+        "Sparse MLA backend tests currently only support CUDA. "
+        "ROCm support requires integrating ROCMAiterMLASparseBackend.",
+        allow_module_level=True,
+    )
+
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
+    FlashInferMLASparseBackend,
+)
 from vllm.v1.attention.backends.mla.flashmla_sparse import (
     FlashMLASparseBackend,
     triton_convert_req_index_to_global_index,
 )
-
-try:
-    from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
-        FlashInferMLASparseBackend,
-    )
-except (ImportError, ModuleNotFoundError):
-    FlashInferMLASparseBackend = None
-
 from vllm.v1.attention.backends.utils import split_prefill_chunks
 from vllm.v1.attention.ops import flashmla
-
-_SPARSE_BACKENDS = [FlashMLASparseBackend]
-_SPARSE_BACKEND_IDS = ["FlashMLA"]
-if FlashInferMLASparseBackend is not None:
-    _SPARSE_BACKENDS.append(FlashInferMLASparseBackend)
-    _SPARSE_BACKEND_IDS.append("FlashInfer")
 
 SPARSE_BACKEND_BATCH_SPECS = {
     name: BATCH_SPECS[name]
@@ -171,8 +171,8 @@ def _quantize_dequantize_fp8_ds_mla(
 
 @pytest.mark.parametrize(
     "backend_cls",
-    _SPARSE_BACKENDS,
-    ids=_SPARSE_BACKEND_IDS,
+    [FlashMLASparseBackend, FlashInferMLASparseBackend],
+    ids=["FlashMLA", "FlashInfer"],
 )
 @pytest.mark.parametrize("batch_name", list(SPARSE_BACKEND_BATCH_SPECS.keys()))
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_ds_mla"])
