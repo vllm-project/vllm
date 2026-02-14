@@ -6,9 +6,6 @@ from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.pooling.protocol import (
-    IOProcessorResponse,
-)
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -139,11 +136,3 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
         )
 
         return resp
-
-    def output_to_response(
-        self, plugin_output: IOProcessorOutput
-    ) -> IOProcessorResponse:
-        return IOProcessorResponse(
-            request_id=plugin_output.request_id,
-            data=plugin_output,
-        )
