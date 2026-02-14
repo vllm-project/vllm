@@ -6,7 +6,7 @@ import json
 import time
 from collections.abc import AsyncGenerator, Callable, Sequence
 from functools import partial
-from typing import Any, Final, Literal, cast
+from typing import Final, Literal, cast
 
 import jinja2
 from fastapi import Request
@@ -108,7 +108,10 @@ class OpenAIServingPooling(OpenAIServing):
                 raw_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
                 )
-                engine_prompts = prompt_to_seq(raw_prompts)
+                engine_prompts = await self._preprocess_cmpl(
+                    request,
+                    prompt_to_seq(raw_prompts),
+                )
             elif isinstance(request, PoolingChatRequest):
                 error_check_ret = self._validate_chat_template(
                     request_chat_template=request.chat_template,
@@ -146,12 +149,11 @@ class OpenAIServingPooling(OpenAIServing):
                 pooling_params = self.io_processor.merge_pooling_params()
                 if pooling_params.task is None:
                     pooling_params.task = "plugin"
-
-                tokenization_kwargs: dict[str, Any] = {}
             else:
                 pooling_params = request.to_pooling_params()  # type: ignore
-                tok_params = request.build_tok_params(self.model_config)  # type: ignore
-                tokenization_kwargs = tok_params.get_encode_kwargs()
+
+            tok_params = request.build_tok_params(self.model_config)
+            tokenization_kwargs = tok_params.get_encode_kwargs()
 
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
