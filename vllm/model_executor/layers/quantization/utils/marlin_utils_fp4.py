@@ -88,6 +88,41 @@ def nvfp4_marlin_process_global_scale(global_scale):
     return global_scale * (2.0 ** (exponent_bias - 7))
 
 
+def marlin_process_stability_scale_factor(
+    weight_scale: torch.Tensor,
+    weight_global_scale: torch.Tensor,
+) -> torch.Tensor:
+    """
+    FP4 cannot represent NaN and Inf, therefore no exceptional numbers (NaN and Inf)
+    will be generated in FP4 GEMM operations. However, the Marlin operator first
+    converts to FP16 or BF16 before performing GEMM, which may produce Inf, and
+    subsequently generate NaN during propagation.
+
+    Due to the larger dynamic range of BF16, it is less likely to produce Inf, while
+    FP16 is more prone to producing Inf due to its smaller dynamic range.
+
+    Therefore, we need to calculate a scaling value (K) to scale down the input and
+    then restore it after the GEMM operation. Based on the principle of matrix
+    multiplication, for MMA, it can be simply expressed as
+    `O = A x B + C` -> `O' = (A/K x B) + (C/K); O = O' * K`.
+
+    The calculation of K requires evaluating the possible maximum value of
+    `input x weight` and dividing it by the maximum representable value of float16.
+    Since the weight is of type FP4, we directly select the maximum representable
+    value of FP4, which is 6.0.
+
+    Because the weight remains constant during inference, a portion of K is
+    pre-calculated to reduce performance overhead.
+    """
+
+    safe_limit = 1 / torch.finfo(torch.float16).max
+    weight_max = 6.0
+    weight_scale_float = weight_scale.cpu().float().cuda(device=weight_scale.device)
+    weight_scale_max = weight_scale_float.abs().nan_to_num(nan=0.0).max()
+
+    return safe_limit * weight_max * weight_scale_max * weight_global_scale.abs()
+
+
 def marlin_stability_scale(
     x: torch.Tensor,
     stability_scale_factor: torch.Tensor | None,
@@ -192,41 +227,6 @@ def apply_fp4_marlin_linear(
     return out
 
 
-def marlin_stability_scale_factor(
-    weight_scale: torch.Tensor,
-    weight_global_scale: torch.Tensor,
-) -> torch.Tensor:
-    """
-    FP4 cannot represent NaN and Inf, therefore no exceptional numbers (NaN and Inf)
-    will be generated in FP4 GEMM operations. However, the Marlin operator first
-    converts to FP16 or BF16 before performing GEMM, which may produce Inf, and
-    subsequently generate NaN during propagation.
-
-    Due to the larger dynamic range of BF16, it is less likely to produce Inf, while
-    FP16 is more prone to producing Inf due to its smaller dynamic range.
-
-    Therefore, we need to calculate a scaling value (K) to scale down the input and
-    then restore it after the GEMM operation. Based on the principle of matrix
-    multiplication, for MMA, it can be simply expressed as
-    `O = A x B + C` -> `O' = (A/K x B) + (C/K); O = O' * K`.
-
-    The calculation of K requires evaluating the possible maximum value of
-    `input x weight` and dividing it by the maximum representable value of float16.
-    Since the weight is of type FP4, we directly select the maximum representable
-    value of FP4, which is 6.0.
-
-    Because the weight remains constant during inference, a portion of K is
-    pre-calculated to reduce performance overhead.
-    """
-
-    safe_limit = 1 / torch.finfo(torch.float16).max
-    weight_max = 6.0
-    weight_scale_float = weight_scale.cpu().float().cuda(device=weight_scale.device)
-    weight_scale_max = weight_scale_float.abs().nan_to_num(nan=0.0).max()
-
-    return safe_limit * weight_max * weight_scale_max * weight_global_scale.abs()
-
-
 def prepare_fp4_layer_for_marlin(
     layer: torch.nn.Module, input_dtype: torch.dtype | None = None
 ) -> None:
@@ -299,7 +299,7 @@ def prepare_fp4_layer_for_marlin(
             weight_global_scale, requires_grad=False
         )
 
-        stability_scale_factor = marlin_stability_scale_factor(
+        stability_scale_factor = marlin_process_stability_scale_factor(
             layer.weight_scale, layer.weight_global_scale
         )
         layer.stability_scale_factor = torch.nn.Parameter(
