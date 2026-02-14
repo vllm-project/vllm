@@ -687,6 +687,11 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
+        if isinstance(loaded_shard_id, tuple):
+            raise NotImplementedError(
+                "Shard id with multiple indices is not supported in weight_loader, "
+                "please use weight_loader_v2 instead."
+            )
         # Special case for GGUF
         # initialize GGUF param after we know the quantize type
         is_gguf_weight = getattr(param, "is_gguf_weight", False)
@@ -828,7 +833,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         self,
         param: BasevLLMParameter,
         loaded_weight: torch.Tensor,
-        output_sizes: list[int] = None,
+        output_sizes: list[int] | None = None,
     ):
         """
         Handle special case for models where MLP layers are already
@@ -888,16 +893,6 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             )
             return
 
-        # if isinstance(loaded_shard_id, tuple):
-        #     shard_offset = self.output_sizes[loaded_shard_id[0]]
-        #     shard_size = sum(
-        #         self.output_sizes[idx]
-        #         for idx in loaded_shard_id
-        #     )
-        # else:
-        #     assert loaded_shard_id < len(self.output_sizes)
-        #     shard_offset = sum(self.output_sizes[:loaded_shard_id])
-        #     shard_size = self.output_sizes[loaded_shard_id]
         assert loaded_shard_id < len(self.output_sizes)
         shard_offset = sum(self.output_sizes[:loaded_shard_id])
         shard_size = self.output_sizes[loaded_shard_id]

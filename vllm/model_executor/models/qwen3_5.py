@@ -725,38 +725,10 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        def split_gdn_qkv_weights(
-            weights: Iterable[tuple[str, torch.Tensor]],
-        ) -> Iterable[tuple[str, torch.Tensor]]:
-            hf_text_config = self.config.get_text_config()
-            k_dim = (
-                hf_text_config.linear_key_head_dim * hf_text_config.linear_num_key_heads
-            )
-            v_dim = (
-                hf_text_config.linear_value_head_dim
-                * hf_text_config.linear_num_value_heads
-            )
-
-            for name, weight in weights:
-                if "in_proj_qkv" in name:
-                    q, k, v = torch.split(
-                        weight,
-                        [k_dim, k_dim, v_dim],
-                        dim=0,
-                    )
-                    for n, w in zip(
-                        ["in_proj_q", "in_proj_k", "in_proj_v"],
-                        [q, k, v],
-                    ):
-                        yield (name.replace("in_proj_qkv", n), w)
-                else:
-                    yield (name, weight)
-
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=["mtp."],
         )
-        # weights = split_gdn_qkv_weights(weights)
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     @classmethod
