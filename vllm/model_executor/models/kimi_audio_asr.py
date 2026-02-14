@@ -855,7 +855,14 @@ class KimiAudioForConditionalGeneration(
         cleaned = re.sub(r"(?<=[\u4e00-\u9fff])\s+(?=[\u4e00-\u9fff])", "", cleaned)
         return cleaned
 
-    def forward(self, *args, **kwargs):  # type: ignore[override]
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: Any | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+        **kwargs: object,
+    ) -> torch.Tensor | Any:
         # Pull out multimodal tensors added by KimiAudioASRMultiModalProcessor.
         whisper_input_features = kwargs.pop("whisper_input_features", None)
         is_continuous_mask = kwargs.pop("is_continuous_mask", None)
@@ -864,10 +871,6 @@ class KimiAudioForConditionalGeneration(
 
         # vLLM forward provides input_ids (bookkeeping ids). For Kimi-Audio we
         # may also receive `audio_input_ids` containing the true ids.
-        input_ids = kwargs.get("input_ids")
-        if input_ids is None and len(args) > 0:
-            input_ids = args[0]
-
         true_input_ids = input_ids
         if isinstance(audio_input_ids, torch.Tensor) and (
             not isinstance(input_ids, torch.Tensor)
@@ -888,10 +891,6 @@ class KimiAudioForConditionalGeneration(
             isinstance(true_input_ids, torch.Tensor)
             and whisper_input_features is not None
         ):
-            original_inputs_embeds = kwargs.get("inputs_embeds")
-            if original_inputs_embeds is None and len(args) > 2:
-                original_inputs_embeds = args[2] if len(args) > 2 else None
-
             mixed_embeds = self.embed_input_ids(
                 true_input_ids,
                 whisper_input_features=whisper_input_features,
@@ -902,12 +901,12 @@ class KimiAudioForConditionalGeneration(
 
             # Ensure mixed embeddings match expected sequence length.
             # to avoid rotary embedding mismatches with positions tensor
-            if original_inputs_embeds is not None:
-                if mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 2:
+            if inputs_embeds is not None:
+                if mixed_embeds.dim() == 3 and inputs_embeds.dim() == 2:
                     mixed_embeds = mixed_embeds.reshape(-1, mixed_embeds.shape[-1])
 
                 if mixed_embeds.dim() == 2:
-                    expected_seq_len = original_inputs_embeds.shape[0]
+                    expected_seq_len = inputs_embeds.shape[0]
                     actual_seq_len = mixed_embeds.shape[0]
 
                     if expected_seq_len != actual_seq_len:
@@ -933,8 +932,8 @@ class KimiAudioForConditionalGeneration(
                                     device=device,
                                     dtype=dtype,
                                 )
-                elif mixed_embeds.dim() == 3 and original_inputs_embeds.dim() == 3:
-                    expected_seq_len = original_inputs_embeds.shape[1]
+                elif mixed_embeds.dim() == 3 and inputs_embeds.dim() == 3:
+                    expected_seq_len = inputs_embeds.shape[1]
                     actual_seq_len = mixed_embeds.shape[1]
 
                     if expected_seq_len != actual_seq_len:
@@ -962,9 +961,14 @@ class KimiAudioForConditionalGeneration(
                                     dtype=dtype,
                                 )
 
-            kwargs["inputs_embeds"] = mixed_embeds
+            inputs_embeds = mixed_embeds
 
-        out = super().forward(*args, **kwargs)
+        out = super().forward(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
 
         if hasattr(out, "logits") and isinstance(out.logits, torch.Tensor):
             self._mask_audio_logits_(out.logits)
