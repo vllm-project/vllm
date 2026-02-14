@@ -303,18 +303,6 @@ class HummingLinearMethod(LinearMethodBase):
         block_shape = (block_size_m, 128, 64)
         warp_shape = (block_size_m, 64, 32)
 
-        import os
-
-        if not os.path.exists("/tmp/aa.pt"):
-            torch.save(
-                (
-                    layer.weight.data,
-                    layer.weight_scale.data,
-                    layer.zero_point.data,
-                ),
-                "/tmp/aa.pt",
-            )
-
         return HummingMethod.forward_layer(
             layer=layer,
             block_shape=block_shape,

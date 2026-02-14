@@ -53,11 +53,11 @@ class HummingUnquantizedWeightConverter(HummingBaseWeightConverter):
     def convert_weight(self, tensor: torch.Tensor) -> dict[str, torch.Tensor]:
         quanted_weight, weight_scale, zero_point, global_scale = quantize_weight(
             weight=tensor,
-            dtype=self.meta.b_dtype,
-            scale_dtype=self.meta.bs_dtype,
-            group_size=self.meta.weight_scale_group_size,
-            has_dynamic_zp=self.meta.has_dynamic_zp,
-            has_global_scale=self.meta.has_global_scale,
+            dtype=self.quant_config.b_dtype,
+            scale_dtype=self.quant_config.bs_dtype,
+            group_size=self.quant_config.weight_scale_group_size,
+            has_dynamic_zp=self.quant_config.has_dynamic_zp,
+            has_global_scale=self.quant_config.has_global_scale,
         )
         return {
             "weight": quanted_weight,
@@ -134,9 +134,6 @@ class HummingNvfp4WeightConverter(HummingBaseWeightConverter):
         return {"weight": tensor.view(torch.int32)}
 
     def convert_weight_scale(self, tensor: torch.Tensor) -> dict[str, torch.Tensor]:
-        if self.is_block_quant:
-            weight_scale_group_size_n = self.quant_config.weight_scale_group_size_n
-            tensor = tensor.repeat_interleave(weight_scale_group_size_n, -1)
         return {"weight_scale": tensor}
 
 
