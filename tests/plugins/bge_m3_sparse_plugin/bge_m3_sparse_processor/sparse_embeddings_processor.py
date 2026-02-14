@@ -73,19 +73,19 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
 
     def _get_sparse_embedding_request(self, request_id: str | None = None):
         if request_id:
-            return self.online_requests.pop(request_id)
+            return self.online_requests.pop(request_id, None)
         return self.offline_requests.pop()
 
     def _build_sparse_embedding_token_weights(
-        self, request_id: str | None, sparse_embedding: dict[int, float]
+        self,
+        sparse_embedding: dict[int, float],
+        return_tokens: bool = False,
     ) -> list[SparseEmbeddingTokenWeight]:
-        request = self._get_sparse_embedding_request(request_id)
-        assert request, "illegal request"
         token_ids = sparse_embedding.keys()
         token_weights = sparse_embedding.values()
         tokens = [None] * len(token_ids)
 
-        if request.return_token_id_texts_map:
+        if return_tokens:
             tokens = self.renderer.get_tokenizer().convert_ids_to_tokens(token_ids)
         sparse_embedding_output: list[SparseEmbeddingTokenWeight] = []
         for token_id, weight, token in zip(token_ids, token_weights, tokens):
@@ -104,6 +104,9 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
     ) -> IOProcessorOutput:
         num_prompt_tokens = 0
         response_data = []
+        return_tokens = self._get_sparse_embedding_request(
+            request_id
+        ).return_token_id_texts_map
         for idx in range(len(model_output)):
             mo = model_output[idx]
             sparse_embedding: dict[int, float] = {}
@@ -112,7 +115,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
                 # this is the case that add_special_tokens is True,
                 # which means first token and last token are special tokens
                 mo.prompt_token_ids = mo.prompt_token_ids[1:]
-            for token_id, weight in zip(mo.prompt_token_ids, mo.outputs.data):
+            for token_id, weight in zip(mo.prompt_token_ids, mo.outputs.data.tolist()):
                 sparse_embedding[token_id] = max(
                     weight, sparse_embedding.get(token_id, 0.0)
                 )
@@ -120,7 +123,8 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
                 SparseEmbeddingResponseData(
                     index=idx,
                     sparse_embedding=self._build_sparse_embedding_token_weights(
-                        request_id, sparse_embedding
+                        sparse_embedding,
+                        return_tokens,
                     ),
                 )
             )
