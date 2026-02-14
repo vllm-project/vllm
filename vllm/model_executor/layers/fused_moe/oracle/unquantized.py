@@ -20,7 +20,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer import (
     swap_w13_to_w31,
 )
 from vllm.platforms import current_platform

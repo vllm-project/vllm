@@ -22,9 +22,11 @@ from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.model_executor.layers.fused_moe.flashinfer_utils import (
     apply_fi_trtllm_fp8_per_tensor_moe,
     register_scales_for_trtllm_fp8_per_tensor_moe,
+)
+from vllm.utils.flashinfer import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
 )
@@ -369,7 +371,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
 def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
     num_experts, intermediate, hidden
 ):
-    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    from vllm.utils.flashinfer import (
         convert_moe_weights_to_flashinfer_trtllm_block_layout,
     )
 
