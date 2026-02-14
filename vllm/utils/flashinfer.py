@@ -13,7 +13,7 @@ import os
 import shutil
 from collections.abc import Callable
 from enum import Enum
-from typing import Any, NoReturn
+from typing import TYPE_CHECKING, Any, NoReturn
 
 import requests
 import torch
@@ -25,6 +25,10 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+
 
 logger = init_logger(__name__)
 
@@ -677,7 +681,6 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     return should_use_flashinfer
 
 
-
 # === Moved from vllm.model_executor.layers.quantization.utils.flashinfer_utils ===
 
 
@@ -705,9 +708,7 @@ def activation_to_flashinfer_int(activation: "MoEActivation") -> int:
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:
     return (
-        x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1])
-        .flip(dims=[1])
-        .reshape(x.shape)
+        x.reshape(-1, 2, x.shape[-2] // 2, x.shape[-1]).flip(dims=[1]).reshape(x.shape)
     )
 
 
@@ -734,9 +735,9 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
         )
 
     # Stack weights and scales for all experts
-    gemm1_weights_fp8_interleaved = torch.stack(
-        gemm1_weights_fp8_interleaved
-    ).reshape(num_experts, 2 * intermediate_size, hidden_size)
+    gemm1_weights_fp8_interleaved = torch.stack(gemm1_weights_fp8_interleaved).reshape(
+        num_experts, 2 * intermediate_size, hidden_size
+    )
 
     # Shuffle weights and scaling factors for transposed mma output
     gemm1_weights_fp8_shuffled = []
@@ -750,9 +751,7 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
         )
 
         gemm2_weights_fp8_shuffled.append(
-            shuffle_matrix_a(
-                gemm2_weights[i].view(torch.uint8), epilogue_tile_m
-            )
+            shuffle_matrix_a(gemm2_weights[i].view(torch.uint8), epilogue_tile_m)
         )
 
     # Stack weights for all experts
@@ -873,12 +872,8 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             .contiguous()
         )
 
-        tmp_weights1 = convert_to_block_layout(
-            tmp_weights1.view(torch.uint8), block_k
-        )
-        tmp_weights2 = convert_to_block_layout(
-            tmp_weights2.view(torch.uint8), block_k
-        )
+        tmp_weights1 = convert_to_block_layout(tmp_weights1.view(torch.uint8), block_k)
+        tmp_weights2 = convert_to_block_layout(tmp_weights2.view(torch.uint8), block_k)
 
         w13_weights_shuffled.append(tmp_weights1.view(torch.bfloat16))
         w2_weights_shuffled.append(tmp_weights2.view(torch.bfloat16))
@@ -918,8 +913,7 @@ def align_fp4_moe_weights_for_fi(
         return w13, w13_scale, w2, w2_scale, intermediate
 
     logger.info_once(
-        "Padding intermediate size from %d to %d for "
-        "up/down projection weights.",
+        "Padding intermediate size from %d to %d for up/down projection weights.",
         intermediate,
         padded_intermediate,
         scope="local",
@@ -928,14 +922,10 @@ def align_fp4_moe_weights_for_fi(
     up_mult = 2 if is_act_and_mul else 1
     padded_gate_up_dim = up_mult * padded_intermediate
 
-    padded_w13 = w13.new_zeros(
-        (num_experts, padded_gate_up_dim, hidden_size // 2)
-    )
+    padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size // 2))
     padded_w13[:, : w13.shape[1], :] = w13
 
-    padded_w2 = w2.new_zeros(
-        (num_experts, hidden_size, padded_intermediate // 2)
-    )
+    padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate // 2))
     padded_w2[:, :, : w2.shape[2]] = w2
 
     padded_w13_scale = w13_scale.new_zeros(
@@ -979,8 +969,7 @@ def align_fp8_moe_weights_for_fi(
         return w13, w2, intermediate
 
     logger.info_once(
-        "Padding intermediate size from %d to %d for "
-        "up/down projection weights.",
+        "Padding intermediate size from %d to %d for up/down projection weights.",
         intermediate,
         padded_intermediate,
         scope="local",
@@ -989,14 +978,10 @@ def align_fp8_moe_weights_for_fi(
     up_mult = 2 if is_act_and_mul else 1
     padded_gate_up_dim = up_mult * padded_intermediate
 
-    padded_w13 = w13.new_zeros(
-        (num_experts, padded_gate_up_dim, hidden_size)
-    )
+    padded_w13 = w13.new_zeros((num_experts, padded_gate_up_dim, hidden_size))
     padded_w13[:, : w13.shape[1], :] = w13
 
-    padded_w2 = w2.new_zeros(
-        (num_experts, hidden_size, padded_intermediate)
-    )
+    padded_w2 = w2.new_zeros((num_experts, hidden_size, padded_intermediate))
     padded_w2[:, :, :intermediate] = w2
 
     return padded_w13, padded_w2, padded_intermediate
