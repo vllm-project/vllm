@@ -295,6 +295,7 @@ class UBatchWrapper:
         self,
         ubatch_slices,
         attn_metadata,
+        slot_mapping,
         input_ids,
         positions,
         inputs_embeds,
@@ -306,6 +307,9 @@ class UBatchWrapper:
     ) -> list[UbatchMetadata]:
         # Create one forward context per ubatch
         forward_contexts = []
+        # slot_mapping can be None, an empty dict (from create_forward_context
+        # converting None to {}), or a list of dicts (one per ubatch)
+        has_slot_mapping = slot_mapping and isinstance(slot_mapping, list)
         for i, ubatch_slice in enumerate(ubatch_slices):
             forward_contexts.append(
                 create_forward_context(
@@ -314,6 +318,7 @@ class UBatchWrapper:
                     dp_metadata=dp_metadata[i],
                     batch_descriptor=batch_descriptor,
                     cudagraph_runtime_mode=cudagraph_runtime_mode,
+                    slot_mapping=slot_mapping[i] if has_slot_mapping else None,
                 )
             )
 
@@ -406,9 +411,8 @@ class UBatchWrapper:
                 return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
-        num_tokens = (
-            ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
-        ) * 2
+        slot_mapping = forward_context.slot_mapping
+        num_tokens = sum(ubatch_slice.num_tokens for ubatch_slice in ubatch_slices)
         input_ids = kwargs["input_ids"]
         positions = kwargs["positions"]
         intermediate_tensors = kwargs["intermediate_tensors"]
@@ -440,6 +444,7 @@ class UBatchWrapper:
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
+                slot_mapping=slot_mapping,
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -462,6 +467,7 @@ class UBatchWrapper:
             ubatch_metadata = self._make_ubatch_metadata(
                 ubatch_slices=ubatch_slices,
                 attn_metadata=attn_metadata,
+                slot_mapping=slot_mapping,
                 input_ids=input_ids,
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,

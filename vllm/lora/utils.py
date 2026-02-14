@@ -2,18 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import huggingface_hub
-from huggingface_hub.utils import (
-    EntryNotFoundError,
-    HfHubHTTPError,
-    HFValidationError,
-    RepositoryNotFoundError,
-)
+from huggingface_hub.utils import HfHubHTTPError, HFValidationError
 from torch import nn
 from transformers import PretrainedConfig
 
+from vllm import envs
 from vllm.config.lora import LoRAConfig
 from vllm.logger import init_logger
 
@@ -47,6 +43,25 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+
+def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
+    """
+    Returns num_active_loras values for cudagraph capture.
+
+    When specialize=True: powers of 2 up to max_loras, plus max_loras + 1.
+    When specialize=False: just [max_loras + 1].
+
+    This is the single source of truth for LoRA capture cases, used by both
+    CudagraphDispatcher and PunicaWrapperGPU.
+    """
+    if not specialize:
+        return [max_loras + 1]
+
+    return [
+        n for n in range(1, max_loras + 2) if (n & (n - 1)) == 0 or n == max_loras + 1
+    ]
+
 
 _GLOBAL_LORA_ID = 0
 
@@ -135,7 +150,7 @@ def replace_submodule(
 
 
 def parse_fine_tuned_lora_name(
-    name: str, weights_mapper: Optional["WeightsMapper"] = None
+    name: str, weights_mapper: "WeightsMapper | None" = None
 ) -> tuple[str, bool]:
     """Parse the name of lora weights.
 
@@ -240,18 +255,27 @@ def get_adapter_absolute_path(lora_path: str) -> str:
     if os.path.exists(lora_path):
         return os.path.abspath(lora_path)
 
-    # If the path does not exist locally, assume it's a Hugging Face repo.
+    # If the path does not exist locally.
+    if envs.VLLM_USE_MODELSCOPE:
+        # If using ModelScope, we assume the path is a ModelScope repo.
+        from modelscope.hub.snapshot_download import InvalidParameter, snapshot_download
+        from requests import HTTPError
+
+        download_fn = lambda: snapshot_download(model_id=lora_path)
+        download_exceptions = (HTTPError, InvalidParameter)
+        error_log = "Error downloading the ModelScope model"
+    else:
+        # Otherwise, we assume the path is a Hugging Face Hub repo.
+        download_fn = lambda: huggingface_hub.snapshot_download(repo_id=lora_path)
+        download_exceptions = (HfHubHTTPError, HFValidationError)
+        error_log = "Error downloading the HuggingFace model"
+
     try:
-        local_snapshot_path = huggingface_hub.snapshot_download(repo_id=lora_path)
-    except (
-        HfHubHTTPError,
-        RepositoryNotFoundError,
-        EntryNotFoundError,
-        HFValidationError,
-    ):
-        # Handle errors that may occur during the download
-        # Return original path instead of throwing error here
-        logger.exception("Error downloading the HuggingFace model")
+        local_snapshot_path = download_fn()
+    except download_exceptions:
+        # Handle errors that may occur during the download.
+        # Return original path instead of throwing error here.
+        logger.exception(error_log)
         return lora_path
 
     return local_snapshot_path

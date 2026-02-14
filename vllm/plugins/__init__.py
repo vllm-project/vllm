@@ -26,6 +26,7 @@ plugins_loaded = False
 
 
 def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
+    """Load plugins registered under the given entry point group."""
     from importlib.metadata import entry_points
 
     allowed_plugins = envs.VLLM_PLUGINS

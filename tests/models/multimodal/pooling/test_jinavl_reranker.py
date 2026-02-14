@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
 
 import pytest
+import transformers
+from packaging import version
 from transformers import AutoModel
 
 from vllm.entrypoints.chat_utils import (
@@ -115,7 +116,7 @@ def _normalize_image(image_val: str) -> str:
 
 def create_score_multimodal_param(
     content_parts: list[dict],
-) -> ScoreMultiModalParam:
+) -> list[ScoreMultiModalParam]:
     """
     Create a ScoreMultiModalParam from a list of content dictionaries.
 
@@ -150,7 +151,7 @@ def create_score_multimodal_param(
                     )
                 )
 
-    return ScoreMultiModalParam(content=formatted_content)
+    return [ScoreMultiModalParam(content=[content]) for content in formatted_content]
 
 
 def _run_vllm(
@@ -196,23 +197,7 @@ def _run_hf(
     else:
         raise ValueError("Unsupported query format")
 
-    # Separate documents by type
-    text_docs: list[str] = []
-    image_docs: list[str] = []
-    text_indices: list[int] = []
-    image_indices: list[int] = []
-
-    for idx, doc in enumerate(document_strs):
-        if "text" in doc:
-            text_docs.append(doc["text"])
-            text_indices.append(idx)
-        elif "image" in doc:
-            image_docs.append(_normalize_image(doc["image"]))
-            image_indices.append(idx)
-        else:
-            raise ValueError(f"Unsupported document format at index {idx}")
-
-    scores: list[None | float] = [None] * len(document_strs)
+    scores: list[float] = []
 
     with hf_runner(
         model,
@@ -221,30 +206,24 @@ def _run_hf(
         auto_cls=AutoModel,
         model_kwargs={"key_mapping": CHECKPOINT_TO_HF_MAPPER},
     ) as hf_model:
-        # Score text documents
-        if text_docs:
-            text_scores = hf_model.model.compute_score(
-                [[query_data, d] for d in text_docs],
-                max_length=2048,
-                query_type=query_type,
-                doc_type="text",
-            )
-            for i, s in zip(text_indices, text_scores):
-                scores[i] = s
-
-        # Score image documents
-        if image_docs:
-            image_scores = hf_model.model.compute_score(
-                [[query_data, d] for d in image_docs],
-                max_length=2048,
-                query_type=query_type,
-                doc_type="image",
-            )
-            for i, s in zip(image_indices, image_scores):
-                scores[i] = s
-
-    assert all(s is not None for s in scores)
-    return cast(list[float], scores)
+        for doc in document_strs:
+            if "text" in doc:
+                score = hf_model.model.compute_score(
+                    [[query_data, doc["text"]]],
+                    max_length=2048,
+                    query_type=query_type,
+                    doc_type="text",
+                )
+                scores.append(score)
+            elif "image" in doc:
+                score = hf_model.model.compute_score(
+                    [[query_data, doc["image"]]],
+                    max_length=2048,
+                    query_type=query_type,
+                    doc_type="image",
+                )
+                scores.append(score)
+    return scores
 
 
 def _run_test(
@@ -277,6 +256,10 @@ def _run_test(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_text_image(
     hf_runner,
     vllm_runner,
@@ -296,6 +279,10 @@ def test_model_text_image(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_text_text(
     hf_runner,
     vllm_runner,
@@ -315,6 +302,10 @@ def test_model_text_text(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_image_text(
     hf_runner,
     vllm_runner,
@@ -334,6 +325,10 @@ def test_model_image_text(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_image_image(
     hf_runner,
     vllm_runner,
@@ -353,6 +348,10 @@ def test_model_image_image(
 
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.skipif(
+    version.parse(transformers.__version__) == version.parse("4.57.5"),
+    reason="Skipped for transformers==4.57.5, https://github.com/huggingface/transformers/issues/43295",
+)
 def test_model_text_mixed_documents(
     hf_runner,
     vllm_runner,

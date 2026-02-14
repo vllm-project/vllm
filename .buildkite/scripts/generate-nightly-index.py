@@ -112,7 +112,7 @@ def parse_from_filename(file: str) -> WheelFileInfo:
 
 def generate_project_list(subdir_names: list[str], comment: str = "") -> str:
     """
-    Generate project list HTML content linking to each project & variant sub-directory.
+    Generate project list HTML content linking to each project & variant subdirectory.
     """
     href_tags = []
     for name in sorted(subdir_names):
@@ -168,23 +168,23 @@ def generate_index_and_metadata(
         comment (str | None): Optional comment to include in the generated HTML files.
 
     First, parse all wheel files to extract metadata.
-    We need to collect all wheel files for each variant, and generate an index for it (in a sub-directory).
+    We need to collect all wheel files for each variant, and generate an index for it (in a subdirectory).
     The index for the default variant (if any) is generated in the root index directory.
 
     If `default_variant` is provided, all wheels must have variant suffixes, and the default variant index
     is purely a copy of the corresponding variant index, with only the links adjusted.
     Otherwise, all wheels without variant suffixes are treated as the default variant.
 
-    If `alias_to_default` is provided, an additional alias sub-directory is created, it has the same content
+    If `alias_to_default` is provided, an additional alias subdirectory is created, it has the same content
     as the default variant index, but the links are adjusted accordingly.
 
     Index directory structure:
         index_base_dir/ (hosted at wheels.vllm.ai/{nightly,$commit,$version}/)
-            index.html  # project list, linking to "vllm/" and other packages, and all variant sub-directories
+            index.html  # project list, linking to "vllm/" and other packages, and all variant subdirectories
             vllm/
                 index.html # package index, pointing to actual files in wheel_base_dir (relative path)
                 metadata.json # machine-readable metadata for all wheels in this package
-            cpu/ # cpu variant sub-directory
+            cpu/ # cpu variant subdirectory
                 index.html
                 vllm/
                     index.html
@@ -194,7 +194,7 @@ def generate_index_and_metadata(
                 vllm/
                     index.html
                     metadata.json
-            cu130/ # cu130 variant sub-directory
+            cu130/ # cu130 variant subdirectory
                 index.html
                 vllm/
                     index.html

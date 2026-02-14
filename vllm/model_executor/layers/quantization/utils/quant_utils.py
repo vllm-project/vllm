@@ -11,7 +11,6 @@ import numpy
 import torch
 from torch import fx
 
-from vllm._custom_ops import cutlass_scaled_mm_supports_fp4
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 
@@ -191,6 +190,51 @@ def group_broadcast(t, shape):
     return t
 
 
+def prep_scale_for_group_broadcast(
+    scale: torch.Tensor,
+    x: torch.Tensor,
+    group_shape: GroupShape | None,
+) -> torch.Tensor:
+    """
+    Prepare the input quantization scale for group broadcasting.
+
+    Args:
+        scale: The scale tensor (scalar or 1D).
+        x: Target tensor whose shape determines broadcast dimensions.
+        group_shape: GroupShape to broadcast over.
+
+    Returns:
+        scale reshaped for correct broadcasting.
+    """
+    if scale.numel() == 1:
+        # For per-tensor quant, keep the scale as a scalar (not reshaped to (1, 1)).
+        # This avoids misclassifying it as channelwise quant in Fp8LinearOp.apply,
+        # where the "per_tensor_activations" check relies on "x_scale.dim() < 2":
+        #   per_tensor_activations = (x_scale.numel() == 1) and x_scale.dim() < 2
+        # For all other cases, reshape scalar scales to (1, 1) for broadcasting.
+        return (
+            scale
+            if group_shape is not None and group_shape.is_per_tensor()
+            else scale.reshape(1, 1)
+        )
+    if scale.ndim == 1:
+        assert group_shape is not None, (
+            "group_shape must be provided to correctly broadcast 1D scale"
+        )
+        rows, cols = _normalize_quant_group_shape(x, group_shape)
+        # Determine broadcasting dimension: either rows or columns match group size
+        if rows == x.shape[-2]:
+            scale = scale.unsqueeze(-2)
+        elif cols == x.shape[-1]:
+            scale = scale.unsqueeze(-1)
+        else:
+            raise ValueError(
+                f"1D scale with shape {scale.shape} cannot be broadcast to x with shape"
+                f" {x.shape}, group_shape={(rows, cols)}"
+            )
+    return scale
+
+
 # Quantize assuming once scale per group of elements with shape group_shape,
 # example group shapes:
 #  * (-1, -1)   for per-tensor quantization
@@ -241,7 +285,7 @@ def scaled_quantize(
     _, fp8_max = get_fp8_min_max()
     scale = fp8_max / amax
 
-    # Apply scale and convert form:
+    # Apply scale and convert from:
     # (BLK_M, BLK_N, BLOCK_SIZE_M * BLOCK_SIZE_N) to (M, N)
     x_scl_sat = (
         (x_blkd_permd * scale.unsqueeze(-1))
@@ -261,29 +305,7 @@ def scaled_dequantize(
     group_shape: GroupShape | None = None,
     out_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:
-    if group_shape is not None:
-        group_shape = _normalize_quant_group_shape(x_q, group_shape)
-
-    if x_s.numel() == 1:  # scalar
-        x_s = x_s.reshape(1, 1)  # normalize all scalar-like tensors to (1, 1)
-    if x_s.ndim == 1:
-        if group_shape is None:
-            raise AssertionError(
-                "if x_s is 1D tensor, group_shape must be provided otherwise "
-                "its ambiguous which dimension to broadcast x_s to"
-            )
-        # unsqueeze the scales for the dimension where we want to broadcast
-        # across the full extent
-        if group_shape[0] == x_q.shape[-2]:
-            x_s = x_s.unsqueeze(-2)
-        elif group_shape[1] == x_q.shape[-1]:
-            x_s = x_s.unsqueeze(-1)
-        else:
-            raise AssertionError(
-                "if x_s is a vector we should be broadcasting it to the full "
-                "extent of one of the dimensions"
-            )
-
+    x_s = prep_scale_for_group_broadcast(x_s, x_q, group_shape)
     if group_shape is not None:
         assert x_s.shape[-1] == x_q.shape[-1] // group_shape[1]
         assert x_s.shape[-2] == x_q.shape[-2] // group_shape[0]
@@ -743,60 +765,6 @@ def awq_pack(
     q_w = q_w.reshape((-1, size_n)).contiguous()
 
     return pack_cols(q_w, num_bits, size_k, size_n)
-
-
-def swizzle_blockscale(scale: torch.Tensor) -> torch.Tensor:
-    """
-    Pad and block-interleave the FP4 block-scales so that they match the data
-    layout expected by the CUTLASS / FlashInfer kernels.
-
-    Parameters
-    ----------
-    scale: torch.Tensor
-
-    Returns
-    -------
-    torch.Tensor
-        The swizzled tensor with the same logical shape as *scale*.
-    """
-    assert scale.dtype == torch.float8_e4m3fn, (
-        "swizzle_blockscale expects the input tensor to be in "
-        "torch.float8_e4m3fn format."
-    )
-
-    scale_ndim = scale.ndim
-    if scale_ndim == 2:
-        scale = scale.unsqueeze(0)  # (1, M, K)
-    assert scale.ndim == 3, "Expected a 2-D or 3-D tensor for block scales."
-
-    B, M, K = scale.shape
-
-    def _round_up(x: int, m: int) -> int:
-        return (x + m - 1) // m * m
-
-    M_padded = _round_up(M, 128)
-    K_padded = _round_up(K, 4)
-
-    padded = torch.zeros(
-        (B, M_padded, K_padded), dtype=scale.dtype, device=scale.device
-    )
-    padded[:B, :M, :K] = scale
-
-    # Reshape / permute to the layout required by the kernel.
-    padded = padded.reshape(B, M_padded // 128, 4, 32, K_padded // 4, 4)
-    swizzled = padded.permute(0, 1, 4, 3, 2, 5).contiguous().cuda()
-
-    if scale_ndim == 2:
-        return swizzled.reshape(M_padded, K_padded)
-    return swizzled.reshape(B, M_padded, K_padded)
-
-
-def cutlass_fp4_supported() -> bool:
-    if not current_platform.is_cuda():
-        return False
-    capability_tuple = current_platform.get_device_capability()
-    capability = -1 if capability_tuple is None else capability_tuple.to_int()
-    return cutlass_scaled_mm_supports_fp4(capability)
 
 
 def convert_bf16_scales_to_fp8(

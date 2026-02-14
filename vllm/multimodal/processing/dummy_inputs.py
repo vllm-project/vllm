@@ -18,6 +18,7 @@ from vllm.config.multimodal import (
 from vllm.logger import init_logger
 
 from ..inputs import MultiModalDataDict
+from ..parse import MultiModalDataItems
 from .context import BaseProcessingInfo
 
 _I = TypeVar("_I", bound=BaseProcessingInfo)
@@ -33,7 +34,7 @@ class ProcessorInputs:
     """
 
     prompt: str | list[int]
-    mm_data: MultiModalDataDict
+    mm_items: MultiModalDataItems
     hf_processor_mm_kwargs: Mapping[str, object] = field(default_factory=dict)
     tokenization_kwargs: Mapping[str, object] = field(default_factory=dict)
 
@@ -62,6 +63,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         """
         Build the multimodal input which, after processing, results in
@@ -82,6 +84,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
@@ -91,17 +94,24 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
             seq_len: Sequence length
             mm_counts: Count of items per modality
             mm_options: Configurable options per modality (optional)
+            mm_processor_kwargs: Additional keyword arguments
+                                for hf_processor (optional)
         """
         dummy_text = self.get_dummy_text(mm_counts)
-
-        # Use the unified function for both legacy and configurable cases
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_data = self.get_dummy_mm_data(
+            seq_len,
+            mm_counts,
+            mm_options,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
         tokenization_kwargs = {"truncation": False}
 
         return ProcessorInputs(
             prompt=dummy_text,
-            mm_data=dummy_mm_data,
+            mm_items=dummy_mm_items,
+            hf_processor_mm_kwargs=mm_processor_kwargs or {},
             tokenization_kwargs=tokenization_kwargs,
         )
 

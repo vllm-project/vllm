@@ -302,8 +302,9 @@ def chunked_prefill_paged_decode(
     block_size = value_cache.shape[3]
     num_seqs = len(seq_lens)
     num_query_heads = query.shape[1]
-    num_kv_heads = key.shape[1]
-    num_queries_per_kv = query.shape[1] // key.shape[1]
+    # key may be None in cross-attention decode (already cached from encoder)
+    num_kv_heads = key.shape[1] if key is not None else key_cache.shape[1]
+    num_queries_per_kv = num_query_heads // num_kv_heads
     head_size = query.shape[2]
 
     # Conversion of FP8 Tensor from uint8 storage to

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence as GenericSequence
-from typing import Optional
 
 import torch
 import torch.types
@@ -126,7 +125,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
 
     @classmethod
     def pack(
-        cls, loras: GenericSequence[Optional["LoRALayerWeights"]]
+        cls, loras: GenericSequence["LoRALayerWeights | None"]
     ) -> "PackedLoRALayerWeights":
         """Pack a list of LoRAs into a single LoRA.
 
@@ -155,7 +154,7 @@ class PackedLoRALayerWeights(LoRALayerWeights):
     @classmethod
     def pack_moe(
         cls,
-        loras: GenericSequence[Optional["LoRALayerWeights"]],
+        loras: GenericSequence["LoRALayerWeights | None"],
         module_name: str,
         is_non_gated_moe: bool = False,
     ) -> "PackedLoRALayerWeights":

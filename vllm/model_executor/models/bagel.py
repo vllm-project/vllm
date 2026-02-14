@@ -44,11 +44,11 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
-    TowerMissingLayer,
 )
 from .siglip import SiglipVisionModel
 from .utils import (
     AutoWeightsLoader,
+    StageMissingLayer,
     WeightsMapper,
     init_vllm_registered_model,
     maybe_prefix,
@@ -250,6 +250,7 @@ class BagelDummyInputsBuilder(BaseDummyInputsBuilder[BagelProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         hf_config = self.info.get_hf_config()
@@ -426,9 +427,9 @@ class BagelForConditionalGeneration(
                     hidden_size=llm_hidden_size,
                 )
         else:
-            self.vit_model = TowerMissingLayer("image")
-            self.connector = TowerMissingLayer("image")
-            self.vit_pos_embed = TowerMissingLayer("image")
+            self.vit_model = StageMissingLayer("image_tower")
+            self.connector = StageMissingLayer("image_tower")
+            self.vit_pos_embed = StageMissingLayer("image_tower")
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -507,7 +508,7 @@ class BagelForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

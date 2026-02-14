@@ -231,7 +231,7 @@ def marlin_create_bench_fn(bt: BenchmarkTensors) -> Callable:
         assert bt.w_tok_s is None
         assert bt.group_size is not None
 
-        fn = lambda: ops.gptq_marlin_gemm(
+        fn = lambda: ops.marlin_gemm(
             a=bt.a,
             c=None,
             b_q_weight=w_q,
