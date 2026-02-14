@@ -56,9 +56,7 @@ def test_colmodernvbert_text_relevance_ordering(vllm_runner):
         scores = vllm_model.score(query, documents)
 
         assert len(scores) == 2
-        assert scores[0] > scores[1], (
-            "ML doc should score higher than weather doc"
-        )
+        assert scores[0] > scores[1], "ML doc should score higher than weather doc"
 
 
 def test_colmodernvbert_text_late_interaction(vllm_runner):
@@ -104,7 +102,8 @@ def test_colmodernvbert_image_token_embed(vllm_runner, image_assets):
             images=[image],
         )
         req_outputs = vllm_model.llm.encode(
-            inputs, pooling_task="token_embed",
+            inputs,
+            pooling_task="token_embed",
         )
         outputs = [req_output.outputs.data for req_output in req_outputs]
 
