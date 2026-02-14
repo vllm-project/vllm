@@ -6,9 +6,9 @@ import math
 from typing import Any
 
 import torch
-from humming import dtypes
 from humming.layer import HummingLayerMeta, HummingMethod
 
+from humming import dtypes
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
@@ -158,7 +158,7 @@ class HummingConfig(QuantizationConfig):
         if user_quant == "humming":
             return cls.get_name()
         return None
-    
+
     def is_layer_skipped(self, layer: torch.nn.Module, prefix: str):
         ignored_layers = self.ignored_layers
         if any(module_name in prefix for module_name in ignored_layers):
@@ -414,6 +414,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
     def get_weight_loader(self, layer: torch.nn.Module):
         shard_id_map = {"w1": 0, "w3": 1}
+
         def weight_loader(
             param: torch.nn.Parameter,
             loaded_weight: torch.Tensor,
@@ -462,7 +463,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         buffer_size = max(buffer_size1, buffer_size2) + buffer_size1 // 2
         buffer = torch.empty(buffer_size, dtype=dtype, device=device)
         output1 = buffer[buffer_size1 // 2 :][:buffer_size1].view(*output_shape1)
-        input2 = buffer[:buffer_size1 // 2].view(output_shape_m, -1)
+        input2 = buffer[: buffer_size1 // 2].view(output_shape_m, -1)
         output2 = buffer[buffer_size1 // 2 :][:buffer_size2].view(*output_shape2)
 
         return output1, input2, output2
