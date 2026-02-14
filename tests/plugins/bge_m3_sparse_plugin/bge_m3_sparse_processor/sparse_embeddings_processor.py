@@ -134,7 +134,6 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
             total_tokens=num_prompt_tokens,
         )
         resp = SparseEmbeddingResponse(
-            request_id=request_id,
             data=response_data,
             usage=usage,
         )
