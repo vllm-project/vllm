@@ -56,7 +56,7 @@ class EncoderCudaGraphManager:
         self.max_batch_size = comp_config.encoder_cudagraph_max_images_per_batch
 
         self.use_dp = (
-            vllm_config.multimodal_config.mm_encoder_tp_mode == "data"
+            vllm_config.model_config.multimodal_config.mm_encoder_tp_mode == "data"
             and vllm_config.parallel_config.tensor_parallel_size > 1
         )
 
@@ -112,11 +112,9 @@ class EncoderCudaGraphManager:
             per_frame=True,
         )
         encoder_metadata['cu_seqlens'] = seq_metadata['cu_seqlens']
-
-        max_seqlen = self.vision_model.compute_attn_mask_seqlen(
-            encoder_metadata['cu_seqlens']
-        )
-        encoder_metadata['max_seqlen'] = max_seqlen
+        # Use CPU tensor from compute_encoder_metadata to avoid GPU sync
+        # when .item() is called during CUDA graph capture
+        encoder_metadata['max_seqlen'] = seq_metadata['max_seqlen']
 
         with torch.inference_mode():
             output = self.vision_model(
@@ -127,13 +125,14 @@ class EncoderCudaGraphManager:
             output_buffer = torch.empty_like(output)
 
         graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph):
-            output = self.vision_model(
-                dummy_pixel_values,
-                dummy_grid_thw,
-                encoder_metadata=encoder_metadata
-            )
-            output_buffer.copy_(output)
+        with torch.inference_mode():
+            with torch.cuda.graph(graph):
+                output = self.vision_model(
+                    dummy_pixel_values,
+                    dummy_grid_thw,
+                    encoder_metadata=encoder_metadata
+                )
+                output_buffer.copy_(output)
 
         self.budget_graphs[token_budget] = BudgetGraphMetadata(
             token_budget=token_budget,
@@ -189,11 +188,14 @@ class EncoderCudaGraphManager:
 
         # Get patch dimensions from vision model's patch_embed
         patch_embed = self.vision_model.patch_embed
-        in_channels = patch_embed.in_channels
+        in_channels = patch_embed.proj.in_channels
         patch_size = patch_embed.patch_size
+        temporal_patch_size = patch_embed.temporal_patch_size
 
+        # PatchEmbed expects shape (total_patches, flattened_patch_size)
+        flattened_patch_size = in_channels * temporal_patch_size * patch_size * patch_size
         dummy_pixel_values = torch.randn(
-            total_patches, in_channels, patch_size, patch_size,
+            total_patches, flattened_patch_size,
             device=self.device,
             dtype=self.dtype,
         )
@@ -279,11 +281,9 @@ class EncoderCudaGraphManager:
             per_frame=True,
         )
         encoder_metadata['cu_seqlens'] = seq_metadata['cu_seqlens']
-
-        max_seqlen = self.vision_model.compute_attn_mask_seqlen(
-            encoder_metadata['cu_seqlens']
-        )
-        encoder_metadata['max_seqlen'] = max_seqlen
+        # Use CPU tensor from compute_encoder_metadata to avoid GPU sync
+        # when .item() is called during CUDA graph capture
+        encoder_metadata['max_seqlen'] = seq_metadata['max_seqlen']
 
         output = self.run_budget_graph(
             pixel_values,
