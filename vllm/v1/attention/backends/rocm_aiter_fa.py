@@ -425,8 +425,13 @@ class AiterFlashAttentionMetadataBuilder(
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-        for layer in layers.values():
-            assert isinstance(layer.impl, AiterFlashAttentionImpl)
+        for name, layer in layers.items():
+            if name not in layer_names:
+                continue
+            assert isinstance(layer.impl, AiterFlashAttentionImpl), (
+                "Aiter Flash Attention Metadata Builder can only be used "
+                "with Aiter Flash Attention Impl."
+            )
             sliding_window_configs.add(layer.impl.sliding_window)
 
         while len(sliding_window_configs) > 0:
