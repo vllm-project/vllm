@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
 from vllm.inputs import (
     EmbedsPrompt,
     ExplicitEncoderDecoderPrompt,
+    ProcessorInputs,
     PromptType,
     SingletonPrompt,
     TextPrompt,
@@ -115,7 +116,9 @@ that has been standardized into a dictionary.
 """
 
 
-def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
+def parse_dec_only_prompt(
+    prompt: PromptType | ProcessorInputs,
+) -> DecoderOnlyDictPrompt:
     """
     Parse a prompt for a decoder-only model and normalize it to a dictionary.
     """
@@ -144,7 +147,7 @@ def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
+def _parse_enc_prompt(prompt: PromptType | ProcessorInputs) -> EncoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -166,7 +169,7 @@ def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
+def _parse_dec_prompt(prompt: PromptType | ProcessorInputs) -> DecoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -195,13 +198,15 @@ def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def parse_enc_dec_prompt(prompt: object) -> EncoderDecoderDictPrompt:
+def parse_enc_dec_prompt(
+    prompt: PromptType | ProcessorInputs,
+) -> EncoderDecoderDictPrompt:
     """
     Parse a prompt for an encoder-decoder model and normalize it to a dictionary.
     """
     if isinstance(prompt, dict) and "encoder_prompt" in prompt:
-        enc_prompt: object = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
-        dec_prompt: object | None = prompt["decoder_prompt"]  # type: ignore[typeddict-item]
+        enc_prompt = prompt["encoder_prompt"]
+        dec_prompt = prompt["decoder_prompt"]
     else:
         enc_prompt = prompt
         dec_prompt = None
@@ -212,7 +217,9 @@ def parse_enc_dec_prompt(prompt: object) -> EncoderDecoderDictPrompt:
     )
 
 
-def parse_model_prompt(model_config: "ModelConfig", prompt: object):
+def parse_model_prompt(
+    model_config: "ModelConfig", prompt: PromptType | ProcessorInputs
+):
     if model_config.is_encoder_decoder:
         return parse_enc_dec_prompt(prompt)
 
@@ -225,7 +232,9 @@ class PromptComponents(NamedTuple):
     embeds: "torch.Tensor | None" = None
 
 
-def extract_target_prompt(model_config: "ModelConfig", prompt: object):
+def extract_target_prompt(
+    model_config: "ModelConfig", prompt: PromptType | ProcessorInputs
+):
     return (
         parse_enc_dec_prompt(prompt)["encoder_prompt"]
         if model_config.is_encoder_decoder
@@ -235,21 +244,23 @@ def extract_target_prompt(model_config: "ModelConfig", prompt: object):
 
 def extract_prompt_components(
     model_config: "ModelConfig",
-    prompt: object,
+    prompt: PromptType | ProcessorInputs,
 ) -> PromptComponents:
     target_prompt = extract_target_prompt(model_config, prompt)
 
     return PromptComponents(
         text=target_prompt.get("prompt"),
-        token_ids=target_prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        token_ids=target_prompt.get("prompt_token_ids"),
         embeds=target_prompt.get("prompt_embeds"),
     )
 
 
-def extract_prompt_len(model_config: "ModelConfig", prompt: object):
+def extract_prompt_len(
+    model_config: "ModelConfig", prompt: PromptType | ProcessorInputs
+):
     target_prompt = extract_target_prompt(model_config, prompt)
 
     return length_from_prompt_token_ids_or_embeds(
-        target_prompt.get("prompt_token_ids"),  # type: ignore[arg-type]
+        target_prompt.get("prompt_token_ids"),
         target_prompt.get("prompt_embeds"),
     )

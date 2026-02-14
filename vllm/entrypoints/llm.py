@@ -4,7 +4,7 @@
 import itertools
 import warnings
 from collections.abc import Callable, Sequence
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import cloudpickle
 import torch.nn as nn
@@ -55,6 +55,7 @@ from vllm.entrypoints.pooling.score.utils import (
 from vllm.entrypoints.utils import log_non_default_args
 from vllm.inputs.data import (
     DataPrompt,
+    ProcessorInputs,
     PromptType,
     SingletonPrompt,
     TextPrompt,
@@ -73,7 +74,6 @@ from vllm.outputs import (
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, merge_kwargs
-from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
     extract_prompt_components,
@@ -400,7 +400,7 @@ class LLM:
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ) -> list[RequestOutput]:
@@ -497,7 +497,7 @@ class LLM:
         seq_params = self._params_to_seq(sampling_params, len(seq_prompts))
 
         if any(param.truncate_prompt_tokens is not None for param in seq_params):
-            engine_prompts: Sequence[DictPrompt | TokPrompt] = [
+            engine_prompts: Sequence[ProcessorInputs] = [
                 engine_prompt
                 for prompt, param in zip(seq_prompts, seq_params)
                 for engine_prompt in self._preprocess_cmpl(
@@ -547,8 +547,8 @@ class LLM:
 
     def _get_modality_specific_lora_reqs(
         self,
-        prompts: Sequence[DictPrompt | TokPrompt],
-        lora_request: list[LoRARequest] | LoRARequest | None,
+        prompts: Sequence[ProcessorInputs],
+        lora_request: Sequence[LoRARequest] | LoRARequest | None,
     ):
         # Grab the lora config off the vllm config on the engine,
         # since this is the same for both v0 & v1.
@@ -580,18 +580,15 @@ class LLM:
 
     def _resolve_single_prompt_mm_lora(
         self,
-        prompt: DictPrompt | TokPrompt,
+        prompt: ProcessorInputs,
         lora_request: LoRARequest | None,
         default_mm_loras: dict[str, str] | None,
     ):
-        if not default_mm_loras or not (
-            mm_data := prompt.get("multi_modal_data") or {}
-        ):
+        if not default_mm_loras or prompt["type"] != "multimodal":
             return lora_request
 
-        intersection = set(
-            mm_data.keys()  # type: ignore
-        ).intersection(default_mm_loras.keys())
+        prompt_modalities = prompt["mm_placeholders"].keys()
+        intersection = set(prompt_modalities).intersection(default_mm_loras.keys())
         if not intersection:
             return lora_request
         if len(intersection) > 1:
@@ -677,7 +674,7 @@ class LLM:
     def _get_beam_search_lora_requests(
         self,
         lora_request: list[LoRARequest] | LoRARequest | None,
-        prompts: list[TokensPrompt | TextPrompt],
+        prompts: Sequence[ProcessorInputs],
     ) -> list[LoRARequest | None]:
         """Get the optional lora request corresponding to each prompt."""
         if isinstance(lora_request, Sequence) and len(lora_request) != len(prompts):
@@ -718,12 +715,13 @@ class LLM:
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
 
-        lora_requests = self._get_beam_search_lora_requests(lora_request, prompts)
+        tokenizer = self.renderer.get_tokenizer()
+        eos_token_id = tokenizer.eos_token_id
+        sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
-        tokenizer = self.get_tokenizer()
-        sort_beams_key = create_sort_beams_key_function(
-            tokenizer.eos_token_id,
-            length_penalty,
+        engine_prompts = self._preprocess_cmpl(prompts)
+        lora_requests = self._get_beam_search_lora_requests(
+            lora_request, engine_prompts
         )
 
         if use_tqdm and concurrency_limit is not None:
@@ -734,16 +732,7 @@ class LLM:
             use_tqdm = False
 
         if concurrency_limit is None:
-            concurrency_limit = len(prompts)
-
-        def create_tokens_prompt_from_beam(beam: BeamSearchSequence) -> TokensPrompt:
-            token_prompt_kwargs: TokensPrompt = {"prompt_token_ids": beam.tokens}
-            if beam.multi_modal_data is not None:
-                token_prompt_kwargs["multi_modal_data"] = beam.multi_modal_data
-
-            if beam.mm_processor_kwargs is not None:
-                token_prompt_kwargs["mm_processor_kwargs"] = beam.mm_processor_kwargs
-            return TokensPrompt(**token_prompt_kwargs)
+            concurrency_limit = len(engine_prompts)
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
@@ -756,30 +745,16 @@ class LLM:
         )
         instances: list[BeamSearchInstance] = []
 
-        for lora_req, prompt in zip(lora_requests, prompts):
-            # Add multimodal processor kwargs & data
-            mm_kwargs = {}
-            if "multi_modal_data" in prompt:
-                mm_kwargs["multi_modal_data"] = prompt["multi_modal_data"]
-            if "mm_processor_kwargs" in prompt:
-                mm_kwargs["mm_processor_kwargs"] = prompt["mm_processor_kwargs"]
-
-            if "prompt_token_ids" in prompt:
-                prompt = cast(TokensPrompt, prompt)  # Needed for mypy
-                prompt_tokens = prompt["prompt_token_ids"]
-            else:
-                prompt_tokens = tokenizer.encode(prompt["prompt"])
-
+        for lora_req, prompt in zip(lora_requests, engine_prompts):
             instances.append(
                 BeamSearchInstance(
-                    prompt_tokens,
+                    prompt,  # type: ignore[arg-type]
                     lora_request=lora_req,
                     logprobs=None,
-                    **mm_kwargs,
                 ),
             )
 
-        for prompt_start in range(0, len(prompts), concurrency_limit):
+        for prompt_start in range(0, len(engine_prompts), concurrency_limit):
             instances_batch = instances[prompt_start : prompt_start + concurrency_limit]
 
             token_iter = range(max_tokens)
@@ -810,10 +785,7 @@ class LLM:
 
                 # create corresponding batch entries for prompt & optional lora
                 prompts_batch, lora_req_batch = zip(
-                    *[
-                        (create_tokens_prompt_from_beam(beam), beam.lora_request)
-                        for beam in all_beams
-                    ]
+                    *[(beam.get_prompt(), beam.lora_request) for beam in all_beams]
                 )
 
                 # only runs for one step
@@ -841,19 +813,15 @@ class LLM:
                             logprobs = result.outputs[0].logprobs[0]
                             for token_id, logprob_obj in logprobs.items():
                                 new_beam = BeamSearchSequence(
+                                    current_beam.orig_prompt,
                                     tokens=current_beam.tokens + [token_id],
                                     logprobs=current_beam.logprobs + [logprobs],
                                     lora_request=current_beam.lora_request,
                                     cum_logprob=current_beam.cum_logprob
                                     + logprob_obj.logprob,
-                                    multi_modal_data=current_beam.multi_modal_data,
-                                    mm_processor_kwargs=current_beam.mm_processor_kwargs,
                                 )
 
-                                if (
-                                    token_id == tokenizer.eos_token_id
-                                    and not ignore_eos
-                                ):
+                                if token_id == eos_token_id and not ignore_eos:
                                     instance.completed.append(new_beam)
                                 else:
                                     instance_new_beams.append(new_beam)
@@ -880,7 +848,7 @@ class LLM:
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[DictPrompt | TokPrompt]:
+    ) -> Sequence[ProcessorInputs]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
         a format that can be passed to `_add_request`.
@@ -888,8 +856,7 @@ class LLM:
         Refer to [LLM.generate][] for a complete description of the arguments.
 
         Returns:
-            A list of `TokPrompt` objects containing the tokenized prompt
-            after chat template interpolation, and the raw multi-modal inputs.
+            A list of `ProcessorInputs` objects ready to be passed into LLMEngine.
         """
         renderer = self.renderer
         model_config = self.model_config
@@ -914,7 +881,7 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-    ) -> Sequence[TokPrompt]:
+    ) -> Sequence[ProcessorInputs]:
         """
         Convert a list of conversations into prompts so that they can then
         be used as input for other LLM APIs.
@@ -922,8 +889,7 @@ class LLM:
         Refer to [LLM.chat][] for a complete description of the arguments.
 
         Returns:
-            A list of `TokPrompt` objects containing the tokenized prompt
-            after chat template interpolation, and the raw multi-modal inputs.
+            A list of `ProcessorInputs` objects ready to be passed into LLMEngine.
         """
         renderer = self.renderer
 
@@ -1797,7 +1763,7 @@ class LLM:
         | Sequence[SamplingParams | PoolingParams],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
@@ -1808,7 +1774,7 @@ class LLM:
             # TODO: Remove this after deprecating `param.truncate_prompt_tokens`
             # Then, move the code from the `else` block to the top and let
             # `self._preprocess_cmpl` handle prompt normalization
-            engine_prompts: Sequence[DictPrompt | TokPrompt] = [
+            engine_prompts: Sequence[ProcessorInputs] = [
                 engine_prompt
                 for prompt, param in zip(seq_prompts, seq_params)
                 for engine_prompt in self._preprocess_cmpl(
@@ -1883,7 +1849,7 @@ class LLM:
 
     def _validate_and_add_requests(
         self,
-        prompts: Sequence[DictPrompt | TokPrompt],
+        prompts: Sequence[ProcessorInputs],
         params: SamplingParams
         | PoolingParams
         | Sequence[SamplingParams | PoolingParams],
@@ -1930,7 +1896,7 @@ class LLM:
 
     def _add_request(
         self,
-        prompt: PromptType | DictPrompt | TokPrompt,
+        prompt: ProcessorInputs,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -1954,32 +1920,17 @@ class LLM:
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
             )
 
-        renderer = self.renderer
-        tok_params = renderer.default_cmpl_tok_params.with_kwargs(
-            **(tokenization_kwargs or {})
-        )
-
-        tokenization_kwargs = tok_params.get_encode_kwargs()
-        engine_request = self.input_processor.process_inputs(
+        self.llm_engine.add_request(
             request_id,
             prompt,
             params,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
-            supported_tasks=self.supported_tasks,
-        )
-
-        self.llm_engine.add_request(
-            request_id,
-            engine_request,
-            params,
-            lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
-            priority=priority,
             prompt_text=prompt_text,
         )
-        return engine_request.request_id
+
+        return request_id
 
     def _run_engine(
         self,
