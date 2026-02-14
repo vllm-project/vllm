@@ -397,7 +397,7 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
                 base_embedding_weight = weight
                 continue
             if name == (
-                "text_model.embeddings" ".tok_embeddings.additional_embedding.weight"
+                "text_model.embeddings.tok_embeddings.additional_embedding.weight"
             ):
                 additional_embedding_weight = weight
                 continue
