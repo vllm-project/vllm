@@ -67,7 +67,7 @@ class BaseRenderer(ABC, Generic[_T]):
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
-            self._mm_processor = mm_registry.create_processor(
+            self.mm_processor = mm_registry.create_processor(
                 config.model_config,
                 config.observability_config,
                 tokenizer=self.tokenizer,
@@ -92,10 +92,10 @@ class BaseRenderer(ABC, Generic[_T]):
         return self._async_tokenizer
 
     def get_mm_processor(self) -> "BaseMultiModalProcessor":
-        if self._mm_processor is None:
+        if self.mm_processor is None:
             raise ValueError("Multi-modal processor not available for text-only models")
 
-        return self._mm_processor
+        return self.mm_processor
 
     def stat_mm_cache(self) -> MultiModalCacheStats | None:
         mm_cache_stats = self._mm_cache_stats
