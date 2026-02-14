@@ -95,6 +95,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -2454,7 +2455,7 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         shift_computed_tokens: int = 0,
-    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+    ) -> tuple[list[torch.Tensor], torch.Tensor, list[str]]:
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
 
         # Swap to the other buffer to avoid race condition with previous
@@ -2463,6 +2464,7 @@ class GPUModelRunner(
         is_mm_embed_buf = self.is_mm_embed_buffers[self.is_mm_embed_idx]
 
         mm_embeds = list[torch.Tensor]()
+        mm_modalities = list[str]()
         is_mm_embed = is_mm_embed_buf.cpu
         is_mm_embed[:total_num_scheduled_tokens] = False
 
@@ -2472,6 +2474,7 @@ class GPUModelRunner(
 
         for req_id in self.input_batch.req_ids:
             mm_embeds_req: list[torch.Tensor] = []
+            mm_modalities_req: list[str] = []
 
             num_scheduled_tokens = scheduler_output.num_scheduled_tokens[req_id]
             req_state = self.requests[req_id]
@@ -2529,6 +2532,7 @@ class GPUModelRunner(
                         req_start_pos + start_idx : req_start_pos + end_idx
                     ] |= is_embed
                 mm_embeds_req.append(mm_embeds_item)
+                mm_modalities_req.append(mm_feature.modality)
 
             if self.is_multimodal_pruning_enabled and self.uses_mrope:
                 assert req_state.mrope_positions is not None
@@ -2545,6 +2549,7 @@ class GPUModelRunner(
                 req_state.mrope_position_delta = new_delta
 
             mm_embeds.extend(mm_embeds_req)
+            mm_modalities.extend(mm_modalities_req)
             req_start_idx += num_scheduled_tokens
 
         is_mm_embed = is_mm_embed_buf.copy_to_gpu(total_num_scheduled_tokens)
@@ -2557,7 +2562,7 @@ class GPUModelRunner(
             self._calc_xdrope_positions(scheduler_output)
             self.xdrope_positions.copy_to_gpu(total_num_scheduled_tokens)
 
-        return mm_embeds, is_mm_embed
+        return mm_embeds, is_mm_embed, mm_modalities
 
     def get_model(self) -> nn.Module:
         if not hasattr(self, "model"):
@@ -2764,15 +2769,21 @@ class GPUModelRunner(
                 encoder_cache=self.encoder_cache,
             ) as ec_connector_output:
                 self._execute_mm_encoder(scheduler_output)
-                mm_embeds, is_mm_embed = self._gather_mm_embeddings(scheduler_output)
+                mm_embeds, is_mm_embed, mm_modalities = (
+                    self._gather_mm_embeddings(scheduler_output))
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
             # as input to the multimodal model, even when the input is text.
-            inputs_embeds_scheduled = self.model.embed_input_ids(
-                self.input_ids.gpu[:num_scheduled_tokens],
+            embed_kwargs: dict[str, object] = dict(
                 multimodal_embeddings=mm_embeds,
                 is_multimodal=is_mm_embed,
+            )
+            if supports_kw(self.model.embed_input_ids, "modality_types"):
+                embed_kwargs["modality_types"] = mm_modalities
+            inputs_embeds_scheduled = self.model.embed_input_ids(
+                self.input_ids.gpu[:num_scheduled_tokens],
+                **embed_kwargs,
             )
 
             # TODO(woosuk): Avoid the copy. Optimize.
