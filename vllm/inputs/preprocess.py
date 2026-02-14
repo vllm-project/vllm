@@ -16,6 +16,7 @@ from vllm.multimodal.inputs import (
     MultiModalUUIDDict,
 )
 from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.video_sparse import SimilarFrameDetector, is_multimodal_efs_enabled
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs import (
     DecoderDictPrompt,
@@ -190,6 +191,36 @@ class InputPreprocessor:
             mm_processor_kwargs = {}
 
         mm_items = mm_processor.info.parse_mm_data(mm_data)
+
+        # Efficient Frame Selection For Videos.
+        if (
+            self.model_config
+            and hasattr(self.model_config, "multimodal_config")
+            and self.model_config.multimodal_config
+        ):
+            efs_sparse_rate = self.model_config.multimodal_config.video_sparse_rate
+        else:
+            efs_sparse_rate = 0.0
+        efs_sparse_enabled = is_multimodal_efs_enabled(efs_sparse_rate)
+        if (
+            efs_sparse_enabled and "video" in mm_items  # type: ignore[typeddict-item]
+        ):
+            videos = mm_items["video"].data
+            sparse_ratio = 1 - (efs_sparse_rate if efs_sparse_rate is not None else 0.0)
+            detector = SimilarFrameDetector(sparse_ratio=sparse_ratio)
+            videos = detector.process_video_frames(videos)
+            mm_items["video"].data = videos  # type: ignore[typeddict-item]
+
+            if (
+                isinstance(mm_items["video"][0], tuple)
+                and hasattr(mm_items["video"], "metadata")
+                and mm_items["video"].metadata is not None
+            ):
+                for idx, meta_dd in enumerate(mm_items["video"].metadata):
+                    meta_dd["frames_indices"] = mm_items["video"].data[idx][1][
+                        "frames_indices"
+                    ]
+
         mm_input = mm_processor.apply(
             prompt,
             mm_items,
