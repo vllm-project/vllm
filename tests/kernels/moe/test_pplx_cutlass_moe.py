@@ -9,6 +9,7 @@ from tests.kernels.utils import torch_experts
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -147,8 +148,9 @@ def pplx_cutlass_moe(
             hidden_dim=hidden_dim,
             intermediate_size_per_partition=intermediate_dim,
             num_local_experts=num_local_experts,
+            num_logical_experts=num_experts,
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-            activation="silu",
+            activation=MoEActivation.SILU,
             in_dtype=torch.bfloat16,
             device="cuda",
             routing_method=RoutingMethodType.Llama4,

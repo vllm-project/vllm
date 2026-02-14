@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -13,10 +13,10 @@ from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.grok2 import Grok2Tokenizer
 
+from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
-from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
@@ -25,19 +25,20 @@ class Grok2Renderer(BaseRenderer):
     @classmethod
     def from_config(
         cls,
-        config: ModelConfig,
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> "BaseRenderer":
         return cls(config, tokenizer_kwargs)
 
     def __init__(
         self,
-        config: ModelConfig,
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> None:
         super().__init__(config)
 
-        if config.skip_tokenizer_init:
+        model_config = self.model_config
+        if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
             tokenizer = cached_get_tokenizer(
@@ -66,7 +67,7 @@ class Grok2Renderer(BaseRenderer):
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
-            self.config,
+            self.model_config,
             content_format="string",
         )
 
@@ -92,7 +93,7 @@ class Grok2Renderer(BaseRenderer):
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
-            self.config,
+            self.model_config,
             content_format="string",
         )
 

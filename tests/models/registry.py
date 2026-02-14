@@ -275,6 +275,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         "zai-org/GLM-4.7-Flash",
         min_transformers_version="5.0.0",
     ),
+    "GlmMoeDsaForCausalLM": _HfExamplesInfo(
+        "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
+    ),
     "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
@@ -526,6 +529,15 @@ _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
     "HF_ColBERT": _HfExamplesInfo("answerdotai/answerai-colbert-small-v1"),
+    "ColBERTModernBertModel": _HfExamplesInfo(
+        "lightonai/GTE-ModernColBERT-v1",
+        hf_overrides={"architectures": ["ColBERTModernBertModel"]},
+    ),
+    "ColBERTJinaRobertaModel": _HfExamplesInfo(
+        "jinaai/jina-colbert-v2",
+        trust_remote_code=True,
+        hf_overrides={"architectures": ["ColBERTJinaRobertaModel"]},
+    ),
     "BgeM3EmbeddingModel": _HfExamplesInfo("BAAI/bge-m3"),
     "Gemma2Model": _HfExamplesInfo("BAAI/bge-multilingual-gemma2"),
     "Gemma3TextModel": _HfExamplesInfo("google/embeddinggemma-300m"),
@@ -585,6 +597,12 @@ _EMBEDDING_EXAMPLE_MODELS = {
         "TIGER-Lab/VLM2Vec-Full", trust_remote_code=True
     ),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"),
+    "ColQwen3": _HfExamplesInfo(
+        "TomoroAI/tomoro-colqwen3-embed-4b", trust_remote_code=True
+    ),
+    "OpsColQwen3Model": _HfExamplesInfo(
+        "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
+    ),
     "SiglipModel": _HfExamplesInfo("google/siglip-base-patch16-224"),
     "PrithviGeoSpatialMAE": _HfExamplesInfo(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
@@ -710,6 +728,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "baidu/ERNIE-4.5-VL-28B-A3B-PT",
         trust_remote_code=True,
     ),
+    "FunASRForConditionalGeneration": _HfExamplesInfo(
+        "allendou/Fun-ASR-Nano-2512-vllm",
+        is_available_online=False,
+    ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
     ),
@@ -718,7 +740,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Gemma3nForConditionalGeneration": _HfExamplesInfo("google/gemma-3n-E2B-it"),
     "GlmAsrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-ASR-Nano-2512",
-        trust_remote_code=True,
         min_transformers_version="5.0.0",
     ),
     "GraniteVision": _HfExamplesInfo("ibm-granite/granite-vision-3.3-2b"),
@@ -909,6 +930,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
     ),
     "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
+    "Ovis2_6ForCausalLM": _HfExamplesInfo(
+        "AIDC-AI/Ovis2.6-2B", is_available_online=False, trust_remote_code=True
+    ),
+    "Ovis2_6_MoeForCausalLM": _HfExamplesInfo(
+        "AIDC-AI/Ovis2.6-30B-A3B", trust_remote_code=True
+    ),
     "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
         "PaddlePaddle/PaddleOCR-VL",
         trust_remote_code=True,
@@ -967,6 +994,26 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         max_model_len=4096,
         min_transformers_version="4.57",
     ),
+    "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3.5-9B-Instruct",
+        max_model_len=4096,
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3.5-35B-A3B-Instruct",
+        max_model_len=4096,
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-9B-Instruct",
+        speculative_model="Qwen/Qwen3.5-9B-Instruct",
+        min_transformers_version="5.1.0",
+    ),
+    "Qwen3_5MoeMTP": _HfExamplesInfo(
+        "Qwen/Qwen3.5-35B-A3B-Instruct",
+        speculative_model="Qwen/Qwen3.5-35B-A3B-Instruct",
+        min_transformers_version="5.1.0",
+    ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
         max_model_len=4096,
@@ -1005,13 +1052,12 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
-        # disable this temporarily until we support HF format
-        is_available_online=False,
+        tokenizer_mode="mistral",
     ),
     "VoxtralRealtimeGeneration": _HfExamplesInfo(
-        "<place-holder>",
-        # disable this temporarily until we support HF format
-        is_available_online=False,
+        "mistralai/Voxtral-Mini-4B-Realtime-2602",
+        enforce_eager=True,
+        tokenizer_mode="mistral",
     ),
     # [Encoder-decoder]
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(

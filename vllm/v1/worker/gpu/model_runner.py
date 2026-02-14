@@ -274,6 +274,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens=input_batch.num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
             query_start_loc_cpu=torch.from_numpy(input_batch.query_start_loc_np),
+            max_query_len=input_batch.num_scheduled_tokens.max().item(),
             seq_lens=input_batch.seq_lens,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,
@@ -561,6 +562,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc_np = query_start_loc_np[: num_reqs + 1]
         query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        max_query_len = num_scheduled_tokens.max().item()
 
         # Get prefill tokens.
         prepare_prefill_inputs(
@@ -624,6 +626,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_tokens=num_tokens,
             query_start_loc_gpu=query_start_loc,
             query_start_loc_cpu=query_start_loc_cpu,
+            max_query_len=max_query_len,
             seq_lens=self.input_buffers.seq_lens,
             max_seq_len=self.max_model_len,
             block_tables=block_tables,

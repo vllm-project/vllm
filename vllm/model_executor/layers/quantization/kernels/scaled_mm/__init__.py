@@ -39,6 +39,9 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.xpu import (
+    XPUFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -71,6 +74,9 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.CPU: [
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUFP8ScaledMMLinearKernel,
     ],
 }
 
