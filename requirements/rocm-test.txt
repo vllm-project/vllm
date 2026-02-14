@@ -58,7 +58,7 @@ schemathesis==3.39.15
     # OpenAI schema test
 
 # Evaluation and benchmarking
-lm-eval[api]==0.4.9.2
+lm-eval[api]>=0.4.10
 jiwer==4.0.0
 
 # Required for multiprocessed tests that use spawn method, Datasets and Evaluate Test
@@ -93,6 +93,6 @@ timm==1.0.17
 # Required for plugins test
 albumentations==1.4.6
 # Pin transformers version
-transformers==4.57.3
+transformers==5.0.0
 # Pin HF Hub version
-huggingface-hub==0.36.2
+huggingface-hub==1.4.1

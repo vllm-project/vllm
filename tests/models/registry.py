@@ -762,6 +762,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom model code import ChatTemplateLoadKwargs which was removed "
+            "in Transformers v5."
+        },
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
@@ -869,6 +874,13 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "4.0": "openbmb/MiniCPM-V-4",
             "4.5": "openbmb/MiniCPM-V-4_5",
         },
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "MiniCPMVBatchFeature is incompatible with its base class in "
+                "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
+            )
+        },
         trust_remote_code=True,
     ),
     "MiniMaxVL01ForConditionalGeneration": _HfExamplesInfo(
@@ -892,6 +904,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "allenai/Molmo2-8B",
         extras={"olmo": "allenai/Molmo2-O-7B"},
         min_transformers_version="4.51",
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "Molmo2Processor uses deprecated optional_attributes and passes "
+                "arbitrary kwargs to ProcessorMixin.__init__ which is no longer "
+                "supported in Transformers v5."
+            )
+        },
         trust_remote_code=True,
         # required by current PrefixLM implementation
         max_num_batched_tokens=31872,
@@ -905,13 +925,25 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nano_vl_dummy", is_available_online=False, trust_remote_code=True
     ),
     "OpenCUAForConditionalGeneration": _HfExamplesInfo(
-        "xlangai/OpenCUA-7B", trust_remote_code=True
+        "xlangai/OpenCUA-7B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom model code is not compatible with Transformers v5."
+        },
     ),
     "OpenPanguVLForConditionalGeneration": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-VL-7B",
         trust_remote_code=True,
         max_model_len=4096,
         enforce_eager=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": (
+                "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
+                "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
+            )
+        },
     ),
     "Ovis": _HfExamplesInfo(
         "AIDC-AI/Ovis2-1B",
