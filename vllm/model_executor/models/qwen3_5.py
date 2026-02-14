@@ -31,14 +31,6 @@ import torch
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
-from transformers.models.qwen3_5.configuration_qwen3_5 import (
-    Qwen3_5Config,
-    Qwen3_5TextConfig,
-)
-from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
-    Qwen3_5MoeConfig,
-    Qwen3_5MoeTextConfig,
-)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -87,6 +79,14 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.qwen3_5 import (
+    Qwen3_5Config,
+    Qwen3_5TextConfig,
+)
+from vllm.transformers_utils.configs.qwen3_5_moe import (
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeTextConfig,
+)
 
 from .interfaces import (
     HasInnerState,

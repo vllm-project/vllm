@@ -3,12 +3,17 @@
 import asyncio
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any, overload
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, Generic, overload
+
+from typing_extensions import TypeVar
 
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.torch_utils import set_default_torch_num_threads
+from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .embed_utils import safe_load_prompt_embeds
 from .inputs import (
@@ -26,11 +31,16 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
+    from vllm.multimodal.cache import BaseMultiModalProcessorCache
+    from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
 
 
-class BaseRenderer(ABC):
+_T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
+
+
+class BaseRenderer(ABC, Generic[_T]):
     @classmethod
     @abstractmethod
     def from_config(
@@ -40,20 +50,36 @@ class BaseRenderer(ABC):
     ) -> "BaseRenderer":
         raise NotImplementedError
 
-    def __init__(self, config: "VllmConfig") -> None:
+    def __init__(self, config: "VllmConfig", tokenizer: _T | None) -> None:
         super().__init__()
 
+        self.config = config
         self.model_config = config.model_config
+
+        self.tokenizer = tokenizer
 
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
-    @property
-    @abstractmethod
-    def tokenizer(self) -> TokenizerLike | None:
-        raise NotImplementedError
+        self.mm_processor: BaseMultiModalProcessor | None = None
+        self._mm_cache_stats: MultiModalCacheStats | None = None
+        if config.model_config.is_multimodal_model:
+            from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 
-    def get_tokenizer(self) -> TokenizerLike:
+            mm_processor_cache = mm_registry.processor_cache_from_config(config)
+
+            with set_default_torch_num_threads():
+                self.mm_processor = mm_registry.create_processor(
+                    config.model_config,
+                    config.observability_config,
+                    tokenizer=tokenizer,
+                    cache=mm_processor_cache,
+                )
+
+            if mm_processor_cache:
+                self._mm_cache_stats = MultiModalCacheStats()
+
+    def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
         if tokenizer is None:
             raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
@@ -65,6 +91,49 @@ class BaseRenderer(ABC):
             self._async_tokenizer = AsyncMicrobatchTokenizer(self.get_tokenizer())
 
         return self._async_tokenizer
+
+    def get_mm_processor(self) -> "BaseMultiModalProcessor":
+        if self.mm_processor is None:
+            raise ValueError("Multi-modal processor not available for text-only models")
+
+        return self.mm_processor
+
+    @property
+    def mm_processor_cache(self) -> "BaseMultiModalProcessorCache | None":
+        if self.mm_processor is None:
+            return None
+
+        return self.mm_processor.cache
+
+    def stat_mm_cache(self) -> MultiModalCacheStats | None:
+        mm_cache_stats = self._mm_cache_stats
+        if mm_cache_stats is None:
+            return None
+
+        self._mm_cache_stats = MultiModalCacheStats()
+
+        return mm_cache_stats
+
+    def update_mm_cache_stats(self) -> None:
+        mm_processor_cache = self.mm_processor_cache
+        mm_cache_stats = self._mm_cache_stats
+
+        if mm_processor_cache and mm_cache_stats:
+            delta = mm_processor_cache.make_stats(delta=True)
+            mm_cache_stats.record(delta.total, delta.hits)
+
+    def clear_mm_cache(self) -> None:
+        mm_processor_cache = self.mm_processor_cache
+        if mm_processor_cache is not None:
+            mm_processor_cache.clear_cache()
+
+        if self._mm_cache_stats is not None:
+            self._mm_cache_stats.reset = True
+
+    def shutdown(self) -> None:
+        mm_processor_cache = self.mm_processor_cache
+        if mm_processor_cache is not None:
+            mm_processor_cache.close()
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
@@ -83,6 +152,36 @@ class BaseRenderer(ABC):
             return None
 
         return self.tokenizer.eos_token_id
+
+    @cached_property
+    def default_cmpl_tok_params(self) -> TokenizeParams:
+        mm_processor = self.mm_processor
+        if mm_processor is not None:
+            return mm_processor.info.default_tok_params
+
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=True,
+        )
+
+    @cached_property
+    def default_chat_tok_params(self) -> TokenizeParams:
+        mm_processor = self.mm_processor
+        if mm_processor is not None:
+            return mm_processor.info.default_tok_params
+
+        model_config = self.model_config
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=False,
+        )
 
     # Step 1: Convert raw inputs to prompts
     def render_prompt(
@@ -317,18 +416,14 @@ class BaseRenderer(ABC):
     def render_cmpl(
         self,
         prompts: Sequence[DictPrompt | bytes],
-        tok_params: TokenizeParams,
+        tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        if tok_params is None:
+            tok_params = self.default_cmpl_tok_params
+
         dict_prompts = self.render_prompts(prompts)
-
-        # NOTE: Some MM models have non-default `add_special_tokens`
-        # so we handle tokenization in multi-modal processor
-        if self.model_config.is_multimodal_model:
-            self._apply_prompt_extras(dict_prompts, prompt_extras)
-            return dict_prompts
-
         tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
@@ -339,14 +434,14 @@ class BaseRenderer(ABC):
     async def render_cmpl_async(
         self,
         prompts: Sequence[DictPrompt | bytes],
-        tok_params: TokenizeParams,
+        tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
-        dict_prompts = await self.render_prompts_async(prompts)
+        if tok_params is None:
+            tok_params = self.default_cmpl_tok_params
 
-        # NOTE: MM data cannot be passed to online Completions API
-        # so we don't have the special case that is in the offline version
+        dict_prompts = await self.render_prompts_async(prompts)
         tok_prompts = await self.tokenize_prompts_async(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
@@ -358,10 +453,13 @@ class BaseRenderer(ABC):
         self,
         conversations: Sequence[list["ChatCompletionMessageParam"]],
         chat_params: ChatParams,
-        tok_params: TokenizeParams,
+        tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        if tok_params is None:
+            tok_params = self.default_chat_tok_params
+
         rendered = [
             self.render_messages(conversation, chat_params)
             for conversation in conversations
@@ -384,10 +482,13 @@ class BaseRenderer(ABC):
         self,
         conversations: Sequence[list["ChatCompletionMessageParam"]],
         chat_params: ChatParams,
-        tok_params: TokenizeParams,
+        tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        if tok_params is None:
+            tok_params = self.default_chat_tok_params
+
         rendered = [
             self.render_messages_async(conversation, chat_params)
             for conversation in conversations
