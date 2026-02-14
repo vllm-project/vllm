@@ -31,6 +31,7 @@ from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import (
     is_pin_memory_available,
     is_uva_available,
@@ -613,12 +614,18 @@ class PPMissingLayer(torch.nn.Identity):
 
 _CPU_OFFLOAD_BYTES = 0
 _CPU_OFFLOAD_MAX_BYTES = 0
+_CPU_OFFLOAD_PARAMS = set()
 
 
 def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
     _CPU_OFFLOAD_BYTES = 0
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
+
+
+def set_cpu_offload_params(params: set[str]) -> None:
+    global _CPU_OFFLOAD_PARAMS
+    _CPU_OFFLOAD_PARAMS = params
 
 
 def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
@@ -642,11 +649,22 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
     offloaded_parameters = False
-    for p in module.parameters():
+    for name, p in module.named_parameters():
         if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
             # we use per-parameter offloading
             # one module might have some parameters offloaded and some not
             break
+
+        if _CPU_OFFLOAD_PARAMS:
+            # Check if parameter belongs to the offloading set
+            # Add dots here to ensure we match full segments only
+            # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight" but not
+            # "mlp.experts.w2_weight_scale"
+            should_offload = any(
+                f".{param}." in f".{name}." for param in _CPU_OFFLOAD_PARAMS
+            )
+            if not should_offload:
+                continue
 
         cpu_data = p.data.to(device="cpu")
         if pin_memory:
@@ -708,6 +726,10 @@ def make_layers(
         ]
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
     )
+    if _CPU_OFFLOAD_MAX_BYTES > 0:
+        logger.info(
+            "Total CPU offloaded parameters: %s GBs", format_gib(_CPU_OFFLOAD_BYTES)
+        )
     return start_layer, end_layer, modules
 
 
