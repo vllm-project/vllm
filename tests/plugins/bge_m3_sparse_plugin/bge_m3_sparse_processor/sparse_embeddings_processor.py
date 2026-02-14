@@ -43,8 +43,10 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
             params = PoolingParams()
         # refer to PoolingCompletionRequest.to_pooling_params
         if request is not None:
-            params.task = request.task
-            params.truncate_prompt_tokens = request.truncate_prompt_tokens
+            if params.task is None:
+                params.task = request.task
+            if params.truncate_prompt_tokens is None:
+                params.truncate_prompt_tokens = request.truncate_prompt_tokens
         return params
 
     def parse_request(self, request_data: Any) -> IOProcessorInput:
