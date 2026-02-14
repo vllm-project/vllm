@@ -902,64 +902,40 @@ class KimiAudioForConditionalGeneration(
             # Ensure mixed embeddings match expected sequence length.
             # to avoid rotary embedding mismatches with positions tensor
             if inputs_embeds is not None:
-                if mixed_embeds.dim() == 3 and inputs_embeds.dim() == 2:
+                # Assert expected dimensions - mixed_embeds should be 2D for vLLM
+                assert mixed_embeds.dim() in (2, 3), (
+                    f"Expected mixed_embeds dim=2 or 3, got {mixed_embeds.dim()}"
+                )
+
+                # Reshape 3D to 2D if needed (flatten batch and sequence dims)
+                if mixed_embeds.dim() == 3:
                     mixed_embeds = mixed_embeds.reshape(-1, mixed_embeds.shape[-1])
 
-                if mixed_embeds.dim() == 2:
-                    expected_seq_len = inputs_embeds.shape[0]
-                    actual_seq_len = mixed_embeds.shape[0]
+                expected_seq_len = inputs_embeds.shape[0]
+                actual_seq_len = mixed_embeds.shape[0]
 
-                    if expected_seq_len != actual_seq_len:
-                        # Pad or truncate mixed embeddings to match expected length.
-                        if actual_seq_len > expected_seq_len:
-                            # Truncate to expected length
-                            mixed_embeds = mixed_embeds[:expected_seq_len]
-                        else:
-                            # Pad to expected length using the last embedding
-                            if actual_seq_len > 0:
-                                padding = mixed_embeds[-1:].expand(
-                                    expected_seq_len - actual_seq_len, -1
-                                )
-                                mixed_embeds = torch.cat([mixed_embeds, padding], dim=0)
-                            else:
-                                # If no embeddings exist, create zero embeddings
-                                device = mixed_embeds.device
-                                dtype = mixed_embeds.dtype
-                                hidden_size = mixed_embeds.shape[-1]
-                                mixed_embeds = torch.zeros(
-                                    expected_seq_len,
-                                    hidden_size,
-                                    device=device,
-                                    dtype=dtype,
-                                )
-                elif mixed_embeds.dim() == 3 and inputs_embeds.dim() == 3:
-                    expected_seq_len = inputs_embeds.shape[1]
-                    actual_seq_len = mixed_embeds.shape[1]
-
-                    if expected_seq_len != actual_seq_len:
-                        if actual_seq_len > expected_seq_len:
-                            mixed_embeds = mixed_embeds[:, :expected_seq_len, :]
-                        else:
-                            if actual_seq_len > 0:
-                                padding = mixed_embeds[:, -1:, :].expand(
-                                    -1,
-                                    expected_seq_len - actual_seq_len,
-                                    -1,
-                                )
-                                mixed_embeds = torch.cat([mixed_embeds, padding], dim=1)
-                            else:
-                                device = mixed_embeds.device
-                                dtype = mixed_embeds.dtype
-                                hidden_size = mixed_embeds.shape[-1]
-                                mixed_embeds = torch.zeros(
-                                    (
-                                        mixed_embeds.shape[0],
-                                        expected_seq_len,
-                                        hidden_size,
-                                    ),
-                                    device=device,
-                                    dtype=dtype,
-                                )
+                if expected_seq_len != actual_seq_len:
+                    # Pad or truncate mixed embeddings to match expected length.
+                    if actual_seq_len > expected_seq_len:
+                        # Truncate to expected length
+                        mixed_embeds = mixed_embeds[:expected_seq_len]
+                    elif actual_seq_len > 0:
+                        # Pad to expected length using the last embedding
+                        padding = mixed_embeds[-1:].expand(
+                            expected_seq_len - actual_seq_len, -1
+                        )
+                        mixed_embeds = torch.cat([mixed_embeds, padding], dim=0)
+                    else:
+                        # If no embeddings exist, create zero embeddings
+                        device = mixed_embeds.device
+                        dtype = mixed_embeds.dtype
+                        hidden_size = mixed_embeds.shape[-1]
+                        mixed_embeds = torch.zeros(
+                            expected_seq_len,
+                            hidden_size,
+                            device=device,
+                            dtype=dtype,
+                        )
 
             inputs_embeds = mixed_embeds
 
