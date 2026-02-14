@@ -434,6 +434,7 @@ class EngineArgs:
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
+    cpu_offload_params: set[str] = get_field(CacheConfig, "cpu_offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
@@ -942,6 +943,9 @@ class EngineArgs:
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
         cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
+        cache_group.add_argument(
+            "--cpu-offload-params", **cache_kwargs["cpu_offload_params"]
+        )
         cache_group.add_argument(
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
@@ -1453,6 +1457,7 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
+            cpu_offload_params=self.cpu_offload_params,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
