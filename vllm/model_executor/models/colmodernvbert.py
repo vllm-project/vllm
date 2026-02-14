@@ -44,7 +44,6 @@ from .modernbert import ModernBertEmbeddings, ModernBertLayer
 from .siglip import SiglipVisionModel
 from .utils import maybe_prefix
 
-
 # ---------------------------------------------------------------------------
 # Connector: pixel shuffle + simple linear projection
 # ---------------------------------------------------------------------------
@@ -62,7 +61,7 @@ class ColModernVBertConnector(nn.Module):
         super().__init__()
         self.pixel_shuffle_factor = config.pixel_shuffle_factor
         vision_hidden_size = config.vision_config.hidden_size
-        input_size = vision_hidden_size * (self.pixel_shuffle_factor ** 2)
+        input_size = vision_hidden_size * (self.pixel_shuffle_factor**2)
         output_size = config.hidden_size
         self.proj = nn.Linear(input_size, output_size, bias=False)
 
@@ -76,16 +75,18 @@ class ColModernVBertConnector(nn.Module):
         features = features.view(batch_size, height, width, hidden_size)
 
         # Reshape to (B, H/f, f, W/f, f, C)
-        features = features.view(batch_size, height // factor, factor,
-                                 width // factor, factor, hidden_size)
+        features = features.view(
+            batch_size, height // factor, factor, width // factor, factor, hidden_size
+        )
 
         # Permute to (B, H/f, W/f, f, f, C)
         features = features.permute(0, 1, 3, 2, 4, 5)
 
         # Reshape to (B, H/f, W/f, C * f^2)
         new_hidden_size = hidden_size * (factor**2)
-        features = features.reshape(batch_size, height // factor,
-                                    width // factor, new_hidden_size)
+        features = features.reshape(
+            batch_size, height // factor, width // factor, new_hidden_size
+        )
 
         return features
 
@@ -136,9 +137,7 @@ class ColModernVBertDummyInputsBuilder(
         mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        target_width, target_height = (
-            self.info.get_image_size_with_most_features()
-        )
+        target_width, target_height = self.info.get_image_size_with_most_features()
         image_overrides = mm_options.get("image") if mm_options else None
         return {
             "image": self._get_dummy_images(
@@ -156,6 +155,7 @@ class ColModernVBertMultiModalProcessor(
     @cached_property
     def _image_processor(self):
         from transformers import AutoImageProcessor
+
         return AutoImageProcessor.from_pretrained(
             self.info.ctx.model_config.model,
         )
@@ -169,7 +169,9 @@ class ColModernVBertMultiModalProcessor(
     ) -> BatchFeature:
         tokenizer = self.info.get_tokenizer()
         text_encoding = tokenizer(
-            prompt, return_tensors="pt", **tok_kwargs,
+            prompt,
+            return_tensors="pt",
+            **tok_kwargs,
         )
         result = BatchFeature(data=dict(text_encoding))
 
@@ -274,14 +276,16 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
         # ``vllm_config.model_config.hf_config`` which would be
         # ``ColModernVBertConfig``, not ``ModernBertConfig``.
         self.text_embeddings = ModernBertEmbeddings(text_config)
-        self.text_layers = nn.ModuleList([
-            ModernBertLayer(
-                config=text_config,
-                layer_id=i,
-                prefix=f"{prefix}.text_layers.{i}",
-            )
-            for i in range(text_config.num_hidden_layers)
-        ])
+        self.text_layers = nn.ModuleList(
+            [
+                ModernBertLayer(
+                    config=text_config,
+                    layer_id=i,
+                    prefix=f"{prefix}.text_layers.{i}",
+                )
+                for i in range(text_config.num_hidden_layers)
+            ]
+        )
         self.text_final_norm = nn.LayerNorm(
             text_config.hidden_size,
             eps=text_config.norm_eps,
@@ -307,7 +311,8 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
     # ---- multimodal ---------------------------------------------------------
 
     def _get_image_features(
-        self, pixel_values: torch.Tensor,
+        self,
+        pixel_values: torch.Tensor,
     ) -> torch.Tensor:
         # Idefics3ImageProcessor may return (batch, tiles, C, H, W);
         # flatten to (batch*tiles, C, H, W) for SiglipVisionModel.
@@ -336,8 +341,7 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        hidden_states = self.text_embeddings(input_ids,
-                                             inputs_embeds=inputs_embeds)
+        hidden_states = self.text_embeddings(input_ids, inputs_embeds=inputs_embeds)
 
         for layer in self.text_layers:
             hidden_states = layer(hidden_states, positions)
@@ -347,7 +351,8 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
     # ---- weight loading -----------------------------------------------------
 
     def load_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]],
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
         # Collect all weights so we can handle DecoupledEmbedding
         # (base + additional embedding weights must be concatenated).
@@ -363,7 +368,7 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
         for name, weight in weights_list:
             # Strip checkpoint "model." prefix
             if name.startswith("model."):
-                name = name[len("model."):]
+                name = name[len("model.") :]
 
             # --- Vision model ---
             if name.startswith("vision_model."):
@@ -373,26 +378,26 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
             # --- Connector ---
             if name.startswith("connector."):
                 mapped = name.replace(
-                    "modality_projection.proj", "proj",
+                    "modality_projection.proj",
+                    "proj",
                 )
                 if mapped in params_dict:
                     param = params_dict[mapped]
                     loader = getattr(
-                        param, "weight_loader", default_weight_loader,
+                        param,
+                        "weight_loader",
+                        default_weight_loader,
                     )
                     loader(param, weight)
                     loaded_params.add(mapped)
                 continue
 
             # --- DecoupledEmbedding (buffer for concatenation) ---
-            if name == (
-                "text_model.embeddings.tok_embeddings.weight"
-            ):
+            if name == ("text_model.embeddings.tok_embeddings.weight"):
                 base_embedding_weight = weight
                 continue
             if name == (
-                "text_model.embeddings"
-                ".tok_embeddings.additional_embedding.weight"
+                "text_model.embeddings.tok_embeddings.additional_embedding.weight"
             ):
                 additional_embedding_weight = weight
                 continue
@@ -402,7 +407,9 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
                 if name in params_dict:
                     param = params_dict[name]
                     loader = getattr(
-                        param, "weight_loader", default_weight_loader,
+                        param,
+                        "weight_loader",
+                        default_weight_loader,
                     )
                     loader(param, weight)
                     loaded_params.add(name)
@@ -410,13 +417,13 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
 
             # --- Text model (remap prefixes) ---
             if name.startswith("text_model."):
-                suffix = name[len("text_model."):]
+                suffix = name[len("text_model.") :]
                 if suffix.startswith("layers."):
-                    mapped = "text_layers." + suffix[len("layers."):]
+                    mapped = "text_layers." + suffix[len("layers.") :]
                 elif suffix.startswith("embeddings."):
-                    mapped = "text_embeddings." + suffix[len("embeddings."):]
+                    mapped = "text_embeddings." + suffix[len("embeddings.") :]
                 elif suffix.startswith("final_norm."):
-                    mapped = "text_final_norm." + suffix[len("final_norm."):]
+                    mapped = "text_final_norm." + suffix[len("final_norm.") :]
                 else:
                     mapped = suffix
 
@@ -425,7 +432,9 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
                 if mapped in params_dict:
                     param = params_dict[mapped]
                     loader = getattr(
-                        param, "weight_loader", default_weight_loader,
+                        param,
+                        "weight_loader",
+                        default_weight_loader,
                     )
                     loader(param, weight)
                     loaded_params.add(mapped)
@@ -443,16 +452,16 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
             if param_name in params_dict:
                 param = params_dict[param_name]
                 loader = getattr(
-                    param, "weight_loader", default_weight_loader,
+                    param,
+                    "weight_loader",
+                    default_weight_loader,
                 )
                 loader(param, combined)
                 loaded_params.add(param_name)
 
         # --- Load vision weights via SiglipVisionModel ---
         vision_loaded = self.vision_model.load_weights(vision_weights)
-        loaded_params.update(
-            {"vision_model." + n for n in vision_loaded}
-        )
+        loaded_params.update({"vision_model." + n for n in vision_loaded})
 
         # --- Mark pooler projection weights as loaded ---
         # The pooler wraps ``custom_text_proj`` as its head projector.
