@@ -33,9 +33,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.jsontree import json_iter_leaves
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
-from vllm.v1.metrics.stats import MultiModalCacheStats
 
 logger = init_logger(__name__)
 
@@ -59,9 +59,7 @@ class InputProcessor:
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
-        self.renderer = renderer or renderer_from_config(model_config)
-        self.mm_registry = mm_registry
-        self.mm_processor_cache = mm_registry.processor_cache_from_config(vllm_config)
+        self.renderer = renderer or renderer_from_config(vllm_config)
 
         self.supports_mm_inputs = mm_registry.supports_multimodal_inputs(model_config)
         self.mm_encoder_cache_size = 0
@@ -75,11 +73,9 @@ class InputProcessor:
             mm_budget.reset_cache()  # Not used anymore
 
         self.input_preprocessor = InputPreprocessor(
-            model_config,
-            self.observability_config,
+            vllm_config,
             renderer=renderer,
             mm_registry=mm_registry,
-            mm_processor_cache=self.mm_processor_cache,
         )
 
     @property
@@ -137,7 +133,7 @@ class InputProcessor:
             )
 
     def _parse_mm_items(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
-        mm_processor = self.input_preprocessor._get_mm_processor()
+        mm_processor = self.renderer.get_mm_processor()
         return mm_processor.info.parse_mm_data(mm_data)
 
     def _validate_singleton_mm_uuids(self, prompt: SingletonPrompt) -> None:
@@ -376,8 +372,6 @@ class InputProcessor:
             processed_inputs=processed_inputs,
         )
 
-        eos_token_id = self.input_preprocessor.get_eos_token_id()
-
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
 
@@ -403,7 +397,7 @@ class InputProcessor:
 
             sampling_params.update_from_generation_config(
                 self.generation_config_fields,
-                None if self.tokenizer is None else self.tokenizer.eos_token_id,
+                self.renderer.get_eos_token_id(),
             )
             if self.tokenizer is not None:
                 sampling_params.update_from_tokenizer(self.tokenizer)
@@ -417,6 +411,15 @@ class InputProcessor:
             decoder_mm_inputs = decoder_inputs["mm_kwargs"]
             decoder_mm_positions = decoder_inputs["mm_placeholders"]
             decoder_mm_hashes = decoder_inputs["mm_hashes"]
+
+            if not all(
+                isinstance(leaf, str) for leaf in json_iter_leaves(decoder_mm_hashes)
+            ):
+                raise ValueError(
+                    f"mm_hashes must contain only strings, got: {decoder_mm_hashes}. "
+                    "This is likely due to an incorrect custom implementation of "
+                    "MultiModalProcessor.apply method."
+                )
 
             # Merge and flatten multimodal placeholders, hashes and inputs
             # from dictionaries to lists, and sort them by each item's position
@@ -446,7 +449,6 @@ class InputProcessor:
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,
-            eos_token_id=eos_token_id,
             arrival_time=arrival_time,
             lora_request=lora_request,
             cache_salt=decoder_inputs.get("cache_salt"),
@@ -566,13 +568,3 @@ class InputProcessor:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")
 
         self._validate_model_input(decoder_inputs, prompt_type="decoder")
-
-    def stat_mm_cache(self) -> MultiModalCacheStats | None:
-        return self.input_preprocessor.stat_mm_cache()
-
-    def clear_mm_cache(self) -> None:
-        self.input_preprocessor.clear_mm_cache()
-
-    def close(self) -> None:
-        if self.mm_processor_cache is not None:
-            self.mm_processor_cache.close()

@@ -357,6 +357,12 @@ class ModelConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
+
+        # NOTE: For some models (e.g, Qwen3-VL), whether the MM code path is enabled
+        # affects the computation graph of the language model, therefore we add it
+        # here early.
+        if self.multimodal_config:
+            factors["language_model_only"] = self.multimodal_config.language_model_only
         return hash_factors(factors)
 
     def _update_nested(
