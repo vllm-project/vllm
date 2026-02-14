@@ -46,7 +46,7 @@ class FaultToleranceConfig:
     The timeout for gloo communication.
     """
 
-    worker_cmd_addr: str = None
+    worker_cmd_addr: str | None = None
     """
     ZMQ address used by EngineCoreSentinel to dispatch instructions to 
     WorkerSentinel instances. This address is assigned dynamically during 

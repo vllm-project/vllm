@@ -6,7 +6,7 @@ from abc import abstractmethod
 import msgspec.msgpack
 import zmq
 
-from vllm.config import FaultToleranceConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket, recv_router_dealer_message
 from vllm.v1.engine import FaultToleranceRequest, FaultToleranceResult
@@ -34,17 +34,17 @@ class BaseSentinel:
 
     def __init__(
         self,
+        vllm_config: VllmConfig,
         upstream_cmd_addr: str | None,
         downstream_cmd_addr: str | None,
         sentinel_identity: bytes | None,
         sentinel_tag: str | None,
-        fault_tolerance_config: FaultToleranceConfig,
     ):
         self.sentinel_dead = False
         self.ctx = zmq.Context()
         self.sentinel_tag = sentinel_tag
         self.logger = self._make_logger()
-        self.ft_config = fault_tolerance_config
+        self.ft_config = vllm_config.fault_tolerance_config
         if upstream_cmd_addr is not None:
             assert sentinel_identity is not None
             self.upstream_cmd_socket = make_zmq_socket(
@@ -87,8 +87,7 @@ class BaseSentinel:
 
         This background thread typically runs persistently to ensure real-time
         detection of errors and timely reception of fault tolerance instructions
-        from upstream sentinels
-        .
+        from upstream sentinels.
         """
         raise NotImplementedError
 

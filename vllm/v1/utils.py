@@ -213,6 +213,10 @@ class APIServerProcessManager:
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
             if engine_fault_socket_addr is not None:
+                assert client_sentinel_cmd_addr is not None
+                assert engine_core_sentinel_cmd_addr is not None
+                assert engine_core_sentinel_identities is not None
+                assert fault_state_pub_socket_addr is not None
                 client_config["engine_fault_socket_addr"] = engine_fault_socket_addr
                 client_config["client_sentinel_cmd_addr"] = client_sentinel_cmd_addr
                 client_config["engine_core_sentinel_cmd_addr"] = (
@@ -278,6 +282,7 @@ def wait_for_completion_or_failure(
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
         actor_run_refs = []
+        assert engine_manager is not None
         if engine_manager.vllm_config.fault_tolerance_config.enable_fault_tolerance:
             # Start a thread to monitor engine liveness.
             # Do not exit when engine is down.

@@ -347,8 +347,7 @@ def recv_router_dealer_message(
         (success, identity, message)
         - identity is only set for ROUTER sockets
         - success=False on timeout or error
-        - message is either a utf-8 decoded str (default) or raw bytes when
-          return_bytes=True
+        - message: utf-8 decoded str (default) or raw bytes if return_bytes=True
     """
     sock_type = socket.getsockopt(zmq.TYPE)
 
