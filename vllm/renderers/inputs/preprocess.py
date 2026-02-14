@@ -116,9 +116,7 @@ that has been standardized into a dictionary.
 """
 
 
-def parse_dec_only_prompt(
-    prompt: PromptType | ProcessorInputs,
-) -> DecoderOnlyDictPrompt:
+def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
     """
     Parse a prompt for a decoder-only model and normalize it to a dictionary.
     """
@@ -147,7 +145,7 @@ def parse_dec_only_prompt(
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_enc_prompt(prompt: PromptType | ProcessorInputs) -> EncoderDictPrompt:
+def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -169,7 +167,7 @@ def _parse_enc_prompt(prompt: PromptType | ProcessorInputs) -> EncoderDictPrompt
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_dec_prompt(prompt: PromptType | ProcessorInputs) -> DecoderDictPrompt:
+def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -205,8 +203,8 @@ def parse_enc_dec_prompt(
     Parse a prompt for an encoder-decoder model and normalize it to a dictionary.
     """
     if isinstance(prompt, dict) and "encoder_prompt" in prompt:
-        enc_prompt = prompt["encoder_prompt"]
-        dec_prompt = prompt["decoder_prompt"]
+        enc_prompt = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
+        dec_prompt = prompt["decoder_prompt"]  # type: ignore[typeddict-item]
     else:
         enc_prompt = prompt
         dec_prompt = None
