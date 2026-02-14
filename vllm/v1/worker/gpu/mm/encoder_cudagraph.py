@@ -156,26 +156,22 @@ class EncoderCudaGraphManager:
     ) -> list[list[int]]:
         """Generate dummy grid configuration for CUDA graph capture.
 
-        This creates an arbitrary example that produces token_budget tokens.
+        This creates an arbitrary example that produces tokens matching the given budget.
         NOT used for runtime batching decisions - only for generating dummy inputs.
 
-        Uses square grids for simplicity: [1, H, H] where H accounts for spatial merging.
+        Uses rectangular grids [1, merge, per_image_output * merge] for exact budget match.
         """
-        # token_budget refers to output tokens after patch merger
-        # Need to account for spatial downsampling if model has a merger
         spatial_merge_size = self.vision_model.spatial_merge_size
+        per_image_output = token_budget // max_batch_size
 
-        # Target output tokens per image
-        target_output_tokens_per_image = token_budget // max_batch_size
-
-        # Input patches needed: output_tokens * (spatial_merge_size^2)
-        target_input_patches_per_image = target_output_tokens_per_image * (spatial_merge_size ** 2)
-
-        # Use square grids: H = W = sqrt(input_patches_per_image)
-        H = int(math.sqrt(target_input_patches_per_image))
-
-        # Create uniform grid config [T, H, W] for all images
-        grid_config = [[1, H, H] for _ in range(max_batch_size)]
+        # Synthetic rectangular grid: [1, merge, per_image_output * merge]
+        # This produces exactly per_image_output tokens per image:
+        #   output_tokens = T * (H/merge) * (W/merge)
+        #                 = 1 * (merge/merge) * (per_image_output*merge/merge)
+        #                 = per_image_output
+        # Total output = max_batch_size * per_image_output = token_budget
+        grid_config = [[1, spatial_merge_size, per_image_output * spatial_merge_size]
+                       for _ in range(max_batch_size)]
 
         return grid_config
 
