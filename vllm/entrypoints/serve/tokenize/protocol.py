@@ -156,6 +156,9 @@ class TokenizeResponse(OpenAIBaseModel):
 
 class DetokenizeRequest(OpenAIBaseModel):
     model: str | None = None
+    # TODO: Factor `torch.iinfo` out. `torch.iinfo` pulls torch into a
+    # Pydantic protocol file that currently has no torch dependency.
+    # See: https://github.com/vllm-project/vllm/pull/34468#discussion_r2801173630
     tokens: list[Annotated[int, Field(ge=0, le=2**63 - 1)]]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
