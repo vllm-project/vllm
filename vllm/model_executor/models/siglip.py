@@ -112,9 +112,6 @@ class SiglipProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object):
         return self.ctx.get_hf_processor(SiglipProcessor, **kwargs)
 
-    def get_default_tok_params(self) -> TokenizeParams:
-        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
-
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
