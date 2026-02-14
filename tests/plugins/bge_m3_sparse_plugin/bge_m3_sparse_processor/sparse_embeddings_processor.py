@@ -62,7 +62,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
             self.offline_requests.append(prompt)
         if self.renderer is None and "renderer" in kwargs:
             self.renderer = kwargs["renderer"]
-        return prompt
+        return prompt.input
 
     def _get_sparse_embedding_request(self, request_id: str | None = None):
         if request_id:

@@ -8,6 +8,7 @@ from vllm.entrypoints.pooling.base.protocol import CompletionRequestMixin
 
 
 class SparseEmbeddingCompletionRequestMixin(CompletionRequestMixin):
+    input: list[int] | list[list[int]] | str | list[str]
     return_token_id_texts_map: bool | None = Field(
         default=None,
         description="Whether to return dict shows the mapping of token_id to text."
