@@ -195,7 +195,7 @@ __global__ void act_and_mul_kernel(
   }
 }
 
-  template <typename T>
+template <typename T>
 __device__ __forceinline__ T silu_kernel(const T& x) {
   const float xf = static_cast<float>(x);
   // x * sigmoid(x)
