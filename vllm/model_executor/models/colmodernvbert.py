@@ -66,30 +66,28 @@ class ColModernVBertConnector(nn.Module):
         self.proj = nn.Linear(input_size, output_size, bias=False)
 
     def pixel_shuffle(self, features: torch.Tensor) -> torch.Tensor:
-        """Spatial rearrangement that reduces seq length by factor^2.
-
-        Same algorithm as ``AyaVisionMultiModalProjector.pixel_shuffle``.
-        """
-        batch_size, seq_length, _ = features.shape
+        """Spatial rearrangement that reduces seq length by factor^2."""
+        batch_size, seq_length, hidden_size = features.shape
         height = width = int(seq_length**0.5)
         factor = self.pixel_shuffle_factor
 
-        features = features.reshape(batch_size, width, height, -1)
-        channels = features.shape[-1]
-        features = features.reshape(
-            batch_size,
-            width,
-            height // factor,
-            channels * factor,
+        # Reshape to (B, H, W, C)
+        features = features.view(batch_size, height, width, hidden_size)
+
+        # Reshape to (B, H/f, f, W/f, f, C)
+        features = features.view(
+            batch_size, height // factor, factor, width // factor, factor, hidden_size
         )
-        features = features.permute(0, 2, 1, 3)
+
+        # Permute to (B, H/f, W/f, f, f, C)
+        features = features.permute(0, 1, 3, 2, 4, 5)
+
+        # Reshape to (B, H/f, W/f, C * f^2)
+        new_hidden_size = hidden_size * (factor**2)
         features = features.reshape(
-            batch_size,
-            height // factor,
-            width // factor,
-            -1,
+            batch_size, height // factor, width // factor, new_hidden_size
         )
-        features = features.permute(0, 2, 1, 3)
+
         return features
 
     def forward(self, features: torch.Tensor) -> torch.Tensor:
@@ -343,10 +341,7 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            hidden_states = self.text_embeddings.norm(inputs_embeds)
-        else:
-            hidden_states = self.text_embeddings(input_ids)
+        hidden_states = self.text_embeddings(input_ids, inputs_embeds=inputs_embeds)
 
         for layer in self.text_layers:
             hidden_states = layer(hidden_states, positions)
