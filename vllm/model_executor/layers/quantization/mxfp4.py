@@ -906,9 +906,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             ):
                 # B200 code-path
                 kwargs = {
-                    "gemm1_alpha": layer.gemm1_alpha,
-                    "gemm1_beta": layer.gemm1_beta,
-                    "gemm1_clamp_limit": layer.gemm1_clamp_limit,
                     # TODO(bnell): part of quant_config
                     "max_capture_size": self.max_capture_size,
                 }
