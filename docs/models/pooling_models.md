@@ -374,6 +374,77 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 
 An example can be found here: [examples/pooling/score/colbert_rerank_online.py](../../examples/pooling/score/colbert_rerank_online.py)
 
+### ColQwen3 Multi-Modal Late Interaction Models
+
+ColQwen3 is based on [ColPali](https://arxiv.org/abs/2407.01449), which extends ColBERT's late interaction approach to **multi-modal** inputs. While ColBERT operates on text-only token embeddings, ColPali/ColQwen3 can embed both **text and images** (e.g. PDF pages, screenshots, diagrams) into per-token L2-normalized vectors and compute relevance via MaxSim scoring. ColQwen3 specifically uses Qwen3-VL as its vision-language backbone.
+
+| Architecture | Backbone | Example HF Models |
+|---|---|---|
+| `ColQwen3` | Qwen3-VL | `TomoroAI/tomoro-colqwen3-embed-4b`, `TomoroAI/tomoro-colqwen3-embed-8b` |
+| `OpsColQwen3Model` | Qwen3-VL | `OpenSearch-AI/Ops-Colqwen3-4B`, `OpenSearch-AI/Ops-Colqwen3-8B` |
+
+Start the server:
+
+```shell
+vllm serve TomoroAI/tomoro-colqwen3-embed-4b --max-model-len 4096
+```
+
+Then you can use the rerank endpoint:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
+    "query": "What is machine learning?",
+    "documents": [
+        "Machine learning is a subset of artificial intelligence.",
+        "Python is a programming language.",
+        "Deep learning uses neural networks."
+    ]
+}'
+```
+
+Or the score endpoint:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
+    "text_1": "What is the capital of France?",
+    "text_2": ["The capital of France is Paris.", "Python is a programming language."]
+}'
+```
+
+You can also get the raw token embeddings using the pooling endpoint with `token_embed` task:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
+    "input": "What is machine learning?",
+    "task": "token_embed"
+}'
+```
+
+For **image inputs**, use the chat-style `messages` field so that the vLLM multimodal processor handles them correctly:
+
+```shell
+curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
+    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
+    "messages": [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64>"}},
+                {"type": "text", "text": "Describe the image."}
+            ]
+        }
+    ]
+}'
+```
+
+Examples can be found here:
+
+- Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
+- Reranking: [examples/pooling/score/colqwen3_rerank_online.py](../../examples/pooling/score/colqwen3_rerank_online.py)
+
 ### BAAI/bge-m3
 
 The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
