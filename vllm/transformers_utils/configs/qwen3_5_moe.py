@@ -79,10 +79,6 @@ class Qwen3_5MoeTextConfig(PretrainedConfig):
             "mrope_section",
             "mrope_interleaved",
         ]
-        self.pad_token_id = pad_token_id
-        self.bos_token_id = bos_token_id
-        self.eos_token_id = eos_token_id
-        self.tie_word_embeddings = tie_word_embeddings
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
@@ -123,6 +119,13 @@ class Qwen3_5MoeTextConfig(PretrainedConfig):
         self.output_router_logits = output_router_logits
         self.router_aux_loss_coef = router_aux_loss_coef
         super().__init__(**kwargs)
+        # Set these AFTER super().__init__() because transformers v4's
+        # PretrainedConfig.__init__ has these as explicit params with different
+        # defaults (e.g. tie_word_embeddings=True) that would overwrite our values.
+        self.pad_token_id = pad_token_id
+        self.bos_token_id = bos_token_id
+        self.eos_token_id = eos_token_id
+        self.tie_word_embeddings = tie_word_embeddings
 
 
 class Qwen3_5MoeVisionConfig(PretrainedConfig):
@@ -194,8 +197,9 @@ class Qwen3_5MoeConfig(PretrainedConfig):
         self.video_token_id = video_token_id
         self.vision_start_token_id = vision_start_token_id
         self.vision_end_token_id = vision_end_token_id
-        self.tie_word_embeddings = tie_word_embeddings
         super().__init__(**kwargs)
+        # Set after super().__init__() to avoid v4 PretrainedConfig overwrite
+        self.tie_word_embeddings = tie_word_embeddings
 
 
 __all__ = ["Qwen3_5MoeConfig", "Qwen3_5MoeTextConfig"]
