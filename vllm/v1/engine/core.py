@@ -18,7 +18,7 @@ from typing import Any, TypeVar, cast
 import msgspec
 import zmq
 
-from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
+from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
@@ -104,10 +104,7 @@ class EngineCoreSentinel(BaseSentinel):
         worker_cmd_addr: str,
         engine_fault_socket_addr: str,
         sentinel_identity: bytes,
-        tp_size: int,
-        pp_size: int,
-        dp_size: int,
-        fault_tolerance_config: FaultToleranceConfig,
+        vllm_config: VllmConfig,
     ):
         self.engine_index = engine_index
         super().__init__(
@@ -115,16 +112,17 @@ class EngineCoreSentinel(BaseSentinel):
             downstream_cmd_addr=worker_cmd_addr,
             sentinel_identity=sentinel_identity,
             sentinel_tag=f"DP_{engine_index}",
-            fault_tolerance_config=fault_tolerance_config,
+            vllm_config=vllm_config,
         )
 
         self.fault_signal_q = fault_signal_q
         self.cmd_q = cmd_q
         self.busy_loop_active = busy_loop_active
         self.engine_input_q = engine_input_q
-        self.tp_size = tp_size
-        self.pp_size = pp_size
-        self.dp_size = dp_size
+        parallel_config = vllm_config.parallel_config
+        self.tp_size = parallel_config.tensor_parallel_size
+        self.pp_size = parallel_config.pipeline_parallel_size
+        self.dp_size = parallel_config.data_parallel_size
 
         # Client <-> EngineCoreSentinel sockets
         self.engine_fault_socket = make_zmq_socket(
@@ -1033,7 +1031,9 @@ class EngineCoreProc(EngineCore):
                 # Track whether the busy loop is currently active.
                 self.busy_loop_active = threading.Event()
                 self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
-                self.cmd_q: queue.Queue[str | None] = queue.Queue(maxsize=1)
+                self.cmd_q: queue.Queue[FaultToleranceRequest | None] = queue.Queue(
+                    maxsize=1
+                )
                 self.engine_recovery_timeout = ft_config.engine_recovery_timeout
                 engine_core_sentinel_ids = addresses.engine_core_sentinel_identities
                 assert engine_core_sentinel_ids is not None
@@ -1051,10 +1051,7 @@ class EngineCoreProc(EngineCore):
                     client_cmd_addr=addresses.engine_core_sentinel_cmd_addr,
                     worker_cmd_addr=worker_cmd_addr,
                     sentinel_identity=engine_core_sentinel_ids[self.engine_index],
-                    tp_size=vllm_config.parallel_config.tensor_parallel_size,
-                    pp_size=vllm_config.parallel_config.pipeline_parallel_size,
-                    dp_size=vllm_config.parallel_config.data_parallel_size,
-                    fault_tolerance_config=vllm_config.fault_tolerance_config,
+                    vllm_config=vllm_config,
                 )
                 vllm_config.fault_tolerance_config.worker_cmd_addr = worker_cmd_addr
                 # Do not shut down the engine immediately upon failure.
@@ -1745,6 +1742,7 @@ class EngineCoreProc(EngineCore):
         super().shutdown()
         if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
             self.engine_core_sentinel.shutdown()
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process

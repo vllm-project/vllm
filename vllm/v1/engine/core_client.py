@@ -403,7 +403,7 @@ class ClientSentinel(BaseSentinel):
             downstream_cmd_addr=engine_core_sentinel_cmd_addr,
             sentinel_identity=None,
             sentinel_tag=None,
-            fault_tolerance_config=vllm_config.fault_tolerance_config,
+            vllm_config=vllm_config,
         )
 
         self.fault_tolerance_req_socket = make_zmq_socket(

@@ -10,7 +10,7 @@ import pytest
 import zmq
 from msgspec import msgpack
 
-from vllm.config import FaultToleranceConfig
+from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
 from vllm.utils.network_utils import make_zmq_socket
 from vllm.v1.engine import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.engine.core import (
@@ -28,6 +28,16 @@ SENTINEL_IDENTITY = b"engine_sentinel_0"
 def create_engine_core_sentinel(
     fault_signal_q: queue.Queue, busy_loop_active: threading.Event
 ):
+    # Construct a minimal VllmConfig with the required parallel and fault-tolerance
+    vllm_cfg = VllmConfig(
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+            data_parallel_size=1,
+        ),
+        fault_tolerance_config=FaultToleranceConfig(enable_fault_tolerance=True),
+    )
+
     return EngineCoreSentinel(
         engine_index=0,
         fault_signal_q=fault_signal_q,
@@ -38,10 +48,7 @@ def create_engine_core_sentinel(
         worker_cmd_addr=WORKER_CMD_ADDR,
         engine_fault_socket_addr=ENGINE_FAULT_SOCKET_ADDR,
         sentinel_identity=SENTINEL_IDENTITY,
-        tp_size=1,
-        pp_size=1,
-        dp_size=1,
-        fault_tolerance_config=FaultToleranceConfig(enable_fault_tolerance=True),
+        vllm_config=vllm_cfg,
     )
 
 

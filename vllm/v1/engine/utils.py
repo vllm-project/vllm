@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import msgspec
@@ -340,7 +340,7 @@ class CoreEngineActorManager:
             if dp_size > 1 and vllm_config.model_config.is_moe
             else EngineCoreActor
         )
-
+        self.vllm_config = vllm_config
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
@@ -364,7 +364,7 @@ class CoreEngineActorManager:
                 port=vllm_config.fault_tolerance_config.internal_fault_report_port,
             )
             identity = generate_identity_group(
-                "core_engine_actor_manager", "clinet_sentinel", "report", 1
+                "core_engine_actor_manager", "client_sentinel", "report", 1
             )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
@@ -1268,7 +1268,7 @@ def generate_identity_group(peer1, peer2, use, n):
     """
     identities = list()
     uuids = [uuid.uuid4() for _ in range(n)]
-    for id in uuids:
-        identity_str = f"{peer1}_{peer2}_{use}_{id}".encode()
+    for identity_uuid in uuids:
+        identity_str = f"{peer1}_{peer2}_{use}_{identity_uuid}".encode()
         identities.append(identity_str)
     return identities

@@ -16,7 +16,6 @@ import numpy as np
 import torch
 import torch.distributed
 import torch.nn as nn
-import zmq
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
@@ -37,8 +36,8 @@ from vllm.distributed.kv_transfer import (
     has_kv_transfer_group,
 )
 from vllm.distributed.parallel_state import (
-    Handle,
     GroupCoordinator,
+    Handle,
     get_all_model_groups,
     get_pcp_group,
     get_pp_group,
@@ -78,6 +77,7 @@ if TYPE_CHECKING:
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
+
 class AsyncIntermediateTensors(IntermediateTensors):
     """IntermediateTensors with lazy comm synchronization"""
 
@@ -109,6 +109,7 @@ class AsyncIntermediateTensors(IntermediateTensors):
             object.__getattribute__(self, "wait_for_comm")()
         return object.__getattribute__(self, name)
 
+
 class WorkerSentinel(BaseSentinel):
     def __init__(
         self,
@@ -127,15 +128,13 @@ class WorkerSentinel(BaseSentinel):
             downstream_cmd_addr=None,
             sentinel_identity=identity.encode(),
             sentinel_tag=f"{self.dp_rank}_{identity}",
-            fault_tolerance_config=vllm_config.fault_tolerance_config,
+            vllm_config=vllm_config,
         )
         self.vllm_config = vllm_config
-        self.zmq_ctx = zmq.Context()
         self.init_distributed_env_callback = init_distributed_env_callback
         self.clear_input_batch_callback = clear_input_batch_callback
         self.device = device
 
-        self.worker_sentinel_dead = False
         self.pause_event = pause_event
         self.communicator_aborted = False
         torch.cuda.set_device(self.device)
