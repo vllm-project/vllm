@@ -181,8 +181,8 @@ def _lora_expand_fp8(
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,  # shape [1]
     num_active_loras: int,  # number of active LoRAs (unused here, for API compat)
+    b_scale: list[torch.Tensor],  # LoRA B weight scale per slice
     a_scale: torch.Tensor | None = None,  # Scale for shrink output (optional)
-    b_scale: list[torch.Tensor] | None = None,  # LoRA B weight scale per slice
     offset_start: int = 0,
     add_inputs: bool = False,
     group_k: int = 0,
@@ -368,8 +368,8 @@ def _lora_expand_fp8_fake(
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
     num_active_loras: int,
+    b_scale: list[torch.Tensor],
     a_scale: torch.Tensor | None = None,
-    b_scale: list[torch.Tensor] | None = None,
     offset_start: int = 0,
     add_inputs: bool = False,
     group_k: int = 0,
