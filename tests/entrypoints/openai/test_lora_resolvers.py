@@ -52,6 +52,7 @@ class MockModelConfig:
     generation_config: str = "auto"
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -95,7 +96,7 @@ def register_mock_resolver():
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    return HfRenderer(
+    return HfRenderer.from_config(
         MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
