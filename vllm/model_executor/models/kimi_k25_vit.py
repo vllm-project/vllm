@@ -36,14 +36,9 @@ from vllm.model_executor.models.vision import (
 )
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25VisionConfig
 
+from .utils import apply_rope_input_validation
+
 logger = init_logger(__name__)
-
-
-def _apply_rope_input_validation(x, freqs_cis):
-    assert x.ndim == freqs_cis.ndim + 1, (x.shape, freqs_cis.shape)
-    assert x.shape[:-2] == freqs_cis.shape[:-1], (x.shape, freqs_cis.shape)
-    assert x.shape[-1] == 2 * freqs_cis.shape[-1], (x.shape, freqs_cis.shape)
-    assert freqs_cis.dtype == torch.complex64, freqs_cis.dtype
 
 
 def get_rope_shape_decorate(func):
@@ -85,8 +80,8 @@ def apply_rope(
     Returns:
         xq_out, xk_out: tensors of shape (..., num_heads, head_dim)
     """
-    _apply_rope_input_validation(xq, freqs_cis)
-    _apply_rope_input_validation(xk, freqs_cis)
+    apply_rope_input_validation(xq, freqs_cis)
+    apply_rope_input_validation(xk, freqs_cis)
 
     freqs_cis = freqs_cis.unsqueeze(-2)  # ..., 1, head_dim/2
     # ..., num_heads, head_dim/2

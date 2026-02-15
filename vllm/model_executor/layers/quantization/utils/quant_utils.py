@@ -813,3 +813,11 @@ def convert_packed_uint4b8_to_signed_int4_inplace(t: torch.Tensor) -> torch.Tens
         t |= ((nib - 8) & 0xF) << shift
 
     return t
+
+
+def get_isa_hint(dtype: torch.dtype) -> str:
+    supports_amx = torch._C._cpu._is_amx_tile_supported()
+    if supports_amx and dtype in (torch.bfloat16,):
+        return "amx"
+    else:
+        return "vec"

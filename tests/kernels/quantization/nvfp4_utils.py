@@ -3,6 +3,7 @@
 import torch
 
 from vllm._custom_ops import scaled_fp4_quant
+from vllm.model_executor.layers.quantization.utils import convert_swizzled_to_linear
 from vllm.scalar_type import scalar_types
 
 FLOAT4_E2M1_MAX = scalar_types.float4_e2m1f.max()
@@ -11,16 +12,6 @@ FLOAT8_E4M3_MAX = torch.finfo(torch.float8_e4m3fn).max
 kE2M1ToFloat = torch.tensor(
     [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0], dtype=torch.float32
 )
-
-
-def convert_swizzled_to_linear(a_sf_swizzled: torch.Tensor, m, k, block_size):
-    m_tiles = (m + 128 - 1) // 128
-    f = block_size * 4
-    k_tiles = (k + f - 1) // f
-    tmp = torch.reshape(a_sf_swizzled, (1, m_tiles, k_tiles, 32, 4, 4))
-    tmp = torch.permute(tmp, (0, 1, 4, 3, 2, 5))
-    out = tmp.reshape(m_tiles * 128, k_tiles * f // block_size)
-    return out[0:m, 0:k]
 
 
 def convert_swizzled_8x4_layout_to_linear(
