@@ -150,10 +150,6 @@ def rocm_unquantized_gemm_impl(
     k = weight.shape[1]
 
     cu_count = get_cu_count()
-    if use_aiter_triton_gemm(n, m, k, x.dtype):
-        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
-
-        return gemm_a16w16(x, weight, bias)
 
     # Next ^2 of n
     N_p2 = 1 << (n - 1).bit_length()
@@ -167,7 +163,6 @@ def rocm_unquantized_gemm_impl(
     CuNeeded = rndup_cus * GrpsShrB
     # candidate for atomic reduce count splitk?
     fits_wvsplitkrc = CuNeeded <= cu_count
-
     use_skinny_reduce_counting = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
         and on_gfx950()
@@ -177,14 +172,18 @@ def rocm_unquantized_gemm_impl(
             and k % 8 == 0
             and k > 512
             and m % 16 == 0
+            and m * n <= 128 * 1024  # max reduce buffer
             and fits_wvsplitkrc
-            and x.is_contiguous()
+            and weight.is_contiguous()
         )
     )
     if use_skinny_reduce_counting:
-        x_view = x.reshape(-1, x.size(-1))
-        out = ops.wvSplitKrc(weight, x_view, cu_count, bias)
-        return out.reshape(*x.shape[:-1], weight.shape[0])
+        return ops.wvSplitKrc(x, weight, cu_count, bias)
+
+    if use_aiter_triton_gemm(n, m, k, x.dtype):
+        from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
+
+        return gemm_a16w16(x, weight, bias)
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
