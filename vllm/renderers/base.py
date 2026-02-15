@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     )
     from vllm.multimodal.cache import BaseMultiModalProcessorCache
     from vllm.multimodal.inputs import (
+        ModalityDataItems,
         MultiModalDataDict,
         MultiModalInputs,
         MultiModalUUIDDict,
@@ -470,7 +471,7 @@ class BaseRenderer(ABC, Generic[_T]):
         modalities = mm_data.keys() | mm_uuids.keys()
 
         for modality in modalities:
-            data_items = mm_items.get(modality, [])
+            data_items: ModalityDataItems | list[Any] = mm_items.get(modality, [])
 
             uuid_items = mm_uuids.get(modality, [])
             if isinstance(uuid_items, str):
