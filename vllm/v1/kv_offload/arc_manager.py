@@ -87,11 +87,12 @@ class ARCOffloadingManager(OffloadingManager):
     def touch(self, block_hashes: Iterable[BlockHash]):
         for block_hash in reversed(list(block_hashes)):
             if block_hash in self.t1:
-                block = self.t1[block_hash]
+                block = self.t1.pop(block_hash)
                 if not block.is_ready:
-                    self.t1.move_to_end(block_hash)
+                    # block was just prepared to be stored, not really touched twice
+                    # keep it in T1 and mark as most recently used
+                    self.t1[block_hash] = block
                 else:
-                    del self.t1[block_hash]
                     self.t2[block_hash] = block
 
             elif block_hash in self.t2:
