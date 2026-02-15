@@ -1087,10 +1087,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 # fall back to the unified_attention triton kernel which
                 # handles both correctly.
                 _MIN_HEAD_SIZE_FOR_LL4MI = 64
-                use_unified_attention = (
-                    self.sliding_window[0] != -1
-                    or self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
-                )
+                use_unified_attention = self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
 
                 if use_unified_attention:
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
@@ -1194,6 +1191,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         layer._v_scale,
                         None,
                         _PARTITION_SIZE_ROCM,
+                        1,
+                        self.sliding_window[0] + 1,
                     )
         else:
             raise NotImplementedError(
