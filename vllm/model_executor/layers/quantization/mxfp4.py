@@ -772,6 +772,30 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 layer.w2_weight_scale = torch.nn.Parameter(
                     w2_scales_interleaved, requires_grad=False
                 )
+
+            assert not self.moe.use_ep, (
+                "SM100_FI_MXFP4_MXFP8_CUTLASS"
+                "and SM90_FI_MXFP4_BF16 doesn't support EP yet"
+            )
+
+            # theses two kernels go through the `flashinfer_cutlass_fused_moe` path
+            from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
+                FlashInferExperts,
+            )
+            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+                MoEPrepareAndFinalizeNoEP,
+            )
+
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            self.kernel = mk.FusedMoEModularKernel(
+                MoEPrepareAndFinalizeNoEP(),
+                FlashInferExperts(
+                    moe_config=self.moe,
+                    quant_config=self.moe_quant_config,
+                ),
+                shared_experts=None,
+            )
         elif self.mxfp4_backend == Mxfp4Backend.TRITON:
             from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
 
@@ -975,21 +999,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
         )
 
-        # Backend-specific preparation
-        from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-            FlashInferExperts,
-        )
-        from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-            MoEPrepareAndFinalizeNoEP,
-        )
-
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        assert self.moe_quant_config is not None
-        self.kernel = mk.FusedMoEModularKernel(
-            MoEPrepareAndFinalizeNoEP(),
-            FlashInferExperts(moe_config=self.moe, quant_config=self.moe_quant_config),
-            shared_experts=None,
-        )
         return self.kernel(
             hidden_states=x,
             w1=layer.w13_weight,
