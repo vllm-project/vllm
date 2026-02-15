@@ -126,28 +126,17 @@ class KVConnectorPromMetrics:
         self._labelnames = labelnames
         self.per_engine_labelvalues = per_engine_labelvalues
 
-    def make_per_engine(self, metric: PromMetric) -> dict[int, PromMetric]:
-        """
-        Create a per-engine child of a prometheus_client.Metric with
-        the appropriate labels set. The parent metric must be created
-        using the labelnames list.
-        """
-        return {
-            idx: metric.labels(*labelvalues)
-            for idx, labelvalues in self.per_engine_labelvalues.items()
-        }
-
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
         Record the supplied transfer statistics to Prometheus metrics. These
         statistics are engine-specific, and should be recorded to a metric
         with the appropriate 'engine' label. These metric instances can be
-        created using the make_per_engine() helper method.
+        created using the create_metric_per_engine() helper method.
         """
         raise NotImplementedError
 
 
-class KVConnectorPrometheus:
+class KVConnectorProm:
     """
     Support for registering per-connector Prometheus metrics, and
     recording transfer statistics to those metrics. Uses
