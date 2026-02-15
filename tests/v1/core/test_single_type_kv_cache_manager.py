@@ -293,33 +293,32 @@ def test_sliding_window_remove_skipped_blocks():
     manager.remove_skipped_blocks("test", 0)
     assert_block_id(block_table, original_block_ids)
 
-    # 4 tokens are computed. Only token 0 is out of the sliding window. As
-    # block 1000 also contains token 1 that is in the sliding window, block 1000
-    # cannot be removed.
+    # 4 tokens are computed. Only token 0 is out of the sliding window.
+    # With prefix caching enabled, we keep one extra block (block_size=2)
+    # for cache hit compatibility, so effective skipped = 0.
     manager.remove_skipped_blocks("test", 4)
     assert_block_id(block_table, original_block_ids)
 
     # 5 tokens are computed. Token 0 & 1 are out of the sliding window.
-    # Block 1000 can be removed.
+    # With the extra block kept for caching, effective skipped = 0.
     manager.remove_skipped_blocks("test", 5)
-    assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
+    assert_block_id(block_table, original_block_ids)
 
     # 6 tokens are computed. Token 0-2 are out of the sliding window.
-    # Cannot remove new block as the block 1001 is still used by token 3.
+    # Effective skipped = 1 token → 0 full blocks → no change.
     manager.remove_skipped_blocks("test", 6)
-    assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
+    assert_block_id(block_table, original_block_ids)
 
     # 7 tokens are computed. Token 0-3 are out of the sliding window.
-    # Block 1001 can be removed and block 1000 is already removed.
+    # Effective skipped = 2 tokens → 1 full block → block 1000 removed.
     manager.remove_skipped_blocks("test", 7)
-    assert_block_id(block_table, [null_block_id] * 2 + original_block_ids[2:])
+    assert_block_id(block_table, [null_block_id] + original_block_ids[1:])
 
     # 11 tokens are computed. Token 0-7 are out of the sliding window.
-    # Block 1002 & 1003 can be removed now. Block 1003 represents a longer
-    # sequence, and is expected to be evicted earlier than 1002, so the order
-    # of removed blocks should be [1003, 1002].
+    # Effective skipped = 6 tokens → 3 full blocks → blocks 1000-1002 removed.
+    # Block 1000 is already null, so only 1001 and 1002 are newly removed.
     manager.remove_skipped_blocks("test", 11)
-    assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
+    assert_block_id(block_table, [null_block_id] * 3 + original_block_ids[3:])
 
 
 def test_get_num_blocks_to_allocate():
