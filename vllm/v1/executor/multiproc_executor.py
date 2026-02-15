@@ -5,7 +5,6 @@ import os
 import pickle
 import queue
 import signal
-import threading
 import time
 import traceback
 import weakref
@@ -102,7 +101,6 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
-        self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
@@ -340,8 +338,6 @@ class MultiprocExecutor(Executor):
         if output_rank is not None:
             response_mqs = (response_mqs[output_rank],)
 
-        shutdown_event = self.shutdown_event
-
         def get_response():
             responses = []
             for mq in response_mqs:
@@ -349,9 +345,7 @@ class MultiprocExecutor(Executor):
                     None if deadline is None else (deadline - time.monotonic())
                 )
                 try:
-                    status, result = mq.dequeue(
-                        timeout=dequeue_timeout, cancel=shutdown_event
-                    )
+                    status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
@@ -419,8 +413,6 @@ class MultiprocExecutor(Executor):
                         w.death_writer = None
                     w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
-
-            self.shutdown_event.set()
 
         self.rpc_broadcast_mq = None
 
@@ -719,7 +711,7 @@ class WorkerProc:
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
         death_pipe: Connection | None = kwargs.pop("death_pipe", None)
-        shutdown_event = threading.Event()
+        shutdown = False
         # Start death monitoring thread if death_pipe is provided
         if death_pipe is not None:
 
@@ -730,8 +722,14 @@ class WorkerProc:
                 except EOFError:
                     # Parent process has exited, terminate this worker
                     logger.info_once("Parent process exited, terminating worker")
-                    # Send signal to self to trigger clean shutdown
-                    shutdown_event.set()
+                    nonlocal shutdown
+                    shutdown = True
+                    # Shut down message queues
+                    if worker is not None and worker.rpc_broadcast_mq is not None:
+                        worker.rpc_broadcast_mq.shutdown()
+                    if worker is not None and worker.worker_response_mq is not None:
+                        worker.worker_response_mq.shutdown()
+
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
 
@@ -771,7 +769,7 @@ class WorkerProc:
             ready_writer.close()
             ready_writer = None
 
-            worker.worker_busy_loop(cancel=shutdown_event)
+            worker.worker_busy_loop()
 
         except Exception:
             # NOTE: if an Exception arises in busy_loop, we send
@@ -781,7 +779,7 @@ class WorkerProc:
 
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
-            elif shutdown_event.is_set():
+            elif shutdown:
                 logger.info("WorkerProc shutting down.")
             else:
                 logger.exception("WorkerProc failed.")
@@ -842,12 +840,12 @@ class WorkerProc:
             output = self.async_output_queue.get()
             self.enqueue_output(output)
 
-    def worker_busy_loop(self, cancel: threading.Event | None = None):
+    def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
-                cancel=cancel, indefinite=True
+                indefinite=True
             )
             try:
                 if isinstance(method, str):
