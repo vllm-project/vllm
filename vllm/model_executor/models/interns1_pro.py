@@ -25,12 +25,12 @@
 """Inference-only InternS1Pro model compatible with HuggingFace weights."""
 
 import functools
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable
 from typing import Any
 
 import torch
 from torch import nn
-from transformers import AutoProcessor, BatchFeature, PretrainedConfig
+from transformers import AutoProcessor, PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
@@ -86,20 +86,6 @@ class InternS1ProProcessingInfo(Qwen3VLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> AutoProcessor:
         return self.ctx.get_hf_processor(**kwargs)
-
-
-class InternS1ProMultimodalProcessor(Qwen3VLMultiModalProcessor):
-    def _call_hf_processor(
-        self,
-        prompt: str,
-        mm_data: Mapping[str, object],
-        mm_kwargs: Mapping[str, object],
-        tok_kwargs: Mapping[str, object],
-    ) -> BatchFeature:
-        mm_kwargs = dict(mm_kwargs)
-        mm_kwargs["text_kwargs"] = mm_kwargs.get("text_kwargs", {})
-        mm_kwargs["text_kwargs"]["add_special_tokens"] = False
-        return super()._call_hf_processor(prompt, mm_data, mm_kwargs, tok_kwargs)
 
 
 class InternS1ProMoeMLP(nn.Module):
@@ -507,7 +493,7 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
-class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -552,12 +538,12 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
 
 
 @MULTIMODAL_REGISTRY.register_processor(
-    InternS1ProMultimodalProcessor,
+    Qwen3VLMultiModalProcessor,
     info=InternS1ProProcessingInfo,
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class InternS1ProForConditionalGeneration(
-    Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
+    Qwen3VLForConditionalGeneration, InternS1ProMoeMixtureOfExperts
 ):
     is_3d_moe_weight: bool = True
     packed_modules_mapping = {
