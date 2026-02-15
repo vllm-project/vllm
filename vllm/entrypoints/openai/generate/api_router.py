@@ -113,7 +113,7 @@ async def init_generate_state(
             enable_log_deltas=args.enable_log_deltas,
             log_error_stack=args.log_error_stack,
         )
-        if "generate" in supported_tasks
+        if any(task in supported_tasks for task in ("generate", "render"))
         else None
     )
     # Warm up chat template processing to avoid first-request latency
@@ -129,7 +129,7 @@ async def init_generate_state(
             enable_force_include_usage=args.enable_force_include_usage,
             log_error_stack=args.log_error_stack,
         )
-        if "generate" in supported_tasks
+        if any(task in supported_tasks for task in ("generate", "render"))
         else None
     )
     state.anthropic_serving_messages = (
