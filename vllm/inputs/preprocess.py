@@ -81,9 +81,15 @@ class InputPreprocessor:
         Obtain the decoder start token id employed by an encoder/decoder
         model. Raises an error if it is not available.
         """
-        dec_start_token_id = getattr(
-            self.model_config.hf_config, "decoder_start_token_id", None
-        )
+        hf_config = self.model_config.hf_config
+        dec_start_token_id = getattr(hf_config, "decoder_start_token_id", None)
+
+        if dec_start_token_id is None:
+            text_config = getattr(hf_config, "text_config", None)
+            if text_config is not None:
+                dec_start_token_id = getattr(
+                    text_config, "decoder_start_token_id", None
+                )
 
         if dec_start_token_id is None:
             logger.warning_once(

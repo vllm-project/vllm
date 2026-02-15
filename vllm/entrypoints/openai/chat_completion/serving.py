@@ -2,6 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import base64
+import binascii
+import io
 import json
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
@@ -14,6 +17,8 @@ import regex as re
 from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
 from partial_json_parser.core.options import Allow
+from PIL import Image
+from transformers import AutoProcessor
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
@@ -172,6 +177,10 @@ class OpenAIServingChat(OpenAIServing):
         # Please use the Responses API instead.
         self.supports_code_interpreter = False
         self.python_tool = None
+        self._florence2_processor = None
+
+        if self.model_config.hf_config.model_type == "florence2":
+            self._get_or_init_florence2_processor(log_context="initialize")
 
     async def warmup(self) -> None:
         """
@@ -1728,7 +1737,13 @@ class OpenAIServingChat(OpenAIServing):
 
         request_metadata.final_usage_info = usage
 
-        response = ChatCompletionResponse(
+        florence2_od_parsed = self._maybe_build_florence2_od_parsed(
+            request=request,
+            model_name=model_name,
+            final_res=final_res,
+        )
+
+        response_kwargs: dict[str, Any] = dict(
             id=request_id,
             created=created_time,
             model=model_name,
@@ -1740,6 +1755,11 @@ class OpenAIServingChat(OpenAIServing):
             ),
             kv_transfer_params=final_res.kv_transfer_params,
         )
+
+        if florence2_od_parsed is not None:
+            response_kwargs["florence2_od_parsed"] = florence2_od_parsed
+
+        response = ChatCompletionResponse(**response_kwargs)
 
         # Log complete response if output logging is enabled
         if self.enable_log_outputs and self.request_logger:
@@ -1774,6 +1794,156 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
         return response
+
+    def _extract_florence2_od_image_size(
+        self,
+        request: ChatCompletionRequest,
+    ) -> tuple[int, int] | None:
+        for message in request.messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") != "image_url":
+                    continue
+
+                image_url_data = part.get("image_url")
+                if isinstance(image_url_data, dict):
+                    image_url = image_url_data.get("url")
+                else:
+                    image_url = image_url_data
+
+                if not isinstance(image_url, str):
+                    continue
+                if not image_url.startswith("data:image"):
+                    continue
+
+                comma_idx = image_url.find(",")
+                if comma_idx <= 0:
+                    continue
+
+                b64_data = image_url[comma_idx + 1 :].strip()
+                if not b64_data:
+                    continue
+
+                # Some clients may include line-breaks/spaces in long data URLs.
+                b64_data = re.sub(r"\s+", "", b64_data)
+
+                # Accept non-padded payloads to be robust across client encoders.
+                missing_padding = len(b64_data) % 4
+                if missing_padding:
+                    b64_data += "=" * (4 - missing_padding)
+
+                try:
+                    raw_bytes = base64.b64decode(b64_data, validate=True)
+                    with Image.open(io.BytesIO(raw_bytes)) as image:
+                        return image.size
+                except (binascii.Error, ValueError, OSError):
+                    continue
+
+        return None
+
+    def _request_contains_od_task(self, request: ChatCompletionRequest) -> bool:
+        for message in request.messages:
+            content = message.get("content")
+            if isinstance(content, str):
+                if "<od>" in content.lower():
+                    return True
+                continue
+
+            if not isinstance(content, list):
+                continue
+
+            for part in content:
+                if not isinstance(part, dict):
+                    continue
+                if part.get("type") not in ("text", "input_text"):
+                    continue
+
+                text = part.get("text") or part.get("input_text")
+                if isinstance(text, str) and "<od>" in text.lower():
+                    return True
+
+        return False
+
+    def _get_or_init_florence2_processor(
+        self,
+        *,
+        log_context: str,
+    ) -> Any | None:
+        if self._florence2_processor is not None:
+            return self._florence2_processor
+
+        try:
+            self._florence2_processor = AutoProcessor.from_pretrained(
+                self.model_config.model,
+                trust_remote_code=self.model_config.trust_remote_code,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to %s Florence2 processor for OD parsing",
+                log_context,
+            )
+            return None
+
+        return self._florence2_processor
+
+    def _maybe_build_florence2_od_parsed(
+        self,
+        request: ChatCompletionRequest,
+        model_name: str,
+        final_res: RequestOutput,
+    ) -> list[dict[str, Any] | None] | None:
+        if not request.florence2_od_parsed:
+            return None
+        if self.model_config.hf_config.model_type != "florence2":
+            return None
+
+        processor = self._get_or_init_florence2_processor(
+            log_context="lazily initialize"
+        )
+        if processor is None:
+            return [None] * len(final_res.outputs)
+
+        if not self._request_contains_od_task(request):
+            return [None] * len(final_res.outputs)
+
+        image_size = self._extract_florence2_od_image_size(request)
+        if image_size is None:
+            logger.warning(
+                "florence2_od_parsed requested but image_size unavailable; "
+                "returning null parsed entries"
+            )
+            return [None] * len(final_res.outputs)
+
+        parsed_per_choice: list[dict[str, Any] | None] = [None] * len(final_res.outputs)
+        for output in final_res.outputs:
+            try:
+                raw_generation = processor.tokenizer.decode(
+                    output.token_ids,
+                    skip_special_tokens=False,
+                )
+                parsed = processor.post_process_generation(
+                    raw_generation,
+                    task="<OD>",
+                    image_size=image_size,
+                )
+                parsed_per_choice[output.index] = parsed
+            except Exception:
+                logger.exception(
+                    "Failed to build florence2_od_parsed for choice index %s "
+                    "on model %s",
+                    output.index,
+                    model_name,
+                )
+
+        if any(item is not None for item in parsed_per_choice):
+            return parsed_per_choice
+
+        return None
 
     def _get_top_logprobs(
         self,

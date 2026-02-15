@@ -109,6 +109,14 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    florence2_od_parsed: list[dict[str, Any] | None] | None = Field(
+        default=None,
+        description=(
+            "Optional Florence2 OD parsed outputs for each choice. "
+            "Only returned when request.florence2_od_parsed=true and "
+            "the served model type is florence2."
+        ),
+    )
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -308,6 +316,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "only in the first chunk, and token_ids contains the delta tokens "
             "for each chunk. This is useful for debugging or when you "
             "need to map generated text back to input tokens."
+        ),
+    )
+    florence2_od_parsed: bool = Field(
+        default=False,
+        description=(
+            "If true, and the model type is florence2 and task is <OD>, "
+            "the response includes parsed OD results in top-level field "
+            "`florence2_od_parsed`."
         ),
     )
 

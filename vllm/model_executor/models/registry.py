@@ -486,6 +486,10 @@ _MULTIMODAL_MODELS = {
         "qwen2_vl",
         "Tarsier2ForConditionalGeneration",
     ),
+    "Florence2ForConditionalGeneration": (
+        "florence2",
+        "Florence2ForConditionalGeneration",
+    ),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralRealtimeGeneration": ("voxtral_realtime", "VoxtralRealtimeGeneration"),  # noqa: E501
@@ -600,7 +604,6 @@ _PREVIOUSLY_SUPPORTED_MODELS = {
     "BartModel": "0.10.2",
     "BartForConditionalGeneration": "0.10.2",
     "DonutForConditionalGeneration": "0.10.2",
-    "Florence2ForConditionalGeneration": "0.10.2",
     "MBartForConditionalGeneration": "0.10.2",
     "MllamaForConditionalGeneration": "0.10.2",
 }

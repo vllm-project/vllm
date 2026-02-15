@@ -1,0 +1,16 @@
+{%- for message in messages -%}
+{%- if message['content'] is string -%}
+{{- message['content'] -}}
+{%- else -%}
+{%- for part in message['content'] -%}
+{%- if part.get('text') is not none -%}
+{{- part.get('text') -}}
+{%- elif part.get('input_text') is not none -%}
+{{- part.get('input_text') -}}
+{%- endif -%}
+{%- endfor -%}
+{%- endif -%}
+{%- if not loop.last -%}
+{{- '\n' -}}
+{%- endif -%}
+{%- endfor -%}

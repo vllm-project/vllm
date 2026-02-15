@@ -5,7 +5,14 @@ import copy
 from pathlib import Path
 from typing import TypeAlias
 
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import (
+    AutoConfig,
+    AutoProcessor,
+    AutoTokenizer,
+    BartTokenizerFast,
+    PreTrainedTokenizer,
+    PreTrainedTokenizerFast,
+)
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
@@ -81,6 +88,38 @@ class CachedHfTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> HfTokenizer:
+        def _fallback_fast_tokenizer() -> HfTokenizer:
+            config = AutoConfig.from_pretrained(
+                path_or_repo_id,
+                trust_remote_code=trust_remote_code,
+                revision=revision,
+                cache_dir=download_dir,
+            )
+            if getattr(config, "model_type", None) == "florence2":
+                try:
+                    processor = AutoProcessor.from_pretrained(
+                        path_or_repo_id,
+                        revision=revision,
+                        trust_remote_code=True,
+                        cache_dir=download_dir,
+                    )
+                    return processor.tokenizer
+                except Exception:
+                    return BartTokenizerFast.from_pretrained(
+                        path_or_repo_id,
+                        *args,
+                        revision=revision,
+                        cache_dir=download_dir,
+                        **kwargs,
+                    )
+            return PreTrainedTokenizerFast.from_pretrained(
+                path_or_repo_id,
+                *args,
+                revision=revision,
+                cache_dir=download_dir,
+                **kwargs,
+            )
+
         try:
             tokenizer = AutoTokenizer.from_pretrained(
                 path_or_repo_id,
@@ -108,6 +147,8 @@ class CachedHfTokenizer(TokenizerLike):
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
+        except KeyError:
+            tokenizer = _fallback_fast_tokenizer()
 
         # The special_tokens in tokenizer should also be
         # controlled by do_lower_case in encoder_config

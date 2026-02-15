@@ -4,6 +4,7 @@
 import importlib
 import inspect
 from functools import lru_cache
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
 from transformers import (
@@ -112,29 +113,31 @@ def get_processor(
     **kwargs: Any,
 ) -> _P:
     """Load a processor for the given model name via HuggingFace."""
+
+    def _load_processor(load_trust_remote_code: bool):
+        if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
+            return AutoProcessor.from_pretrained(
+                processor_name,
+                *args,
+                revision=revision,
+                trust_remote_code=load_trust_remote_code,
+                **kwargs,
+            )
+        if issubclass(processor_cls, ProcessorMixin):
+            return processor_cls.from_pretrained(
+                processor_name,
+                *args,
+                revision=revision,
+                trust_remote_code=load_trust_remote_code,
+                **kwargs,
+            )
+        return processor_cls(*args, **kwargs)
+
     if revision is None:
         revision = "main"
     try:
         processor_name = convert_model_repo_to_path(processor_name)
-        if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
-            processor = AutoProcessor.from_pretrained(
-                processor_name,
-                *args,
-                revision=revision,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
-        elif issubclass(processor_cls, ProcessorMixin):
-            processor = processor_cls.from_pretrained(
-                processor_name,
-                *args,
-                revision=revision,
-                trust_remote_code=trust_remote_code,
-                **kwargs,
-            )
-        else:
-            # Processors that are standalone classes unrelated to HF
-            processor = processor_cls(*args, **kwargs)
+        processor = _load_processor(trust_remote_code)
     except ValueError as e:
         # If the error pertains to the processor class not existing or not
         # currently being imported, suggest using the --trust-remote-code flag.
@@ -148,6 +151,21 @@ def get_processor(
                 "`--trust-remote-code` flag in the CLI."
             )
             raise RuntimeError(err_msg) from e
+        else:
+            raise e
+    except AttributeError as e:
+        can_retry = (
+            not trust_remote_code
+            and "image_token" in str(e)
+            and Path(processor_name).exists()
+            and (
+                isinstance(processor_cls, tuple)
+                or processor_cls == ProcessorMixin
+                or issubclass(processor_cls, ProcessorMixin)
+            )
+        )
+        if can_retry:
+            processor = _load_processor(True)
         else:
             raise e
 
