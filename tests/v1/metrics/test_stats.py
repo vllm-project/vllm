@@ -209,3 +209,53 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 1000
     assert stats.recomputed_tokens == 1
+
+
+def test_prompt_token_stats_pd_disagg_external_exceeds_cached():
+    """Test P/D disagg case where external tokens exceed cached tokens.
+
+    In P/D disaggregation, the decode instance may receive more tokens via
+    external KV transfer than it has cached locally. This previously caused
+    negative local_cache_hit values which crashed Prometheus counters.
+    """
+    stats = PromptTokenStats()
+
+    # Case: Decode receives 7000 tokens from prefill, but has 0 local cache
+    # This should NOT result in negative local_cache_hit
+    stats.update_from_output(
+        num_cached_tokens=0,
+        num_external_computed_tokens=7000,
+        prompt_len=7000,
+    )
+
+    assert stats.computed == 7000  # prompt_len - num_cached_tokens
+    assert stats.local_cache_hit == 0  # Should be clamped to 0, not -7000
+    assert stats.external_kv_transfer == 7000
+    assert stats.total == 7000
+
+    # Verify all values are non-negative (required for Prometheus counters)
+    assert stats.computed >= 0
+    assert stats.local_cache_hit >= 0
+    assert stats.external_kv_transfer >= 0
+    assert stats.cached_tokens >= 0
+    assert stats.recomputed_tokens >= 0
+
+
+def test_prompt_token_stats_pd_disagg_partial_overlap():
+    """Test P/D disagg with partial overlap between external and cached."""
+    stats = PromptTokenStats()
+
+    # Case: Some local cache, but more external transfer
+    # num_cached_tokens=100, num_external=500
+    # Old behavior: local_cache_hit = 100 - 500 = -400 (BUG!)
+    # New behavior: local_cache_hit = max(0, 100 - 500) = 0
+    stats.update_from_output(
+        num_cached_tokens=100,
+        num_external_computed_tokens=500,
+        prompt_len=1000,
+    )
+
+    assert stats.computed == 900  # 1000 - 100
+    assert stats.local_cache_hit == 0  # Clamped from -400
+    assert stats.external_kv_transfer == 500
+    assert stats.local_cache_hit >= 0  # Must be non-negative for Prometheus
