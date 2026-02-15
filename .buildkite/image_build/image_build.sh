@@ -147,7 +147,6 @@ print_bake_config() {
     # image and can cause duplicate artifact uploads from downstream steps.
     local bake_tmp
     bake_tmp="$(mktemp -d)"
-    trap 'rm -rf "${bake_tmp}"' RETURN
     BAKE_CONFIG_FILE="${bake_tmp}/bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
     docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
