@@ -15,10 +15,6 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_int,
-    align_fp4_moe_weights_for_fi,
-)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
@@ -28,6 +24,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    activation_to_flashinfer_int,
+    align_fp4_moe_weights_for_fi,
+)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.fused_moe.layer import FusedMoE
