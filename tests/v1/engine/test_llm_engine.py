@@ -224,7 +224,7 @@ def test_skip_tokenizer_initialization(model: str):
     )
     sampling_params = SamplingParams(prompt_logprobs=True, detokenize=True)
 
-    with pytest.raises(ValueError, match="cannot pass text prompts when"):
+    with pytest.raises(ValueError, match="`skip_tokenizer_init=True`"):
         llm.generate("abc", sampling_params)
 
     outputs = llm.generate(

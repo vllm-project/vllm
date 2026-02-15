@@ -140,8 +140,8 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
                                            CVT_FP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
 
-    out_pos =
-        cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(quant_input, SFScaleVal, sf_out);
+    out_pos = cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+        quant_input, SFScaleVal, sf_out);
   }
 }
 
@@ -246,8 +246,8 @@ __global__ void __launch_bounds__(1024, VLLM_BLOCKS_PER_SM(1024))
                                            CVT_FP4_NUM_THREADS_PER_SF>(
             rowIdx_in_expert, colIdx, numKTiles, SFout_in_expert);
 
-    out_pos =
-        cvt_warp_fp16_to_fp4<Type, UE8M0_SF>(quant_input, SFScaleVal, sf_out);
+    out_pos = cvt_warp_fp16_to_fp4<Type, CVT_FP4_NUM_THREADS_PER_SF, UE8M0_SF>(
+        quant_input, SFScaleVal, sf_out);
   }
 }
 
