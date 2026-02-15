@@ -175,7 +175,8 @@ def fused_moe_kernel_gptq_awq(
     if pid_m * BLOCK_SIZE_M >= num_tokens_post_padded:
         return
     offs_token_id = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
-    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id)
+    # Cast to int64 to prevent overflow in stride*offset products
+    offs_token = tl.load(sorted_token_ids_ptr + offs_token_id).to(tl.int64)
     token_mask = offs_token < num_valid_tokens
 
     off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
@@ -426,6 +427,9 @@ def fused_moe_kernel(
             pid_m,  # first element = pid_m
             num_valid_tokens,  # remaining elements = constant
         )
+    # Cast to int64 to prevent overflow in stride*offset products
+    # (e.g. stride_cm * offs_token can exceed int32 for large token counts)
+    offs_token = offs_token.to(tl.int64)
 
     token_mask = offs_token < num_valid_tokens
 
