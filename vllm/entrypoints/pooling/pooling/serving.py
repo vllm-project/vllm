@@ -106,7 +106,9 @@ class OpenAIServingPooling(OpenAIServing):
                 validated_prompt = self.io_processor.parse_data(request.data)
 
                 raw_prompts = await self.io_processor.pre_process_async(
-                    prompt=validated_prompt, request_id=request_id
+                    prompt=validated_prompt,
+                    request_id=request_id,
+                    renderer=self.renderer,
                 )
                 engine_prompts = await self._preprocess_cmpl(
                     request,
@@ -146,7 +148,9 @@ class OpenAIServingPooling(OpenAIServing):
             if use_io_processor:
                 assert self.io_processor is not None
 
-                pooling_params = self.io_processor.merge_pooling_params()
+                pooling_params = self.io_processor.merge_pooling_params(
+                    params=None, request=request
+                )
                 if pooling_params.task is None:
                     pooling_params.task = "plugin"
             else:
