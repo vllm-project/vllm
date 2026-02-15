@@ -298,9 +298,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             swiglu_alpha = self.gemm1_alpha
             swiglu_beta = self.gemm1_beta
             swiglu_limit = self.gemm1_clamp_limit
-            fc1_expert_weights = w1.view(torch.long)
-            fc2_expert_weights = w2.view(torch.long)
+
             if self.quant_dtype == "mxfp8":
+                fc1_expert_weights = w1.view(torch.long)
+                fc2_expert_weights = w2.view(torch.long)
                 fake_input_scale = torch.ones(
                     self.moe_config.num_experts, device=hidden_states.device
                 )
@@ -313,6 +314,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 use_mxfp8_act_scaling = True
             else:
                 assert hidden_states.dtype == torch.bfloat16
+                fc1_expert_weights = w1
+                fc2_expert_weights = w2
                 quant_scales = [
                     self.w1_scale,
                     self.w2_scale,
