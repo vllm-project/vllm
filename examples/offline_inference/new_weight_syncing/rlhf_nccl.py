@@ -36,6 +36,7 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -90,10 +91,13 @@ class TrainModel:
 
     def broadcast_weights(self, packed: bool = True):
         """Broadcast weights to the inference engine."""
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
+        trainer_args = NCCLTrainerSendWeightsArgs(
             group=self.model_update_group,
             packed=packed,
+        )
+        NCCLWeightTransferEngine.trainer_send_weights(
+            iterator=self.model.named_parameters(),
+            trainer_args=trainer_args,
         )
 
 

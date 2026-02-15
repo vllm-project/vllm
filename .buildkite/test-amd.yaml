@@ -276,7 +276,8 @@ steps:
   - popd
   # NEW rlhf examples
   - pushd ../examples/offline_inference/new_weight_syncing
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_nccl.py
+  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_ipc.py
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
   - popd
 
