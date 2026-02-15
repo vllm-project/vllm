@@ -227,6 +227,7 @@ class EngineCoreRequestType(enum.Enum):
     UTILITY = b"\x03"
     # Sentinel used within EngineCoreProc.
     EXECUTOR_FAILED = b"\x04"
+    PAUSE = b"\x05"
 
 
 class ReconfigureDistributedRequest(msgspec.Struct):
@@ -244,3 +245,30 @@ class ReconfigureRankType(enum.IntEnum):
 
     KEEP_CURRENT_RANK = -1
     SHUTDOWN_CURRENT_RANK = -2
+
+
+class FaultToleranceRequest(msgspec.Struct):
+    """
+    Request for fault tolerance instructions, used in the fault tolerance protocol.
+    """
+
+    request_id: str
+    instruction: str
+    params: dict[str, Any]
+
+
+class FaultToleranceResult(msgspec.Struct):
+    """
+    Result of applying fault tolerance instructions.
+    """
+
+    request_id: str
+    success: bool
+    reason: str | None = None
+
+
+class EngineStatusType(enum.IntEnum):
+    HEALTHY = 0
+    DEAD = 1
+    UNHEALTHY = 2
+    PAUSED = 3
