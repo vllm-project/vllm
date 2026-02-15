@@ -204,7 +204,7 @@ class DefaultModelLoader(BaseModelLoader):
                 self.load_config.use_tqdm_on_load,
             )
         elif use_safetensors:
-            if self.load_config.load_format == "fastsafetensors":
+            if self.load_config.load_format in ("fastsafetensors", "auto"):
                 weights_iterator = fastsafetensors_weights_iterator(
                     hf_weights_files,
                     self.load_config.use_tqdm_on_load,
