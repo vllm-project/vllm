@@ -278,7 +278,6 @@ def all_reduce_fusion_pass_on_test_model(
     )
 
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     custom_ops = []
     if enable_rms_norm_custom_op:
@@ -304,6 +303,7 @@ def all_reduce_fusion_pass_on_test_model(
         model=model_name, trust_remote_code=True, dtype=dtype, seed=42
     )
     with set_current_vllm_config(vllm_config):
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
         all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
         noop_pass = NoOpEliminationPass(vllm_config)
         func_pass = FixFunctionalizationPass(vllm_config)
