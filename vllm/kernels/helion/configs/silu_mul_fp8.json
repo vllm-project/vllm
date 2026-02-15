@@ -273,7 +273,7 @@
       "range_warp_specializes": []
     }
   },
-  "nvidia_h100_sxm5": {
+  "nvidia_h100_80gb_hbm3": {
     "intermediate_2048_batchsize_256": {
       "block_sizes": [
         1,
