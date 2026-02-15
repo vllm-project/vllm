@@ -76,6 +76,21 @@ class ObservabilityConfig:
     This includes number of context/generation requests and tokens
     and the elapsed cpu time for the iteration."""
 
+    histogram_buckets_ttft: list[float] | None = None
+    """Custom Prometheus histogram buckets for time-to-first-token (TTFT)
+    metrics. Specify as a list of float boundaries in seconds.
+    If None, uses the default buckets."""
+
+    histogram_buckets_itl: list[float] | None = None
+    """Custom Prometheus histogram buckets for inter-token latency (ITL)
+    metrics. Specify as a list of float boundaries in seconds.
+    If None, uses the default buckets."""
+
+    histogram_buckets_request_latency: list[float] | None = None
+    """Custom Prometheus histogram buckets for request latency metrics
+    (e2e, queue, inference, prefill, decode). Specify as a list of float
+    boundaries in seconds. If None, uses the default buckets."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
