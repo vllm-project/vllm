@@ -4,19 +4,29 @@
 import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
+from torch._higher_order_ops import auto_functionalized
+from torch._inductor.fx_passes.post_grad import view_to_reshape
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
 
 import vllm.model_executor.layers.quantization.utils.fp8_utils  # noqa: F401
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.config.utils import Range
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.attention import (
+    Attention,
+    get_attention_context,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
     ScaleDesc,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.ops.paged_attn import PagedAttention
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -25,10 +35,13 @@ from .matcher_utils import (
     MatcherFusedAddRMSNorm,
     MatcherQuantFP8,
     MatcherRMSNorm,
+    MatcherRotaryEmbedding,
     MatcherSiluAndMul,
 )
 from .rms_quant_fusion import (
     FusedRMSQuantKey,
+    empty_bf16,
+    empty_i64,
 )
 
 logger = init_logger(__name__)
@@ -502,3 +515,254 @@ class RocmAiterTritonAddRMSNormPadFusionPass(VllmPatternMatcherPass):
 
     def uuid(self) -> str:
         return VllmInductorPass.hash_source(self, AddAiterRMSNormPadPattern)
+
+
+def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    layer_name: str = "",
+) -> torch.Tensor:
+    """
+    This impl wraps the AITER call as well as fetching the KV cache and
+    other attention metadata from the forward context. It also returns
+    a dummy tensor, similar to `Attention.unified_kv_cache_update`,
+    that is passed to unified_attention to signal a side effect and
+    the data dependency between them to ensure torch.compile preserves ordering.
+    """
+    from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+
+    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    if layer_slot_mapping is not None:
+        assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
+            f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
+        )
+
+        if attn_layer.backend == AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN:
+            flash_layout = True
+            key_cache, value_cache = kv_cache.unbind(0)
+        elif attn_layer.backend == AttentionBackendEnum.TRITON_ATTN:
+            flash_layout = True
+            key_cache, value_cache = kv_cache.unbind(1)
+        elif attn_layer.backend == AttentionBackendEnum.ROCM_ATTN:
+            flash_layout = False
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, attn_layer.num_kv_heads, attn_layer.head_size
+            )
+        else:
+            raise ValueError(
+                f"Unsupported backend for RoPE+KVCache fusion: {attn_layer.backend}"
+            )
+
+        is_fp8_kv_cache = attn_layer.impl.kv_cache_dtype.startswith("fp8")  # type: ignore[attr-defined]
+        if is_fp8_kv_cache:
+            key_cache_og_dtype = key_cache.dtype
+            value_cache_og_dtype = value_cache.dtype
+            key_cache = key_cache.view(attn_layer.impl.fp8_dtype)  # type: ignore[attr-defined]
+            value_cache = value_cache.view(attn_layer.impl.fp8_dtype)  # type: ignore[attr-defined]
+        cos, sin = cos_sin_cache.chunk(2, dim=-1)
+
+        query, key, key_cache, value_cache = fused_qk_rope_reshape_and_cache(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            positions,
+            cos,
+            sin,
+            attn_layer._k_scale,
+            attn_layer._v_scale,
+            is_neox,
+            flash_layout=flash_layout,
+            apply_scale=is_fp8_kv_cache,
+            q_out=query,
+            k_out=key,
+            output_zeros=False,
+        )
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(key_cache_og_dtype)
+            value_cache = value_cache.view(value_cache_og_dtype)
+    # TODO (Rohan138): do I need an else here? To do RoPE during the dummy forward
+    # when the slot_mappings haven't been initialized yet?
+    # I assume not, because this will return the original qkv anyway,
+    # and this is all inside a custom op so Inductor shouldn't
+    # know what we're doing to the tensors inside the custom op
+    # especially since the RoPE would be inplace as well
+
+    dummy = torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
+    return dummy
+
+
+def _rocm_aiter_triton_qk_rope_reshape_and_cache_fake(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    positions: torch.Tensor,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    layer_name: str = "",
+) -> torch.Tensor:
+    dummy = torch.empty(0, device=query.device, dtype=query.dtype)
+    return dummy
+
+
+direct_register_custom_op(
+    op_name="rocm_aiter_triton_qk_rope_reshape_and_cache",
+    op_func=_rocm_aiter_triton_qk_rope_reshape_and_cache_impl,
+    mutates_args=["query", "key"],
+    fake_impl=_rocm_aiter_triton_qk_rope_reshape_and_cache_fake,
+)
+
+
+class RopeReshapeKVCachePattern:
+    """
+    This pattern matches the following unfused sequence:
+      q, k = rotary_embedding(positions, q, k, head_size, cos_sin_cache, is_neox)
+      kv_cache_dummy = unified_kv_cache_update(k, v, layer_name)
+
+    and replaces it with the fused AITER triton kernel:
+      q_out, k_out, key_cache, value_cache = qk_rope_reshape_and_cache(
+        q, k, v, key_cache, value_cache, slot_mapping, positions,
+        cos, sin, k_scale, v_scale, is_neox, flash_layout
+      )
+    """
+
+    FUSED_OP = torch.ops.vllm.rocm_aiter_triton_qk_rope_reshape_and_cache.default
+
+    def __init__(
+        self,
+        layer: Attention,
+        is_neox: bool,
+    ) -> None:
+        self.layer_name = layer.layer_name
+        self.num_heads = layer.num_heads
+        self.num_kv_heads = layer.num_kv_heads
+        self.head_size = layer.head_size
+        self.head_size_v = layer.head_size_v
+        self.is_neox = is_neox
+
+        self.q_size = self.num_heads * self.head_size
+        self.k_size = self.num_kv_heads * self.head_size
+        self.v_size = self.num_kv_heads * self.head_size_v
+
+        self.rope_matcher = MatcherRotaryEmbedding(
+            is_neox=self.is_neox,
+            head_size=self.head_size,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_kv_heads,
+        )
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        # Sample inputs to help pattern tracing
+        T = 5
+        L = 4096
+        qkv = empty_bf16(T, self.q_size + self.k_size + self.v_size)
+        positions = empty_i64(T)
+        cos_sin_cache = empty_bf16(L, self.head_size)
+        return [
+            qkv,
+            positions,
+            cos_sin_cache,
+        ]
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        def pattern(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q, k = self.rope_matcher(positions, q, k, cos_sin_cache)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
+            # Note: dummy needs to be the first output due to an Inductor bug,
+            # see https://github.com/vllm-project/vllm/issues/33666
+            return dummy, q, k, v
+
+        def replacement(
+            qkv: torch.Tensor,
+            positions: torch.Tensor,
+            cos_sin_cache: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+            q, k, v = qkv.split([self.q_size, self.k_size, self.v_size], dim=-1)
+            q = q.view(-1, self.num_heads, self.head_size)
+            k = k.view(-1, self.num_kv_heads, self.head_size)
+            v = v.view(-1, self.num_kv_heads, self.head_size_v)
+            results = auto_functionalized(
+                self.FUSED_OP,
+                query=q,
+                key=k,
+                value=v,
+                positions=positions,
+                cos_sin_cache=cos_sin_cache,
+                is_neox=self.is_neox,
+                layer_name=self.layer_name,
+            )
+            return results[0], results[1], results[2], v
+
+        # NOTE: use view_to_reshape to unify view/reshape to simplify
+        # pattern and increase matching opportunities
+        def fwd_and_view_to_reshape(*args, **kwargs) -> fx.GraphModule:
+            gm = pm.fwd_only(*args, **kwargs)
+            view_to_reshape(gm)
+            return gm
+
+        pm.register_replacement(
+            pattern, replacement, self.get_inputs(), fwd_and_view_to_reshape, pm_pass
+        )
+
+
+class ROCmAiterTritonRopeReshapeKVCacheFusionPass(VllmPatternMatcherPass):
+    """
+    This pass fuses the rotary embedding and KV cache update operations
+    into a single AITER triton kernel: qk_rope_reshape_and_cache.
+
+    It uses the pattern matcher and matches each layer manually, as strings
+    cannot be wildcarded. This also lets us check support on attention layers
+    upon registration instead of during pattern matching.
+
+    This fusion eliminates the need for separate kernel launches and
+    intermediate memory operations between the RoPE and cache update steps.
+    """
+
+    @enable_fake_mode
+    def __init__(self, config: VllmConfig) -> None:
+        super().__init__(config)
+
+        self.patterns: PatternMatcherPass = PatternMatcherPass(
+            pass_name="rocm_aiter_triton_rope_reshape_kv_cache_fusion_pass"
+        )
+
+        cc = config.compilation_config
+        self.max_token_num = cc.pass_config.rope_kvcache_fusion_max_token_num
+
+        attn_layers = get_layers_from_vllm_config(config, Attention)
+        for _, layer in attn_layers.items():
+            for is_neox in [True, False]:
+                RopeReshapeKVCachePattern(
+                    layer=layer,
+                    is_neox=is_neox,
+                ).register(self.patterns)
+
+        self.dump_patterns(config, self.patterns)
+
+    @VllmInductorPass.time_and_log
+    def __call__(self, graph: fx.Graph) -> None:
+        self.matched_count = self.patterns.apply(graph)
+        logger.debug("Replaced %s patterns", self.matched_count)
+
+    def is_applicable_for_range(self, compile_range: Range) -> bool:
+        # This pass works best for the small-batch decode setting.
+        # For large-batch e.g. prefill, it is better to use two separate kernels
+        # since they are compute bound and the fused kernels require further tuning.
+        return compile_range.end <= self.max_token_num
+
+    def uuid(self) -> str:
+        return VllmInductorPass.hash_source(self, RopeReshapeKVCachePattern)

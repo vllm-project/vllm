@@ -162,6 +162,16 @@ class FixFunctionalizationPass(VllmInductorPass):
                     "position_ids",
                 )
                 self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
+            elif (
+                hasattr(torch.ops.vllm, "rocm_aiter_triton_qk_rope_reshape_and_cache")
+                and at_target
+                == torch.ops.vllm.rocm_aiter_triton_qk_rope_reshape_and_cache.default
+            ):
+                mutated_args = {
+                    1: "query",
+                    2: "key",
+                }
+                self.defunctionalize(graph, node, mutated_args=mutated_args)
             else:
                 continue  # skip the count
 
@@ -208,13 +218,20 @@ class FixFunctionalizationPass(VllmInductorPass):
         self, node: torch.fx.Node, mutated_args: dict[int, torch.fx.Node | str]
     ) -> None:
         """
-        Replace all getitem users of the auto-functionalized node with the
+        Replace mutated getitem users of the auto-functionalized node with the
         mutated arguments.
         :param node: The auto-functionalized node
         :param mutated_args: The mutated arguments, indexed by getitem index.
         If the value of an arg is a string, `node.kwargs[arg]` is used.
         """
         for idx, user in self.getitem_users(node).items():
+            # Some functionalized nodes may return both a result at getitem[0]
+            # as well as mutated args at getitem[1:...]
+            if idx == 0:
+                assert idx not in mutated_args, (
+                    f"result at getitem[0] should not be in mutated_args for {node}"
+                )
+                continue
             arg = mutated_args[idx]
             arg = node.kwargs[arg] if isinstance(arg, str) else arg
             user.replace_all_uses_with(arg)
@@ -257,10 +274,21 @@ class FixFunctionalizationPass(VllmInductorPass):
         with graph.inserting_before(node):
             function = node.args[0]
             if args is None:
-                graph.call_function(function, kwargs=node.kwargs)
+                fn_node = graph.call_function(function, kwargs=node.kwargs)
             else:
                 # Args passed as strings refer to items in node.kwargs
                 args = tuple(
                     node.kwargs[arg] if isinstance(arg, str) else arg for arg in args
                 )
-                graph.call_function(function, args=args)
+                fn_node = graph.call_function(function, args=args)
+
+        # TODO (Rohan138): make this a separate function maybe?
+        # TODO (Rohan138): does this handle multiple getitem[0] nodes?
+        # do we know for sure that those have been deduplicated?
+        # Replace result at getitem[0] of the auto-functionalized node
+        # with the result of the new node if the getitem[0] node exists
+        users = self.getitem_users(node)
+        if 0 in users:
+            user = users[0]
+            user.replace_all_uses_with(fn_node)
+            self._remove(user)
