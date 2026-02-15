@@ -92,14 +92,13 @@ class SamplingStates:
         idx_mapping_np: np.ndarray,
     ) -> torch.Tensor:
         do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
-        top_k = self.top_k.gpu[idx_mapping] if do_top_k else None
-
         do_top_p = np.any(self.top_p.np[idx_mapping_np] != 1.0)
-        top_p = self.top_p.gpu[idx_mapping] if do_top_p else None
+        if not (do_top_k or do_top_p):
+            return logits
 
-        if do_top_k or do_top_p:
-            logits = apply_top_k_top_p(logits, top_k, top_p)
-        return logits
+        top_k = self.top_k.gpu[idx_mapping] if do_top_k else None
+        top_p = self.top_p.gpu[idx_mapping] if do_top_p else None
+        return apply_top_k_top_p(logits, top_k, top_p)
 
     def max_num_logprobs(self, idx_mapping_np: np.ndarray) -> int:
         return int(np.max(self.num_logprobs[idx_mapping_np]))
