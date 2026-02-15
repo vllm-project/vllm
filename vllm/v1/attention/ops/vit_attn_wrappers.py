@@ -110,6 +110,83 @@ def vit_flash_attn_wrapper(
     )
 
 
+def triton_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    batch_size: int,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
+
+    q_len = q.size(1)
+    if cu_seqlens is None:
+        cu_seqlens = torch.arange(
+            0, (batch_size + 1) * q_len, step=q_len, dtype=torch.int32, device=q.device
+        )
+    max_seqlen = q_len if max_seqlen is None else max_seqlen.item()
+
+    q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    output = torch.empty_like(q)
+    context_attention_fwd(
+        q,
+        k,
+        v,
+        output,
+        b_start_loc=cu_seqlens[:-1],
+        b_seq_len=cu_seqlens[1:] - cu_seqlens[:-1],
+        max_input_len=max_seqlen,
+        is_causal=False,
+        sliding_window_q=None,
+        sliding_window_k=None,
+        softmax_scale=scale,
+    )
+
+    context_layer = einops.rearrange(output, "(b s) h d -> b s h d", b=batch_size)
+    return context_layer
+
+
+def triton_attn_wrapper_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    batch_size: int,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty_like(q)
+
+
+direct_register_custom_op(
+    op_name="triton_attn_wrapper",
+    op_func=triton_attn_wrapper,
+    fake_impl=triton_attn_wrapper_fake,
+)
+
+
+def vit_triton_attn_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    batch_size: int,
+    scale: float | None = None,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops.vllm.triton_attn_wrapper(
+        q,
+        k,
+        v,
+        batch_size,
+        scale,
+        cu_seqlens,
+        max_seqlen,
+    )
+
+
 def apply_sdpa(
     q: torch.Tensor,
     k: torch.Tensor,
