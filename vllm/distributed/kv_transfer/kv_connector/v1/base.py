@@ -397,6 +397,20 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def get_aux_meta(self) -> dict[str, dict[str, Any]] | None:
+        """
+        Get auxiliary metadata from worker-side put_aux() calls.
+
+        Called by the model runner after get_finished() to populate
+        KVConnectorOutput.aux_meta, which flows back to the scheduler
+        via ModelRunnerOutput.
+
+        Returns:
+            dict mapping req_id to aux metadata dict, or None if no
+            auxiliary metadata is pending.
+        """
+        return None
+
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
         Get the KVConnector handshake metadata for this connector.

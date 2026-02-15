@@ -84,6 +84,7 @@ class KVOutputAggregator:
         aggregated_kv_connector_stats = None
         combined_kv_cache_events = None
         invalid_block_ids = set[int]()
+        aggregated_aux_meta: dict[str, dict[str, Any]] | None = None
         for model_runner_output in outputs:
             assert model_runner_output is not None
             kv_output = model_runner_output.kv_connector_output
@@ -139,6 +140,15 @@ class KVOutputAggregator:
 
             invalid_block_ids |= kv_output.invalid_block_ids
 
+            # Aux metadata: take from the first worker that has it.
+            if aggregated_aux_meta is None and kv_output.aux_meta:
+                aggregated_aux_meta = kv_output.aux_meta
+            elif kv_output.aux_meta:
+                # Merge in any req_ids not yet seen (handles edge cases).
+                for req_id, info in kv_output.aux_meta.items():
+                    if req_id not in aggregated_aux_meta:  # type: ignore[operator]
+                        aggregated_aux_meta[req_id] = info  # type: ignore[index]
+
         # select output of the worker specified by output_rank
         output = outputs[output_rank]
 
@@ -150,6 +160,7 @@ class KVOutputAggregator:
             kv_cache_events=combined_kv_cache_events or None,
             invalid_block_ids=invalid_block_ids,
             expected_finished_count=self._expected_finished_count,
+            aux_meta=aggregated_aux_meta,
         )
 
         return output
