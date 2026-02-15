@@ -281,7 +281,8 @@ endif()
 
 set(VLLM_EXT_SRC
   "csrc/mamba/mamba_ssm/selective_scan_fwd.cu"
-  "csrc/cache_kernels.cu"
+  # cache_kernels.cu is handled separately for NVFP4 architectures
+  # "csrc/cache_kernels.cu"
   "csrc/cache_kernels_fused.cu"
   "csrc/attention/paged_attention_v1.cu"
   "csrc/attention/paged_attention_v2.cu"
@@ -684,7 +685,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       "csrc/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
       "csrc/quantization/fp4/nvfp4_experts_quant.cu"
       "csrc/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
-      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu")
+      "csrc/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+      "csrc/cache_kernels.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${FP4_ARCHS}")
@@ -696,6 +698,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     message(STATUS "Not building NVFP4 as no compatible archs were found.")
     # clear FP4_ARCHS
     set(FP4_ARCHS)
+    # Add cache_kernels.cu to standard build if NVFP4 is not enabled
+    list(APPEND VLLM_EXT_SRC "csrc/cache_kernels.cu")
   endif()
 
   # CUTLASS MLA Archs and flags
