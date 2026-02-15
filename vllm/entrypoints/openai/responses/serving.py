@@ -419,13 +419,27 @@ class OpenAIServingResponses(OpenAIServing):
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
+        # Only include builtin tools that the request actually asked for.
+        # Without this filter, tools registered on the server (e.g. via
+        # --tool-server demo) would be available for execution even when
+        # the request didn't enable them.
+        requested_tool_types = extract_tool_types(request.tools)
         builtin_tool_list: list[str] = []
         if self.tool_server is not None:
-            if self.tool_server.has_tool("browser"):
+            if (
+                self.tool_server.has_tool("browser")
+                and "web_search_preview" in requested_tool_types
+            ):
                 builtin_tool_list.append("browser")
-            if self.tool_server.has_tool("python"):
+            if (
+                self.tool_server.has_tool("python")
+                and "code_interpreter" in requested_tool_types
+            ):
                 builtin_tool_list.append("python")
-            if self.tool_server.has_tool("container"):
+            if (
+                self.tool_server.has_tool("container")
+                and "container" in requested_tool_types
+            ):
                 builtin_tool_list.append("container")
 
         if self.tool_server is not None:
