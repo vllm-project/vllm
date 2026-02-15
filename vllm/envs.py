@@ -169,6 +169,7 @@ if TYPE_CHECKING:
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
+    VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
@@ -1235,6 +1236,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # insecure method and it is needed for some reason.
     "VLLM_ALLOW_INSECURE_SERIALIZATION": lambda: bool(
         int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))
+    ),
+    # Temporary: skip adding random suffix to internal request IDs. May be
+    # needed for KV connectors that match request IDs across instances.
+    "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "0"))
     ),
     # IP address used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_HOST": lambda: os.getenv(
