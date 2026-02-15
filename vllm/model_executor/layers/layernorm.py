@@ -6,6 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+# Import kernels
+import vllm.kernels  # noqa: F401
+from vllm import ir
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
@@ -183,6 +186,12 @@ class RMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
+        add_residual = residual is not None
+        weight = self.weight.data if self.has_weight else None
+        if not add_residual:
+            return ir.ops.rms_norm(
+                x, weight, self.variance_epsilon, self.variance_size_override
+            )
 
         return self.forward_static(
             x,
@@ -199,10 +208,16 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        add_residual = residual is not None
+        weight = self.weight.data if self.has_weight else None
+        if not add_residual and not vllm_is_batch_invariant():
+            return ir.ops.rms_norm(
+                x, weight, self.variance_epsilon, self.variance_size_override
+            )
+
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
-        add_residual = residual is not None
         if add_residual:
             return fused_add_rms_norm(
                 x, residual, self.weight.data, self.variance_epsilon
@@ -215,6 +230,13 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        add_residual = residual is not None
+        weight = self.weight.data if self.has_weight else None
+        if not add_residual:
+            return ir.ops.rms_norm(
+                x, weight, self.variance_epsilon, self.variance_size_override
+            )
+
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
 
