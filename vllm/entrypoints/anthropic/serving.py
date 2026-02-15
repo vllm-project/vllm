@@ -7,7 +7,6 @@
 
 import json
 import logging
-import time
 from collections.abc import AsyncGenerator
 from typing import Any
 
@@ -22,6 +21,7 @@ from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesResponse,
     AnthropicStreamEvent,
     AnthropicUsage,
+    generate_tool_call_id,
 )
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
@@ -40,6 +40,34 @@ from vllm.entrypoints.openai.engine.protocol import (
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_tool_result_text(content: str | list[dict[str, Any]] | None) -> str:
+    """Extract plain text from an Anthropic tool_result content field.
+
+    The Anthropic API allows tool_result content as either a plain string or
+    a list of content blocks (e.g. ``[{"type": "text", "text": "..."}]``).
+    Using ``str()`` on the list form produces a Python repr rather than the
+    actual text.  This helper normalises both forms to a plain string.
+    """
+    if content is None:
+        return ""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                if block.get("type") == "text":
+                    parts.append(block.get("text", ""))
+                elif block.get("type") == "image":
+                    parts.append("[image]")
+                else:
+                    parts.append(json.dumps(block))
+            else:
+                parts.append(str(block))
+        return "\n".join(parts)
+    return str(content)
 
 
 def wrap_data_with_event(data: str, event: str):
@@ -126,7 +154,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     elif block.type == "tool_use":
                         # Convert tool use to function call format
                         tool_call = {
-                            "id": block.id or f"call_{int(time.time())}",
+                            "id": block.id or generate_tool_call_id(),
                             "type": "function",
                             "function": {
                                 "name": block.name or "",
@@ -140,16 +168,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 {
                                     "role": "tool",
                                     "tool_call_id": block.id or "",
-                                    "content": str(block.content)
-                                    if block.content
-                                    else "",
+                                    "content": _extract_tool_result_text(block.content),
                                 }
                             )
                         else:
                             # Assistant tool result becomes regular text
-                            tool_result_text = (
-                                str(block.content) if block.content else ""
-                            )
+                            tool_result_text = _extract_tool_result_text(block.content)
                             content_parts.append(
                                 {
                                     "type": "text",
@@ -270,23 +294,24 @@ class AnthropicServingMessages(OpenAIServingChat):
         elif generator.choices[0].finish_reason == "tool_calls":
             result.stop_reason = "tool_use"
 
-        content: list[AnthropicContentBlock] = [
-            AnthropicContentBlock(
-                type="text",
-                text=generator.choices[0].message.content
-                if generator.choices[0].message.content
-                else "",
-            )
-        ]
+        content: list[AnthropicContentBlock] = []
+
+        # Only include a text block when there is actual text content.
+        # Anthropic clients (e.g. Claude Code) do not expect an empty text
+        # block alongside tool_use blocks.
+        msg_content = generator.choices[0].message.content
+        if msg_content:
+            content.append(AnthropicContentBlock(type="text", text=msg_content))
 
         for tool_call in generator.choices[0].message.tool_calls:
-            anthropic_tool_call = AnthropicContentBlock(
-                type="tool_use",
-                id=tool_call.id,
-                name=tool_call.function.name,
-                input=json.loads(tool_call.function.arguments),
+            content.append(
+                AnthropicContentBlock(
+                    type="tool_use",
+                    id=tool_call.id,
+                    name=tool_call.function.name,
+                    input=json.loads(tool_call.function.arguments),
+                )
             )
-            content += [anthropic_tool_call]
 
         result.content = content
 
@@ -432,6 +457,25 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 data = chunk.model_dump_json(exclude_unset=True)
                                 yield wrap_data_with_event(data, "content_block_start")
                                 content_block_started = True
+
+                                # The first chunk may carry arguments alongside
+                                # the tool call id.  Emit them as a delta so
+                                # they are not silently dropped.
+                                if tool_call.function and tool_call.function.arguments:
+                                    args_chunk = AnthropicStreamEvent(
+                                        index=content_block_index,
+                                        type="content_block_delta",
+                                        delta=AnthropicDelta(
+                                            type="input_json_delta",
+                                            partial_json=tool_call.function.arguments,
+                                        ),
+                                    )
+                                    data = args_chunk.model_dump_json(
+                                        exclude_unset=True
+                                    )
+                                    yield wrap_data_with_event(
+                                        data, "content_block_delta"
+                                    )
 
                             else:
                                 chunk = AnthropicStreamEvent(
