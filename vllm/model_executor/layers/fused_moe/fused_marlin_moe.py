@@ -35,6 +35,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils import (
     marlin_moe_intermediate_size,
     marlin_quant_input,
 )
+from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
+    marlin_stability_scale,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Static128BlockSym,
@@ -83,6 +86,8 @@ def _fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     is_k_full: bool = True,
+    w1_stability_scale_factor: torch.Tensor | None = None,
+    w2_stability_scale_factor: torch.Tensor | None = None,
 ) -> torch.Tensor:
     assert hidden_states.ndim == 2
     M, K = hidden_states.size()
@@ -122,6 +127,16 @@ def _fused_marlin_moe(
     elif input_dtype == torch.float8_e4m3fn:
         gate_up_input, a_scales1 = marlin_quant_input(hidden_states, input_dtype)
 
+    # Stability scaling before GEMM1: scale down input (and bias) to
+    # prevent FP16 overflow in the Marlin FP4 dequantization path.
+    # Use non-in-place ops since hidden_states is shared across GEMMs.
+    k1 = marlin_stability_scale(gate_up_input, w1_stability_scale_factor, bias1)
+    if k1 is not None:
+        k1_inv = torch.reciprocal(k1)
+        gate_up_input = gate_up_input * k1_inv
+        if bias1 is not None:
+            bias1 = bias1 * k1_inv
+
     intermediate_cache1 = ops.moe_wna16_marlin_gemm(
         gate_up_input,
         intermediate_cache1,
@@ -150,6 +165,11 @@ def _fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=False,
     )
+
+    # Stability scaling after GEMM1: restore scale before activation.
+    if k1 is not None:
+        intermediate_cache1.mul_(k1)
+
     activation_func(
         activation,
         intermediate_cache2,
@@ -173,6 +193,15 @@ def _fused_marlin_moe(
         intermediate_cache2, a_scales2 = marlin_quant_input(
             intermediate_cache2, input_dtype
         )
+
+    # Stability scaling before GEMM2: scale down intermediate (and bias).
+    # intermediate_cache2 is a scratch buffer, safe for in-place ops.
+    k2 = marlin_stability_scale(intermediate_cache2, w2_stability_scale_factor, bias2)
+    if k2 is not None:
+        k2_inv = torch.reciprocal(k2)
+        intermediate_cache2.mul_(k2_inv)
+        if bias2 is not None:
+            bias2 = bias2 * k2_inv
 
     output = ops.moe_wna16_marlin_gemm(
         intermediate_cache2,
@@ -202,6 +231,10 @@ def _fused_marlin_moe(
         use_fp32_reduce=True,
         is_zp_float=False,
     )
+
+    # Stability scaling after GEMM2: restore scale on output.
+    if k2 is not None:
+        output.mul_(k2)
 
     return output
 
@@ -242,6 +275,8 @@ def fused_marlin_moe(
     output: torch.Tensor | None = None,
     input_dtype: torch.dtype | None = None,
     inplace: bool = False,
+    w1_stability_scale_factor: torch.Tensor | None = None,
+    w2_stability_scale_factor: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     This function computes a Mixture of Experts (MoE) layer using two sets of
@@ -358,6 +393,8 @@ def fused_marlin_moe(
         output=None,
         input_dtype=input_dtype,
         is_k_full=is_k_full,
+        w1_stability_scale_factor=w1_stability_scale_factor,
+        w2_stability_scale_factor=w2_stability_scale_factor,
     ).view(-1, topk, K)
 
     if output is None:
@@ -397,6 +434,8 @@ def batched_fused_marlin_moe(
     is_k_full: bool = True,
     output: torch.Tensor | None = None,
     inplace: bool = False,
+    w1_stability_scale_factor: torch.Tensor | None = None,
+    w2_stability_scale_factor: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """
     This function massages the inputs so the batched hidden_states can be
@@ -519,6 +558,8 @@ def batched_fused_marlin_moe(
         intermediate_cache2=intermediate_cache2,
         output=output.view(-1, K) if output is not None else output,
         is_k_full=is_k_full,
+        w1_stability_scale_factor=w1_stability_scale_factor,
+        w2_stability_scale_factor=w2_stability_scale_factor,
     )
 
     output = output.view(B, BATCH_TOKENS_MAX, K)
@@ -740,6 +781,8 @@ class MarlinExperts(MarlinExpertsBase):
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
             input_dtype=self.input_dtype,
+            w1_stability_scale_factor=self.w1_stability_scale_factor,
+            w2_stability_scale_factor=self.w2_stability_scale_factor,
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
@@ -848,4 +891,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
             sort_indices1=self.w13_g_idx_sort_indices,
             sort_indices2=self.w2_g_idx_sort_indices,
             is_k_full=self.is_k_full,
+            w1_stability_scale_factor=self.w1_stability_scale_factor,
+            w2_stability_scale_factor=self.w2_stability_scale_factor,
         )

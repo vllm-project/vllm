@@ -185,6 +185,9 @@ class FusedMoEQuantDesc:
     # Biases for GPT triton MoE
     bias: torch.Tensor | None = None
 
+    # Stability scale factor for NVFP4 Marlin MoE
+    stability_scale_factor: torch.Tensor | None = None
+
 
 # TODO(bnell): have subclasses for specific moe methods?
 # e.g. for specific arguments bias, precision, etc.
@@ -340,6 +343,14 @@ class FusedMoEQuantConfig:
         return self._w2.alpha_or_gscale
 
     @property
+    def w1_stability_scale_factor(self) -> torch.Tensor | None:
+        return self._w1.stability_scale_factor
+
+    @property
+    def w2_stability_scale_factor(self) -> torch.Tensor | None:
+        return self._w2.stability_scale_factor
+
+    @property
     def use_fp8_w8a8(self) -> bool:
         return self.quant_dtype == torch.float8_e4m3fn
 
@@ -471,6 +482,8 @@ class FusedMoEQuantConfig:
         w1_zp: torch.Tensor | None = None,
         w2_zp: torch.Tensor | None = None,
         weight_dtype: torch.dtype | str | None = None,
+        w1_stability_scale_factor: torch.Tensor | None = None,
+        w2_stability_scale_factor: torch.Tensor | None = None,
     ) -> "FusedMoEQuantConfig":
         """
         General builder function for a FusedMoEQuantConfig.
@@ -527,10 +540,22 @@ class FusedMoEQuantConfig:
             _a1=FusedMoEQuantDesc(quant_dtype, a_shape, a1_scale, a1_gscale),
             _a2=FusedMoEQuantDesc(quant_dtype, a_shape, a2_scale, a2_gscale),
             _w1=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w1_scale, g1_alphas, w1_zp, w1_bias
+                weight_dtype,
+                w_shape,
+                w1_scale,
+                g1_alphas,
+                w1_zp,
+                w1_bias,
+                w1_stability_scale_factor,
             ),
             _w2=FusedMoEQuantDesc(
-                weight_dtype, w_shape, w2_scale, g2_alphas, w2_zp, w2_bias
+                weight_dtype,
+                w_shape,
+                w2_scale,
+                g2_alphas,
+                w2_zp,
+                w2_bias,
+                w2_stability_scale_factor,
             ),
         )
         assert quant_config.per_act_token_quant == per_act_token_quant
@@ -758,9 +783,11 @@ def nvfp4_w4a16_moe_quant_config(
     g2_alphas: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    w1_stability_scale_factor: torch.Tensor | None = None,
+    w2_stability_scale_factor: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
-    Construct a quant config for 16-but activations and nvp4 weights.
+    Construct a quant config for 16-bit activations and nvfp4 weights.
     """
     return FusedMoEQuantConfig.make(
         quant_dtype=None,
@@ -769,6 +796,8 @@ def nvfp4_w4a16_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
         weight_dtype="nvfp4",
+        w1_stability_scale_factor=w1_stability_scale_factor,
+        w2_stability_scale_factor=w2_stability_scale_factor,
     )
 
 
