@@ -310,7 +310,6 @@ def fi_trtllm_fp8_per_tensor_moe(
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_per_tensor_scale_moe
 
     # The DeepSeekV3 routing method requires float32 router logits.
-    print(routing_method_type)
     if routing_method_type == RoutingMethodType.DeepSeekV3:
         routing_logits = routing_logits.to(torch.float32)
 
