@@ -917,6 +917,7 @@ class FusedMoEParallelConfig:
     sp_size: int
 
     use_ep: bool  # whether to use EP or not
+    moe_backend: str  # backend for MoE expert computation kernels
     all2all_backend: str  # all2all backend for MoE communication
     enable_eplb: bool  # whether to enable expert load balancing
 
@@ -1081,6 +1082,7 @@ class FusedMoEParallelConfig:
                 ep_rank=0,
                 sp_size=sp_size_,
                 use_ep=False,
+                moe_backend=vllm_parallel_config.moe_backend,
                 all2all_backend=vllm_parallel_config.all2all_backend,
                 enable_eplb=vllm_parallel_config.enable_eplb,
             )
@@ -1101,6 +1103,7 @@ class FusedMoEParallelConfig:
             ep_rank=ep_rank,
             sp_size=sp_size_,
             use_ep=True,
+            moe_backend=vllm_parallel_config.moe_backend,
             all2all_backend=vllm_parallel_config.all2all_backend,
             enable_eplb=vllm_parallel_config.enable_eplb,
         )
@@ -1119,6 +1122,7 @@ class FusedMoEParallelConfig:
             ep_rank=0,
             sp_size=1,
             use_ep=False,
+            moe_backend="auto",
             all2all_backend="naive",
             enable_eplb=False,
         )
