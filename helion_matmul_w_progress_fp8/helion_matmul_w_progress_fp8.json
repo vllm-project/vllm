@@ -1,0 +1,53 @@
+{
+  "h100": {
+    "mperrank_32_n_64_k_32_splits_1": {
+      "block_sizes": [
+        8,
+        8,
+        32
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        0,
+        4
+      ],
+      "range_num_stages": [
+        0,
+        4
+      ],
+      "range_multi_buffers": [
+        null,
+        true
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "first",
+        ""
+      ],
+      "num_warps": 1,
+      "num_stages": 3,
+      "indexing": [
+        "tensor_descriptor",
+        "tensor_descriptor",
+        "pointer",
+        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat",
+      "range_warp_specializes": []
+    }
+  }
+}

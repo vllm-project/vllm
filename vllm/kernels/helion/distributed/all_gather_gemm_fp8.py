@@ -4,16 +4,8 @@ from torch.distributed import ProcessGroup
 import helion
 import helion.language as hl
 
-HELION_CONFIG = helion.Config(
-    block_sizes=[8, 256, 64],
-    num_warps=8,
-    num_stages=3,
-    indexing="block_ptr",
-)
-@helion.kernel(
-    config=HELION_CONFIG,
-    static_shapes=True,
-)
+
+@helion.kernel()
 def helion_matmul_w_progress_fp8(
     a: torch.Tensor,  # [M, K] FP8 (full gathered)
     a_shared: torch.Tensor,  # [M//world_size, K] FP8

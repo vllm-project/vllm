@@ -1,0 +1,142 @@
+from itertools import product
+from pathlib import Path
+from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import helion_matmul_w_progress_fp8,copy_engine_all_gather_w_progress
+import os
+import pytest
+import torch
+import torch.distributed as dist
+from torch.distributed import ProcessGroup
+from vllm.kernels.helion.config_manager import ConfigManager
+# VLLM_USE_HELION_BACKEND=1  python -m torch.distributed.run --standalone     --nproc-per-node 4     --rdzv-backend c10d --rdzv-endpoint localhost:0     --no_python python3 scripts/autotune_helion_collective.py 
+from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
+    helion_all_gather_fp8_gemm  # This triggers the direct_register_custom_op call
+)
+
+def _helion_all_gather_fp8_gemm_runtime(
+    a_shared: torch.Tensor,
+    b: torch.Tensor,
+    scale_a: torch.Tensor,
+    scale_b: torch.Tensor,
+    world_size: int,
+    group_name: ProcessGroup,
+    a_out: torch.Tensor | None = None,
+    progress: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, dict]:
+    """
+    Performs an all-gather on a_shared and matrix multiplication using the Helion library.
+    """
+    configs = {
+        "SPLITS_PER_RANK":1,
+    }
+
+    a_shared_symm = dist._symmetric_memory.empty(
+        a_shared.shape,
+        dtype=a_shared.dtype,
+        device=a_shared.device
+    )
+    a_shared_symm.copy_(a_shared)
+
+    # Determine group size and rank
+    symm_mem_group = group_name
+    if symm_mem_group is None:
+        raise RuntimeError("No symmetric memory group available")
+    symm_mem_hdl = dist._symmetric_memory.rendezvous(a_shared_symm, group=symm_mem_group)
+        
+    a_shape = list(a_shared.shape)
+    a_shape[0] *= symm_mem_hdl.world_size
+    configs["RANK"] = symm_mem_hdl.rank
+    configs["WORLD_SIZE"] = symm_mem_hdl.world_size
+
+    if a_out is None:
+        a_out = torch.empty(a_shape, dtype=a_shared.dtype, device=a_shared.device)
+    if progress is None:
+        progress = torch.zeros(
+            symm_mem_hdl.world_size * configs["SPLITS_PER_RANK"],
+            dtype=torch.uint32,
+            device=a_shared_symm.device,
+        )
+    else:
+        progress.fill_(0) # Reset progress to 0.
+    backend_stream = copy_engine_all_gather_w_progress(
+        a_out, a_shared_symm, progress, group_name, configs["SPLITS_PER_RANK"]
+    )
+    inputs = (a_out, a_shared_symm, scale_a, b, scale_b, progress,configs["SPLITS_PER_RANK"],configs["RANK"])
+    best_config = helion_matmul_w_progress_fp8.autotune(inputs, force=True)
+    best_config.save("best_config.json")
+    print("Best config found:", best_config)
+
+    
+    torch.cuda.current_stream().wait_stream(backend_stream)
+
+    return a_out, best_config
+
+def autotune(fn=helion_matmul_w_progress_fp8, force=False):
+    num_tokens_list = [128]#4096]#, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
+    hidden_size_list = [32]#,2048 4096, 8192]
+    N = 64  # Output dimension for b (can tune as needed)
+    rank = int(os.environ["RANK"])
+    local_rank = int(os.environ["LOCAL_RANK"])
+    world_size = int(os.environ["WORLD_SIZE"])
+    
+    # Setup device - : each process gets its own GPU
+    torch.manual_seed(42 + rank)
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    
+    # Initialize distributed with torchrun's env vars
+    if not dist.is_initialized():
+        dist.init_process_group("nccl")
+    
+    # Register dist.group.WORLD in vLLM's _groups registry
+    from vllm.distributed.parallel_state import _groups, GroupCoordinator
+    import weakref
+    
+    # Create a minimal GroupCoordinator wrapping WORLD
+    world_group = GroupCoordinator(
+        group_ranks=[list(range(world_size))],
+        local_rank=local_rank,
+        torch_distributed_backend="nccl",
+        use_device_communicator=False,
+        group_name="world",
+    )
+    dist_group = dist.group.WORLD
+    assert dist_group is not None
+    # Store a weak reference to the GroupCoordinator in _groups so the kernel can access it without preventing garbage collection.
+    _groups[dist_group.group_name] = weakref.ref(world_group)
+    config_manager = ConfigManager(base_dir="helion_matmul_w_progress_fp8")
+    for num_tokens, hidden_size in product(num_tokens_list, hidden_size_list):
+        try:
+            print(f"Start autotuning with num_tokens={num_tokens} and hidden_size={hidden_size}")
+
+            tokens_per_rank = num_tokens // world_size
+            # Local shard for this rank
+            a_shared = torch.rand(tokens_per_rank, hidden_size, device=device, dtype=torch.float32) * 0.05
+            a_shared = a_shared.to(torch.float8_e4m3fn)
+
+            b = (torch.rand(hidden_size, N, device=device, dtype=torch.float32)  * 0.05).T.contiguous().T
+            b= b.to(torch.float8_e4m3fn)
+            scale_a = torch.rand((tokens_per_rank, 1), device=device, dtype=torch.float32) * 0.1 + 0.05
+            scale_b = torch.rand((1, N), device=device, dtype=torch.float32) * 0.1 + 0.05
+
+            # Progress tensor
+            SPLITS_PER_RANK = 1
+
+            # Prepare inputs for kernel
+            inputs = (a_shared, b, scale_a, scale_b, world_size, dist_group.group_name)
+            config_key = f"mperrank_{tokens_per_rank}_n_{N}_k_{hidden_size}_splits_{SPLITS_PER_RANK}"
+            # Call autotune and save best config
+            out, best_config = _helion_all_gather_fp8_gemm_runtime(*inputs)
+            print(f"Best config: {best_config}")
+
+            config_manager.save_configs(
+                kernel_name="helion_matmul_w_progress_fp8",
+                platform="h100",
+                configs={config_key: best_config},
+            )
+            print(f"Successfully saved config file {config_key}")
+        except Exception as e:
+            print(f"Autotuning failed for num_tokens={num_tokens}, hidden_size={hidden_size}: {e}")
+            continue
+
+if __name__ == "__main__":
+    autotune()
