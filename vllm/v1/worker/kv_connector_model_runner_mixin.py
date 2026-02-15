@@ -123,11 +123,12 @@ class KVConnectorModelRunnerMixin:
         This will allow efficient KV transfer of per-block KV data for all
         layers at once.
         Note this layout will only be applied given 3 conditions:
-        1. The KV Cache config contains just a single group where all layers
-            have the same page size.
+        1. All KV cache groups have compatible attention specs (same backend,
+            same kv_cache_shape, and same stride order). Each group must
+            contain exactly one attention subgroup with an AttentionSpec.
         2. A KV connector is configured, and the KV connector instance prefers
             to use this layout (prefer_cross_layer_blocks() returns True)
-        2. The flash attention backend supports this layout
+        3. The flash attention backend supports this layout
             (get_kv_cache_stride_order(True) includes a placement for a
             num_layers dimension)
 
@@ -149,32 +150,51 @@ class KVConnectorModelRunnerMixin:
         if not get_kv_transfer_group().prefer_cross_layer_blocks:
             return False
 
-        if len(attn_groups) != 1 or len(attn_groups[0]) != 1:
+        if not attn_groups:
             return False
 
-        attn_group = attn_groups[0][0]
-        kv_cache_spec = attn_group.kv_cache_spec
-        if not isinstance(kv_cache_spec, AttentionSpec):
-            return False
+        reference_shape = None
+        reference_stride_order = None
 
-        attn_backend = attn_group.backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            1234,
-            kv_cache_spec.block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
-        )
+        for subgroups in attn_groups:
+            if len(subgroups) != 1:
+                return False
 
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
+            attn_group = subgroups[0]
+            kv_cache_spec = attn_group.kv_cache_spec
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                return False
+
+            attn_backend = attn_group.backend
+            kv_cache_shape = attn_backend.get_kv_cache_shape(
+                1234,
+                kv_cache_spec.block_size,
+                kv_cache_spec.num_kv_heads,
+                kv_cache_spec.head_size,
+                cache_dtype_str=cache_dtype,
             )
-        except (AttributeError, NotImplementedError):
-            return False
 
-        # check that attention backend include a layers dimension
-        return len(kv_cache_stride_order) == len(kv_cache_shape) + 1
+            try:
+                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+                    include_num_layers_dimension=True
+                )
+            except (AttributeError, NotImplementedError):
+                return False
+
+            # check that attention backend includes a layers dimension
+            if len(kv_cache_stride_order) != len(kv_cache_shape) + 1:
+                return False
+
+            if reference_shape is None:
+                reference_shape = kv_cache_shape
+                reference_stride_order = kv_cache_stride_order
+            elif (
+                kv_cache_shape != reference_shape
+                or kv_cache_stride_order != reference_stride_order
+            ):
+                return False
+
+        return True
 
     @staticmethod
     def allocate_uniform_kv_caches(
@@ -219,7 +239,10 @@ class KVConnectorModelRunnerMixin:
         num_layers = len(kv_cache_config.kv_cache_tensors)
         total_size = tensor_size * num_layers
 
-        assert len(kernel_block_sizes) == 1
+        assert len(set(kernel_block_sizes)) == 1, (
+            "All KV cache groups must have the same kernel block size "
+            "for uniform layout"
+        )
         kernel_block_size = kernel_block_sizes[0]
         num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
         kernel_num_blocks = num_blocks * num_blocks_per_kv_block
