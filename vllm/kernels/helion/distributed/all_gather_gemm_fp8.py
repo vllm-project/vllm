@@ -3,9 +3,20 @@ import torch.distributed as dist
 from torch.distributed import ProcessGroup
 import helion
 import helion.language as hl
+from vllm.kernels.helion.register import register_kernel
+from typing import Callable, Any
+import logging
 
+logger = logging.getLogger(__name__)
+from vllm.utils.import_utils import has_helion
 
-@helion.kernel()
+if not has_helion():
+    raise ImportError(
+        "helion is required for helion_matmul_w_progress_fp8 kernel. "
+        "Install it with: pip install helion"
+    )
+
+@register_kernel  # type: ignore[misc]
 def helion_matmul_w_progress_fp8(
     a: torch.Tensor,  # [M, K] FP8 (full gathered)
     a_shared: torch.Tensor,  # [M//world_size, K] FP8
@@ -49,7 +60,81 @@ def helion_matmul_w_progress_fp8(
 
     return out
 
+# @helion_matmul_w_progress_fp8.register_config_picker  # type: ignore[misc]
+# def pick_helion_matmul_w_progress_fp8_config(
+#     args: tuple, 
+#     config_keys: list[str],
+# ) -> str | None:
+#     if not config_keys:
+#         return None
+#         """
+#         Config picker for helion_matmul_w_progress_fp8.
 
+#         Args:
+#             args: tuple containing runtime kernel arguments:
+#                 a_shared: [M_per_rank, K] local input shard
+#                 b: [K, N] weight/projection matrix
+#                 scale_a: [M_per_rank, 1]
+#                 scale_b: [1, N]
+#                 world_size: int
+#                 splits_per_rank: int
+#             config_keys: list of available pre-autotuned config keys
+
+#         Returns:
+#             str: best matching config key
+#         """
+#      # Unpack runtime arguments
+#     a, a_shared, _ ,b, _ , _, world_size, splits_per_rank, rank = args
+
+#     # Shapes
+#     M_per_rank, K = a_shared.shape
+#     _, N = b.shape
+#     M = M_per_rank * world_size
+
+#     # Exact match key
+#     target_key = f"mperrank_{M_per_rank}_n_{N}_k_{K}_splits_{splits_per_rank}"
+#     if target_key in config_keys:
+#         logger.debug("Found exact config: %s", target_key)
+#         return target_key
+
+#     # Collect candidate distances
+#     candidates = []
+#     for key in config_keys:
+#         try:
+#             parts = key.split("_")
+#             candidate_mpr = int(parts[1])
+#             candidate_N = int(parts[3])
+#             candidate_K = int(parts[5])
+#             candidate_splits = int(parts[7])
+#         except (ValueError, IndexError):
+#             continue
+
+#         # Only consider same splits_per_rank
+#         if candidate_splits != splits_per_rank:
+#             continue
+
+#         # Weighted Manhattan distance: M_per_rank dominates
+#         score = abs(candidate_mpr - M_per_rank) * 1000 \
+#                 + abs(candidate_N - N) * 10 \
+#                 + abs(candidate_K - K)
+
+#         candidates.append((score, key))
+
+#     if candidates:
+#         _, best_key = min(candidates)
+#         logger.debug(
+#             "No exact config found. Using closest match: %s for M=%d, N=%d, K=%d, splits=%d",
+#             best_key, M, N, K, splits_per_rank
+#         )
+#         return best_key
+
+#     # Fallback to default
+#     if "default" in config_keys:
+#         logger.debug("Falling back to default config")
+#         return "default"
+
+#     logger.warning("No suitable config found and no default available")
+#     return None
 
 def copy_engine_all_gather_w_progress(
     output: torch.Tensor,

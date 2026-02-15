@@ -61,7 +61,7 @@ def _helion_all_gather_fp8_gemm_runtime(
         a_out, a_shared_symm, progress, group_name, configs["SPLITS_PER_RANK"]
     )
     inputs = (a_out, a_shared_symm, scale_a, b, scale_b, progress,configs["SPLITS_PER_RANK"],configs["RANK"])
-    best_config = helion_matmul_w_progress_fp8.autotune(inputs, force=True)
+    best_config = helion_matmul_w_progress_fp8.run_autotune(inputs)
     best_config.save("best_config.json")
     print("Best config found:", best_config)
 
