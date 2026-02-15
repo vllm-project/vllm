@@ -248,6 +248,7 @@ class ReconfigureDistributedRequest(msgspec.Struct):
     new_stateless_world_group_port_list: list[list[int]]
     new_stateless_dp_group_port_list: list[list[int]]
     new_stateless_ep_group_port_list: list[list[int]]
+    new_stateless_eplb_group_port_list: list[list[int]]
 
 
 class ReconfigureRankType(enum.IntEnum):

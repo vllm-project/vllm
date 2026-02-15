@@ -547,3 +547,6 @@ class ElasticEPScalingState:
         parallel_config._stateless_ep_group_port_list = (
             reconfig_request.new_stateless_ep_group_port_list
         )
+        parallel_config._stateless_eplb_group_port_list = (
+            reconfig_request.new_stateless_eplb_group_port_list
+        )

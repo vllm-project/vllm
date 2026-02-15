@@ -469,7 +469,10 @@ def allocate_stateless_group_ports(parallel_config, new_data_parallel_size: int)
         new_world_size_across_dp
         // (new_data_parallel_size * parallel_config.tensor_parallel_size),
     )
-    total_ports_needed = (num_world_groups + num_dp_groups + num_ep_groups) * 3 + 5
+    num_eplb_groups = num_ep_groups
+    total_ports_needed = (
+        num_world_groups + num_dp_groups + num_ep_groups + num_eplb_groups
+    ) * 3 + 5
     all_ports = get_open_ports_list(total_ports_needed)
     new_data_parallel_master_port_list = all_ports[-5:]
     all_ports = all_ports[:-5]
@@ -484,12 +487,18 @@ def allocate_stateless_group_ports(parallel_config, new_data_parallel_size: int)
     new_stateless_ep_group_port_list = [
         all_ports[i : i + 3] for i in range(start_idx, start_idx + num_ep_groups * 3, 3)
     ]
+    start_idx += num_ep_groups * 3
+    new_stateless_eplb_group_port_list = [
+        all_ports[i : i + 3]
+        for i in range(start_idx, start_idx + num_eplb_groups * 3, 3)
+    ]
 
     parallel_config._stateless_world_group_port_list = (
         new_stateless_world_group_port_list
     )
     parallel_config._stateless_dp_group_port_list = new_stateless_dp_group_port_list
     parallel_config._stateless_ep_group_port_list = new_stateless_ep_group_port_list
+    parallel_config._stateless_eplb_group_port_list = new_stateless_eplb_group_port_list
     parallel_config.data_parallel_master_port = new_data_parallel_master_port_list.pop()
     parallel_config._data_parallel_master_port_list = new_data_parallel_master_port_list
 
@@ -1533,6 +1542,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 new_stateless_world_group_port_list=parallel_config._stateless_world_group_port_list,
                 new_stateless_dp_group_port_list=parallel_config._stateless_dp_group_port_list,
                 new_stateless_ep_group_port_list=parallel_config._stateless_ep_group_port_list,
+                new_stateless_eplb_group_port_list=parallel_config._stateless_eplb_group_port_list,
             )
             coro = self._call_utility_async(
                 "reinitialize_distributed", reconfig_request, engine=engine
@@ -1622,6 +1632,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 new_stateless_world_group_port_list=parallel_config._stateless_world_group_port_list,
                 new_stateless_dp_group_port_list=parallel_config._stateless_dp_group_port_list,
                 new_stateless_ep_group_port_list=parallel_config._stateless_ep_group_port_list,
+                new_stateless_eplb_group_port_list=parallel_config._stateless_eplb_group_port_list,
             )
             if cur_dp_rank >= new_data_parallel_size:
                 reconfig_request.new_data_parallel_rank = (

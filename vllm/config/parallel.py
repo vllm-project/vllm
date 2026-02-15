@@ -265,6 +265,11 @@ class ParallelConfig:
     len(self._stateless_ep_group_port_list) == world_size_across_dp // ep_size,
     """
 
+    _stateless_eplb_group_port_list: list[list[int]] = Field(default_factory=list)
+    """List of open ports for stateless EPLB groups when enable_elastic_ep is True.
+    Same topology as EP but separate NCCL communicator to avoid deadlocks.
+    """
+
     _stateless_world_group_port_list: list[list[int]] = Field(default_factory=list)
     """List of open ports for stateless world group when enable_elastic_ep is True.
     Set to be private as it's not intended to be configured by users.
@@ -430,6 +435,9 @@ class ParallelConfig:
 
     def get_next_stateless_ep_group_port(self) -> list[int]:
         return self._stateless_ep_group_port_list.pop()
+
+    def get_next_stateless_eplb_group_port(self) -> list[int]:
+        return self._stateless_eplb_group_port_list.pop()
 
     def stateless_init_dp_group(self, return_store: bool = False) -> ProcessGroup:
         # NOTE: In high-concurrency scenarios multiple processes
@@ -612,7 +620,8 @@ class ParallelConfig:
             # we need 3 ports for each comm group in `StatelessGroupCoordinator`.
             # one for stateless CPU group, one for stateless device group,
             # one for stateless TCPStore group.
-            total_ports_needed = (num_world_groups + num_dp_groups + num_ep_groups) * 3
+            num_eplb_groups = num_ep_groups
+            total_ports_needed = (num_world_groups + num_dp_groups + num_ep_groups + num_eplb_groups) * 3
             if not self._stateless_world_group_port_list:
                 all_ports = get_open_ports_list(total_ports_needed + 5)
                 # NOTE(yongji): allocate 5 ports for _data_parallel_master_port_list
@@ -636,6 +645,11 @@ class ParallelConfig:
                 self._stateless_ep_group_port_list = [
                     all_ports[i : i + 3]
                     for i in range(start_idx, start_idx + num_ep_groups * 3, 3)
+                ]
+                start_idx += num_ep_groups * 3
+                self._stateless_eplb_group_port_list = [
+                    all_ports[i : i + 3]
+                    for i in range(start_idx, start_idx + num_eplb_groups * 3, 3)
                 ]
 
         if self.data_parallel_size > 1 or self.data_parallel_size_local == 0:
