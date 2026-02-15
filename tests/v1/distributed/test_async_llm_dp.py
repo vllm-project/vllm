@@ -3,6 +3,7 @@
 
 import asyncio
 import os
+import time
 from contextlib import ExitStack
 from dataclasses import dataclass
 
@@ -187,24 +188,35 @@ async def test_load(
 # =============================================================================
 # DP Pause/Resume Tests
 # =============================================================================
+# When expert_parallel=False: uses non-MoE model (DP replicas as separate engines).
+# When expert_parallel=True: uses MoE model + EP (DPEngineCoreProc, sync pause path).
 
 DP_PAUSE_MODEL = "hmellor/tiny-random-LlamaForCausalLM"
+DP_PAUSE_MODEL_MOE = "ibm-research/PowerMoE-3b"
 DP_PAUSE_PROMPT = "This is a test of data parallel pause"
 
 
+def _get_dp_pause_engine_args(expert_parallel: bool) -> AsyncEngineArgs:
+    """Engine args for DP pause tests: MoE+EP when expert_parallel else small Llama."""
+    model = DP_PAUSE_MODEL_MOE if expert_parallel else DP_PAUSE_MODEL
+    return AsyncEngineArgs(
+        model=model,
+        enforce_eager=True,
+        tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
+        data_parallel_size=DP_SIZE,
+        data_parallel_backend="mp",
+        enable_expert_parallel=expert_parallel,
+    )
+
+
 @pytest.mark.asyncio
-async def test_dp_pause_resume_basic():
+@pytest.mark.parametrize("expert_parallel", [False, True])
+async def test_dp_pause_resume_basic(expert_parallel: bool):
     """Pausing from the client (one call) pauses all DP ranks; resume clears it."""
     if current_platform.is_rocm():
         pytest.skip("DP pause tests use mp backend only")
     with ExitStack() as after:
-        engine_args = AsyncEngineArgs(
-            model=DP_PAUSE_MODEL,
-            enforce_eager=True,
-            tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
-            data_parallel_size=DP_SIZE,
-            data_parallel_backend="mp",
-        )
+        engine_args = _get_dp_pause_engine_args(expert_parallel)
         engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
@@ -226,18 +238,13 @@ async def test_dp_pause_resume_basic():
 
 
 @pytest.mark.asyncio
-async def test_dp_pause_abort():
+@pytest.mark.parametrize("expert_parallel", [False, True])
+async def test_dp_pause_abort(expert_parallel: bool):
     """Pause with abort from one client aborts in-flight requests on all DP ranks."""
     if current_platform.is_rocm():
         pytest.skip("DP pause tests use mp backend only")
     with ExitStack() as after:
-        engine_args = AsyncEngineArgs(
-            model=DP_PAUSE_MODEL,
-            enforce_eager=True,
-            tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
-            data_parallel_size=DP_SIZE,
-            data_parallel_backend="mp",
-        )
+        engine_args = _get_dp_pause_engine_args(expert_parallel)
         engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
@@ -286,41 +293,57 @@ async def test_dp_pause_abort():
 
 
 @pytest.mark.asyncio
-async def test_dp_pause_keep_then_resume():
-    """Pause with keep queues new requests; resume allows them to run."""
+@pytest.mark.parametrize("expert_parallel", [False, True])
+async def test_dp_pause_keep_then_resume(expert_parallel: bool):
+    """Start generation, pause after a few tokens (keep mode), resume; verify gap."""
     if current_platform.is_rocm():
         pytest.skip("DP pause tests use mp backend only")
+
+    pause_duration = 2.0
+    min_tokens_before_pause = 3
+
     with ExitStack() as after:
-        engine_args = AsyncEngineArgs(
-            model=DP_PAUSE_MODEL,
-            enforce_eager=True,
-            tensor_parallel_size=int(os.getenv("TP_SIZE", 1)),
-            data_parallel_size=DP_SIZE,
-            data_parallel_backend="mp",
-        )
+        engine_args = _get_dp_pause_engine_args(expert_parallel)
         engine = AsyncLLM.from_engine_args(engine_args)
         after.callback(engine.shutdown)
 
-        await engine.pause_generation(mode="keep")
-        assert await engine.is_paused()
+        sampling_params = SamplingParams(max_tokens=15, ignore_eos=True)
+        token_times: list[tuple[int, float]] = []
+        pause_token_idx = 0
 
-        request_done = asyncio.Event()
-
-        async def gen():
-            async for out in engine.generate(
-                request_id="queued-keep",
+        async def generator_task():
+            nonlocal pause_token_idx
+            out = None
+            async for output in engine.generate(
+                request_id="keep-resume-req",
                 prompt=DP_PAUSE_PROMPT,
-                sampling_params=SamplingParams(max_tokens=5),
+                sampling_params=sampling_params,
             ):
-                pass
-            request_done.set()
+                token_count = len(output.outputs[0].token_ids)
+                token_times.append((token_count, time.monotonic()))
+                out = output
             return out
 
-        task = asyncio.create_task(gen())
-        await asyncio.sleep(0.2)
-        assert not request_done.is_set()
+        async def controller_task():
+            nonlocal pause_token_idx
+            while len(token_times) < min_tokens_before_pause:
+                await asyncio.sleep(0.01)
+            await engine.pause_generation(mode="keep")
+            await asyncio.sleep(pause_duration)
+            pause_token_idx = len(token_times)
+            await engine.resume_generation()
 
-        await engine.resume_generation()
-        final = await asyncio.wait_for(task, timeout=10.0)
-        assert final.finished
-        assert not await engine.is_paused()
+        gen_task = asyncio.create_task(generator_task())
+        ctrl_task = asyncio.create_task(controller_task())
+        final_output, _ = await asyncio.gather(gen_task, ctrl_task)
+
+        assert final_output is not None and final_output.finished
+        assert await engine.is_paused() is False
+        assert pause_token_idx >= min_tokens_before_pause
+        if pause_token_idx > 0 and pause_token_idx < len(token_times):
+            pause_gap = (
+                token_times[pause_token_idx][1] - token_times[pause_token_idx - 1][1]
+            )
+            assert pause_gap >= pause_duration * 0.8, (
+                f"Expected gap ~{pause_duration}s after pause, got {pause_gap:.3f}s"
+            )

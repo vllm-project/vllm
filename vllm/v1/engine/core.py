@@ -1122,9 +1122,11 @@ class EngineCoreProc(EngineCore):
             get_result = lambda: (method := getattr(self, method_name)) and method(
                 *self._convert_msgspec_args(method, args)
             )
+
             enqueue_output = lambda out: self.output_queue.put_nowait(
                 (client_idx, EngineCoreOutputs(utility_output=out))
             )
+
             self._invoke_utility_method(method_name, get_result, output, enqueue_output)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
@@ -1493,6 +1495,20 @@ class DPEngineCoreProc(EngineCoreProc):
 
         super().add_request(request, request_wave)
 
+    def pause_scheduler(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        result = super().pause_scheduler(mode, clear_cache)
+        if self.per_step_hooks:
+            self.engines_running = True
+        return result
+
+    def resume_scheduler(self) -> None:
+        super().resume_scheduler()
+        # After keep-mode pause we may be blocked in _process_input_queue();
+        # ensure we break out and keep looping to run the in-flight request.
+        self.engines_running = True
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
@@ -1532,6 +1548,7 @@ class DPEngineCoreProc(EngineCoreProc):
             # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
+            self._process_per_step_hooks()
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
 
             if not executed:
@@ -1546,7 +1563,7 @@ class DPEngineCoreProc(EngineCoreProc):
             # 3) All-reduce operation to determine global unfinished reqs.
             self.engines_running = self._has_global_unfinished_reqs(
                 local_unfinished_reqs
-            )
+            ) or bool(self.per_step_hooks)
 
             if not self.engines_running:
                 if self.dp_rank == 0 or not self.has_coordinator:
