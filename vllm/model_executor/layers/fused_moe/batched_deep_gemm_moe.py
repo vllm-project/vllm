@@ -311,9 +311,6 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         return True
 
-    def supports_chunking(self) -> bool:
-        return False
-
     def supports_expert_map(self) -> bool:
         return False
 

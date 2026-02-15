@@ -194,7 +194,6 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
     if not current_platform.has_device_capability(100):
         pytest.skip("Test is only supported for sm >= 100")
     set_random_seed(7)
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(
             m, k, n, e, is_trtllm=True, activation=activation
@@ -266,7 +265,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
     workspace_init,
 ):
     set_random_seed(7)
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+    assert activation in ["silu", "relu2_no_mul"]
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(
             m, k, n, e, is_trtllm=False, activation=activation

@@ -83,12 +83,6 @@ class FlashInferCuteDSLExperts(mk.FusedMoEPermuteExpertsUnpermute):
     def supports_expert_map(self) -> bool:
         return False
 
-    def supports_chunking(self) -> bool:
-        # This refers to TP chunking; DP chunking is handled separately.
-        # TODO(shuw@nvidia.com): Set to False to be consistent with
-        # batched_deep_gemm_moe
-        return False
-
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         # Let PrepareAndFinalize::finalize() decide the impl.
         return TopKWeightAndReduceDelegate()

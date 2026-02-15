@@ -92,16 +92,6 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
             moe_parallel_config
         ) and fallback_cls._supports_parallel_config(moe_parallel_config)
 
-    def supports_chunking(self) -> bool:
-        assert (
-            self.experts.supports_chunking()
-            == self.fallback_experts.supports_chunking()
-        )
-        return (
-            self.experts.supports_chunking()
-            and self.fallback_experts.supports_chunking()
-        )
-
     def supports_expert_map(self) -> bool:
         assert (
             self.experts.supports_expert_map()
