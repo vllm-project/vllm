@@ -113,7 +113,7 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         return [576]
 
 
-@dataclass
+@dataclass(slots=True)
 class ROCMAiterMLASparseMetadata(AttentionMetadata):
     num_reqs: int
     max_query_len: int
@@ -136,7 +136,7 @@ class ROCMAiterMLASparseMetadata(AttentionMetadata):
     topk_tokens: int = 2048
 
 
-@dataclass
+@dataclass(slots=True)
 class ROCMAiterMLASparseMetadataBuilder(
     AttentionMetadataBuilder[ROCMAiterMLASparseMetadata]
 ):

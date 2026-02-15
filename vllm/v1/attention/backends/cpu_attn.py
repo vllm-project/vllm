@@ -82,7 +82,7 @@ class CPUAttentionBackend(AttentionBackend):
         return False
 
 
-@dataclass
+@dataclass(slots=True)
 class CPUAttentionMetadata:
     isa: str
     num_actual_tokens: int  # Number of tokens excluding padding.

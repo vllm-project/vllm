@@ -29,7 +29,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHash
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingUpdate:
     """Lightweight data for streaming session continuation.
 
@@ -57,6 +57,50 @@ class StreamingUpdate:
 
 
 class Request:
+    """Request object representing a single generation request."""
+
+    __slots__ = (
+        "_all_token_ids",
+        "_block_hasher",
+        "_output_token_ids",
+        "all_token_ids",
+        "arrival_time",
+        "block_hashes",
+        "cache_salt",
+        "client_index",
+        "discard_latest_async_tokens",
+        "eos_token_id",
+        "events",
+        "get_hash_new_full_blocks",
+        "is_prefill_chunk",
+        "kv_transfer_params",
+        "lora_request",
+        "max_tokens",
+        "mm_features",
+        "num_cached_tokens",
+        "num_computed_tokens",
+        "num_external_computed_tokens",
+        "num_nans_in_logits",
+        "num_output_placeholders",
+        "num_preemptions",
+        "num_prompt_tokens",
+        "output_token_ids",
+        "pooling_params",
+        "priority",
+        "prompt_embeds",
+        "prompt_token_ids",
+        "request_id",
+        "resumable",
+        "sampling_params",
+        "skip_reading_prefix_cache",
+        "spec_token_ids",
+        "status",
+        "stop_reason",
+        "streaming_queue",
+        "structured_output_request",
+        "trace_headers",
+    )
+
     def __init__(
         self,
         request_id: str,

@@ -106,13 +106,13 @@ class RequestOutputCollector:
             self._input_stream_task = None
 
 
-@dataclass
+@dataclass(slots=True)
 class OutputProcessorOutput:
     request_outputs: list[RequestOutput | PoolingRequestOutput]
     reqs_to_abort: list[str]
 
 
-@dataclass
+@dataclass(slots=True)
 class StreamingUpdate:
     """Streaming input update data for output processor.
 

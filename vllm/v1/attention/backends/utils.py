@@ -83,7 +83,7 @@ def set_kv_cache_layout(cache_layout: KVCacheLayoutType):
     _KV_CACHE_LAYOUT_OVERRIDE = cache_layout
 
 
-@dataclass
+@dataclass(slots=True)
 class PerLayerParameters:
     """
     Currently, FlashInfer backend only support models in which all layers share

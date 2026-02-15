@@ -451,7 +451,7 @@ class MultiprocExecutor(Executor):
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class UnreadyWorkerProcHandle:
     """WorkerProcess handle before READY."""
 
@@ -461,7 +461,7 @@ class UnreadyWorkerProcHandle:
     death_writer: Connection | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class WorkerProcHandle:
     proc: BaseProcess
     rank: int

@@ -448,7 +448,7 @@ class UniformTypeKVCacheSpecs(KVCacheSpec):
             return None
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheTensor:
     """
     A class for specifying how the workers should initialize the KV cache.
@@ -458,7 +458,7 @@ class KVCacheTensor:
     shared_by: list[str]  # layer names that share the same KV cache tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheGroupSpec:
     """
     Represents a group of model layers that share the same KV cache block table.
@@ -471,7 +471,7 @@ class KVCacheGroupSpec:
     kv_cache_spec: KVCacheSpec
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheConfig:
     """
     The KV cache configuration of a model.

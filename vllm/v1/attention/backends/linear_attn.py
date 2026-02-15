@@ -28,7 +28,7 @@ class LinearAttentionBackend(AttentionBackend):
         return LinearAttentionMetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class LinearAttentionMetadata:
     num_prefills: int
     num_prefill_tokens: int

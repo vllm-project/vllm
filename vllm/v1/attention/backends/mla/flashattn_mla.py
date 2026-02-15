@@ -86,7 +86,7 @@ class FlashAttnMLABackend(MLACommonBackend):
         return None
 
 
-@dataclass
+@dataclass(slots=True)
 class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
     query_start_loc: torch.Tensor
     max_query_len: int
@@ -95,7 +95,7 @@ class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
     max_num_splits: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class FlashAttnMLAMetadata(MLACommonMetadata[FlashAttnMLADecodeMetadata]):
     pass
 

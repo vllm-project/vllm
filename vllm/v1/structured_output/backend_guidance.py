@@ -4,7 +4,7 @@
 import copy
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 import torch
@@ -82,8 +82,13 @@ def process_for_additional_properties(
     return guide_json_obj
 
 
-@dataclass
+@dataclass(slots=True)
 class GuidanceBackend(StructuredOutputBackend):
+    disable_any_whitespace: bool = field(init=False)
+    disable_additional_properties: bool = field(init=False)
+    ll_tokenizer: Any = field(init=False)
+    serialized_grammar: Any = field(init=False, default=None)
+
     def __post_init__(self):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
@@ -130,7 +135,7 @@ class GuidanceBackend(StructuredOutputBackend):
         pass
 
 
-@dataclass
+@dataclass(slots=True)
 class GuidanceGrammar(StructuredOutputGrammar):
     ll_matcher: llguidance.LLMatcher
     ll_tokenizer: llguidance.LLTokenizer

@@ -32,7 +32,7 @@ class GDNAttentionBackend(AttentionBackend):
         return GDNAttentionMetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class GDNAttentionMetadata:
     num_prefills: int
     num_prefill_tokens: int

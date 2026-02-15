@@ -18,7 +18,7 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheBlocks:
     """
     The allocation result of KVCacheManager, work as the interface between

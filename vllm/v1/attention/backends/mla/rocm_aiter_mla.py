@@ -38,7 +38,7 @@ class AiterMLABackend(MLACommonBackend):
         return AiterMLAMetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterMLADecodeMetadata(MLACommonDecodeMetadata):
     # The indptr of the paged kv cache, shape: [batch_size + 1]
     paged_kv_indptr: torch.Tensor | None = None

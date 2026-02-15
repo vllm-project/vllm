@@ -31,8 +31,12 @@ else:
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class XgrammarBackend(StructuredOutputBackend):
+    disable_any_whitespace: bool = field(init=False)
+    compiler: Any = field(init=False)
+    num_speculative_tokens: int = field(init=False)
+
     def __post_init__(self):
         self.disable_any_whitespace = (
             self.vllm_config.structured_outputs_config.disable_any_whitespace
@@ -128,7 +132,7 @@ class XgrammarBackend(StructuredOutputBackend):
         del self.compiler
 
 
-@dataclass
+@dataclass(slots=True)
 class XgrammarGrammar(StructuredOutputGrammar):
     # NOTE: This would be a generic-enough class for
     # supporting different backends, in the future.

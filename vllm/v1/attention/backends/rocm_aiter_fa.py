@@ -301,7 +301,7 @@ if current_platform.is_rocm():
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionDecodeMetadata:
     max_query_len: int
     min_query_len: int
@@ -309,7 +309,7 @@ class AiterFlashAttentionDecodeMetadata:
     query_start_loc: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionPrefillMetadata:
     max_query_len: int
     min_query_len: int
@@ -317,7 +317,7 @@ class AiterFlashAttentionPrefillMetadata:
     query_start_loc: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterChunkSlidingWindowMetadata:
     swa_seqlens: torch.Tensor
     swa_cu_seqlens: torch.Tensor
@@ -328,7 +328,7 @@ class AiterChunkSlidingWindowMetadata:
     swa_workspace: torch.Tensor
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterChunkContextMetadata:
     workspace: torch.Tensor
     cu_seq_lens_chunk: torch.Tensor
@@ -342,7 +342,7 @@ class AiterChunkContextMetadata:
     swa_metadata: AiterChunkSlidingWindowMetadata | None
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionChunkPrefillMetadata:
     max_query_len: int
     min_query_len: int
@@ -351,7 +351,7 @@ class AiterFlashAttentionChunkPrefillMetadata:
     chunk_context_metadata: AiterChunkContextMetadata
 
 
-@dataclass
+@dataclass(slots=True)
 class AiterFlashAttentionMetadata:
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|

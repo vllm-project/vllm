@@ -4,7 +4,7 @@
 import time
 from collections import defaultdict, deque
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
 
 
-@dataclass
+@dataclass(slots=True)
 class BaseCacheStats:
     """Stores cache hit statistics."""
 
@@ -111,7 +111,7 @@ class CachingMetrics:
         return self.aggregated_query_hit / self.aggregated_query_total
 
 
-@dataclass
+@dataclass(slots=True)
 class PrefixCacheStats(BaseCacheStats):
     """
     Stores prefix cache hit statistics.
@@ -142,7 +142,7 @@ class PrefixCacheStats(BaseCacheStats):
             self.hits += num_hits
 
 
-@dataclass
+@dataclass(slots=True)
 class MultiModalCacheStats(BaseCacheStats):
     """
     Stores multi-modal cache hit statistics.
@@ -158,7 +158,7 @@ class MultiModalCacheStats(BaseCacheStats):
         self.hits += num_hits
 
 
-@dataclass
+@dataclass(slots=True)
 class KVCacheEvictionEvent:
     """Single KV cache block eviction sample."""
 
@@ -167,7 +167,7 @@ class KVCacheEvictionEvent:
     reuse_gaps_seconds: tuple[float, ...]
 
 
-@dataclass
+@dataclass(slots=True)
 class SchedulerStats:
     """Stats associated with the scheduler."""
 
@@ -197,7 +197,7 @@ class SchedulerStats:
     perf_stats: PerfStats | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class RequestStateStats:
     """Stats that need to be tracked across delta updates."""
 
@@ -219,7 +219,7 @@ class RequestStateStats:
     is_corrupted: bool = False
 
 
-@dataclass
+@dataclass(slots=True)
 class FinishedRequestStats:
     """Stats associated with a finished request."""
 
@@ -237,7 +237,7 @@ class FinishedRequestStats:
     num_cached_tokens: int = 0
 
 
-@dataclass
+@dataclass(slots=True)
 class PromptTokenStats:
     """Breakdown of prompt tokens by source.
 
@@ -254,7 +254,7 @@ class PromptTokenStats:
         local_cache_hit + external_kv_transfer - recomputed_tokens = cached_tokens
     """
 
-    ALL_SOURCES: tuple[str, ...] = (
+    ALL_SOURCES: ClassVar[tuple[str, ...]] = (
         "local_compute",
         "local_cache_hit",
         "external_kv_transfer",

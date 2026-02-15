@@ -4,7 +4,7 @@ import ast
 import json
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from transformers import PreTrainedTokenizerBase
@@ -38,7 +38,7 @@ def _cached_build_vllm_token_enforcer_tokenizer_data(
     )
 
 
-@dataclass
+@dataclass(slots=True)
 class LMFormatEnforcerGrammar(StructuredOutputGrammar):
     token_enforcer: lmformatenforcer.TokenEnforcer
     current_tokens_prefix: list[int] = field(default_factory=list)
@@ -89,8 +89,10 @@ class LMFormatEnforcerGrammar(StructuredOutputGrammar):
         self.current_tokens_prefix = []
 
 
-@dataclass
+@dataclass(slots=True)
 class LMFormatEnforcerBackend(StructuredOutputBackend):
+    tokenizer_data: Any = field(init=False)
+
     def __post_init__(self):
         self.tokenizer_data = _cached_build_vllm_token_enforcer_tokenizer_data(
             self.tokenizer, self.vocab_size

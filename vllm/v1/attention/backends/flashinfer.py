@@ -382,21 +382,21 @@ class FlashInferBackend(AttentionBackend):
         return None
 
 
-@dataclass
+@dataclass(slots=True)
 class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
 
 
-@dataclass
+@dataclass(slots=True)
 class FIDecode:
     """Metadata for the native FlashInfer decode pathway (non-TRTLLM)."""
 
     wrapper: BatchDecodeWithPagedKVCacheWrapper
 
 
-@dataclass
+@dataclass(slots=True)
 class TRTLLMPrefill:
     """Metadata for the TRTLLM prefill pathway."""
 
@@ -424,7 +424,7 @@ class TRTLLMPrefill:
     """The maximum sequence length for KV Cache."""
 
 
-@dataclass
+@dataclass(slots=True)
 class TRTLLMDecode:
     """Metadata for the TRTLLM decode pathway."""
 
@@ -444,7 +444,7 @@ class TRTLLMDecode:
     """The maximum sequence length for KV Cache."""
 
 
-@dataclass
+@dataclass(slots=True)
 class FlashInferMetadata:
     num_actual_tokens: int
     """Total number of tokens in the batch (excluding padding)."""
