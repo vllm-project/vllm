@@ -354,3 +354,8 @@ def validate_xgrammar_grammar(sampling_params: SamplingParams) -> None:
                 xgr.Grammar.from_structural_tag(so_params.structural_tag)
         except Exception as e:
             raise ValueError("Invalid structural tag specification.") from e
+
+    if so_params.lark:
+        raise ValueError(
+            "xgrazmmar does not support grammar from Lark. Use guidance instead."
+        )
