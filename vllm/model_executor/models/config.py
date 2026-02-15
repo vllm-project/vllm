@@ -434,6 +434,9 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 # https://github.com/flashinfer-ai/flashinfer/issues/1993 reports that`
                 # head size 256 and block size 16 is not supported on blackwell.
                 kernel_block_alignment_size = 32
+            # Xpu only supports block_size that is divisible by 64.
+            if current_platform.is_xpu():
+                kernel_block_alignment_size = 64
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,
                 num_kv_heads=model_config.get_num_kv_heads(parallel_config),
