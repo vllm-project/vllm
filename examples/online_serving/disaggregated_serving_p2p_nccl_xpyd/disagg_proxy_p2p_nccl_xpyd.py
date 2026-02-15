@@ -104,20 +104,34 @@ def random_uuid() -> str:
     return str(uuid.uuid4().hex)
 
 
-async def forward_request(url, data, request_id):
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
-        headers = {
-            "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
-            "X-Request-Id": request_id,
-        }
-        async with session.post(url=url, json=data, headers=headers) as response:
-            if response.status == 200:
-                if True:
-                    async for chunk_bytes in response.content.iter_chunked(1024):
-                        yield chunk_bytes
-                else:
-                    content = await response.read()
-                    yield content
+def _build_headers(request_id):
+    headers = {"X-Request-Id": request_id}
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
+
+
+async def forward_request(url, data, headers):
+    async with (
+        aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session,
+        session.post(url=url, json=data, headers=headers) as response,
+    ):
+        if response.status == 200:
+            async for chunk_bytes in response.content.iter_chunked(1024):
+                yield chunk_bytes
+
+
+async def run_prefill(url, data, headers):
+    async with (
+        aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session,
+        session.post(url=url, json=data, headers=headers) as response,
+    ):
+        if response.status == 200:
+            return await response.json()
+        raise RuntimeError(
+            f"Prefill backend error {response.status}: {await response.text()}"
+        )
 
 
 @app.route("/v1/completions", methods=["POST"])
@@ -154,20 +168,28 @@ async def handle_request():
         )
         count += 1
 
-        request_id = (
-            f"___prefill_addr_{prefill_zmq_addr}___decode_addr_"
-            f"{decode_zmq_addr}_{random_uuid()}"
-        )
+        request_id = random_uuid()
+        headers = _build_headers(request_id)
+
+        prefill_request["stream"] = False
+        prefill_request["kv_transfer_params"] = {
+            "remote_kv_addr": decode_zmq_addr,
+        }
 
         # finish prefill
-        async for _ in forward_request(
-            f"http://{prefill_addr}{request.path}", prefill_request, request_id
-        ):
-            continue
+        prefill_response = await run_prefill(
+            f"http://{prefill_addr}{request.path}", prefill_request, headers
+        )
+
+        # forward kv_transfer_params from prefill to decode
+        kv_transfer_params = prefill_response.get("kv_transfer_params", {})
+        decode_request = original_request_data.copy()
+        if kv_transfer_params:
+            decode_request["kv_transfer_params"] = kv_transfer_params
 
         # return decode
         generator = forward_request(
-            f"http://{decode_addr}{request.path}", original_request_data, request_id
+            f"http://{decode_addr}{request.path}", decode_request, headers
         )
         response = await make_response(generator)
         response.timeout = None
