@@ -229,6 +229,22 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "bool is_scale_transposed) -> ()");
   ops.impl("rms_norm_per_block_quant", torch::kCUDA, &rms_norm_per_block_quant);
 
+#ifndef USE_ROCM
+  // Fused RMSNorm + NVFP4 quantization
+  ops.def(
+      "rms_norm_nvfp4_quant(Tensor! result, Tensor! result_scale, "
+      "Tensor input, Tensor weight, Tensor input_scale, float epsilon) -> ()");
+  ops.impl("rms_norm_nvfp4_quant", torch::kCUDA, &rms_norm_nvfp4_quant);
+
+  // Fused Add + RMSNorm + NVFP4 quantization
+  ops.def(
+      "fused_add_rms_norm_nvfp4_quant(Tensor! result, Tensor! result_scale, "
+      "Tensor input, Tensor! residual, Tensor weight, Tensor input_scale, "
+      "float epsilon) -> ()");
+  ops.impl("fused_add_rms_norm_nvfp4_quant", torch::kCUDA,
+           &fused_add_rms_norm_nvfp4_quant);
+#endif
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(

@@ -143,6 +143,19 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
                               std::optional<torch::Tensor> residual,
                               int64_t group_size, bool is_scale_transposed);
 
+#ifndef USE_ROCM
+void rms_norm_nvfp4_quant(torch::Tensor& out, torch::Tensor& output_scale,
+                          torch::Tensor& input, torch::Tensor& weight,
+                          torch::Tensor& input_scale, double epsilon);
+
+void fused_add_rms_norm_nvfp4_quant(torch::Tensor& out,
+                                    torch::Tensor& output_scale,
+                                    torch::Tensor& input,
+                                    torch::Tensor& residual,
+                                    torch::Tensor& weight,
+                                    torch::Tensor& input_scale, double epsilon);
+#endif
+
 void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
                       std::optional<torch::Tensor> key, int64_t head_size,
                       torch::Tensor& cos_sin_cache, bool is_neox);
