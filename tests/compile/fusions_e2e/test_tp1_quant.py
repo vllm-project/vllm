@@ -66,6 +66,7 @@ def test_tp1_fp8_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
+    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
@@ -122,6 +123,7 @@ def test_tp1_fp4_fusions(
     model_kwargs["hf_overrides"] = hf_overrides(n_layers)
     model_kwargs["load_format"] = "dummy"
     model_kwargs["max_model_len"] = 1024
+    model_kwargs["kernel_config"] = {"enable_flashinfer_autotune": False}
 
     compilation_config = dict(
         use_inductor_graph_partition=inductor_graph_partition,
