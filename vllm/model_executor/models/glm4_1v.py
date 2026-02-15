@@ -723,10 +723,11 @@ class Glm4vVisionTransformer(nn.Module):
         cu_seqlens: torch.Tensor,
     ) -> torch.Tensor | None:
         max_seqlen = None
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
-        ):
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
