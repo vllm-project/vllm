@@ -168,16 +168,12 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 {
                                     "role": "tool",
                                     "tool_call_id": block.id or "",
-                                    "content": _extract_tool_result_text(
-                                        block.content
-                                    ),
+                                    "content": _extract_tool_result_text(block.content),
                                 }
                             )
                         else:
                             # Assistant tool result becomes regular text
-                            tool_result_text = _extract_tool_result_text(
-                                block.content
-                            )
+                            tool_result_text = _extract_tool_result_text(block.content)
                             content_parts.append(
                                 {
                                     "type": "text",
@@ -465,10 +461,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 # The first chunk may carry arguments alongside
                                 # the tool call id.  Emit them as a delta so
                                 # they are not silently dropped.
-                                if (
-                                    tool_call.function
-                                    and tool_call.function.arguments
-                                ):
+                                if tool_call.function and tool_call.function.arguments:
                                     args_chunk = AnthropicStreamEvent(
                                         index=content_block_index,
                                         type="content_block_delta",
