@@ -12,8 +12,8 @@ from collections.abc import AsyncGenerator, Iterable, Mapping
 from typing import Any
 
 from vllm.config import VllmConfig
-from vllm.engine.protocol import EngineClient
-from vllm.inputs import PromptType, StreamingInput
+from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, RequestOutput
