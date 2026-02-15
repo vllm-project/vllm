@@ -325,16 +325,16 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
-            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
+            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = self._tokenize_prompt(prompt, params)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
-            prompt = self._detokenize_prompt(prompt)
+            prompt = self._detokenize_prompt(prompt)  # type: ignore[arg-type]
 
-        return params.apply_post_tokenization(self.tokenizer, prompt)
+        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     @overload
     async def _tokenize_singleton_prompt_async(
@@ -356,16 +356,16 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> SingletonTokPrompt:
         if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
-            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
+            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
             prompt = await self._tokenize_prompt_async(prompt, params)
 
         if params.needs_detokenization and "prompt" not in prompt:
             if "prompt_token_ids" not in prompt:
                 raise RuntimeError("Cannot run detokenization on embeddings")
 
-            prompt = await self._detokenize_prompt_async(prompt)
+            prompt = await self._detokenize_prompt_async(prompt)  # type: ignore[arg-type]
 
-        return params.apply_post_tokenization(self.tokenizer, prompt)
+        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
 
     def _tokenize_enc_dec_prompt(
         self,
@@ -537,8 +537,7 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt_token_ids: list[int],
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object] | None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        mm_uuids: MultiModalUUIDDict | None,
     ) -> "TokenInputs | MultiModalInputs":
         mm_processor = self.get_mm_processor()
 
@@ -568,7 +567,7 @@ class BaseRenderer(ABC, Generic[_T]):
                 prompt_token_ids,
                 multi_modal_data,
                 prompt.get("mm_processor_kwargs"),
-                mm_uuids=prompt.get("multi_modal_uuids"),
+                prompt.get("multi_modal_uuids"),
             )
         else:
             inputs = token_inputs(prompt_token_ids)
@@ -616,9 +615,9 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: SingletonTokPrompt,
     ) -> SingletonInputs:
         if "prompt_embeds" in prompt:
-            return self._process_embeds(prompt)
+            return self._process_embeds(prompt)  # type: ignore[arg-type]
 
-        return self._process_tokens(prompt)
+        return self._process_tokens(prompt)  # type: ignore[arg-type]
 
     def _process_enc_dec(
         self,
@@ -637,7 +636,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def process_for_engine(self, prompt: TokPrompt) -> ProcessorInputs:
         if "encoder_prompt" in prompt:
-            return self._process_enc_dec(prompt)
+            return self._process_enc_dec(prompt)  # type: ignore[arg-type]
 
         return self._process_singleton(prompt)
 

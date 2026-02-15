@@ -33,11 +33,8 @@ class BeamSearchSequence:
 
         prompt_text = prompt.get("prompt")
         cache_salt = prompt.get("cache_salt")
-        mm_kwargs = prompt.get("mm_kwargs")
-        mm_hashes = prompt.get("mm_hashes")
-        mm_placeholders = prompt.get("mm_placeholders")
 
-        if not mm_kwargs or not mm_hashes or not mm_placeholders:
+        if prompt["type"] == "token":
             return token_inputs(
                 self.tokens,
                 prompt=prompt_text,
@@ -46,9 +43,9 @@ class BeamSearchSequence:
 
         return mm_inputs(
             prompt_token_ids=self.tokens,
-            mm_kwargs=mm_kwargs,
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholders,
+            mm_kwargs=prompt["mm_kwargs"],
+            mm_hashes=prompt["mm_hashes"],
+            mm_placeholders=prompt["mm_placeholders"],
             prompt=prompt_text,
             cache_salt=cache_salt,
         )

@@ -746,9 +746,18 @@ class LLM:
         instances: list[BeamSearchInstance] = []
 
         for lora_req, prompt in zip(lora_requests, engine_prompts):
+            if prompt["type"] == "embeds":
+                raise NotImplementedError(
+                    "Embedding prompt not supported for beam search"
+                )
+            if prompt["type"] == "enc_dec":
+                raise NotImplementedError(
+                    "Encoder-decoder prompt not supported for beam search"
+                )
+
             instances.append(
                 BeamSearchInstance(
-                    prompt,  # type: ignore[arg-type]
+                    prompt,
                     lora_request=lora_req,
                     logprobs=None,
                 ),

@@ -116,7 +116,7 @@ that has been standardized into a dictionary.
 """
 
 
-def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
+def parse_dec_only_prompt(prompt: PromptType | object) -> DecoderOnlyDictPrompt:
     """
     Parse a prompt for a decoder-only model and normalize it to a dictionary.
     """
@@ -145,7 +145,7 @@ def parse_dec_only_prompt(prompt: object) -> DecoderOnlyDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
+def _parse_enc_prompt(prompt: PromptType | object) -> EncoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -167,7 +167,7 @@ def _parse_enc_prompt(prompt: object) -> EncoderDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
+def _parse_dec_prompt(prompt: PromptType | object) -> DecoderDictPrompt:
     if isinstance(prompt, str):
         return TextPrompt(prompt=prompt)
 
@@ -196,9 +196,7 @@ def _parse_dec_prompt(prompt: object) -> DecoderDictPrompt:
     raise TypeError("Prompt should be a string, list of tokens, or dictionary")
 
 
-def parse_enc_dec_prompt(
-    prompt: PromptType | ProcessorInputs,
-) -> EncoderDecoderDictPrompt:
+def parse_enc_dec_prompt(prompt: PromptType | object) -> EncoderDecoderDictPrompt:
     """
     Parse a prompt for an encoder-decoder model and normalize it to a dictionary.
     """
@@ -215,9 +213,7 @@ def parse_enc_dec_prompt(
     )
 
 
-def parse_model_prompt(
-    model_config: "ModelConfig", prompt: PromptType | ProcessorInputs
-):
+def parse_model_prompt(model_config: "ModelConfig", prompt: object):
     if model_config.is_encoder_decoder:
         return parse_enc_dec_prompt(prompt)
 
@@ -230,9 +226,7 @@ class PromptComponents(NamedTuple):
     embeds: "torch.Tensor | None" = None
 
 
-def extract_target_prompt(
-    model_config: "ModelConfig", prompt: PromptType | ProcessorInputs
-):
+def extract_target_prompt(model_config: "ModelConfig", prompt: object):
     return (
         parse_enc_dec_prompt(prompt)["encoder_prompt"]
         if model_config.is_encoder_decoder

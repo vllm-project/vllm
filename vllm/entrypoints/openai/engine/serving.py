@@ -100,14 +100,12 @@ from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
     SingletonPrompt,
-    TokenInputs,
     TokensPrompt,
     token_inputs,
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalInputs
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -255,7 +253,7 @@ class OpenAIServing:
 
     async def beam_search(
         self,
-        prompt: TokenInputs | MultiModalInputs,
+        prompt: ProcessorInputs,
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
@@ -272,8 +270,12 @@ class OpenAIServing:
         eos_token_id = tokenizer.eos_token_id
         sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
-        if "encoder_prompt" in prompt:
-            raise NotImplementedError("Encoder-decoder prompt not supported")
+        if prompt["type"] == "embeds":
+            raise NotImplementedError("Embedding prompt not supported for beam search")
+        if prompt["type"] == "enc_dec":
+            raise NotImplementedError(
+                "Encoder-decoder prompt not supported for beam search"
+            )
 
         prompt_text = prompt.get("prompt")
         prompt_token_ids = prompt["prompt_token_ids"]

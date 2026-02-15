@@ -80,7 +80,7 @@ class InputPreprocessor:
             **(tokenization_kwargs or {})
         )
 
-        tok_prompt = renderer.tokenize_prompt(
+        tok_prompt = renderer._tokenize_singleton_prompt(
             TextPrompt(prompt=prompt),
             tok_params,
         )
@@ -131,7 +131,7 @@ class InputPreprocessor:
             **(tokenization_kwargs or {})
         )
 
-        tok_prompt = renderer.tokenize_prompt(
+        tok_prompt = renderer._tokenize_singleton_prompt(
             TokensPrompt(prompt_token_ids=inputs),
             tok_params,
         )
