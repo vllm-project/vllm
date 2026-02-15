@@ -50,6 +50,7 @@ from vllm.entrypoints.pooling.score.utils import (
     compress_token_type_ids,
     compute_maxsim_score,
     get_score_prompt,
+    score_data_to_prompts,
     validate_score_input,
 )
 from vllm.entrypoints.utils import log_non_default_args
@@ -1397,25 +1398,13 @@ class LLM:
 
         tokenizer = self.get_tokenizer()
 
-        # Extract text from ScoreData
-        text_1: list[str] = []
-        for text in data_1:
-            if not isinstance(text, str):
-                raise NotImplementedError(
-                    "Late interaction scores currently do not support multimodal input."
-                )
-            text_1.append(text)
-
-        text_2: list[str] = []
-        for text in data_2:
-            if not isinstance(text, str):
-                raise NotImplementedError(
-                    "Late interaction scores currently do not support multimodal input."
-                )
-            text_2.append(text)
+        # Convert ScoreData to PromptType (handles both text and multimodal)
+        model_config = self.model_config
+        prompts_1 = score_data_to_prompts(data_1, "query", model_config)
+        prompts_2 = score_data_to_prompts(data_2, "document", model_config)
 
         encoded_output: list[PoolingRequestOutput] = self.encode(
-            text_1 + text_2,
+            prompts_1 + prompts_2,
             use_tqdm=use_tqdm,
             lora_request=lora_request,
             pooling_params=pooling_params,
@@ -1423,8 +1412,8 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
         )
 
-        encoded_output_1: list[PoolingRequestOutput] = encoded_output[0 : len(text_1)]
-        encoded_output_2: list[PoolingRequestOutput] = encoded_output[len(text_1) :]
+        encoded_output_1: list[PoolingRequestOutput] = encoded_output[: len(prompts_1)]
+        encoded_output_2: list[PoolingRequestOutput] = encoded_output[len(prompts_1) :]
 
         if len(encoded_output_1) == 1:
             encoded_output_1 = encoded_output_1 * len(encoded_output_2)
