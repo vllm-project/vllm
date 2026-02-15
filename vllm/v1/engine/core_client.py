@@ -50,6 +50,7 @@ from vllm.v1.engine.utils import (
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
+from vllm.v1.engine.tensor_ipc import TensorIpcSender
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder, bytestr
 
 logger = init_logger(__name__)
@@ -75,7 +76,8 @@ def encoder_request_context(
     """
     # Set target engine index for tensor routing
     engine_index = int.from_bytes(engine, "little")
-    encoder.set_target_engine(engine_index)
+    if encoder.tensor_ipc_sender is not None:
+        encoder.tensor_ipc_sender.set_target_engine(engine_index)
 
     # Set request context if this is an ADD request with a request_id
     if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
@@ -543,9 +545,13 @@ class MPClient(EngineCoreClient):
                     vllm_config.model_config.multimodal_config.multimodal_tensor_ipc
                 )
 
+            # Create TensorIpcSender when IPC is enabled and queues available
+            tensor_ipc_sender: TensorIpcSender | None = None
+            if multimodal_tensor_ipc == "torch_shm" and tensor_queues:
+                tensor_ipc_sender = TensorIpcSender(tensor_queues)
+
             self.encoder = MsgpackEncoder(
-                tensor_queues=tensor_queues,
-                multimodal_tensor_ipc=multimodal_tensor_ipc,
+                tensor_ipc_sender=tensor_ipc_sender,
             )
             self.decoder = MsgpackDecoder(EngineCoreOutputs)
             # Store tensor queues for routing

@@ -64,6 +64,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import compute_iteration_details
@@ -746,8 +747,8 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
-        # Decoder for cleanup (set by process_input_sockets thread)
-        self.tensor_decoder: MsgpackDecoder | None = None
+        # Receiver for tensor IPC cleanup (set by process_input_sockets thread)
+        self.tensor_ipc_receiver: TensorIpcReceiver | None = None
 
         with self._perform_handshakes(
             handshake_address,
@@ -1144,15 +1145,15 @@ class EngineCoreProc(EngineCore):
         super().abort_requests(request_ids)
 
         # Then cleanup any orphaned tensors for these requests
-        if self.tensor_decoder is not None:
+        if self.tensor_ipc_receiver is not None:
             for request_id in request_ids:
-                self.tensor_decoder.cleanup_request_tensors(request_id)
+                self.tensor_ipc_receiver.cleanup_request_tensors(request_id)
 
     def _cleanup_finished_request_tensors(self, finished_req_ids: set[str]) -> None:
         """Cleanup any orphaned tensors for finished requests."""
-        if self.tensor_decoder is not None:
+        if self.tensor_ipc_receiver is not None:
             for request_id in finished_req_ids:
-                self.tensor_decoder.cleanup_request_tensors(request_id)
+                self.tensor_ipc_receiver.cleanup_request_tensors(request_id)
 
     def _process_per_step_hooks(self) -> None:
         if self.per_step_hooks:
@@ -1248,14 +1249,17 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding with tensor queue for CUDA tensors.
-        add_request_decoder = MsgpackDecoder(
-            EngineCoreRequest, tensor_queue=self.tensor_queue
-        )
-        generic_decoder = MsgpackDecoder(tensor_queue=self.tensor_queue)
+        # Create TensorIpcReceiver when queue is available.
+        receiver: TensorIpcReceiver | None = None
+        if self.tensor_queue is not None:
+            receiver = TensorIpcReceiver(self.tensor_queue)
+        self.tensor_ipc_receiver = receiver
 
-        # Store decoder reference for tensor cleanup on abort
-        self.tensor_decoder = add_request_decoder
+        # Msgpack serialization decoding with tensor IPC receiver.
+        add_request_decoder = MsgpackDecoder(
+            EngineCoreRequest, tensor_ipc_receiver=receiver
+        )
+        generic_decoder = MsgpackDecoder(tensor_ipc_receiver=receiver)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [

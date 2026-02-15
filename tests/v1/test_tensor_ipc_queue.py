@@ -13,12 +13,13 @@ import pytest
 import torch
 import torch.multiprocessing as torch_mp
 
-from vllm.v1.serial_utils import (
-    MsgpackDecoder,
-    MsgpackEncoder,
+from vllm.v1.engine.tensor_ipc import (
     TensorIpcData,
     TensorIpcHandle,
+    TensorIpcReceiver,
+    TensorIpcSender,
 )
+from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -39,9 +40,10 @@ def encoder_process(
 ):
     """Process that encodes and sends CUDA tensors via queue."""
     try:
-        # Create encoder with tensor queues
-        encoder = MsgpackEncoder(tensor_queues=tensor_queues)
-        encoder.set_target_engine(target_engine)
+        # Create encoder with tensor IPC sender
+        sender = TensorIpcSender(tensor_queues)
+        sender.set_target_engine(target_engine)
+        encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
         # Create a CUDA tensor if available
         if torch.cuda.is_available():
@@ -164,7 +166,7 @@ def test_cuda_tensor_queue_basic():
 
 def test_cpu_tensor_fallback():
     """Test that CPU tensors use standard serialization path."""
-    encoder = MsgpackEncoder(tensor_queues=None)
+    encoder = MsgpackEncoder()
 
     # Create a CPU tensor
     tensor = torch.randn(3, 4, dtype=torch.float32)
@@ -183,9 +185,10 @@ def test_cpu_tensor_fallback():
 def test_encoder_without_target_engine():
     """Test that encoder handles missing target engine gracefully."""
     tensor_queues = [torch_mp.Queue()]
-    encoder = MsgpackEncoder(tensor_queues=tensor_queues)
+    sender = TensorIpcSender(tensor_queues)
+    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
-    # Don't set target engine
+    # Don't set target engine on sender
     if torch.cuda.is_available():
         tensor = torch.randn(2, 3, device="cuda:0")
     else:
@@ -197,7 +200,7 @@ def test_encoder_without_target_engine():
 
 
 def test_decoder_buffer_management():
-    """Test decoder's tensor buffer management when draining queue."""
+    """Test receiver's tensor buffer management when draining queue."""
     tensor_queue = torch_mp.Queue()
 
     # Put multiple tensors in queue using TensorIpcData
@@ -211,8 +214,8 @@ def test_decoder_buffer_management():
         ipc_data = TensorIpcData(request_id=None, tensor_id=tensor_id, tensor=tensor)
         tensor_queue.put(ipc_data)
 
-    # Create decoder
-    decoder = MsgpackDecoder(tensor_queue=tensor_queue)
+    # Create receiver directly
+    receiver = TensorIpcReceiver(tensor_queue)
 
     # Request tensor_3 (should buffer tensor_1 and tensor_2)
     handle = TensorIpcHandle(
@@ -223,12 +226,12 @@ def test_decoder_buffer_management():
         device="cpu",
     )
 
-    result = decoder._decode_ipc_queue_tensor(handle)
+    result = receiver.recv_tensor(handle)
     assert result.shape == (6, 7)
 
     # Verify buffer has tensor_1 and tensor_2 using tuple keys
-    assert (None, "tensor_1") in decoder._tensor_buffer
-    assert (None, "tensor_2") in decoder._tensor_buffer
+    assert (None, "tensor_1") in receiver._tensor_buffer
+    assert (None, "tensor_2") in receiver._tensor_buffer
 
     # Request buffered tensor
     handle2 = TensorIpcHandle(
@@ -239,10 +242,10 @@ def test_decoder_buffer_management():
         device="cpu",
     )
 
-    result2 = decoder._decode_ipc_queue_tensor(handle2)
+    result2 = receiver.recv_tensor(handle2)
     assert result2.shape == (2, 3)
     # tensor_1 should be removed from buffer
-    assert (None, "tensor_1") not in decoder._tensor_buffer
+    assert (None, "tensor_1") not in receiver._tensor_buffer
 
 
 def api_server_worker(
@@ -345,10 +348,9 @@ def mixed_tensor_encoder_process(
 ):
     """Process that encodes mixed CPU/CUDA tensors."""
     try:
-        encoder = MsgpackEncoder(
-            tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
-        )
-        encoder.set_target_engine(0)
+        sender = TensorIpcSender(tensor_queues)
+        sender.set_target_engine(0)
+        encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
         # Create only CUDA tensor for IPC (CPU will be serialized)
         # But actually, let's just send CUDA tensor directly
@@ -357,7 +359,6 @@ def mixed_tensor_encoder_process(
         # Manually send via IPC to test the mechanism
         tensor_id = "test_cuda_tensor"
         cuda_tensor_shared = cuda_tensor.share_memory_()
-        from vllm.v1.serial_utils import TensorIpcData
 
         ipc_data = TensorIpcData(
             request_id=None, tensor_id=tensor_id, tensor=cuda_tensor_shared
@@ -475,10 +476,9 @@ def cpu_tensor_ipc_encoder_process(
     """Process that encodes and sends CPU tensors via IPC queue."""
     try:
         # Create encoder with IPC enabled for all tensors
-        encoder = MsgpackEncoder(
-            tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
-        )
-        encoder.set_target_engine(target_engine)
+        sender = TensorIpcSender(tensor_queues)
+        sender.set_target_engine(target_engine)
+        encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
         # Create a CPU tensor
         tensor = torch.randn(*tensor_shape, dtype=torch.float32)
@@ -608,14 +608,11 @@ def test_cpu_tensor_ipc():
 
 
 def test_ipc_disabled_mode():
-    """Test that IPC is disabled when multimodal_tensor_ipc="direct_rpc"."""
+    """Test that IPC is disabled when no sender is provided."""
     tensor_queues = [torch_mp.Queue()]
 
-    # Create encoder with IPC disabled
-    encoder = MsgpackEncoder(
-        tensor_queues=tensor_queues, multimodal_tensor_ipc="direct_rpc"
-    )
-    encoder.set_target_engine(0)
+    # Create encoder without IPC sender (IPC disabled)
+    encoder = MsgpackEncoder()
 
     # Create a CPU tensor
     cpu_tensor = torch.randn(2, 3, dtype=torch.float32)
@@ -647,18 +644,15 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
 
     tensor_queues = [torch_mp.Queue()]
 
-    # Create encoder with IPC enabled for all tensors
-    encoder = MsgpackEncoder(
-        tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
-    )
-    encoder.set_target_engine(0)
+    # Create sender and encoder with IPC enabled for all tensors
+    sender = TensorIpcSender(tensor_queues)
+    sender.set_target_engine(0)
+    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
-    # Verify encoder configuration
-    assert encoder.multimodal_tensor_ipc == "torch_shm", (
-        "Torch queue-based IPC should be enabled"
-    )
-    assert encoder.tensor_queues is not None, "Tensor queues should be set"
-    assert encoder.target_engine_index == 0, "Target engine should be set"
+    # Verify sender configuration
+    assert encoder.tensor_ipc_sender is not None, "Sender should be set"
+    assert sender.is_ready(), "Sender should be ready"
+    assert sender.target_engine_index == 0, "Target engine should be set"
 
     # Note: Actual IPC transfer only works across processes
     # (tested in test_cpu_tensor_ipc)
@@ -670,8 +664,8 @@ def test_tensor_cleanup_on_abort():
     # Create a tensor queue (not actually used in this simplified test)
     tensor_queue = torch_mp.Queue()
 
-    # Create decoder
-    decoder = MsgpackDecoder(dict, tensor_queue=tensor_queue)
+    # Create receiver directly
+    receiver = TensorIpcReceiver(tensor_queue)
 
     # Simulate tensors in the buffer for multiple requests
     request_ids = ["req1", "req2", "req3"]
@@ -684,43 +678,43 @@ def test_tensor_cleanup_on_abort():
             tensor = torch.randn(10, 10)
 
             # Manually add to buffer and tracking (simulating decode behavior)
-            decoder._tensor_buffer[tensor_key] = tensor
+            receiver._tensor_buffer[tensor_key] = tensor
 
-            if request_id not in decoder._request_to_tensors:
-                decoder._request_to_tensors[request_id] = []
-            decoder._request_to_tensors[request_id].append(tensor_key)
+            if request_id not in receiver._request_to_tensors:
+                receiver._request_to_tensors[request_id] = []
+            receiver._request_to_tensors[request_id].append(tensor_key)
 
     # Verify tensors are in the buffer
-    initial_buffer_size = len(decoder._tensor_buffer)
+    initial_buffer_size = len(receiver._tensor_buffer)
     assert initial_buffer_size == 6, "Buffer should contain 6 tensors (2 per request)"
 
     # Verify request tracking
-    assert len(decoder._request_to_tensors) == 3, "Should track 3 requests"
-    assert len(decoder._request_to_tensors["req1"]) == 2, "req1 should have 2 tensors"
+    assert len(receiver._request_to_tensors) == 3, "Should track 3 requests"
+    assert len(receiver._request_to_tensors["req1"]) == 2, "req1 should have 2 tensors"
 
     # Cleanup tensors for req1
-    removed_count_1 = decoder.cleanup_request_tensors("req1")
+    removed_count_1 = receiver.cleanup_request_tensors("req1")
     assert removed_count_1 == 2, "Should have removed 2 tensors for req1"
-    assert len(decoder._tensor_buffer) == 4, "Buffer should have 4 tensors left"
-    assert "req1" not in decoder._request_to_tensors, (
+    assert len(receiver._tensor_buffer) == 4, "Buffer should have 4 tensors left"
+    assert "req1" not in receiver._request_to_tensors, (
         "req1 should be removed from tracking"
     )
 
     # Cleanup tensors for req2
-    removed_count_2 = decoder.cleanup_request_tensors("req2")
+    removed_count_2 = receiver.cleanup_request_tensors("req2")
     assert removed_count_2 == 2, "Should have removed 2 tensors for req2"
-    assert len(decoder._tensor_buffer) == 2, "Buffer should have 2 tensors left"
+    assert len(receiver._tensor_buffer) == 2, "Buffer should have 2 tensors left"
 
     # Cleanup req3
-    removed_count_3 = decoder.cleanup_request_tensors("req3")
+    removed_count_3 = receiver.cleanup_request_tensors("req3")
     assert removed_count_3 == 2, "Should have removed 2 tensors for req3"
 
     # Verify all tensors are cleaned up
-    assert len(decoder._tensor_buffer) == 0, "Buffer should be empty"
-    assert len(decoder._request_to_tensors) == 0, "Request tracking should be empty"
+    assert len(receiver._tensor_buffer) == 0, "Buffer should be empty"
+    assert len(receiver._request_to_tensors) == 0, "Request tracking should be empty"
 
     # Cleanup for non-existent request should return 0
-    removed_count_4 = decoder.cleanup_request_tensors("nonexistent")
+    removed_count_4 = receiver.cleanup_request_tensors("nonexistent")
     assert removed_count_4 == 0, "Should return 0 for non-existent request"
 
 
@@ -741,8 +735,8 @@ def test_tensor_cleanup_after_decode():
     ipc_data = TensorIpcData(request_id=request_id, tensor_id=tensor_id, tensor=tensor)
     tensor_queue.put(ipc_data)
 
-    # Create decoder
-    decoder = MsgpackDecoder(dict, tensor_queue=tensor_queue)
+    # Create receiver directly
+    receiver = TensorIpcReceiver(tensor_queue)
 
     # Create a TensorIpcHandle to decode
     handle = TensorIpcHandle(
@@ -753,20 +747,20 @@ def test_tensor_cleanup_after_decode():
         device=str(tensor.device),
     )
 
-    # Decode the tensor - this should retrieve it from the queue
-    decoded_tensor = decoder._decode_ipc_queue_tensor(handle)
+    # Receive the tensor - this should retrieve it from the queue
+    decoded_tensor = receiver.recv_tensor(handle)
 
     # Verify the tensor was decoded
     assert decoded_tensor.shape == tensor.shape, "Decoded tensor should match shape"
 
     # Verify the tensor was removed from buffer after decode
     tensor_key = (request_id, tensor_id)
-    assert tensor_key not in decoder._tensor_buffer, (
+    assert tensor_key not in receiver._tensor_buffer, (
         "Tensor should be removed from buffer"
     )
 
     # Verify the request tracking was cleaned up
-    assert request_id not in decoder._request_to_tensors, (
+    assert request_id not in receiver._request_to_tensors, (
         "Request tracking should be cleaned up"
     )
 

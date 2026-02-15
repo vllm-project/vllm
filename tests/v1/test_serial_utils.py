@@ -297,18 +297,20 @@ def test_non_multimodal_tensor_with_ipc():
     """
     import torch.multiprocessing as torch_mp
 
+    from vllm.v1.engine.tensor_ipc import TensorIpcReceiver, TensorIpcSender
+
     # Create tensor queues for IPC
     tensor_queues = [torch_mp.Queue()]
 
-    # Create encoder with IPC enabled
-    encoder = MsgpackEncoder(
-        tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
-    )
-    encoder.set_target_engine(0)
+    # Create encoder with IPC sender
+    sender = TensorIpcSender(tensor_queues)
+    sender.set_target_engine(0)
+    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
     encoder.set_request_context("test_request_123")
 
-    # Create decoder with IPC queue
-    decoder = MsgpackDecoder(RequestWithTensor, tensor_queue=tensor_queues[0])
+    # Create decoder with IPC receiver
+    receiver = TensorIpcReceiver(tensor_queues[0])
+    decoder = MsgpackDecoder(RequestWithTensor, tensor_ipc_receiver=receiver)
 
     # Create a request with a non-multimodal tensor
     original_tensor = torch.randn(5, 10, dtype=torch.float32)
@@ -337,18 +339,20 @@ def test_non_multimodal_tensor_with_ipc_none_value():
     """Test that None values for tensor fields work correctly with IPC enabled."""
     import torch.multiprocessing as torch_mp
 
+    from vllm.v1.engine.tensor_ipc import TensorIpcReceiver, TensorIpcSender
+
     # Create tensor queues for IPC
     tensor_queues = [torch_mp.Queue()]
 
-    # Create encoder with IPC enabled
-    encoder = MsgpackEncoder(
-        tensor_queues=tensor_queues, multimodal_tensor_ipc="torch_shm"
-    )
-    encoder.set_target_engine(0)
+    # Create encoder with IPC sender
+    sender = TensorIpcSender(tensor_queues)
+    sender.set_target_engine(0)
+    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
     encoder.set_request_context("test_request_456")
 
-    # Create decoder with IPC queue
-    decoder = MsgpackDecoder(RequestWithTensor, tensor_queue=tensor_queues[0])
+    # Create decoder with IPC receiver
+    receiver = TensorIpcReceiver(tensor_queues[0])
+    decoder = MsgpackDecoder(RequestWithTensor, tensor_ipc_receiver=receiver)
 
     # Create a request with None for the tensor field
     request = RequestWithTensor(prompt_embeds=None, data="test_data_with_none")
