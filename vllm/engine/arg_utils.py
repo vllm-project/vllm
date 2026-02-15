@@ -480,6 +480,9 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
+    multimodal_tensor_ipc: Literal["direct_rpc", "torch_shm"] = (
+        MultiModalConfig.multimodal_tensor_ipc
+    )
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
@@ -1022,6 +1025,10 @@ class EngineArgs:
         multimodal_group.add_argument(
             "--video-pruning-rate", **multimodal_kwargs["video_pruning_rate"]
         )
+        multimodal_group.add_argument(
+            "--multimodal-tensor-ipc",
+            **multimodal_kwargs["multimodal_tensor_ipc"],
+        )
 
         # LoRA related configs
         lora_kwargs = get_kwargs(LoRAConfig)
@@ -1326,6 +1333,7 @@ class EngineArgs:
             override_attention_dtype=self.override_attention_dtype,
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
+            multimodal_tensor_ipc=self.multimodal_tensor_ipc,
             io_processor_plugin=self.io_processor_plugin,
         )
 
