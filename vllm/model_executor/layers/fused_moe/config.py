@@ -14,6 +14,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
     OCP_MX_DTYPES,
     OCP_MX_Scheme,
@@ -913,11 +914,15 @@ class FusedMoEParallelConfig:
     pcp_rank: int
     dp_rank: int
     ep_rank: int
+    sp_size: int
 
     use_ep: bool  # whether to use EP or not
     all2all_backend: str  # all2all backend for MoE communication
-    is_sequence_parallel: bool  # whether sequence parallelism is used
     enable_eplb: bool  # whether to enable expert load balancing
+
+    @property
+    def is_sequence_parallel(self) -> bool:
+        return self.sp_size > 1
 
     @property
     def use_all2all_kernels(self):
@@ -974,6 +979,7 @@ class FusedMoEParallelConfig:
         tp_size_: int,
         pcp_size_: int,
         dp_size_: int,
+        sp_size_: int,
         vllm_parallel_config: ParallelConfig,
     ) -> "FusedMoEParallelConfig":
         """
@@ -1073,9 +1079,9 @@ class FusedMoEParallelConfig:
                 dp_rank=dp_rank,
                 ep_size=1,
                 ep_rank=0,
+                sp_size=sp_size_,
                 use_ep=False,
                 all2all_backend=vllm_parallel_config.all2all_backend,
-                is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
                 enable_eplb=vllm_parallel_config.enable_eplb,
             )
         # DP + EP / TP + EP / DP + TP + EP
@@ -1093,9 +1099,9 @@ class FusedMoEParallelConfig:
             dp_rank=dp_rank,
             ep_size=ep_size,
             ep_rank=ep_rank,
+            sp_size=sp_size_,
             use_ep=True,
             all2all_backend=vllm_parallel_config.all2all_backend,
-            is_sequence_parallel=vllm_parallel_config.use_sequence_parallel_moe,
             enable_eplb=vllm_parallel_config.enable_eplb,
         )
 
@@ -1111,10 +1117,10 @@ class FusedMoEParallelConfig:
             dp_rank=0,
             ep_size=1,
             ep_rank=0,
+            sp_size=1,
             use_ep=False,
             all2all_backend="naive",
             enable_eplb=False,
-            is_sequence_parallel=False,
         )
 
 
@@ -1126,7 +1132,8 @@ class FusedMoEConfig:
     hidden_dim: int
     intermediate_size_per_partition: int
     num_local_experts: int
-    activation: str
+    num_logical_experts: int
+    activation: MoEActivation
     device: torch.device | str
     routing_method: RoutingMethodType
     moe_parallel_config: FusedMoEParallelConfig
@@ -1174,6 +1181,14 @@ class FusedMoEConfig:
     @property
     def ep_size(self):
         return self.moe_parallel_config.ep_size
+
+    @property
+    def sp_size(self):
+        return self.moe_parallel_config.sp_size
+
+    @property
+    def is_sequence_parallel(self):
+        return self.moe_parallel_config.is_sequence_parallel
 
     @property
     def tp_rank(self):
