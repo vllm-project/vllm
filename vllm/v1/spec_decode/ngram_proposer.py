@@ -130,6 +130,7 @@ class NgramProposer:
 
     def propose(
         self,
+        optimal_num_speculative_tokens: int | None,
         sampled_token_ids: list[list[int]],
         num_tokens_no_spec: np.ndarray,
         token_ids_cpu: np.ndarray,
@@ -137,6 +138,10 @@ class NgramProposer:
         | list[dict[str, torch.Tensor]]
         | None = None,  # unused
     ) -> list[list[int]]:
+        # Use optimal num speculative tokens if provided
+        if optimal_num_speculative_tokens is not None:
+            self.num_speculative_tokens = optimal_num_speculative_tokens
+
         # find which requests need ngram proposals
         valid_ngram_requests = []
         for i, sampled_ids in enumerate(sampled_token_ids):
