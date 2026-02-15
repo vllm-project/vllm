@@ -523,3 +523,32 @@ def test_human_readable_model_len():
     for invalid in ["1a", "pwd", "10.24", "1.23M", "1.22T"]:
         with pytest.raises(ArgumentError):
             parser.parse_args(["--max-model-len", invalid])
+
+
+def test_hf_overrides_json_string_normalized():
+    """Test that hf_overrides JSON string is normalized into a dict."""
+    json_overrides = '{"architectures": ["TestModel"]}'
+    engine_args = EngineArgs(model="test-model", hf_overrides=json_overrides)
+    assert engine_args.hf_overrides == {"architectures": ["TestModel"]}
+
+
+def test_hf_overrides_invalid_string():
+    """Test that non-JSON string raises a clear error."""
+    with pytest.raises(ValueError):
+        EngineArgs(model="test-model", hf_overrides="not-json")
+
+
+def test_hf_overrides_json_string_from_cli_normalized():
+    """Test hf_overrides JSON string normalization through CLI path."""
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(
+        [
+            "--model",
+            "test-model",
+            "--hf-overrides",
+            '{"quantization_config_file": "/tmp/torchao.json"}',
+        ]
+    )
+
+    engine_args = EngineArgs.from_cli_args(args)
+    assert engine_args.hf_overrides == {"quantization_config_file": "/tmp/torchao.json"}

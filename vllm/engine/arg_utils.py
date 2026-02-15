@@ -610,6 +610,7 @@ class EngineArgs:
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
             )
+        self._normalize_hf_overrides()
         # Setup plugins
         from vllm.plugins import load_general_plugins
 
@@ -634,6 +635,30 @@ class EngineArgs:
                         tokenizer_id,
                         self.tokenizer,
                     )
+
+    def _normalize_hf_overrides(self) -> None:
+        """Normalize hf_overrides to a dict or callable.
+
+        Supports JSON object strings.
+        """
+        if self.hf_overrides is None or callable(self.hf_overrides):
+            return
+        if isinstance(self.hf_overrides, dict):
+            return
+        if not isinstance(self.hf_overrides, str):
+            raise TypeError(
+                "hf_overrides must be a dict, a callable, or a JSON string."
+            )
+
+        raw = self.hf_overrides.strip()
+        if re.match(r"(?s)^\s*{.*}\s*$", raw):
+            try:
+                self.hf_overrides = json.loads(raw)
+                return
+            except json.JSONDecodeError as exc:
+                raise ValueError("hf_overrides is not valid JSON.") from exc
+
+        raise ValueError("hf_overrides must be a JSON object string.")
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
