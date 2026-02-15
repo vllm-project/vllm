@@ -730,14 +730,7 @@ class SiglipEncoder(nn.Module):
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
         )
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"PaddleOCR-VL does not support {self.attn_backend} backend now."
-            )
+
         self.layers = nn.ModuleList(
             [
                 SiglipEncoderLayer(
@@ -805,6 +798,7 @@ class SiglipEncoder(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
