@@ -569,7 +569,7 @@ class ColumnParallelLinear(LinearBase):
             if output_dim is not None:
                 assert final_shape[output_dim] % self.tp_size == 0
                 final_shape[output_dim] = final_shape[output_dim] // self.tp_size
-            param.materialize(final_shape, dtype=loaded_weight.dtype)
+            param.materialize(tuple(final_shape), dtype=loaded_weight.dtype)
 
         param_data = param.data
         if output_dim is not None and not is_sharded_weight:
@@ -848,7 +848,7 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
             if (
-                isinstance(param, (PackedColumnParameter, PackedvLLMParameter))
+                isinstance(param, PackedColumnParameter | PackedvLLMParameter)
                 and param.packed_dim == param.output_dim
             ):
                 shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
@@ -1035,7 +1035,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             # If quantized, we need to adjust the offset and size to account
             # for the packing.
             if (
-                isinstance(param, (PackedColumnParameter, PackedvLLMParameter))
+                isinstance(param, PackedColumnParameter | PackedvLLMParameter)
                 and param.packed_dim == param.output_dim
             ):
                 shard_size, shard_offset = param.adjust_shard_indexes_for_packing(
