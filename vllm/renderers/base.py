@@ -99,7 +99,9 @@ class BaseRenderer(ABC, Generic[_T]):
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()
 
-            self._mm_uuid_counter = AtomicCounter()
+            # This is used to generate internal request ID for MM processing
+            # It has no relation to the request ID for engine core
+            self._mm_req_counter = AtomicCounter()
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -510,6 +512,7 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_data: "MultiModalDataDict",
         mm_items: "MultiModalDataItems",
         mm_uuids: "MultiModalUUIDDict | None",
+        mm_req_id: str,
     ):
         model_config = self.model_config
 
@@ -517,15 +520,14 @@ class BaseRenderer(ABC, Generic[_T]):
         # processing caching, no multimodal features or embeddings will be
         # reused across requests, therefore identifying multimodal data items
         # by their content is no longer necessary, and we create uuids with
-        # `<base_uuid>-<modality>-<index>`, overriding even user-provided ones.
+        # `<mm_req_id>-<modality>-<index>`, overriding even user-provided ones.
         if (
             model_config.multimodal_config
             and model_config.multimodal_config.mm_processor_cache_gb == 0
             and not self.config.cache_config.enable_prefix_caching
         ):
-            base_uuid = self._mm_uuid_counter.inc(1)
             mm_uuids = {
-                modality: [f"{base_uuid}-{modality}-{i}" for i in range(data_count)]
+                modality: [f"{mm_req_id}-{modality}-{i}" for i in range(data_count)]
                 for modality, data_count in mm_items.get_all_counts().items()
             }
 
@@ -533,24 +535,32 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return mm_uuids
 
+    # TODO: Remove str and tokenization_kwargs after deprecating InputPreprocessor
     def _process_multimodal(
         self,
-        prompt_token_ids: list[int],
+        prompt: list[int] | str,
         mm_data: MultiModalDataDict,
         mm_processor_kwargs: Mapping[str, object] | None,
+        tokenization_kwargs: dict[str, Any] | None,
         mm_uuids: MultiModalUUIDDict | None,
-    ) -> "TokenInputs | MultiModalInputs":
+    ) -> "MultiModalInputs":
+        from vllm.multimodal.processing.context import set_request_id
+
+        mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
+
         mm_processor = self.get_mm_processor()
 
         mm_items = mm_processor.info.parse_mm_data(mm_data)
+        mm_uuids = self._process_mm_uuids(mm_data, mm_items, mm_uuids, mm_req_id)
 
-        mm_inputs = mm_processor.apply(
-            prompt_token_ids,
-            mm_items,
-            hf_processor_mm_kwargs=mm_processor_kwargs or {},
-            tokenization_kwargs=None,  # Tokenization already done in Step 2
-            mm_uuids=self._process_mm_uuids(mm_data, mm_items, mm_uuids),
-        )
+        with set_request_id(mm_req_id):
+            mm_inputs = mm_processor.apply(
+                prompt,
+                mm_items,
+                hf_processor_mm_kwargs=mm_processor_kwargs or {},
+                tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
 
         self.update_mm_cache_stats()
 
@@ -567,8 +577,9 @@ class BaseRenderer(ABC, Generic[_T]):
             inputs = self._process_multimodal(
                 prompt_token_ids,
                 multi_modal_data,
-                prompt.get("mm_processor_kwargs"),
-                prompt.get("multi_modal_uuids"),
+                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                tokenization_kwargs=None,  # Tokenization already done in Step 2
+                mm_uuids=prompt.get("multi_modal_uuids"),
             )
         else:
             inputs = token_inputs(prompt_token_ids)

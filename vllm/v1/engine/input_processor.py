@@ -20,7 +20,6 @@ from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
 )
-from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
@@ -211,7 +210,7 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        with set_request_id(request_id), set_default_torch_num_threads():
+        with set_default_torch_num_threads():
             if isinstance(prompt, dict) and "type" in prompt:
                 processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
             else:

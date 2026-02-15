@@ -100,21 +100,13 @@ class InputPreprocessor:
         Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
         """
-        mm_processor = self.renderer.get_mm_processor()
-
-        mm_items = mm_processor.info.parse_mm_data(mm_data)
-
-        mm_inputs = mm_processor.apply(
+        return self.renderer._process_multimodal(
             prompt,
-            mm_items,
-            hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            mm_data,
+            mm_processor_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=self.renderer._process_mm_uuids(mm_data, mm_items, mm_uuids),
+            mm_uuids=mm_uuids,
         )
-
-        self.renderer.update_mm_cache_stats()
-
-        return mm_inputs
 
     def _process_embeds(
         self,
