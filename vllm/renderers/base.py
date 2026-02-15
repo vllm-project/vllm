@@ -539,10 +539,10 @@ class BaseRenderer(ABC, Generic[_T]):
     def _process_multimodal(
         self,
         prompt: list[int] | str,
-        mm_data: MultiModalDataDict,
+        mm_data: "MultiModalDataDict",
         mm_processor_kwargs: Mapping[str, object] | None,
         tokenization_kwargs: dict[str, Any] | None,
-        mm_uuids: MultiModalUUIDDict | None,
+        mm_uuids: "MultiModalUUIDDict | None",
     ) -> "MultiModalInputs":
         from vllm.multimodal.processing.context import set_request_id
 
