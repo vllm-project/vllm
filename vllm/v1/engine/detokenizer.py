@@ -190,18 +190,22 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         )
 
         if not self.spaces_between_special_tokens:
-            # Store dict of added token ids so that we can suppress
+            # Store dict of special token ids so that we can suppress
             # the spaces between them.
-            added_token_ids = getattr(self.tokenizer, "added_token_ids", None)
-            if added_token_ids is None:
-                self.tokenizer.added_token_ids = added_token_ids = {
-                    tid: tok.content
-                    for tid, tok in self.tokenizer.get_added_tokens_decoder().items()
+            special_token_ids = getattr(
+                self.tokenizer, "_vllm_special_added_token_ids", None
+            )
+            if special_token_ids is None:
+                added_tokens_decoder = self.tokenizer.get_added_tokens_decoder()
+                self.tokenizer._vllm_special_added_token_ids = special_token_ids = {
+                    tid: (tok.content if hasattr(tok, "content") else str(tok))
+                    for tid, tok in added_tokens_decoder.items()
+                    if getattr(tok, "special", False)
                 }
 
-            if added_token_ids:
+            if special_token_ids:
                 self.last_special = False
-                self.added_token_ids = added_token_ids
+                self.special_token_ids = special_token_ids
             else:
                 # No added tokens.
                 self.spaces_between_special_tokens = True
@@ -210,7 +214,7 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         token = self._protected_step(next_token_id)
 
         if not self.spaces_between_special_tokens:
-            special_token = self.added_token_ids.get(next_token_id)
+            special_token = self.special_token_ids.get(next_token_id)
             is_special = special_token is not None
             if is_special and self.last_special:
                 # Return raw token string without any prefixed spaces.

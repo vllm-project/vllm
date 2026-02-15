@@ -25,7 +25,7 @@ def _convert_tokens_to_string_with_added_encoders(
     # Performance improvements: avoid repeated attribute and function lookups;
     # localize frequently used objects;
 
-    sub_texts: list[str] = []
+    segments: list[tuple[str, bool]] = []
     current_sub_text: list[str] = []
     convert_tokens_to_string = tokenizer.convert_tokens_to_string
     added_vocab_set = set(tokenizer.get_added_vocab())
@@ -33,22 +33,42 @@ def _convert_tokens_to_string_with_added_encoders(
         set(tokenizer.all_special_tokens) if skip_special_tokens else ()
     )
 
+    # Added tokens that get spaces around them (special=True or in all_special_tokens)
+    special_added: set[str] = set()
+    if spaces_between_special_tokens and added_vocab_set:
+        special = set(getattr(tokenizer, "all_special_tokens", []) or [])
+        dec = getattr(tokenizer, "added_tokens_decoder", None)
+        if dec:
+            for t in dec.values():
+                c = getattr(t, "content", None) or str(t)
+                if getattr(t, "special", False) or c in special:
+                    special_added.add(c)
+        else:
+            special_added = added_vocab_set
+
     for token in output_tokens:
-        # Use precomputed set for skip-special check
         if token in all_special_tokens:
             continue
         if token in added_vocab_set:
             if current_sub_text:
-                sub_texts.append(convert_tokens_to_string(current_sub_text))
+                segments.append((convert_tokens_to_string(current_sub_text), False))
                 current_sub_text.clear()
-            sub_texts.append(token)
+            segments.append((token, token in special_added))
         else:
             current_sub_text.append(token)
     if current_sub_text:
-        sub_texts.append(convert_tokens_to_string(current_sub_text))
-    if spaces_between_special_tokens:
-        return " ".join(sub_texts)
-    return "".join(sub_texts)
+        segments.append((convert_tokens_to_string(current_sub_text), False))
+
+    if spaces_between_special_tokens and segments:
+        parts: list[str] = [segments[0][0]]
+        prev_special = segments[0][1]
+        for text, is_special in segments[1:]:
+            if prev_special or is_special:
+                parts.append(" ")
+            parts.append(text)
+            prev_special = is_special
+        return "".join(parts)
+    return "".join(text for text, _ in segments)
 
 
 # 5 is an arbitrary value that should work for all
