@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -235,6 +236,8 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
+    """MXFP4 MoE quantization method."""
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
@@ -1139,8 +1142,9 @@ class XpuMxfp4MoEMethod(Mxfp4MoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        assert layer.activation == "swigluoai", (
-            "Only swiglu_oai activation is supported for XPU MXFP4 MoE"
+        assert layer.activation == MoEActivation.SWIGLUOAI, (
+            "Only swiglu_oai activation is supported for "
+            f"XPU MXFP4 MoE, not {layer.activation}."
         )
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
