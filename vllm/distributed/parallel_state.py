@@ -1229,6 +1229,7 @@ def get_pcp_group() -> GroupCoordinator:
 
 _STANDBY_DP: "StatelessGroupCoordinator | None" = None
 _STANDBY_EP: "StatelessGroupCoordinator | None" = None
+_STANDBY_EPLB: "StatelessGroupCoordinator | None" = None
 _STANDBY_WORLD: "StatelessGroupCoordinator | None" = None
 _STANDBY_WORLD_NODE_COUNT: int | None = None
 
@@ -1239,6 +1240,10 @@ def get_standby_dp_group() -> "StatelessGroupCoordinator | None":
 
 def get_standby_ep_group() -> "StatelessGroupCoordinator | None":
     return _STANDBY_EP
+
+
+def get_standby_eplb_group() -> "StatelessGroupCoordinator | None":
+    return _STANDBY_EPLB
 
 
 def get_standby_world_group() -> "StatelessGroupCoordinator | None":
@@ -1696,10 +1701,29 @@ def initialize_model_parallel(
             and config.parallel_config is not None
             and config.parallel_config.enable_eplb
         ):
-            # Reuse the same group_ranks from EP
-            _EPLB = init_model_parallel_group(
-                group_ranks, get_world_group().local_rank, backend, group_name="eplb"
-            )
+            if enable_elastic_ep:
+                eplb_group_ports = [
+                    parallel_config.get_next_stateless_eplb_group_port()
+                    for _ in group_ranks
+                ]
+                _EPLB = StatelessGroupCoordinator(
+                    group_ranks=group_ranks,
+                    local_rank=get_world_group().local_rank,
+                    torch_distributed_backend=backend,
+                    use_device_communicator=True,
+                    group_name="eplb",
+                    host=parallel_config.data_parallel_master_ip,
+                    group_ports=eplb_group_ports,
+                    global_rank=get_world_group().rank,
+                    global_world_size=get_world_group().world_size,
+                )
+            else:
+                _EPLB = init_model_parallel_group(
+                    group_ranks,
+                    get_world_group().local_rank,
+                    backend,
+                    group_name="eplb",
+                )
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
 
@@ -1772,11 +1796,17 @@ def create_standby_groups(
     world_group_ports: list[list[int]],
     dp_group_ports: list[list[int]],
     ep_group_ports: list[list[int]],
+    eplb_group_ports: list[list[int]] | None = None,
     backend: str | None = None,
 ) -> None:
     from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 
-    global _STANDBY_WORLD, _STANDBY_WORLD_NODE_COUNT, _STANDBY_DP, _STANDBY_EP
+    global \
+        _STANDBY_WORLD, \
+        _STANDBY_WORLD_NODE_COUNT, \
+        _STANDBY_DP, \
+        _STANDBY_EP, \
+        _STANDBY_EPLB
 
     assert new_world_size_across_dp == torch.distributed.get_world_size() * new_dp_size
     world_group = get_world_group()
@@ -1835,22 +1865,39 @@ def create_standby_groups(
         global_world_size=new_world_size_across_dp,
     )
 
+    if eplb_group_ports is not None:
+        _STANDBY_EPLB = StatelessGroupCoordinator(
+            group_ranks=standby_ep_ranks,
+            local_rank=local_rank,
+            torch_distributed_backend=backend,
+            use_device_communicator=True,
+            group_name="eplb",
+            host=master_ip,
+            group_ports=eplb_group_ports,
+            global_rank=global_rank,
+            global_world_size=new_world_size_across_dp,
+        )
+
 
 def switch_to_standby_groups() -> None:
     global _WORLD, _STANDBY_WORLD, _NODE_COUNT, _STANDBY_WORLD_NODE_COUNT
-    global _DP, _EP, _STANDBY_DP, _STANDBY_EP
+    global _DP, _EP, _STANDBY_DP, _STANDBY_EP, _EPLB, _STANDBY_EPLB
     assert _DP is not None
     assert _EP is not None
     assert _WORLD is not None
     _DP.destroy()
     _EP.destroy()
     _WORLD.destroy()
+    if _EPLB is not None:
+        _EPLB.destroy()
     _DP = _STANDBY_DP
     _EP = _STANDBY_EP
+    _EPLB = _STANDBY_EPLB
     _WORLD = _STANDBY_WORLD
     _NODE_COUNT = _STANDBY_WORLD_NODE_COUNT
     _STANDBY_DP = None
     _STANDBY_EP = None
+    _STANDBY_EPLB = None
     _STANDBY_WORLD = None
     _STANDBY_WORLD_NODE_COUNT = None
 
