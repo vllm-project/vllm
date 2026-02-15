@@ -6,13 +6,50 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from vllm import _oink_ops, envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
     vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
+
+logger = init_logger(__name__)
+
+
+def _can_view_as_2d(x: torch.Tensor) -> bool:
+    """Return True if x.view(-1, x.shape[-1]) is viewable (no copy)."""
+    if x.dim() < 2:
+        return False
+    if x.dim() == 2:
+        return True
+    # For a view(-1, N) to be valid, all leading dims must be contiguous with
+    # respect to each other (size-1 dims are ignored).
+    for dim in range(x.dim() - 1):
+        # Strides for size-1 dims are irrelevant and can be arbitrary.
+        if x.size(dim + 1) != 1 and x.stride(dim) != x.stride(dim + 1) * x.size(
+            dim + 1
+        ):
+            return False
+    return True
+
+
+def _is_oink_stride_compatible_2d(x_2d: torch.Tensor) -> bool:
+    """Return True if x_2d meets Oink's pointer-path stride constraints."""
+    if x_2d.dim() != 2:
+        return False
+    if x_2d.stride(1) != 1:
+        return False
+    # Match Oink's vectorization constraint: stride(0) divisible by 256b.
+    if x_2d.dtype in (torch.float16, torch.bfloat16):
+        divby = 16
+    elif x_2d.dtype == torch.float32:
+        divby = 8
+    else:
+        return False
+    return (x_2d.stride(0) % divby) == 0
 
 
 def rms_norm(
@@ -131,6 +168,57 @@ class RMSNorm(CustomOp):
                 with_fused_add=True, dtype=weight_dtype, use_aiter=aiter_rmsnorm_enabled
             )
 
+        # Optional: enable Oink Blackwell RMSNorm custom-op fast path on
+        # compatible CUDA devices (e.g., SM100) when the external Oink
+        # package is available. This is detected once at construction time
+        # to avoid per-call device queries in the hot path.
+        self._use_oink_rmsnorm = False
+        self._use_oink_fused_add_rmsnorm = False
+        if (
+            not current_platform.is_rocm()
+            and torch.cuda.is_available()
+            and bool(getattr(envs, "VLLM_USE_OINK_OPS", False))
+        ):
+            # NOTE: vLLM disables custom ops by default when using Inductor.
+            # If this op is disabled, CustomOp will dispatch to forward_native,
+            # and the Oink path in forward_cuda will never run.
+            if getattr(self._forward_method, "__func__", None) is getattr(
+                self.forward_native, "__func__", None
+            ):
+                try:
+                    from vllm.config import get_cached_compilation_config
+
+                    custom_ops = get_cached_compilation_config().custom_ops
+                except Exception:
+                    custom_ops = ["<unknown>"]
+                logger.warning_once(
+                    "VLLM_USE_OINK_OPS=1 but the `rms_norm` custom op is "
+                    "disabled (CompilationConfig.custom_ops=%s). Enable it via "
+                    "`compilation_config={'custom_ops': ['none', '+rms_norm']}` "
+                    "(or `['all']`) to let vLLM call into torch.ops.oink.*.",
+                    custom_ops,
+                )
+                # Custom op disabled => forward_cuda won't run. Avoid doing any
+                # external Oink initialization work in this case.
+            else:
+                try:
+                    device_index = torch.cuda.current_device()
+                    if _oink_ops.is_oink_available_for_device(device_index):
+                        self._use_oink_rmsnorm = True
+                        self._use_oink_fused_add_rmsnorm = (
+                            _oink_ops.has_fused_add_rms_norm()
+                        )
+                except Exception as e:
+                    # If anything goes wrong (no Oink install, CPU-only env, etc.),
+                    # silently fall back to the built-in RMSNorm path.
+                    logger.warning_once(
+                        "VLLM_USE_OINK_OPS=1 but failed to initialize Oink "
+                        "RMSNorm; falling back to vLLM RMSNorm. Error: %s",
+                        e,
+                    )
+                    self._use_oink_rmsnorm = False
+                    self._use_oink_fused_add_rmsnorm = False
+
     @staticmethod
     def forward_static(
         x: torch.Tensor,
@@ -201,6 +289,73 @@ class RMSNorm(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if self.variance_size_override is not None:
             return self.forward_native(x, residual)
+
+        # Optional Oink SM100 fast path (no residual). This path is
+        # torch.compile-friendly via torch.ops.oink.rmsnorm and preserves
+        # 2D layouts (including padded rows) when using the Oink
+        # pointer-based kernel.
+        if (
+            residual is None
+            and getattr(self, "_use_oink_rmsnorm", False)
+            and x.is_cuda
+            and x.dim() >= 2
+            and self.has_weight
+            and not vllm_is_batch_invariant()
+            and self.weight.data.dtype == x.dtype
+            and self.weight.data.is_contiguous()
+        ):
+            orig_shape = x.shape
+            hidden_size = orig_shape[-1]
+            if _can_view_as_2d(x):
+                x_2d = x.view(-1, hidden_size)
+                if _is_oink_stride_compatible_2d(x_2d):
+                    y_2d = _oink_ops.rmsnorm(
+                        x_2d,
+                        self.weight.data,
+                        self.variance_epsilon,
+                    )
+                    return y_2d.view(orig_shape)
+
+        # Optional Oink SM100 fast path (fused residual-add + RMSNorm, in-place).
+        # This mirrors vLLM's fused_add_rms_norm semantics by mutating both
+        # `x` (normalized output) and `residual` (residual-out buffer).
+        if (
+            residual is not None
+            and getattr(self, "_use_oink_fused_add_rmsnorm", False)
+            and x.is_cuda
+            and residual.is_cuda
+            and x.shape == residual.shape
+            and x.dtype == residual.dtype
+            and x.dim() >= 2
+            and self.has_weight
+            and not vllm_is_batch_invariant()
+            and self.weight.data.dtype == x.dtype
+            and self.weight.data.is_contiguous()
+        ):
+            orig_shape = x.shape
+            hidden_size = orig_shape[-1]
+            if _can_view_as_2d(x) and _can_view_as_2d(residual):
+                x_2d = x.view(-1, hidden_size)
+                res_2d = residual.view(-1, hidden_size)
+
+                # The Oink in-place pointer path supports the common vLLM
+                # layout where:
+                # - `x` may be strided/padded row-major (stride(1) == 1), and
+                # - `residual` is contiguous row-major ([M, N] with stride(0) == N).
+                # If these conditions are not met, fall back to vLLM's built-in
+                # fused kernel.
+                if (
+                    _is_oink_stride_compatible_2d(x_2d)
+                    and _is_oink_stride_compatible_2d(res_2d)
+                    and res_2d.is_contiguous()
+                ):
+                    _oink_ops.fused_add_rms_norm_(
+                        x_2d,
+                        res_2d,
+                        self.weight.data,
+                        self.variance_epsilon,
+                    )
+                    return x, residual
 
         add_residual = residual is not None
         if add_residual:
