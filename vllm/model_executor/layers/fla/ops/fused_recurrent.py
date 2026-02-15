@@ -150,14 +150,20 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            # Load state index and check for PAD_SLOT_ID (-1)
-            final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
-            ).to(tl.int64)
-            # Only store if state index is valid (not PAD_SLOT_ID)
-            if final_state_idx >= 0:
-                p_ht = ht + final_state_idx * stride_final_state_token
-                p_ht = p_ht + i_hv * V * K + o_v[:, None] * K + o_k[None, :]
+            if IS_CONTINUOUS_BATCHING:
+                # Load state index and check for PAD_SLOT_ID (-1)
+                final_state_idx = tl.load(
+                    ssm_state_indices + i_n * stride_indices_seq + i_t
+                ).to(tl.int64)
+                # Only store if state index is valid (not PAD_SLOT_ID)
+                if final_state_idx >= 0:
+                    p_ht = ht + final_state_idx * stride_final_state_token
+                    p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
+                    tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+            else:
+                # Non-continuous batching: use sequence index directly
+                p_ht = ht + i_n * stride_final_state_token
+                p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
                 tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
         else:
             p_ht = ht + (bos + i_t) * stride_final_state_token
