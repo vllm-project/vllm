@@ -165,7 +165,12 @@ from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
     get_total_cp_world_size,
 )
-from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
+from vllm.v1.worker.dp_utils import (
+    DPSyncHandle,
+    coordinate_batch_across_dp,
+    coordinate_batch_across_dp_finish,
+    coordinate_batch_across_dp_start,
+)
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
@@ -3077,7 +3082,7 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
-    def _determine_batch_execution_and_padding(
+    def _determine_batch_execution_and_padding_start(
         self,
         num_tokens: int,
         num_reqs: int,
@@ -3086,8 +3091,6 @@ class GPUModelRunner(
         use_cascade_attn: bool,
         allow_microbatching: bool = True,
         force_eager: bool = False,
-        # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
-        # be improved in model runner v2)
         force_uniform_decode: bool | None = None,
         force_has_lora: bool | None = None,
         force_num_active_loras: int | None = None,
@@ -3095,10 +3098,21 @@ class GPUModelRunner(
     ) -> tuple[
         CUDAGraphMode,
         BatchDescriptor,
-        bool,
-        torch.Tensor | None,
-        CUDAGraphStat | None,
+        bool,  # uniform_decode
+        DPSyncHandle | None,
     ]:
+        """Start batch execution determination and async DP sync.
+
+        This does local cudagraph dispatch and starts the async DP sync.
+        Call _determine_batch_execution_and_padding_finish() after doing
+        other work to get the final results.
+
+        Returns:
+            cudagraph_mode: Local cudagraph mode
+            batch_descriptor: Local batch descriptor
+            uniform_decode: Whether this is uniform decode
+            dp_sync_handle: Handle for async DP sync, or None if DP size is 1
+        """
         uniform_decode = self._is_uniform_decode(
             max_num_scheduled_tokens=max_num_scheduled_tokens,
             uniform_decode_query_len=self.uniform_decode_query_len,
@@ -3106,13 +3120,10 @@ class GPUModelRunner(
             num_reqs=num_reqs,
             force_uniform_decode=force_uniform_decode,
         )
-        # Encoder-decoder models only support CG for decoder_step > 0 (no enc_output
-        # is present). Also, chunked-prefill is disabled, so batch are uniform.
         has_encoder_output = (
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
-        # Compute LoRA state for cudagraph dispatch
         num_active_loras = (
             force_num_active_loras
             if force_num_active_loras is not None
@@ -3147,28 +3158,59 @@ class GPUModelRunner(
                 "a multiple of tensor parallel size"
             )
 
-        # Extra coordination when running data-parallel since we need to coordinate
-        # across ranks
-        should_ubatch, num_tokens_across_dp = False, None
+        # Start async DP sync if running data-parallel
+        dp_sync_handle = None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
-            # Disable DP padding when running eager to avoid excessive padding when
-            # running prefills. This lets us set cudagraph_mode="NONE" on the prefiller
-            # in a P/D setup and still use CUDA graphs (enabled by this padding) on the
-            # decoder.
             allow_dp_padding = (
                 self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             )
+            dp_sync_handle = coordinate_batch_across_dp_start(
+                num_tokens_unpadded=num_tokens,
+                parallel_config=self.parallel_config,
+                allow_microbatching=allow_microbatching,
+                allow_dp_padding=allow_dp_padding,
+                num_tokens_padded=num_tokens_padded,
+                uniform_decode=uniform_decode,
+                num_scheduled_tokens_per_request=num_scheduled_tokens_np,
+                cudagraph_mode=cudagraph_mode.value,
+            )
 
+        return cudagraph_mode, batch_descriptor, uniform_decode, dp_sync_handle
+
+    def _determine_batch_execution_and_padding_finish(
+        self,
+        cudagraph_mode: CUDAGraphMode,
+        batch_descriptor: BatchDescriptor,
+        dp_sync_handle: DPSyncHandle | None,
+        num_tokens: int,
+        force_eager: bool = False,
+    ) -> tuple[
+        CUDAGraphMode,
+        BatchDescriptor,
+        bool,
+        torch.Tensor | None,
+        CUDAGraphStat | None,
+    ]:
+        """Finish batch execution determination by waiting for async DP sync.
+
+        Args:
+            cudagraph_mode: From _determine_batch_execution_and_padding_start()
+            batch_descriptor: From _determine_batch_execution_and_padding_start()
+            dp_sync_handle: From _determine_batch_execution_and_padding_start()
+            num_tokens: Number of tokens (for cudagraph stats)
+            force_eager: If True, force eager execution (no cudagraph dispatch)
+
+        Returns:
+            Same as _determine_batch_execution_and_padding()
+        """
+        num_tokens_padded = batch_descriptor.num_tokens
+
+        # Wait for async DP sync and process results
+        should_ubatch, num_tokens_across_dp = False, None
+        if dp_sync_handle is not None:
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
-                coordinate_batch_across_dp(
-                    num_tokens_unpadded=num_tokens,
-                    parallel_config=self.parallel_config,
-                    allow_microbatching=allow_microbatching,
-                    allow_dp_padding=allow_dp_padding,
-                    num_tokens_padded=num_tokens_padded,
-                    uniform_decode=uniform_decode,
-                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
-                    cudagraph_mode=cudagraph_mode.value,
+                coordinate_batch_across_dp_finish(
+                    dp_sync_handle, cudagraph_mode.value
                 )
             )
 
@@ -3177,12 +3219,20 @@ class GPUModelRunner(
                 dp_rank = self.parallel_config.data_parallel_rank
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
                 # Re-dispatch with DP padding so we have the correct batch_descriptor
-                cudagraph_mode, batch_descriptor = dispatch_cudagraph(
-                    num_tokens_padded,
-                    disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
-                )
-                # Assert to make sure the agreed upon token count is correct otherwise
-                # num_tokens_across_dp will no-longer be valid
+                # Note: We need to reconstruct dispatch_cudagraph here
+                uniform_decode = dp_sync_handle.should_attempt_ubatching or False
+                if force_eager:
+                    # When force_eager is True, skip cudagraph dispatch
+                    cudagraph_mode = CUDAGraphMode.NONE
+                    batch_descriptor = BatchDescriptor(num_tokens_padded)
+                else:
+                    cudagraph_mode, batch_descriptor = self.cudagraph_dispatcher.dispatch(
+                        num_tokens=num_tokens_padded,
+                        has_lora=len(self.input_batch.lora_id_to_lora_request) > 0,
+                        uniform_decode=uniform_decode,
+                        disable_full=synced_cudagraph_mode <= CUDAGraphMode.PIECEWISE.value,
+                        num_active_loras=len(self.input_batch.lora_id_to_lora_request),
+                    )
                 assert batch_descriptor.num_tokens == num_tokens_padded
 
         cudagraph_stats = None
@@ -3200,6 +3250,57 @@ class GPUModelRunner(
             should_ubatch,
             num_tokens_across_dp,
             cudagraph_stats,
+        )
+
+    def _determine_batch_execution_and_padding(
+        self,
+        num_tokens: int,
+        num_reqs: int,
+        num_scheduled_tokens_np: np.ndarray,
+        max_num_scheduled_tokens: int,
+        use_cascade_attn: bool,
+        allow_microbatching: bool = True,
+        force_eager: bool = False,
+        # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
+        # be improved in model runner v2)
+        force_uniform_decode: bool | None = None,
+        force_has_lora: bool | None = None,
+        force_num_active_loras: int | None = None,
+        num_encoder_reqs: int = 0,
+    ) -> tuple[
+        CUDAGraphMode,
+        BatchDescriptor,
+        bool,
+        torch.Tensor | None,
+        CUDAGraphStat | None,
+    ]:
+        """Synchronous version that calls start and finish back-to-back.
+
+        For async overlap, use _determine_batch_execution_and_padding_start()
+        and _determine_batch_execution_and_padding_finish() separately.
+        """
+        cudagraph_mode, batch_descriptor, uniform_decode, dp_sync_handle = (
+            self._determine_batch_execution_and_padding_start(
+                num_tokens=num_tokens,
+                num_reqs=num_reqs,
+                num_scheduled_tokens_np=num_scheduled_tokens_np,
+                max_num_scheduled_tokens=max_num_scheduled_tokens,
+                use_cascade_attn=use_cascade_attn,
+                allow_microbatching=allow_microbatching,
+                force_eager=force_eager,
+                force_uniform_decode=force_uniform_decode,
+                force_has_lora=force_has_lora,
+                force_num_active_loras=force_num_active_loras,
+                num_encoder_reqs=num_encoder_reqs,
+            )
+        )
+
+        return self._determine_batch_execution_and_padding_finish(
+            cudagraph_mode=cudagraph_mode,
+            batch_descriptor=batch_descriptor,
+            dp_sync_handle=dp_sync_handle,
+            num_tokens=num_tokens,
+            force_eager=force_eager,
         )
 
     def _register_layerwise_nvtx_hooks(self) -> None:
@@ -3384,35 +3485,78 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            logits_indices, spec_decode_metadata = self._prepare_inputs(
-                scheduler_output,
-                num_scheduled_tokens_np,
-            )
+            # Use async DP sync with overlap if enabled via env var
+            if envs.VLLM_USE_ASYNC_DP_SYNC:
+                # NEW PATH: Async DP sync overlaps with _prepare_inputs
+                # Compute cascade attention prefix lengths first (needed for DP sync)
+                cascade_attn_prefix_lens = None
+                if self.cascade_attn_enabled and not self.parallel_config.use_ubatching:
+                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                        num_scheduled_tokens_np,
+                        self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                        scheduler_output.num_common_prefix_blocks,
+                    )
 
-            cascade_attn_prefix_lens = None
-            # Disable cascade attention when using microbatching (DBO)
-            if self.cascade_attn_enabled and not self.parallel_config.use_ubatching:
-                # Pre-compute cascade attention prefix lengths
-                cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
-                    num_scheduled_tokens_np,
-                    self.input_batch.num_computed_tokens_cpu[:num_reqs],
-                    scheduler_output.num_common_prefix_blocks,
+                # Start async DP sync (runs over IB while we do _prepare_inputs)
+                cudagraph_mode, batch_desc, uniform_decode, dp_sync_handle = (
+                    self._determine_batch_execution_and_padding_start(
+                        num_tokens=num_tokens_unpadded,
+                        num_reqs=num_reqs,
+                        num_scheduled_tokens_np=num_scheduled_tokens_np,
+                        max_num_scheduled_tokens=max_num_scheduled_tokens,
+                        use_cascade_attn=cascade_attn_prefix_lens is not None,
+                        num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                    )
                 )
 
-            (
-                cudagraph_mode,
-                batch_desc,
-                should_ubatch,
-                num_tokens_across_dp,
-                cudagraph_stats,
-            ) = self._determine_batch_execution_and_padding(
-                num_tokens=num_tokens_unpadded,
-                num_reqs=num_reqs,
-                num_scheduled_tokens_np=num_scheduled_tokens_np,
-                max_num_scheduled_tokens=max_num_scheduled_tokens,
-                use_cascade_attn=cascade_attn_prefix_lens is not None,
-                num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
-            )
+                # Do _prepare_inputs while async DP sync runs in background
+                logits_indices, spec_decode_metadata = self._prepare_inputs(
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                )
+
+                # Wait for async DP sync to complete and get final results
+                (
+                    cudagraph_mode,
+                    batch_desc,
+                    should_ubatch,
+                    num_tokens_across_dp,
+                    cudagraph_stats,
+                ) = self._determine_batch_execution_and_padding_finish(
+                    cudagraph_mode=cudagraph_mode,
+                    batch_descriptor=batch_desc,
+                    dp_sync_handle=dp_sync_handle,
+                    num_tokens=num_tokens_unpadded,
+                )
+            else:
+                # OLD PATH: Original synchronous behavior
+                logits_indices, spec_decode_metadata = self._prepare_inputs(
+                    scheduler_output,
+                    num_scheduled_tokens_np,
+                )
+
+                cascade_attn_prefix_lens = None
+                if self.cascade_attn_enabled and not self.parallel_config.use_ubatching:
+                    cascade_attn_prefix_lens = self._compute_cascade_attn_prefix_lens(
+                        num_scheduled_tokens_np,
+                        self.input_batch.num_computed_tokens_cpu[:num_reqs],
+                        scheduler_output.num_common_prefix_blocks,
+                    )
+
+                (
+                    cudagraph_mode,
+                    batch_desc,
+                    should_ubatch,
+                    num_tokens_across_dp,
+                    cudagraph_stats,
+                ) = self._determine_batch_execution_and_padding(
+                    num_tokens=num_tokens_unpadded,
+                    num_reqs=num_reqs,
+                    num_scheduled_tokens_np=num_scheduled_tokens_np,
+                    max_num_scheduled_tokens=max_num_scheduled_tokens,
+                    use_cascade_attn=cascade_attn_prefix_lens is not None,
+                    num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                )
 
             logger.debug(
                 "Running batch with cudagraph_mode: %s, batch_descriptor: %s, "
