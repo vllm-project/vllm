@@ -763,6 +763,10 @@ class MambaManager(SingleTypeKVCacheManager):
             self.last_state_block_idx: dict[str, int] = {}
             # The set of the requests that have been allocated blocks
             self._allocated_block_reqs: set[str] = set()
+        elif self.mamba_cache_mode == "all":
+            # Track seq_lens at which each block was last written
+            # Maps: request_id -> {block_idx -> write_position}
+            self.block_write_positions: dict[str, dict[int, int]] = {}
 
     @classmethod
     def find_longest_cache_hit(
@@ -995,6 +999,8 @@ class MambaManager(SingleTypeKVCacheManager):
         if self.mamba_cache_mode == "align":
             self._allocated_block_reqs.discard(request_id)
             self.last_state_block_idx.pop(request_id, None)
+        elif self.mamba_cache_mode == "all":
+            self.block_write_positions.pop(request_id, None)
         super().free(request_id)
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -1005,9 +1011,68 @@ class MambaManager(SingleTypeKVCacheManager):
         """
         return num_computed_tokens - 1
 
+    def _update_block_write_positions(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+        num_tokens: int,
+    ) -> None:
+        """Track which blocks the kernel wrote and at what sequence position.
+
+        Mirrors kernel behavior: intermediate chunks write at block boundaries,
+        last chunk writes at the final token position.
+        """
+        seqlen = num_tokens - num_computed_tokens
+        if seqlen <= 0:
+            return
+
+        positions = self.block_write_positions.setdefault(request_id, {})
+        n_chunks = cdiv(seqlen, self.block_size)
+        block_idx_first = num_computed_tokens // self.block_size
+
+        for chunk_idx in range(n_chunks):
+            is_last = chunk_idx == n_chunks - 1
+
+            if is_last:
+                block_idx = (num_tokens - 1) // self.block_size
+                write_pos = num_tokens
+            else:
+                block_idx = block_idx_first + chunk_idx
+                write_pos = num_computed_tokens + (chunk_idx + 1) * self.block_size
+            positions[block_idx] = write_pos
+
+    def _get_num_cacheable_blocks(self, request_id: str, num_tokens: int) -> int:
+        """Return count of blocks with complete SSM state.
+
+        A block is complete if write_pos == (block_idx + 1) * block_size exactly.
+        """
+        num_full_blocks = num_tokens // self.block_size
+        num_already_cached = self.num_cached_block.get(request_id, 0)
+        positions = self.block_write_positions.get(request_id, {})
+
+        for block_idx in range(num_already_cached, num_full_blocks):
+            expected = (block_idx + 1) * self.block_size
+
+            if positions.get(block_idx, 0) != expected:
+                return block_idx  # First incomplete block = cacheable count
+
+        return num_full_blocks
+
     def cache_blocks(self, request: Request, num_tokens: int) -> None:
         num_cached_blocks_before = self.num_cached_block.get(request.request_id, 0)
+
+        if self.mamba_cache_mode == "all":
+            # Track block writes and only cache blocks with complete mamba_block_size
+            self._update_block_write_positions(
+                request.request_id, request.num_computed_tokens, num_tokens
+            )
+            num_cacheable = self._get_num_cacheable_blocks(
+                request.request_id, num_tokens
+            )
+            num_tokens = num_cacheable * self.block_size
+
         super().cache_blocks(request, num_tokens)
+
         num_cached_blocks_after = self.num_cached_block.get(request.request_id, 0)
         if num_cached_blocks_after > num_cached_blocks_before:
             for block in self.req_to_blocks[request.request_id][
