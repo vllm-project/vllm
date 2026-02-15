@@ -309,7 +309,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   SET(CUTLASS_ENABLE_HEADERS_ONLY ON CACHE BOOL "Enable only the header library")
 
   # Set CUTLASS_REVISION. Used for FetchContent. Also fixes some bogus messages when building.
-  set(CUTLASS_REVISION "v4.2.1")
+  set(CUTLASS_REVISION "v4.3.5")
 
   # Use the specified CUTLASS source directory for compilation if VLLM_CUTLASS_SRC_DIR is provided
   if (DEFINED ENV{VLLM_CUTLASS_SRC_DIR})
@@ -767,6 +767,31 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
                      "if you intend on running FP8 quantized MoE models on Blackwell.")
     else()
       message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
+                     "in CUDA target architectures.")
+    endif()
+  endif()
+
+  # The MoE kernel cutlass_moe_mm for SM120
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(SCALED_MM_ARCHS "12.0a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0 AND SCALED_MM_ARCHS)
+    set(SRCS "csrc/quantization/w8a8/cutlass/moe/grouped_mm_c3x_sm120.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
+    message(STATUS "Building grouped_mm_c3x_sm120 for archs: ${SCALED_MM_ARCHS}")
+  else()
+    if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0 AND SCALED_MM_ARCHS)
+      message(STATUS "Not building grouped_mm_c3x_sm120 kernels as CUDA Compiler version is "
+                     "not >= 13.0, we recommend upgrading to CUDA 13.0 or later "
+                     "if you intend on running FP8 quantized MoE models on SM120.")
+    else()
+      message(STATUS "Not building grouped_mm_c3x_sm120 as no compatible archs found "
                      "in CUDA target architectures.")
     endif()
   endif()
