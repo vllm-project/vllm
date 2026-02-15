@@ -3,6 +3,8 @@
 
 import asyncio
 import base64
+import ipaddress
+import socket
 import tempfile
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
@@ -336,10 +338,62 @@ class BatchProgressTracker:
         return self._pbar
 
 
+_MAX_BATCH_FILE_SIZE_BYTES = 512 * 1024 * 1024  # 512 MB
+_MAX_DOWNLOAD_SIZE_BYTES = 100 * 1024 * 1024  # 100 MB
+_READ_FILE_TIMEOUT = aiohttp.ClientTimeout(total=300)
+_DOWNLOAD_TIMEOUT = aiohttp.ClientTimeout(total=60)
+
+
+def _validate_url(url: str) -> None:
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise ValueError(
+            f"Unsupported URL scheme: {parsed.scheme}. "
+            "Only http and https are allowed."
+        )
+    hostname = parsed.hostname
+    if not hostname:
+        raise ValueError(f"Invalid URL: no hostname found in {url}")
+    try:
+        resolved_ips = socket.getaddrinfo(
+            hostname, parsed.port, proto=socket.IPPROTO_TCP
+        )
+    except socket.gaierror as e:
+        raise ValueError(f"Failed to resolve hostname {hostname}: {e}") from e
+    for _, _, _, _, sockaddr in resolved_ips:
+        ip = ipaddress.ip_address(sockaddr[0])
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            raise ValueError(
+                f"Access to private/internal address {ip} is not allowed."
+            )
+
+
 async def read_file(path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
-            return await resp.text()
+        _validate_url(path_or_url)
+        async with (
+            aiohttp.ClientSession(timeout=_READ_FILE_TIMEOUT) as session,
+            session.get(path_or_url) as resp,
+        ):
+            if resp.status != 200:
+                raise Exception(
+                    f"Failed to read file from URL: {path_or_url}. "
+                    f"Status: {resp.status}"
+                )
+            content_length = resp.content_length
+            if content_length is not None and content_length > _MAX_BATCH_FILE_SIZE_BYTES:
+                raise ValueError(
+                    f"File at {path_or_url} is too large: "
+                    f"{content_length} bytes exceeds limit of "
+                    f"{_MAX_BATCH_FILE_SIZE_BYTES} bytes."
+                )
+            data = await resp.content.read(_MAX_BATCH_FILE_SIZE_BYTES + 1)
+            if len(data) > _MAX_BATCH_FILE_SIZE_BYTES:
+                raise ValueError(
+                    f"File at {path_or_url} exceeds size limit of "
+                    f"{_MAX_BATCH_FILE_SIZE_BYTES} bytes."
+                )
+            return data.decode("utf-8")
     else:
         with open(path_or_url, encoding="utf-8") as f:
             return f.read()
@@ -480,15 +534,29 @@ async def download_bytes_from_url(url: str) -> bytes:
 
     # Handle HTTP/HTTPS URLs
     elif parsed.scheme in ("http", "https"):
+        _validate_url(url)
         async with (
-            aiohttp.ClientSession() as session,
+            aiohttp.ClientSession(timeout=_DOWNLOAD_TIMEOUT) as session,
             session.get(url) as resp,
         ):
             if resp.status != 200:
                 raise Exception(
                     f"Failed to download data from URL: {url}. Status: {resp.status}"
                 )
-            return await resp.read()
+            content_length = resp.content_length
+            if content_length is not None and content_length > _MAX_DOWNLOAD_SIZE_BYTES:
+                raise ValueError(
+                    f"Download from {url} is too large: "
+                    f"{content_length} bytes exceeds limit of "
+                    f"{_MAX_DOWNLOAD_SIZE_BYTES} bytes."
+                )
+            data = await resp.content.read(_MAX_DOWNLOAD_SIZE_BYTES + 1)
+            if len(data) > _MAX_DOWNLOAD_SIZE_BYTES:
+                raise ValueError(
+                    f"Download from {url} exceeds size limit of "
+                    f"{_MAX_DOWNLOAD_SIZE_BYTES} bytes."
+                )
+            return data
 
     else:
         raise ValueError(
