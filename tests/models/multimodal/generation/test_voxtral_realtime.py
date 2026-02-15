@@ -10,11 +10,11 @@ from mistral_common.protocol.transcription.request import (
     TranscriptionRequest,
 )
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
 from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
@@ -27,7 +27,7 @@ ENGINE_CONFIG = dict(
     load_format="mistral",
     tokenizer_mode="mistral",
     enforce_eager=True,
-    gpu_memory_utilization=0.4,
+    gpu_memory_utilization=0.9,
 )
 
 
@@ -114,6 +114,9 @@ def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
 
 @pytest.mark.asyncio
 async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine):
+    # Lazy import to avoid CUDA-reinitialization error
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeBuffer
+
     sampling_params = SamplingParams(temperature=0.0, max_tokens=1)
     audio_config = tokenizer.instruct_tokenizer.audio_encoder.audio_config
 
@@ -146,6 +149,9 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
 
         output_tokens_list.append(output_tokens)
 
-    texts = [tokenizer.decode(output_tokens) for output_tokens in output_tokens_list]
+    texts = [
+        tokenizer.decode(output_tokens, special_token_policy=SpecialTokenPolicy.IGNORE)
+        for output_tokens in output_tokens_list
+    ]
     texts[1] = texts[1].replace("a base hit", "OBS").replace("oh my", "oh, my")
     assert texts == EXPECTED_TEXT
