@@ -292,6 +292,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             assert self.gemm1_alpha is not None
             assert self.gemm1_beta is not None
             assert self.gemm1_clamp_limit is not None
+            assert topk_ids.is_contiguous()
 
             fc1_expert_biases = self.w1_bias
             fc2_expert_biases = self.w2_bias
