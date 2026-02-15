@@ -195,7 +195,7 @@ def build_app(
 
     register_sagemaker_api_router(app, supported_tasks)
 
-    if "generate" in supported_tasks:
+    if any(task in supported_tasks for task in ("generate", "render")):
         from vllm.entrypoints.openai.generate.api_router import (
             register_generate_api_routers,
         )
@@ -350,7 +350,7 @@ async def init_app_state(
         log_error_stack=args.log_error_stack,
     )
 
-    if "generate" in supported_tasks:
+    if any(task in supported_tasks for task in ("generate", "render")):
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
 
         await init_generate_state(

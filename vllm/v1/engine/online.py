@@ -67,7 +67,7 @@ class OnlineEngineClient(EngineClient):
     # -- Task support --
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return ("generate",)
+        return ("render",)
 
     # -- Inference (not supported) --
 
