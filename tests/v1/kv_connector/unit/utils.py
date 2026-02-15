@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.example_connector import (  # 
 from vllm.utils.hashing import sha256
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
+from vllm.v1.core.sched.async_scheduler import AsyncScheduler
 from vllm.v1.core.sched.scheduler import Scheduler, SchedulerOutput
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
@@ -140,7 +141,7 @@ def create_vllm_config(
 def create_scheduler(
     vllm_config: VllmConfig,
     num_blocks: int = 10000,
-) -> Scheduler:
+) -> Scheduler | AsyncScheduler:
     """Initialize Scheduler For Testing."""
     block_size = vllm_config.cache_config.block_size
     kv_cache_config = KVCacheConfig(
@@ -159,7 +160,11 @@ def create_scheduler(
         ],
     )
     vllm_config.cache_config.num_gpu_blocks = num_blocks
-    return Scheduler(
+
+    scheduler_cls = (
+        AsyncScheduler if vllm_config.scheduler_config.async_scheduling else Scheduler
+    )
+    return scheduler_cls(
         vllm_config=vllm_config,
         kv_cache_config=kv_cache_config,
         log_stats=True,
