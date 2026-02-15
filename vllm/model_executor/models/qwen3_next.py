@@ -407,8 +407,8 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         # projection of the input hidden states
-        self.projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
-        self.projection_size_ba = self.num_v_heads * 2
+        # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
+        # we need to create qkvz_proj adaptively here.
         self.in_proj_qkvz = self.create_qkvz_proj(
             hidden_size=self.hidden_size,
             key_dim=self.key_dim,
