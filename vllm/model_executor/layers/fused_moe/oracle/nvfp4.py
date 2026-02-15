@@ -281,12 +281,17 @@ def convert_to_nvfp4_moe_kernel_format(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    torch.Tensor | None,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+    torch.Tensor | None,
 ]:
+    w13_stability_scale_factor: torch.Tensor | None = None
+    w2_stability_scale_factor: torch.Tensor | None = None
+
     if (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
         or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
@@ -323,6 +328,8 @@ def convert_to_nvfp4_moe_kernel_format(
             w2,
             w2_scale,
             w2_scale_2,
+            w13_stability_scale_factor,
+            w2_stability_scale_factor,
         ) = prepare_nvfp4_moe_layer_for_marlin(
             layer=layer,
             w13=w13,
@@ -345,6 +352,8 @@ def convert_to_nvfp4_moe_kernel_format(
         w2_scale,
         w2_scale_2,
         a2_scale,
+        w13_stability_scale_factor,
+        w2_stability_scale_factor,
     )
 
 
@@ -364,8 +373,10 @@ def make_nvfp4_moe_quant_config(
     w2_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
     w2_scale_2: torch.Tensor,
-    a13_scale: torch.Tensor,
-    a2_scale: torch.Tensor,
+    a13_scale: torch.Tensor | None,
+    a2_scale: torch.Tensor | None,
+    w13_stability_scale_factor: torch.Tensor | None = None,
+    w2_stability_scale_factor: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig | None:
     UNSUPPORTED = [NvFp4MoeBackend.FLASHINFER_TRTLLM]
     if backend in UNSUPPORTED:
@@ -377,8 +388,11 @@ def make_nvfp4_moe_quant_config(
             g2_alphas=w2_scale_2,
             w1_scale=w13_scale,
             w2_scale=w2_scale,
+            w1_stability_scale_factor=w13_stability_scale_factor,
+            w2_stability_scale_factor=w2_stability_scale_factor,
         )
 
+    assert a13_scale is not None and a2_scale is not None
     g1_alphas = a13_scale * w13_scale_2
     g2_alphas = a2_scale * w2_scale_2
     return nvfp4_moe_quant_config(
