@@ -103,7 +103,7 @@ class OpenAIServingPooling(OpenAIServing):
                         "offline inference example for more details."
                     )
 
-                validated_prompt = self.io_processor.parse_data(request.data)
+                validated_prompt = self.io_processor.parse_data(request)
 
                 raw_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
