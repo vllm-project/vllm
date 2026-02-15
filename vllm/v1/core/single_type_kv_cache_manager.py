@@ -1042,19 +1042,19 @@ class MambaManager(SingleTypeKVCacheManager):
             positions[block_idx] = write_pos
 
     def _get_num_cacheable_blocks(self, request_id: str, num_tokens: int) -> int:
-        """Return count of blocks with complete SSM state.
+        """Return count of blocks with complete mamba_block_size.
 
         A block is complete if write_pos == (block_idx + 1) * block_size exactly.
         """
         num_full_blocks = num_tokens // self.block_size
         num_already_cached = self.num_cached_block.get(request_id, 0)
-        positions = self.block_write_positions.get(request_id, {})
+        seq_positions = self.block_write_positions.get(request_id, {})
 
         for block_idx in range(num_already_cached, num_full_blocks):
-            expected = (block_idx + 1) * self.block_size
+            expected_block_size = (block_idx + 1) * self.block_size
 
-            if positions.get(block_idx, 0) != expected:
-                return block_idx  # First incomplete block = cacheable count
+            if seq_positions.get(block_idx, 0) != expected_block_size:
+                return block_idx  # Number of complete blocks before this one
 
         return num_full_blocks
 
