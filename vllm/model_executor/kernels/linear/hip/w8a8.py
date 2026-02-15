@@ -5,15 +5,11 @@
 import torch
 
 import vllm.envs as envs
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8_linear
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.utils.platform_utils import get_cu_count
 from vllm.utils.torch_utils import direct_register_custom_op
-
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
 
 
 def rocm_per_tensor_float_w8a8_scaled_mm_impl(
@@ -71,7 +67,7 @@ if current_platform.is_rocm():
     )
 
 
-class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+class FpKernel(w8a8_linear.FpKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -90,7 +86,7 @@ class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.FpKernelConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
