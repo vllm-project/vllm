@@ -201,6 +201,7 @@ def flashinfer_fused_moe_blockscale_fp8(
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
+    num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
     assert top_k <= global_num_experts
     assert top_k <= 10

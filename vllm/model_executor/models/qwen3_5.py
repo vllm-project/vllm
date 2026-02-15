@@ -30,14 +30,6 @@ from collections.abc import Callable, Iterable
 import torch
 from einops import rearrange
 from torch import nn
-from transformers.models.qwen3_5.configuration_qwen3_5 import (
-    Qwen3_5Config,
-    Qwen3_5TextConfig,
-)
-from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
-    Qwen3_5MoeConfig,
-    Qwen3_5MoeTextConfig,
-)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -68,6 +60,14 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.qwen3_5 import (
+    Qwen3_5Config,
+    Qwen3_5TextConfig,
+)
+from vllm.transformers_utils.configs.qwen3_5_moe import (
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeTextConfig,
+)
 
 from .interfaces import (
     HasInnerState,
@@ -736,9 +736,10 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         cls,
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
-        mamba_ssm_dtype = vllm_config.model_config.hf_text_config.mamba_ssm_dtype
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype, mamba_ssm_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
