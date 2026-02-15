@@ -1101,8 +1101,11 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         unified_attention,
                     )
 
+                    decode_cu_seqlens_q = attn_metadata.query_start_loc[
+                        : num_decodes + 1
+                    ]
                     descale_shape = (
-                        attn_metadata.query_start_loc[:num_decodes].shape[0] - 1,
+                        num_decodes,
                         key_cache.shape[2],
                     )
                     unified_attention(
@@ -1110,7 +1113,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         k=key_cache,
                         v=value_cache,
                         out=output[:num_decode_tokens],
-                        cu_seqlens_q=attn_metadata.query_start_loc[:num_decodes],
+                        cu_seqlens_q=decode_cu_seqlens_q,
                         max_seqlen_q=1,
                         seqused_k=attn_metadata.seq_lens[:num_decodes],
                         max_seqlen_k=attn_metadata.max_seq_len,
