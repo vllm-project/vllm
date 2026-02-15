@@ -70,8 +70,12 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
 
 
 @pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize("specialize_active_lora", [False, True])
 def test_gpt_oss_lora(
-    monkeypatch: pytest.MonkeyPatch, gptoss20b_lora_files, mxfp4_use_marlin
+    monkeypatch: pytest.MonkeyPatch,
+    gptoss20b_lora_files,
+    mxfp4_use_marlin,
+    specialize_active_lora,
 ):
     with monkeypatch.context() as m:
         m.setenv("VLLM_MXFP4_USE_MARLIN", "1" if mxfp4_use_marlin else "0")
@@ -83,8 +87,9 @@ def test_gpt_oss_lora(
             max_lora_rank=8,
             max_num_seqs=2,
             max_num_batched_tokens=2048,
-            compilation_config=vllm.config.CompilationConfig(  # Avoid OOM
-                cudagraph_specialize_lora=False,
+            specialize_active_lora=specialize_active_lora,
+            compilation_config=vllm.config.CompilationConfig(
+                cudagraph_specialize_lora=specialize_active_lora,
             ),
         )
 
