@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, TypeVar
 
-from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
@@ -12,8 +11,12 @@ from vllm.utils.import_utils import LazyLoader
 
 if TYPE_CHECKING:
     import torch
+
+    from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 else:
     torch = LazyLoader("torch", globals(), "torch")
+
+    ChatTemplateContentFormatOption = object
 
 logger = init_logger(__name__)
 
@@ -43,7 +46,7 @@ class ChatParams:
     chat_template: str | None = None
     """The chat template to apply."""
 
-    chat_template_content_format: ChatTemplateContentFormatOption = "auto"
+    chat_template_content_format: "ChatTemplateContentFormatOption" = "auto"
     """The format of the chat template."""
 
     chat_template_kwargs: dict[str, Any] = field(default_factory=dict)
@@ -163,10 +166,7 @@ class TokenizeParams:
                 value=truncate_prompt_tokens,
             )
 
-    def with_kwargs(self, tokenization_kwargs: dict[str, Any] | None):
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
-
+    def with_kwargs(self, **tokenization_kwargs: Any):
         max_length = tokenization_kwargs.pop("max_length", self.max_input_tokens)
         pad_prompt_tokens = tokenization_kwargs.pop(
             "pad_prompt_tokens", self.pad_prompt_tokens
