@@ -35,6 +35,7 @@ _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
+    "kimi": ("kimi", "KimiTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
 }
 
@@ -164,6 +165,14 @@ def resolve_tokenizer_args(
         revision=revision,
     ):
         tokenizer_mode = "grok2"
+
+    # Try to use Kimi tiktoken tokenizer if possible
+    if tokenizer_mode == "auto" and any_pattern_in_repo_files(
+        model_name_or_path=str(tokenizer_name),
+        allow_patterns=["tiktoken.model", "tokenization_kimia.py"],
+        revision=revision,
+    ):
+        tokenizer_mode = "kimi"
 
     # Fallback to HF tokenizer
     if tokenizer_mode == "auto":

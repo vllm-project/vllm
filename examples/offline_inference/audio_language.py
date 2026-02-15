@@ -12,6 +12,7 @@ import os
 from dataclasses import asdict
 from typing import Any, NamedTuple
 
+import librosa
 from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
@@ -478,6 +479,78 @@ def run_whisper(question: str, audio_count: int) -> ModelRequestData:
     )
 
 
+# Kimi-Audio (ASR)
+def run_kimi_audio_asr(question: str, audio_count: int) -> ModelRequestData:
+    """Kimi-Audio ASR example using kimia_infer for preprocessing."""
+    import contextlib
+
+    # Lazy import kimia_infer since it's only needed for Kimi-Audio
+    import kimia_infer.api.prompt_manager  # noqa: F401
+    import torch
+
+    from vllm.model_executor.models.kimi_audio_asr import (
+        KimiAudioForConditionalGeneration,
+        _get_kimia_prompt_manager,
+        _write_wav_tmp,
+    )
+
+    assert audio_count == 1, "Kimi-Audio ASR only supports single audio input"
+
+    model_path = args.model or "moonshotai/Kimi-Audio-7B-Instruct"
+
+    audio, sr = audio_assets[0].audio_and_sample_rate
+    if sr != 16000:
+        audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
+
+    wav_path = _write_wav_tmp(audio, 16000)
+    try:
+        cls = KimiAudioForConditionalGeneration
+        prompt_manager = _get_kimia_prompt_manager(
+            model_path=str(model_path),
+            kimia_token_offset=cls.DEFAULT_KIMIA_TOKEN_OFFSET,
+            kimia_text_audiodelaytokens=cls.DEFAULT_KIMIA_TEXT_AUDIODELAYTOKENS,
+        )
+
+        instruction = question.strip() or "Please transcribe the following audio:"
+        messages = [
+            {"role": "user", "message_type": "text", "content": instruction},
+            {"role": "user", "message_type": "audio", "content": wav_path},
+        ]
+
+        with torch.inference_mode():
+            content = prompt_manager.get_prompt(messages, output_type="text")
+            audio_ids, text_ids, is_continuous_mask, _, _ = content.to_tensor()
+            whisper_feats = content.continuous_feature[0]
+            if whisper_feats.dim() == 2:
+                whisper_feats = whisper_feats.unsqueeze(0)
+
+        mm_audio = {
+            "whisper_input_features": whisper_feats,
+            "is_continuous_mask": is_continuous_mask,
+            "text_input_ids": text_ids,
+            "audio_input_ids": audio_ids,
+        }
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(wav_path)
+
+    engine_args = EngineArgs(
+        model=model_path,
+        trust_remote_code=True,
+        max_model_len=2048,
+        max_num_seqs=1,
+        limit_mm_per_prompt={"audio": audio_count},
+        enable_mm_embeds=True,
+        enforce_eager=True,
+    )
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompt_token_ids=[KimiAudioForConditionalGeneration.PLACEHOLDER_TOKEN_ID],
+        multi_modal_data={"audio": mm_audio},
+    )
+
+
 model_example_map = {
     "audioflamingo3": run_audioflamingo3,
     "musicflamingo": run_musicflamingo,
@@ -485,6 +558,7 @@ model_example_map = {
     "glmasr": run_glmasr,
     "funaudiochat": run_funaudiochat,
     "granite_speech": run_granite_speech,
+    "kimi_audio_asr": run_kimi_audio_asr,
     "midashenglm": run_midashenglm,
     "minicpmo": run_minicpmo,
     "phi4_mm": run_phi4mm,
