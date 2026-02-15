@@ -46,12 +46,11 @@ if TYPE_CHECKING:
     )
     from vllm.multimodal.cache import BaseMultiModalProcessorCache
     from vllm.multimodal.inputs import (
-        ModalityDataItems,
         MultiModalDataDict,
         MultiModalInputs,
         MultiModalUUIDDict,
     )
-    from vllm.multimodal.parse import MultiModalDataItems
+    from vllm.multimodal.parse import ModalityDataItems, MultiModalDataItems
     from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
