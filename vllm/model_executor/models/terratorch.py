@@ -48,6 +48,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
     MultiModalUUIDDict,
     PlaceholderRange,
+    mm_inputs,
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
@@ -222,8 +223,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
             ),
         )
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=[1],
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,

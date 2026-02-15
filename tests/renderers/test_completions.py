@@ -93,14 +93,14 @@ def _build_renderer(
 
 
 def _preprocess_prompt(
-    mdoel_config: ModelConfig,
+    model_config: ModelConfig,
     prompt_or_prompts: SingletonPrompt | bytes | Sequence[SingletonPrompt | bytes],
 ):
     return [
         (
             prompt
             if isinstance(prompt, bytes)
-            else parse_model_prompt(mdoel_config, prompt)
+            else parse_model_prompt(model_config, prompt)
         )
         for prompt in prompt_to_seq(prompt_or_prompts)
     ]
