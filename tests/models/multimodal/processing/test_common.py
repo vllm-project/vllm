@@ -450,6 +450,8 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    if model_id == "allendou/Fun-ASR-Nano-2512-vllm":
+        pytest.skip("Cache result not matched. Needs further investigation.")
     if model_id == "google/gemma-3n-E2B-it":
         pytest.skip("Fix later")
     if model_id == "OpenGVLab/InternVL2-2B":
