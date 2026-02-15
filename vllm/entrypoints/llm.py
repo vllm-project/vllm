@@ -76,7 +76,6 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
-    extract_prompt_components,
     parse_model_prompt,
     prompt_to_seq,
 )
@@ -1911,7 +1910,6 @@ class LLM:
         tokenization_kwargs: dict[str, Any] | None = None,
         priority: int = 0,
     ) -> str:
-        prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
         request_id = str(next(self.request_counter))
 
         if params.truncate_prompt_tokens is not None:
@@ -1936,7 +1934,6 @@ class LLM:
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
-            prompt_text=prompt_text,
         )
 
         return request_id

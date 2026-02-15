@@ -242,7 +242,6 @@ class LLMEngine:
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            assert prompt_text is None
             request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
