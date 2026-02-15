@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -85,6 +86,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - pass per-block weight scales to the kernel
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
+        self.max_capture_size = (
+            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
+        )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -355,6 +359,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             use_deepseek_fp8_block_scale=self.use_deepseek_fp8_block_scale,
             use_mxfp8_act_scaling=use_mxfp8_act_scaling,
             use_w4_group_scaling=use_w4_group_scaling,
+            tune_max_num_tokens=max(self.max_capture_size, 1),
         )
 
     def moe_sum(self, input: torch.Tensor, output: torch.Tensor) -> None:
