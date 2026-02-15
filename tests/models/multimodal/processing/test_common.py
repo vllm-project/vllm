@@ -102,7 +102,6 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
-    "interns1_pro": False,
     "lfm2_vl": False,
     "nemotron_parse": False,
     "ovis": False,
