@@ -52,7 +52,7 @@ async def tokenize(request: TokenizeRequest, raw_request: Request):
     try:
         generator = await handler.create_tokenize(request, raw_request)
     except Exception as e:
-        return handler.create_error_response(e)
+        generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

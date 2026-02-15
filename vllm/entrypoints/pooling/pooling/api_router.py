@@ -44,7 +44,7 @@ async def create_pooling(request: PoolingRequest, raw_request: Request):
     try:
         generator = await handler.create_pooling(request, raw_request)
     except Exception as e:
-        return handler.create_error_response(e)
+        generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

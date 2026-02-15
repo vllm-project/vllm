@@ -52,7 +52,7 @@ async def create_score(request: ScoreRequest, raw_request: Request):
     try:
         generator = await handler.create_score(request, raw_request)
     except Exception as e:
-        return handler.create_error_response(e)
+        generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -103,7 +103,7 @@ async def do_rerank(request: RerankRequest, raw_request: Request):
     try:
         generator = await handler.do_rerank(request, raw_request)
     except Exception as e:
-        return handler.create_error_response(e)
+        generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
