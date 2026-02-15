@@ -81,7 +81,7 @@ async def scale_elastic_ep(raw_request: Request):
             f"after {drain_timeout} seconds",
         ) from e
     except Exception as e:
-        logger.error("Scale failed: %s", e)
+        logger.exception("Scale failed: %s", e)
         raise HTTPException(status_code=500, detail="Scale failed") from e
     finally:
         set_scaling_elastic_ep(False)
