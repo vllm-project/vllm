@@ -108,10 +108,12 @@ def set_default_torch_num_threads(num_threads: int | None = None):
     Sets the default number of threads for PyTorch to the given value.
 
     `None` means using the value of the environment variable `OMP_NUM_THREADS`
-    (or `1` if that is not available).
+    (or the CFS-aware CPU count if that is not available).
     """
     if num_threads is None:
-        num_threads = 1
+        from vllm._cpu_detection import get_available_cpus
+
+        num_threads = max(1, get_available_cpus())
 
         try:
             num_threads = int(os.environ["OMP_NUM_THREADS"])
