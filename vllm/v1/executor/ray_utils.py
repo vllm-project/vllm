@@ -108,7 +108,7 @@ try:
 
             if isinstance(output, AsyncModelRunnerOutput):
                 output = output.get_output()
-            if not get_pp_group().is_last_rank:
+            if not self._is_last_rank():
                 # Case where there are no scheduled requests
                 # but may still be finished requests.
                 assert not output or not output.req_ids
@@ -127,6 +127,9 @@ try:
 
         def _is_intermediate_tensors(self, output) -> bool:
             return isinstance(output, IntermediateTensors)
+
+        def _is_last_rank(self) -> bool:
+            return get_pp_group().is_last_rank
 
     ray_import_err = None
 
