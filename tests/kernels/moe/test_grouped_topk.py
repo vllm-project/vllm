@@ -27,7 +27,7 @@ from vllm.utils.torch_utils import set_random_seed
 )
 @pytest.mark.parametrize("n_token", [1, 33, 64])
 @pytest.mark.parametrize("n_hidden", [1024, 2048])
-@pytest.mark.parametrize("n_expert", [16])
+@pytest.mark.parametrize("n_expert", [16, 256])
 @pytest.mark.parametrize("topk", [2])
 @pytest.mark.parametrize("renormalize", [True, False])
 @pytest.mark.parametrize("num_expert_group", [8])
@@ -89,8 +89,7 @@ def test_grouped_topk(
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        if renormalize:
-            torch.testing.assert_close(
-                baseline_topk_weights, test_topk_weights, atol=2e-2, rtol=0
-            )
+        torch.testing.assert_close(
+            baseline_topk_weights, test_topk_weights, atol=2e-2, rtol=0
+        )
         torch.testing.assert_close(baseline_topk_ids, test_topk_ids, atol=0, rtol=0)
