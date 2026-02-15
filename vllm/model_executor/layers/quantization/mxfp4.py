@@ -422,6 +422,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     self.moe_quant_config,
                     input_dtype=self.marlin_input_dtype,
                 ),
+                inplace=not self.moe.disable_inplace,
                 shared_experts=None,
             )
         elif (
