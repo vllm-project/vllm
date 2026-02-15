@@ -66,6 +66,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -553,6 +554,9 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_processor(
             Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability

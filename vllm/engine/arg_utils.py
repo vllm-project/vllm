@@ -434,6 +434,7 @@ class EngineArgs:
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = CacheConfig.cpu_offload_gb
+    cpu_offload_params: set[str] = get_field(CacheConfig, "cpu_offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
@@ -507,8 +508,6 @@ class EngineArgs:
     )
     reasoning_parser: str = StructuredOutputsConfig.reasoning_parser
     reasoning_parser_plugin: str | None = None
-
-    logits_processor_pattern: str | None = ModelConfig.logits_processor_pattern
 
     speculative_config: dict[str, Any] | None = None
 
@@ -710,9 +709,6 @@ class EngineArgs:
         )
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
-        model_group.add_argument(
-            "--logits-processor-pattern", **model_kwargs["logits_processor_pattern"]
-        )
         model_group.add_argument(
             "--generation-config", **model_kwargs["generation_config"]
         )
@@ -947,6 +943,9 @@ class EngineArgs:
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
         cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
+        cache_group.add_argument(
+            "--cpu-offload-params", **cache_kwargs["cpu_offload_params"]
+        )
         cache_group.add_argument(
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
@@ -1320,7 +1319,6 @@ class EngineArgs:
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
             pooler_config=self.pooler_config,
-            logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,
             enable_sleep_mode=self.enable_sleep_mode,
@@ -1429,7 +1427,7 @@ class EngineArgs:
         self.model_weights = model_config.model_weights
         self.tokenizer = model_config.tokenizer
 
-        self._check_feature_supported(model_config)
+        self._check_feature_supported()
         self._set_default_chunked_prefill_and_prefix_caching_args(model_config)
         self._set_default_max_num_seqs_and_batched_tokens_args(
             usage_context, model_config
@@ -1459,6 +1457,7 @@ class EngineArgs:
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
+            cpu_offload_params=self.cpu_offload_params,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
@@ -1831,11 +1830,8 @@ class EngineArgs:
 
         return config
 
-    def _check_feature_supported(self, model_config: ModelConfig):
+    def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
-        if self.logits_processor_pattern != EngineArgs.logits_processor_pattern:
-            _raise_unsupported_error(feature_name="--logits-processor-pattern")
-
         # No Concurrent Partial Prefills so far.
         if (
             self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
