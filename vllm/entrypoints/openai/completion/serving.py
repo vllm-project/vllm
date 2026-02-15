@@ -157,8 +157,6 @@ class OpenAIServingCompletion(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text = self._extract_prompt_text(engine_prompt)
-
                 max_tokens = get_max_tokens(
                     max_model_len,
                     request.max_tokens,
@@ -208,7 +206,6 @@ class OpenAIServingCompletion(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
-                        prompt_text=prompt_text,
                         data_parallel_rank=data_parallel_rank,
                     )
 

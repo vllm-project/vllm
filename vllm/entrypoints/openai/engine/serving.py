@@ -1071,7 +1071,6 @@ class OpenAIServing:
         trace_headers: Mapping[str, str] | None = None,
     ):
         max_model_len = self.model_config.max_model_len
-        prompt_text = self._extract_prompt_text(engine_prompt)
 
         orig_priority = priority
         sub_request = 0
@@ -1093,7 +1092,6 @@ class OpenAIServing:
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
-                prompt_text=prompt_text,
             )
 
             async for res in generator:
@@ -1128,7 +1126,6 @@ class OpenAIServing:
                     context.chat_template,
                     context.chat_template_content_format,
                 )
-                prompt_text = self._extract_prompt_text(engine_prompt)
 
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,

@@ -28,7 +28,6 @@ from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.jsontree import json_iter_leaves
-from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -210,14 +209,13 @@ class InputProcessor:
         # 1. Tokenize text prompt, with LoRA request if one exists.
         # 2. For multimodal models with a merged preprocessor, preprocess
         #   multimodal data and expand prompt token ids accordingly.
-        with set_default_torch_num_threads():
-            if isinstance(prompt, dict) and "type" in prompt:
-                processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
-            else:
-                processed_inputs = self.input_preprocessor.preprocess(
-                    prompt,
-                    tokenization_kwargs=tokenization_kwargs,
-                )
+        if isinstance(prompt, dict) and "type" in prompt:
+            processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
+        else:
+            processed_inputs = self.input_preprocessor.preprocess(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+            )
 
         from vllm.platforms import current_platform
 

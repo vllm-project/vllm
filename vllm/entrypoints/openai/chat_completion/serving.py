@@ -373,9 +373,7 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text, prompt_token_ids, _ = self._extract_prompt_components(
-                    engine_prompt
-                )
+                prompt_token_ids = self._extract_prompt_components(engine_prompt).tokens
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
@@ -438,7 +436,6 @@ class OpenAIServingChat(OpenAIServing):
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
-                        prompt_text=prompt_text,
                         data_parallel_rank=data_parallel_rank,
                         reasoning_ended=reasoning_ended,
                     )

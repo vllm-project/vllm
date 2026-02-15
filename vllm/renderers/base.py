@@ -552,7 +552,7 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuids = self._process_mm_uuids(mm_data, mm_items, mm_uuids, mm_req_id)
 
-        with set_request_id(mm_req_id):
+        with set_request_id(mm_req_id), set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(
                 prompt,
                 mm_items,
