@@ -209,7 +209,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         _, passthrough_data = self._get_hf_mm_data(mm_items)
         mm_processed_data = BatchFeature(
             {
-                k: torch.as_tensor(v).clone().unsqueeze(0)
+                k: torch.as_tensor(v).detach().clone().unsqueeze(0)
                 for k, v in passthrough_data.items()
             },
             tensor_type="pt",
