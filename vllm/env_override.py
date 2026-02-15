@@ -1,6 +1,95 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# ruff: noqa: E402
+import importlib.util
 import os
+
+
+# Peripheral function to _maybe_set_cuda_compatibility_path().
+# PyTorch version must not be determined by importing directly
+# because it will trigger the CUDA initialization, losing the
+# chance to set the LD_LIBRARY_PATH beforehand.
+def _get_torch_cuda_version():
+    try:
+        spec = importlib.util.find_spec("torch")
+        if not spec:
+            return None
+        if spec.origin:
+            torch_root = os.path.dirname(spec.origin)
+        else:
+            if spec.submodule_search_locations:
+                torch_root = spec.submodule_search_locations[0]
+            else:
+                return None
+        version_path = os.path.join(torch_root, "version.py")
+        if not os.path.exists(version_path):
+            return None
+
+        # Load the version module without importing torch
+        spec = importlib.util.spec_from_file_location("torch.version", version_path)
+        if not spec or not spec.loader:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        # Avoid registering it in sys.modules to not confuse future imports
+        spec.loader.exec_module(module)
+        return getattr(module, "cuda", None)
+    except Exception:
+        return None
+
+
+# The CUDA compatibility library path must be set before importing
+# torch, because torch loads CUDA shared libraries at import time and the
+# dynamic linker only consults LD_LIBRARY_PATH when a library is first
+# loaded. Setting it afterwards has no effect.
+def _maybe_set_cuda_compatibility_path():
+    enable_cuda_compatibility = os.environ.get(
+        "VLLM_ENABLE_CUDA_COMPATIBILITY", "0"
+    ).strip().lower() in ("1", "true")
+    if not enable_cuda_compatibility:
+        return
+
+    # If VLLM_CUDA_COMPATIBILITY_PATH is set, use it.
+    # Otherwise, try to find the torch CUDA version and use the default path.
+    cuda_compat_path = os.environ.get("VLLM_CUDA_COMPATIBILITY_PATH", None)
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        # Detect the presence of the conda environment and cuda-compat package
+        conda_prefix = os.environ.get("CONDA_PREFIX", None)
+        if conda_prefix and os.path.isdir(os.path.join(conda_prefix, "cuda-compat")):
+            cuda_compat_path = os.path.join(conda_prefix, "cuda-compat")
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        torch_cuda_version = _get_torch_cuda_version()
+        # https://docs.nvidia.com/deploy/cuda-compatibility/forward-compatibility.html
+        if torch_cuda_version and os.path.isdir(
+            f"/usr/local/cuda-{torch_cuda_version}/compat"
+        ):
+            cuda_compat_path = f"/usr/local/cuda-{torch_cuda_version}/compat"
+    if not cuda_compat_path or not os.path.isdir(cuda_compat_path):
+        return
+
+    existing_ld_library = os.environ.get("LD_LIBRARY_PATH", None)
+    if not existing_ld_library:
+        ld_library_paths = []
+    else:
+        ld_library_paths = existing_ld_library.split(os.pathsep)
+
+    norm_cuda_compat_path = os.path.normpath(cuda_compat_path)
+    if (
+        ld_library_paths
+        and ld_library_paths[0]
+        and os.path.normpath(ld_library_paths[0]) == norm_cuda_compat_path
+    ):
+        return
+
+    new_ld_library_paths = [norm_cuda_compat_path] + [
+        ld_library_path
+        for ld_library_path in ld_library_paths
+        if not ld_library_path
+        or os.path.normpath(ld_library_path) != norm_cuda_compat_path
+    ]
+    os.environ["LD_LIBRARY_PATH"] = os.pathsep.join(new_ld_library_paths)
+
+
+_maybe_set_cuda_compatibility_path()
 
 import torch
 
