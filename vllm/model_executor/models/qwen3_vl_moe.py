@@ -45,6 +45,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+from vllm.tokenizers.registry import cached_tokenizer_from_config
 
 from .interfaces import MixtureOfExperts
 from .qwen3_moe import (
@@ -415,6 +416,7 @@ class Qwen3VLMoeForConditionalGeneration(
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self._tokenizer = cached_tokenizer_from_config(vllm_config.model_config)
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         self.video_pruning_rate = multimodal_config.video_pruning_rate
