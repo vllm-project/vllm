@@ -138,16 +138,30 @@ steps:
   - TARGET_TEST_SUITE=A100 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - pytest -v -s -x lora/test_mixtral.py
 
-- label: Distributed Tests (2 GPUs)(H100)
+- label: Distributed MoE Tests (2 GPUs)(H100)
+  timeout_in_minutes: 15
+  device: h100
+  source_file_dependencies:
+  - vllm/config/parallel.py
+  - vllm/distributed/
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/worker/
+  - examples/offline_inference/data_parallel.py
+  - tests/v1/distributed/test_dbo.py
+  working_dir: "/vllm-workspace/"
+  num_devices: 2
+  commands:
+  - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
+  - pytest -v -s tests/v1/distributed/test_dbo.py
+
+- label: Distributed Context Parallel Tests (2 GPUs)(H100)
   timeout_in_minutes: 15
   device: h100
   optional: true
   working_dir: "/vllm-workspace/"
   num_devices: 2
   commands:
-    - pytest -v -s tests/distributed/test_context_parallel.py
-    - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
-    - pytest -v -s tests/v1/distributed/test_dbo.py
+  - pytest -v -s tests/distributed/test_context_parallel.py
 
 - label: Distributed Tests (2 GPUs)(B200)
   device: b200
