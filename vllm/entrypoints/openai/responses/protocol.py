@@ -15,6 +15,9 @@ from openai.types.responses import (
     ResponseCodeInterpreterCallInterpretingEvent,
     ResponseContentPartAddedEvent,
     ResponseContentPartDoneEvent,
+    ResponseFileSearchCallCompletedEvent,
+    ResponseFileSearchCallInProgressEvent,
+    ResponseFileSearchCallSearchingEvent,
     ResponseFunctionToolCall,
     ResponseInputItemParam,
     ResponseMcpCallArgumentsDeltaEvent,
@@ -336,8 +339,11 @@ class ResponsesRequest(OpenAIBaseModel):
                 response_format.type == "json_schema"
                 and response_format.schema_ is not None
             ):
+                structured_outputs_kwargs: dict[str, Any] = {
+                    "json": response_format.schema_
+                }
                 structured_outputs = StructuredOutputsParams(
-                    json=response_format.schema_
+                    **structured_outputs_kwargs
                 )
 
         stop = self.stop if self.stop else []
@@ -624,6 +630,9 @@ StreamingResponsesResponse: TypeAlias = (
     | ResponseReasoningTextDoneEvent
     | ResponseReasoningPartAddedEvent
     | ResponseReasoningPartDoneEvent
+    | ResponseFileSearchCallInProgressEvent
+    | ResponseFileSearchCallSearchingEvent
+    | ResponseFileSearchCallCompletedEvent
     | ResponseCodeInterpreterCallInProgressEvent
     | ResponseCodeInterpreterCallCodeDeltaEvent
     | ResponseWebSearchCallInProgressEvent
