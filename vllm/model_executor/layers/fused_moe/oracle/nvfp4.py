@@ -67,7 +67,7 @@ def backend_to_kernel_cls(
     backend: NvFp4MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-        from vllm.model_executor.layers.fused_moe.experts.flashinfer_trtllm_nvfp4_moe import (  # noqa: E501
+        from vllm.model_executor.layers.fused_moe.experts.trtllm_nvfp4_moe import (
             TrtLlmNvFp4ExpertsModular,
             TrtLlmNvFp4ExpertsMonolithic,
         )
