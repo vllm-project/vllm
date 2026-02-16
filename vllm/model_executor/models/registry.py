@@ -247,8 +247,8 @@ _EMBEDDING_MODELS = {
     "XLMRobertaModel": ("roberta", "RobertaEmbeddingModel"),
     "BgeM3EmbeddingModel": ("roberta", "BgeM3EmbeddingModel"),
     # [Multimodal]
-    "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "CLIPModel": ("clip", "CLIPEmbeddingModel"),
+    "ColModernVBertForRetrieval": ("colmodernvbert", "ColModernVBertForRetrieval"),
     "LlavaNextForConditionalGeneration": (
         "llava_next",
         "LlavaNextForConditionalGeneration",

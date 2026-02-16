@@ -591,10 +591,10 @@ _EMBEDDING_EXAMPLE_MODELS = {
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
     ),
     # [Multimodal]
+    "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
     ),
-    "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo(
         "TIGER-Lab/VLM2Vec-Full", trust_remote_code=True
