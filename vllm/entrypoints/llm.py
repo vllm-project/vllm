@@ -1884,10 +1884,12 @@ class LLM:
     ):
         if isinstance(prompts, (list, tuple)):
             logger.warning_once(
-                "Running renderer on all prompts before adding them to engine "
-                "is less efficient than rendering one prompt and adding it to engine "
-                "before processing the next prompt. It is recommended to instead "
-                "pass a generator that renders one prompt per iteration."
+                "Rendering all prompts before adding them to the engine "
+                "is less efficient than performing both on the same prompt "
+                "before processing the next prompt. You should instead pass "
+                "a generator that renders one prompt per iteration, as that allows "
+                "engine execution to begin for the first prompt while processing "
+                "the next prompt."
             )
 
         self._render_and_add_requests(
