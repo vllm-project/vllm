@@ -45,11 +45,10 @@ from vllm.model_executor.models import (
     SupportsTranscription,
     supports_transcription,
 )
-from vllm.outputs import RequestOutput
+from vllm.multimodal.audio import split_audio
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.audio import split_audio
 from vllm.utils.import_utils import PlaceholderModule
 
 try:
