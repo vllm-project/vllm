@@ -16,7 +16,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_topk,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoDPEPModular,
+    make_moe_prepare_and_finalize_no_dp_ep,
 )
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -133,7 +133,7 @@ def bench_run(
         )
 
         fn = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModular(),
+            make_moe_prepare_and_finalize_no_dp_ep(use_monolithic=False),
             CutlassExpertsFp8(
                 moe_config=make_dummy_moe_config(
                     num_experts=w2.shape[0],
@@ -165,7 +165,7 @@ def bench_run(
         )
 
         fn = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModular(),
+            make_moe_prepare_and_finalize_no_dp_ep(False),
             CutlassExpertsFp8(
                 moe_config=make_dummy_moe_config(
                     num_experts=w2.shape[0],
