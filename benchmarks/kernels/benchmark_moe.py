@@ -926,42 +926,52 @@ def main(args: argparse.Namespace):
                 "kernels. Please remove the flag."
             )
         start = time.time()
-        configs = _distribute(
-            "tune",
-            [
-                (
-                    batch_size,
-                    E,
-                    shard_intermediate_size,
-                    hidden_size,
-                    topk,
-                    dtype,
-                    use_fp8_w8a8,
-                    use_int8_w8a16,
-                    use_int4_w4a16,
-                    search_space,
-                    block_quant_shape,
-                    use_deep_gemm,
-                )
-                for batch_size in batch_sizes
-            ],
-        )
-        best_configs = {
-            M: sort_config(config) for M, config in zip(batch_sizes, configs)
-        }
-        save_configs(
-            best_configs,
-            E,
-            shard_intermediate_size,
-            hidden_size,
-            topk,
-            dtype,
-            use_fp8_w8a8,
-            use_int8_w8a16,
-            use_int4_w4a16,
-            block_quant_shape,
-            args.save_dir,
-        )
+        # Initialize best_configs dict to store results incrementally
+        best_configs = {}
+        
+        # Process each batch size and save incrementally
+        for batch_size in batch_sizes:
+            print(f"\n{'='*60}")
+            print(f"Tuning batch size: {batch_size}")
+            print(f"{'='*60}")
+            
+            result = _distribute(
+                "tune",
+                [
+                    (
+                        batch_size,
+                        E,
+                        shard_intermediate_size,
+                        hidden_size,
+                        topk,
+                        dtype,
+                        use_fp8_w8a8,
+                        use_int8_w8a16,
+                        use_int4_w4a16,
+                        search_space,
+                        block_quant_shape,
+                        use_deep_gemm,
+                    )
+                ],
+            )
+            best_config = sort_config(result[0])
+            best_configs[batch_size] = best_config
+            
+            # Save incrementally after each batch size completes
+            save_configs(
+                best_configs,
+                E,
+                shard_intermediate_size,
+                hidden_size,
+                topk,
+                dtype,
+                use_fp8_w8a8,
+                use_int8_w8a16,
+                use_int4_w4a16,
+                block_quant_shape,
+                args.save_dir,
+            )
+            print(f"Saved results for batch size {batch_size}")
         end = time.time()
         print(f"Tuning took {end - start:.2f} seconds")
     else:
