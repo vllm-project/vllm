@@ -75,7 +75,7 @@ class MoeOnlineWeightQuantizer:
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
 
-        # Stash device for JIT materialization (must be set before weight loader)
+        # Stash device for JIT materialization
         layer._load_device = torch.get_default_device()
 
         weight_loader = extra_weight_attrs["weight_loader"]
