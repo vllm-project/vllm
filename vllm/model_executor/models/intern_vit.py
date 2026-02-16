@@ -233,6 +233,12 @@ class InternParallelAttention(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         B, N, _ = x.shape
         qkv, _ = self.qkv(x)
+        if qkv.dim() == 3 and qkv.size(0) == 1 and qkv.size(1) == B * N:
+            # Some quantized paths collapse batch into sequence length.
+            qkv = qkv.view(B, N, -1)
+        if qkv.dim() == 2:
+            # Some quantized paths flatten (B, N, D) -> (B*N, D); restore shape.
+            qkv = qkv.view(B, N, -1)
         q, k, v = qkv.chunk(3, dim=-1)
 
         if self.qk_normalization:
@@ -240,6 +246,9 @@ class InternParallelAttention(nn.Module):
 
         out = self.attn(q, k, v)
         out, _ = self.proj(out)
+        if out.dim() == 2 and out.size(0) == B * N:
+            # Some quantized paths flatten (B, N, D) -> (B*N, D) after proj.
+            out = out.view(B, N, -1)
         return out
 
 
@@ -273,9 +282,13 @@ class InternMLP(nn.Module):
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        orig_shape = hidden_states.shape
         hidden_states, _ = self.fc1(hidden_states)
         hidden_states = self.activation_fn(hidden_states)
         hidden_states, _ = self.fc2(hidden_states)
+        if hidden_states.dim() == 2 and len(orig_shape) == 3:
+            # Some quantized paths flatten (B, N, D) -> (B*N, D) in MLP.
+            hidden_states = hidden_states.view(*orig_shape)
 
         return hidden_states
 

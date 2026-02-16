@@ -538,6 +538,9 @@ class NemotronParseImageProcessor:
             # Handle grayscale images
             if pixel_values_tensor.shape[0] == 1:
                 pixel_values_tensor = pixel_values_tensor.expand(3, -1, -1)
+            # Handle RGBA images (drop alpha channel)
+            elif pixel_values_tensor.shape[0] == 4:
+                pixel_values_tensor = pixel_values_tensor[:3, :, :]
 
             pixel_values.append(pixel_values_tensor)
 
