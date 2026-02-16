@@ -143,15 +143,6 @@ class NCCLLibrary:
         Function("ncclGetVersion", ncclResult_t, [ctypes.POINTER(ctypes.c_int)]),
         # ncclResult_t ncclGetUniqueId(ncclUniqueId* uniqueId);
         Function("ncclGetUniqueId", ncclResult_t, [ctypes.POINTER(ncclUniqueId)]),
-        # ncclResult_t ncclCommGetAsyncError(ncclComm_t comm, ncclResult_t* asyncError)
-        Function(
-            "ncclCommGetAsyncError",
-            ncclResult_t,
-            [
-                ncclComm_t,
-                ctypes.POINTER(ncclResult_t),
-            ],
-        ),
         # ncclResult_t  ncclCommInitRank(
         #   ncclComm_t* comm, int nranks, ncclUniqueId commId, int rank);
         # note that ncclComm_t is a pointer type, so the first argument
@@ -290,8 +281,6 @@ class NCCLLibrary:
         # it is better not to call it at all.
         # ncclResult_t  ncclCommDestroy(ncclComm_t comm);
         Function("ncclCommDestroy", ncclResult_t, [ncclComm_t]),
-        # ncclResult_t ncclCommAbort(ncclComm_t comm)
-        Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
         # ncclResult_t ncclGroupStart();
         Function("ncclGroupStart", ncclResult_t, []),
         # ncclResult_t ncclGroupEnd();
@@ -378,32 +367,10 @@ class NCCLLibrary:
     def ncclGetErrorString(self, result: ncclResult_t) -> str:
         return self._funcs["ncclGetErrorString"](result).decode("utf-8")
 
-    def NCCL_CHECK(self, result: ncclResult_t, comm: ncclComm_t | None = None) -> None:
-        ncclSuccess = 0
-        ncclInProgress = 7
-
-        if result == ncclSuccess:
-            return
-
-        # Handle non-blocking communicators
-        if result == ncclInProgress:
-            if comm is None:
-                raise RuntimeError(
-                    "NCCL_CHECK: ncclInProgress returned but no communicator "
-                    "provided (required for non-blocking NCCL checks)."
-                )
-            while True:
-                result = self.ncclCommGetAsyncError(comm)
-                result_value = result.value
-                if result_value == ncclSuccess:
-                    # Operation has completed successfully
-                    return
-                if result_value != ncclInProgress:
-                    # Now a definite error occurred
-                    break
-
-        error_str = self.ncclGetErrorString(result)
-        raise RuntimeError(f"NCCL_CHECK failed: {error_str} (code={result})")
+    def NCCL_CHECK(self, result: ncclResult_t) -> None:
+        if result != 0:
+            error_str = self.ncclGetErrorString(result)
+            raise RuntimeError(f"NCCL error: {error_str}")
 
     def ncclGetRawVersion(self) -> int:
         version = ctypes.c_int()
@@ -424,11 +391,6 @@ class NCCLLibrary:
         self.NCCL_CHECK(self._funcs["ncclGetUniqueId"](ctypes.byref(unique_id)))
         return unique_id
 
-    def ncclCommGetAsyncError(self, comm: ncclComm_t) -> ncclResult_t:
-        async_error = ncclResult_t()
-        self._funcs["ncclCommGetAsyncError"](comm, ctypes.byref(async_error))
-        return async_error
-
     def unique_id_from_bytes(self, data: bytes) -> ncclUniqueId:
         if len(data) != 128:
             raise ValueError(
@@ -445,8 +407,7 @@ class NCCLLibrary:
         self.NCCL_CHECK(
             self._funcs["ncclCommInitRank"](
                 ctypes.byref(comm), world_size, unique_id, rank
-            ),
-            comm,
+            )
         )
         return comm
 
@@ -468,8 +429,7 @@ class NCCLLibrary:
         self.NCCL_CHECK(
             self._funcs["ncclAllReduce"](
                 sendbuff, recvbuff, count, datatype, op, comm, stream
-            ),
-            comm,
+            )
         )
 
     def ncclReduce(
@@ -491,8 +451,7 @@ class NCCLLibrary:
         self.NCCL_CHECK(
             self._funcs["ncclReduce"](
                 sendbuff, recvbuff, count, datatype, op, root, comm, stream
-            ),
-            comm,
+            )
         )
 
     def ncclReduceScatter(
@@ -513,8 +472,7 @@ class NCCLLibrary:
         self.NCCL_CHECK(
             self._funcs["ncclReduceScatter"](
                 sendbuff, recvbuff, count, datatype, op, comm, stream
-            ),
-            comm,
+            )
         )
 
     def ncclAllGather(
@@ -533,8 +491,7 @@ class NCCLLibrary:
         self.NCCL_CHECK(
             self._funcs["ncclAllGather"](
                 sendbuff, recvbuff, count, datatype, comm, stream
-            ),
-            comm,
+            )
         )
 
     def ncclSend(
@@ -547,7 +504,7 @@ class NCCLLibrary:
         stream: cudaStream_t,
     ) -> None:
         self.NCCL_CHECK(
-            self._funcs["ncclSend"](sendbuff, count, datatype, dest, comm, stream), comm
+            self._funcs["ncclSend"](sendbuff, count, datatype, dest, comm, stream)
         )
 
     def ncclRecv(
@@ -560,7 +517,7 @@ class NCCLLibrary:
         stream: cudaStream_t,
     ) -> None:
         self.NCCL_CHECK(
-            self._funcs["ncclRecv"](recvbuff, count, datatype, src, comm, stream), comm
+            self._funcs["ncclRecv"](recvbuff, count, datatype, src, comm, stream)
         )
 
     def ncclBroadcast(
@@ -576,21 +533,17 @@ class NCCLLibrary:
         self.NCCL_CHECK(
             self._funcs["ncclBroadcast"](
                 sendbuff, recvbuff, count, datatype, root, comm, stream
-            ),
-            comm,
+            )
         )
 
     def ncclCommDestroy(self, comm: ncclComm_t) -> None:
-        self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm), comm)
-
-    def ncclCommAbort(self, comm: ncclComm_t) -> None:
-        self.NCCL_CHECK(self._funcs["ncclCommAbort"](comm), comm)
+        self.NCCL_CHECK(self._funcs["ncclCommDestroy"](comm))
 
     def ncclGroupStart(self) -> None:
         self.NCCL_CHECK(self._funcs["ncclGroupStart"]())
 
-    def ncclGroupEnd(self, comm) -> None:
-        self.NCCL_CHECK(self._funcs["ncclGroupEnd"](), comm)
+    def ncclGroupEnd(self) -> None:
+        self.NCCL_CHECK(self._funcs["ncclGroupEnd"]())
 
     def ncclCommWindowRegister(
         self, comm: ncclComm_t, buff: buffer_type, size: int, win_flags: int
@@ -599,13 +552,12 @@ class NCCLLibrary:
         self.NCCL_CHECK(
             self._funcs["ncclCommWindowRegister"](
                 comm, buff, size, ctypes.byref(window), win_flags
-            ),
-            comm,
+            )
         )
         return window
 
     def ncclCommWindowDeregister(self, comm: ncclComm_t, window: ncclWindow_t) -> None:
-        self.NCCL_CHECK(self._funcs["ncclCommWindowDeregister"](comm, window), comm)
+        self.NCCL_CHECK(self._funcs["ncclCommWindowDeregister"](comm, window))
 
 
 __all__ = [
