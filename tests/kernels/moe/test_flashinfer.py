@@ -167,6 +167,7 @@ class TestData:
             hidden_dim=k,
             intermediate_size_per_partition=n,
             num_local_experts=e,
+            num_logical_experts=e,
             moe_parallel_config=layer.moe_parallel_config,
             in_dtype=hidden_states.dtype,
             is_act_and_mul=is_gated,

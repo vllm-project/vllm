@@ -1047,7 +1047,6 @@ class FusedMoEKernelModularImpl:
         See `workspace_shapes` for a description of the remainder of arguments.
         Returns a tuple of (workspace13, workspace2, output) tensors.
         """
-        assert isinstance(self.fused_experts, FusedMoEExpertsModular)
         assert M_full > 0 and M_chunk > 0
 
         num_chunks, _ = self._chunk_info(M_full)
@@ -1203,8 +1202,6 @@ class FusedMoEKernelModularImpl:
         The _prepare method is a wrapper around self.prepare_finalize.prepare
         that handles DBO and async.
         """
-        assert isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeModular)
-
         if not self.prepare_finalize.supports_async():
             # We shouldn't be running an a2a kernel that doesn't
             # support async prepare/finalize
@@ -1290,8 +1287,6 @@ class FusedMoEKernelModularImpl:
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
     ) -> torch.Tensor:
-        assert isinstance(self.fused_experts, FusedMoEExpertsModular)
-
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
         )
@@ -1391,8 +1386,6 @@ class FusedMoEKernelModularImpl:
                 shared_experts_input is the original hidden_states (full
                 dimension) needed by the shared expert MLP.
         """
-        assert isinstance(self.fused_experts, FusedMoEExpertsModular)
-        assert isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeModular)
         shared_output: torch.Tensor | None = None
 
         # For latent MoE: shared experts need the original hidden_states
