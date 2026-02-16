@@ -119,10 +119,10 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 ]
                 and p.has_device_capability(90)
             )
-            # fp8 block-scale on 9.0
+            # fp8 block-scale on 9.0 and 12.0+ (SM121/GB10 via FlashInfer native)
             or (
                 scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym)
-                and p.is_device_capability(90)
+                and (p.is_device_capability(90) or p.is_device_capability_family(120))
             )
             # nvfp4 on 10.0+
             or (
