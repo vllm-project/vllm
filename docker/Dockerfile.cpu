@@ -159,7 +159,7 @@ RUN \
     esac; \
     }; \
     remove_packages_not_supported_on_aarch64 && \
-    sed -i 's/^torch==.*/torch==2.10.0/g' requirements/cpu-test.in && \
+    sed -i 's/^torch==.*/torch==2.11.0/g' requirements/cpu-test.in && \
     sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
     uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
