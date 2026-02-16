@@ -387,10 +387,6 @@ class CudaPlatformBase(Platform):
     ) -> "AttentionBackendEnum | None":
         """Select the best attention backend for the given configuration.
 
-        This is the single source of truth for backend selection, used by both
-        check_and_update_config (to set block_size) and get_attn_backend_cls
-        (to get the backend class path).
-
         Args:
             selected_backend: User-specified backend, or None for auto-selection
             attn_selector_config: Configuration for attention selection
@@ -407,17 +403,17 @@ class CudaPlatformBase(Platform):
         if selected_backend is not None:
             try:
                 backend_class = selected_backend.get_class()
-                validation_errors = backend_class.validate_configuration(
+                invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
-                validation_errors = ["ImportError"]
-            if validation_errors:
+                invalid_reasons = ["ImportError"]
+            if invalid_reasons:
                 if raise_on_invalid:
                     raise ValueError(
                         f"Selected backend {selected_backend} is not valid for "
-                        f"this configuration. Reason: {validation_errors}"
+                        f"this configuration. Reason: {invalid_reasons}"
                     )
                 return None
             return selected_backend
