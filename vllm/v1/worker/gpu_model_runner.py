@@ -4081,14 +4081,43 @@ class GPUModelRunner(
                     else:
                         target_hidden_states = hidden_states[:total_num_tokens]
 
+            mm_embed_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
             if self.supports_mm_inputs and self.drafter.supports_mm_inputs:
                 mm_embed_inputs = self._gather_mm_embeddings(
                     scheduler_output,
                     shift_computed_tokens=1,
                 )
-            else:
-                mm_embed_inputs = None
-
+                # IMPORTANT WARNING: this guard validates multimodal draft
+                # inputs and falls back to text-only mode on inconsistency
+                # to avoid silent corruption.
+                mm_embeds, is_mm_embed = mm_embed_inputs
+                if is_mm_embed is None:
+                    # Disable multimodal draft path when mask construction fails.
+                    logger.warning_once(
+                        "mm_embed_inputs returned None mask; "
+                        "using text-only draft path."
+                    )
+                    mm_embed_inputs = None
+                elif mm_embeds is None:
+                    # Disable multimodal draft path when embeddings are
+                    # missing unexpectedly.
+                    logger.warning_once(
+                        "mm_embed_inputs returned None embeddings; "
+                        "using text-only draft path."
+                    )
+                    mm_embed_inputs = None
+                elif (
+                    hasattr(mm_embeds, "__len__")
+                    and len(mm_embeds) == 0
+                    and bool(is_mm_embed.any().item())
+                ):
+                    # Disable multimodal draft path when placeholder mask and
+                    # embeds disagree.
+                    logger.warning_once(
+                        "mm_embed_inputs has placeholder mask but empty embeddings; "
+                        "using text-only draft path."
+                    )
+                    mm_embed_inputs = None
             draft_token_ids = self.drafter.propose(
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
