@@ -156,8 +156,8 @@ def _prepare_prefill_inputs_kernel(
     next_prefill_tokens_ptr,
     idx_mapping_ptr,
     query_start_loc_ptr,
-    request_token_ids_ptr,
-    request_token_ids_stride,
+    all_token_ids_ptr,
+    all_token_ids_stride,
     prefill_lens_ptr,
     num_computed_tokens_ptr,
     BLOCK_SIZE: tl.constexpr,
@@ -174,7 +174,7 @@ def _prepare_prefill_inputs_kernel(
     query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
     query_len = query_end - query_start
 
-    request_ptr = request_token_ids_ptr + req_state_idx * request_token_ids_stride
+    request_ptr = all_token_ids_ptr + req_state_idx * all_token_ids_stride
     for i in range(0, query_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
@@ -192,7 +192,7 @@ def prepare_prefill_inputs(
     next_prefill_tokens: torch.Tensor,
     idx_mapping: torch.Tensor,
     query_start_loc: torch.Tensor,
-    request_token_ids: torch.Tensor,
+    all_token_ids: torch.Tensor,
     prefill_len: torch.Tensor,
     num_computed_tokens: torch.Tensor,
 ) -> None:
@@ -202,8 +202,8 @@ def prepare_prefill_inputs(
         next_prefill_tokens,
         idx_mapping,
         query_start_loc,
-        request_token_ids,
-        request_token_ids.stride(0),
+        all_token_ids,
+        all_token_ids.stride(0),
         prefill_len,
         num_computed_tokens,
         BLOCK_SIZE=1024,
@@ -423,8 +423,8 @@ def _post_update_kernel(
     num_sampled_ptr,
     num_rejected_ptr,
     query_start_loc_ptr,
-    request_token_ids_ptr,
-    request_token_ids_stride,
+    all_token_ids_ptr,
+    all_token_ids_stride,
     prefill_len_ptr,
     output_len_ptr,
 ):
@@ -441,7 +441,7 @@ def _post_update_kernel(
         tl.store(output_len_ptr + req_state_idx, current_output_len + num_sampled)
 
     prefill_len = tl.load(prefill_len_ptr + req_state_idx)
-    request_base = request_token_ids_ptr + req_state_idx * request_token_ids_stride
+    request_base = all_token_ids_ptr + req_state_idx * all_token_ids_stride
     for i in range(num_sampled):
         token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
         token_ptr = (
@@ -480,7 +480,7 @@ def post_update(
     # [num_reqs + 1]
     query_start_loc: torch.Tensor,
     # [max_num_reqs, max_model_len]
-    request_token_ids: torch.Tensor,
+    all_token_ids: torch.Tensor,
     # [max_num_reqs]
     prefill_len: torch.Tensor,
     # [max_num_reqs]
@@ -498,8 +498,8 @@ def post_update(
         num_sampled,
         num_rejected,
         query_start_loc,
-        request_token_ids,
-        request_token_ids.stride(0),
+        all_token_ids,
+        all_token_ids.stride(0),
         prefill_len,
         output_len,
         num_warps=1,

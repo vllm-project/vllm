@@ -16,7 +16,7 @@ class BadWordsState:
         self,
         max_num_reqs: int,
         device: torch.device,
-        request_token_ids: torch.Tensor,
+        all_token_ids: torch.Tensor,
         prompt_len: torch.Tensor,
         prefill_len: torch.Tensor,
         output_len: torch.Tensor,
@@ -24,7 +24,7 @@ class BadWordsState:
         self.max_num_reqs = max_num_reqs
         self.device = device
 
-        self.request_token_ids = request_token_ids
+        self.all_token_ids = all_token_ids
         self.prompt_len = prompt_len
         self.prefill_len = prefill_len
         self.output_len = output_len
@@ -107,7 +107,7 @@ class BadWordsState:
             self.bad_word_token_ids.gpu,
             self.bad_word_offsets.gpu,
             self.num_bad_words.gpu,
-            self.request_token_ids,
+            self.all_token_ids,
             self.prompt_len,
             self.prefill_len,
             self.output_len,
@@ -127,8 +127,8 @@ def _bad_words_kernel(
     bad_word_offsets_ptr,
     bad_word_offsets_stride,
     num_bad_words_ptr,
-    request_token_ids_ptr,
-    request_token_ids_stride,
+    all_token_ids_ptr,
+    all_token_ids_stride,
     prompt_len_ptr,
     prefill_len_ptr,
     output_len_ptr,
@@ -155,9 +155,7 @@ def _bad_words_kernel(
 
     bd_offsets_base = bad_word_offsets_ptr + req_state_idx * bad_word_offsets_stride
     bd_tokens_base = bad_word_token_ids_ptr + req_state_idx * bad_word_token_ids_stride
-    output_base = (
-        request_token_ids_ptr + req_state_idx * request_token_ids_stride + prompt_len
-    )
+    output_base = all_token_ids_ptr + req_state_idx * all_token_ids_stride + prompt_len
 
     start = tl.load(bd_offsets_base + bw_idx)
     end = tl.load(bd_offsets_base + bw_idx + 1)
@@ -192,7 +190,7 @@ def apply_bad_words(
     bad_word_token_ids: torch.Tensor,
     bad_word_offsets: torch.Tensor,
     num_bad_words: torch.Tensor,
-    request_token_ids: torch.Tensor,
+    all_token_ids: torch.Tensor,
     prompt_len: torch.Tensor,
     prefill_len: torch.Tensor,
     output_len: torch.Tensor,
@@ -210,8 +208,8 @@ def apply_bad_words(
         bad_word_offsets,
         bad_word_offsets.stride(0),
         num_bad_words,
-        request_token_ids,
-        request_token_ids.stride(0),
+        all_token_ids,
+        all_token_ids.stride(0),
         prompt_len,
         prefill_len,
         output_len,

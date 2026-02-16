@@ -31,7 +31,7 @@ class RequestState:
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
         # To save GPU memory, we use UVA instead of GPU for this tensor.
-        self.request_token_ids = StagedWriteTensor(
+        self.all_token_ids = StagedWriteTensor(
             (self.max_num_reqs, self.max_model_len),
             dtype=torch.int32,
             device=device,
@@ -75,7 +75,7 @@ class RequestState:
         self,
         req_id: str,
         prompt_len: int,
-        request_token_ids: list[int],
+        all_token_ids: list[int],
         num_computed_tokens: int,
     ) -> None:
         assert len(self.free_indices) > 0, "No free indices"
@@ -84,13 +84,13 @@ class RequestState:
         self.index_to_req_id[req_idx] = req_id
 
         self.prompt_len.np[req_idx] = prompt_len
-        prefill_len = len(request_token_ids)
+        prefill_len = len(all_token_ids)
         assert prefill_len >= prompt_len, (
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
         self.prefill_len.np[req_idx] = prefill_len
         self.output_len.np[req_idx] = 0
-        self.request_token_ids.stage_write(req_idx, 0, request_token_ids)
+        self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
@@ -98,7 +98,7 @@ class RequestState:
         self.prompt_len.copy_to_uva()
         self.prefill_len.copy_to_uva()
         self.output_len.copy_to_uva()
-        self.request_token_ids.apply_write()
+        self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 
     def remove_request(self, req_id: str) -> None:

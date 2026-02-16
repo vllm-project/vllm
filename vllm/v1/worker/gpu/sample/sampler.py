@@ -23,7 +23,7 @@ class Sampler:
         max_num_reqs: int,
         vocab_size: int,
         device: torch.device,
-        request_token_ids: torch.Tensor,
+        all_token_ids: torch.Tensor,
         request_prompt_len: torch.Tensor,
         prefill_len: torch.Tensor,
         output_len: torch.Tensor,
@@ -42,7 +42,7 @@ class Sampler:
         self.bad_words_state = BadWordsState(
             max_num_reqs,
             device,
-            request_token_ids=request_token_ids,
+            all_token_ids=all_token_ids,
             prompt_len=request_prompt_len,
             prefill_len=prefill_len,
             output_len=output_len,
@@ -58,13 +58,13 @@ class Sampler:
 
     def apply_staged_writes(
         self,
-        request_token_ids: torch.Tensor,
+        all_token_ids: torch.Tensor,
         prefill_lens: np.ndarray,
         prompt_lens: np.ndarray,
     ) -> None:
         self.sampling_states.apply_staged_writes()
         self.penalties_state.apply_staged_writes(
-            request_token_ids, prefill_lens, prompt_lens
+            all_token_ids, prefill_lens, prompt_lens
         )
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()

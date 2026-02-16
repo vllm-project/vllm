@@ -51,14 +51,14 @@ class PenaltiesState:
 
     def apply_staged_writes(
         self,
-        request_token_ids: torch.Tensor,
+        all_token_ids: torch.Tensor,
         prefill_lens: np.ndarray,
         prompt_lens: np.ndarray,
     ) -> None:
         # TODO(woosuk): Optimize this.
         for req_idx in self._penalties_reqs:
             bincount(
-                request_token_ids[req_idx],
+                all_token_ids[req_idx],
                 int(prefill_lens[req_idx]),
                 int(prompt_lens[req_idx]),
                 self.prompt_bin_mask[req_idx],
@@ -216,7 +216,7 @@ def apply_penalties(
 
 @triton.jit(do_not_specialize=["prefill_len", "prompt_len"])
 def _bincount_kernel(
-    request_token_ids_ptr,
+    all_token_ids_ptr,
     prefill_len,
     prompt_len,
     prompt_bin_mask_ptr,
@@ -230,7 +230,7 @@ def _bincount_kernel(
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     if block_idx * BLOCK_SIZE < prompt_len:
         mask = block < prompt_len
-        prefill_tokens = tl.load(request_token_ids_ptr + block, mask=mask)
+        prefill_tokens = tl.load(all_token_ids_ptr + block, mask=mask)
         idx = prefill_tokens // 32
         bit_idx = prefill_tokens % 32
         bit = tl.full((BLOCK_SIZE,), 1, tl.int32) << bit_idx
@@ -238,12 +238,12 @@ def _bincount_kernel(
     if (block_idx + 1) * BLOCK_SIZE >= prompt_len:
         mask = block < prefill_len
         mask &= block >= prompt_len
-        output_tokens = tl.load(request_token_ids_ptr + block, mask=mask)
+        output_tokens = tl.load(all_token_ids_ptr + block, mask=mask)
         tl.atomic_add(output_bin_counts_ptr + output_tokens, 1, mask=mask)
 
 
 def bincount(
-    request_token_ids: torch.Tensor,
+    all_token_ids: torch.Tensor,
     prefill_len: int,
     prompt_len: int,
     prompt_bin_mask: torch.Tensor,
@@ -254,7 +254,7 @@ def bincount(
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(prefill_len, BLOCK_SIZE)
     _bincount_kernel[(num_blocks,)](
-        request_token_ids,
+        all_token_ids,
         prefill_len,
         prompt_len,
         prompt_bin_mask,
