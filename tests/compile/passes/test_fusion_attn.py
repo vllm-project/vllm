@@ -108,10 +108,8 @@ class AttentionQuantPatternModel(torch.nn.Module):
         kv_cache_shape = attn_backend.get_kv_cache_shape(
             num_blocks, self.block_size, self.num_kv_heads, self.head_size
         )
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+        assert len(kv_cache_stride_order) == len(kv_cache_shape)
 
         kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
         inv_order = [

@@ -86,8 +86,9 @@ class AttentionBackend(ABC):
     ) -> tuple[int, ...]:
         raise NotImplementedError
 
-    @staticmethod
+    @classmethod
     def get_kv_cache_stride_order(
+        cls,
         include_num_layers_dimension: bool = False,
     ) -> tuple[int, ...]:
         """
@@ -97,9 +98,6 @@ class AttentionBackend(ABC):
         and get_kv_cache_stride_order returns (1, 3, 0, 2, 4) then the physical
         ordering of dimensions is
         [num_blocks, num_heads, 2, block_size, head_size].
-
-        If this function is unimplemented / raises NotImplementedError,
-        the physical layout of the KV cache will match the logical shape.
 
         Args:
             include_num_layers_dimension: if True, includes an additional
@@ -115,7 +113,31 @@ class AttentionBackend(ABC):
         Returns:
             A tuple of ints which is a permutation of range(len(shape)).
         """
-        raise NotImplementedError
+        # Default to the logical layout for backends without a custom
+        # memory ordering.
+        num_dims = None
+        # Use mock arguments to infer the logical rank for the backend.
+        for block_size in (16, 1, 64, 128):
+            try:
+                num_dims = len(
+                    cls.get_kv_cache_shape(
+                        num_blocks=1,
+                        block_size=block_size,
+                        num_kv_heads=1,
+                        head_size=1,
+                        cache_dtype_str="auto",
+                    )
+                )
+                break
+            except Exception:
+                continue
+        if num_dims is None:
+            # Fall back to the standard [2, num_blocks, block_size, num_heads,
+            # head_size] rank used by most attention backends.
+            num_dims = 5
+        if include_num_layers_dimension:
+            num_dims += 1
+        return tuple(range(num_dims))
 
     @classmethod
     def full_cls_name(cls) -> tuple[str, str]:

@@ -99,12 +99,8 @@ def _reshape_kv_cache(
                 kv_cache_spec.head_size,
             )
 
-            # FIXME(woosuk): Add kv_cache_stride_order to all attention backends.
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-                assert len(kv_cache_stride_order) == len(kv_cache_shape)
-            except (AttributeError, NotImplementedError):
-                kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+            assert len(kv_cache_stride_order) == len(kv_cache_shape)
 
             kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
             inv_order = [
