@@ -602,6 +602,12 @@ class GPUModelRunner(
             self.max_num_reqs, dtype=torch.int32
         )
         self.req_indices = self._make_buffer(self.max_num_tokens, dtype=torch.int64)
+        self.prev_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
+        self.current_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
+        self.new_indices = self._make_buffer(self.max_num_reqs, dtype=torch.int64)
+        self.new_computed_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
 
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
@@ -1745,12 +1751,15 @@ class GPUModelRunner(
             and prev_req_id_to_index
         ):
             if current_indices:
-                prev_indices_gpu = torch.tensor(
-                    prev_indices, dtype=torch.int64, device=self.device
-                )
-                current_indices_gpu = torch.tensor(
-                    current_indices, dtype=torch.int64, device=self.device
-                )
+                n_common = len(current_indices)
+                self.prev_indices.np[:n_common] = prev_indices
+                self.prev_indices.copy_to_gpu(n_common)
+                prev_indices_gpu = self.prev_indices.gpu[:n_common]
+
+                self.current_indices.np[:n_common] = current_indices
+                self.current_indices.copy_to_gpu(n_common)
+                current_indices_gpu = self.current_indices.gpu[:n_common]
+
                 valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
                 self.num_computed_tokens[current_indices_gpu] = (
                     self.input_batch.num_computed_tokens_cpu_tensor[current_indices].to(
@@ -1763,18 +1772,18 @@ class GPUModelRunner(
                 self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
 
             if new_indices:
-                new_indices_gpu = torch.tensor(
-                    new_indices, dtype=torch.int64, device=self.device
+                n_new = len(new_indices)
+                self.new_indices.np[:n_new] = new_indices
+                self.new_indices.copy_to_gpu(n_new)
+                new_indices_gpu = self.new_indices.gpu[:n_new]
+
+                self.new_computed_tokens.np[:n_new] = (
+                    self.input_batch.num_computed_tokens_cpu[new_indices]
                 )
-                new_vals = torch.tensor(
-                    [
-                        int(self.input_batch.num_computed_tokens_cpu[i])
-                        for i in new_indices
-                    ],
-                    dtype=torch.int32,
-                    device=self.device,
+                self.new_computed_tokens.copy_to_gpu(n_new)
+                self.num_computed_tokens[new_indices_gpu] = (
+                    self.new_computed_tokens.gpu[:n_new]
                 )
-                self.num_computed_tokens[new_indices_gpu] = new_vals
         else:
             self.num_computed_tokens[:num_reqs].copy_(
                 self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs],
