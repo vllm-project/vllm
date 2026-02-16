@@ -968,128 +968,31 @@ def _slice_scales(
     return None
 
 
-class FusedMoEKernel(torch.nn.Module):
+################################################################################
+# TODO: make the below a separate file.
+################################################################################
+
+
+@final
+class FusedMoEKernelModularImpl:
     def __init__(
         self,
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        fused_experts: FusedMoEExperts,
+        prepare_finalize: FusedMoEPrepareAndFinalizeModular,
+        fused_experts: FusedMoEExpertsModular,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
         inplace: bool = False,
     ):
-        super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+        self.moe_parallel_config = moe_parallel_config
         self.inplace = inplace
-
-        # prefer an explicit FusedMoEParallelConfig when available (from
-        # FusedMoE layers / tests).
-        # if not provided, assume this kernel is
-        # running in a non-DP+EP context
-        self.moe_parallel_config: FusedMoEParallelConfig | None = moe_parallel_config
         self.is_dp_ep = (
             moe_parallel_config is not None
             and moe_parallel_config.dp_size > 1
             and moe_parallel_config.use_ep
         )
-
-        # Confirm P/F and Experts kernels are consistent with eachother.
-        if not (
-            (
-                isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
-                and isinstance(fused_experts, FusedMoEExpertsMonolithic)
-            )
-            or (
-                isinstance(prepare_finalize, FusedMoEPrepareAndFinalizeModular)
-                and isinstance(fused_experts, FusedMoEExpertsModular)
-            )
-        ):
-            raise ValueError(
-                "prepare_finalize and fused_experts must both be either monolithic "
-                f"or non-monolithic but got {prepare_finalize.__class__.__name__} "
-                "and {fused_experts.__class__.__name__}"
-            )
-
-        self._post_init_setup()
-        assert (
-            prepare_finalize.activation_format == fused_experts.activation_format()
-        ), (
-            f"{prepare_finalize.__class__.__name__}."
-            f"{prepare_finalize.activation_format} == "
-            f"{fused_experts.__class__.__name__}."
-            f"{fused_experts.activation_format()}"
-        )
-
-    @staticmethod
-    def make_mk(
-        prepare_finalize: FusedMoEPrepareAndFinalize,
-        fused_experts: FusedMoEExperts,
-        shared_experts: torch.nn.Module | None = None,
-        moe_parallel_config: FusedMoEParallelConfig | None = None,
-    ) -> "FusedMoEKernel":
-        """
-        Factory method to create a FusedMoEKernel instance.
-        """
-        if isinstance(
-            prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
-        ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
-            return FusedMoEKMonolithicKernel(
-                prepare_finalize,
-                fused_experts,
-                shared_experts,
-                moe_parallel_config,
-            )
-        elif isinstance(
-            prepare_finalize, FusedMoEPrepareAndFinalizeModular
-        ) and isinstance(fused_experts, FusedMoEExpertsModular):
-            return FusedMoEModularKernel(
-                prepare_finalize,
-                fused_experts,
-                shared_experts,
-                moe_parallel_config,
-            )
-        else:
-            raise ValueError(
-                "prepare_finalize and fused_experts must both be either monolithic "
-                f"or non-monolithic but got {prepare_finalize.__class__.__name__} "
-                "and {fused_experts.__class__.__name__}"
-            )
-
-    def _post_init_setup(self):
-        """
-        Resolve any leftover setup dependencies between self.prepare_finalize
-        and self.fused_experts here.
-        """
-        self.prepare_finalize.post_init_setup(self.fused_experts)
-
-    def supports_expert_map(self) -> bool:
-        """
-        A flag indicating whether or not this class supports expert maps.
-        """
-        return self.fused_experts.supports_expert_map()
-
-    def output_is_reduced(self) -> bool:
-        """
-        Indicates whether or not the output of fused MoE kernel
-        is reduced across all ranks.
-        """
-        return self.prepare_finalize.output_is_reduced()
-
-
-@final
-class FusedMoEModularKernel(FusedMoEKernel):
-    """
-    This class combines a FusedMoEPrepareAndFinalizeModular instance and
-    a FusedMoEExpertsModular to provide an interface that
-    is compatible with the `fused_experts` function in fused_moe.py.
-
-    It takes care of managing any required scratch space.
-
-    Note: Instances of this class should only be used for a single model
-    layer due to any layer specific state that may be used by the component
-    objects.
-    """
 
     def _chunk_info(self, M: int) -> tuple[int, int]:
         """
@@ -1140,7 +1043,7 @@ class FusedMoEModularKernel(FusedMoEKernel):
         workspace_dtype = self.fused_experts.workspace_dtype(out_dtype)
 
         # Force worst-case allocation in profiling run for
-        # "mk.FusedMoEModularKernel.Standard" formats where this is only bounded
+        # "mk.FusedMoEKernel.Standard" formats where this is only bounded
         # by `VLLM_FUSED_MOE_CHUNK_SIZE` and may not be seen during profiling with
         # DP+EP due to the random token routing.
         is_profile_run = (
@@ -1540,13 +1443,13 @@ class FusedMoEModularKernel(FusedMoEKernel):
             assert shared_output is not None
             return shared_output, output
 
-    def forward(
+    def apply(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
         activation: MoEActivation = MoEActivation.SILU,
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
@@ -1561,8 +1464,7 @@ class FusedMoEModularKernel(FusedMoEKernel):
         - hidden_states: (torch.Tensor): The input tensor to the MoE layer.
         - w1 (torch.Tensor): The first set of expert weights.
         - w2 (torch.Tensor): The second set of expert weights.
-        - topk_weights (torch.Tensor): The topk weights applied at the end of
-          the layer.
+        - topk_weights (torch.Tensor): The topk weights applied at the end of the layer.
         - topk_ids (torch.Tensor): A map of row to expert id.
         - activation (MoEActivation): The activation function to apply after the first
           MoE layer.
@@ -1581,7 +1483,6 @@ class FusedMoEModularKernel(FusedMoEKernel):
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
-
         if self.inplace:
             assert self.shared_experts is None
             assert not disable_inplace()
@@ -1630,8 +1531,16 @@ class FusedMoEModularKernel(FusedMoEKernel):
 
 
 @final
-class FusedMoEKMonolithicKernel(FusedMoEKernel):
-    def forward(
+class FusedMoEKernelMonolithicImpl:
+    def __init__(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalizeMonolithic,
+        fused_experts: FusedMoEExpertsMonolithic,
+    ):
+        self.prepare_finalize = prepare_finalize
+        self.fused_experts = fused_experts
+
+    def apply(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
@@ -1652,8 +1561,6 @@ class FusedMoEKMonolithicKernel(FusedMoEKernel):
         to the topk_ids and topk_weights. This is used for kernels
         that have fused router + experts (e.g. FLASHINFER_TRTLLM).
         """
-        assert isinstance(self.prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic)
-        assert isinstance(self.fused_experts, FusedMoEExpertsMonolithic)
 
         # TODO(rob): add inplace support.
         a1q, a1q_scale, router_logits = self.prepare_finalize.prepare(
@@ -1683,3 +1590,128 @@ class FusedMoEKMonolithicKernel(FusedMoEKernel):
         output = self.prepare_finalize.finalize(fused_out)
 
         return output
+
+
+@final
+class FusedMoEKernel(torch.nn.Module):
+    def __init__(
+        self,
+        prepare_finalize: FusedMoEPrepareAndFinalize,
+        fused_experts: FusedMoEExperts,
+        shared_experts: torch.nn.Module | None = None,
+        moe_parallel_config: FusedMoEParallelConfig | None = None,
+        inplace: bool = False,
+    ):
+        super().__init__()
+        self.shared_experts = shared_experts  # NOTE: check if we can remove
+
+        # Initialize the implementation (monolithic or modular).
+        self.impl: FusedMoEKernelModularImpl | FusedMoEKernelMonolithicImpl
+        if isinstance(
+            prepare_finalize, FusedMoEPrepareAndFinalizeModular
+        ) and isinstance(fused_experts, FusedMoEExpertsModular):
+            self.impl = FusedMoEKernelModularImpl(
+                prepare_finalize,
+                fused_experts,
+                shared_experts,
+                moe_parallel_config,
+                inplace,
+            )
+
+        elif isinstance(
+            prepare_finalize, FusedMoEPrepareAndFinalizeMonolithic
+        ) and isinstance(fused_experts, FusedMoEExpertsMonolithic):
+            assert shared_experts is None
+            assert not inplace
+            self.impl = FusedMoEKernelMonolithicImpl(
+                prepare_finalize,
+                fused_experts,
+            )
+
+        else:
+            raise ValueError(
+                "prepare_finalize and fused_experts must both be either monolithic "
+                f"or non-monolithic but got {prepare_finalize.__class__.__name__} "
+                "and {fused_experts.__class__.__name__}"
+            )
+
+        self._post_init_setup()
+
+    def _post_init_setup(self):
+        """
+        Resolve any leftover setup dependencies between self.prepare_finalize
+        and self.fused_experts here.
+        """
+        self.impl.prepare_finalize.post_init_setup(self.impl.fused_experts)
+        assert (
+            self.impl.prepare_finalize.activation_format
+            == self.impl.fused_experts.activation_format()
+        )
+
+    def supports_expert_map(self) -> bool:
+        """
+        A flag indicating whether or not this class supports expert maps.
+        """
+        return self.impl.fused_experts.supports_expert_map()
+
+    def output_is_reduced(self) -> bool:
+        """
+        Indicates whether or not the output of fused MoE kernel
+        is reduced across all ranks.
+        """
+        return self.impl.prepare_finalize.output_is_reduced()
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        routing_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        # grouped topk + fused topk bias parameters
+        num_expert_group: int | None = None,
+        e_score_correction_bias: torch.Tensor | None = None,
+        routed_scaling_factor: float | None = None,
+        topk_group: int | None = None,
+    ) -> torch.Tensor:
+        if isinstance(self.impl, FusedMoEKernelModularImpl):
+            assert isinstance(routing_input, tuple)
+            topk_ids, topk_weights = routing_input
+            assert num_expert_group is None
+            assert e_score_correction_bias is None
+            assert routed_scaling_factor is None
+            assert topk_group is None
+
+            return self.impl.apply(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+            )
+
+        elif isinstance(self.impl, FusedMoEKernelMonolithicImpl):
+            assert isinstance(routing_input, torch.Tensor)
+            router_logits = routing_input
+
+            return self.impl.apply(
+                hidden_states=hidden_states,
+                w1=w1,
+                w2=w2,
+                router_logits=router_logits,
+                activation=activation,
+                global_num_experts=global_num_experts,
+                expert_map=expert_map,
+                apply_router_weight_on_input=apply_router_weight_on_input,
+                num_expert_group=num_expert_group,
+                e_score_correction_bias=e_score_correction_bias,
+                routed_scaling_factor=routed_scaling_factor,
+                topk_group=topk_group,
+            )

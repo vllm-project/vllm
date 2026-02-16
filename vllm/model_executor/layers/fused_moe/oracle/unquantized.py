@@ -165,7 +165,7 @@ def make_unquantized_moe_kernel(
     backend: UnquantizedMoeBackend,
     quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
-) -> mk.FusedMoEModularKernel | None:
+) -> mk.FusedMoEKernel | None:
     if backend in UNSUPPORTED_BACKEND:
         return None
 
@@ -174,7 +174,7 @@ def make_unquantized_moe_kernel(
             FlashInferExperts,
         )
 
-        kernel = mk.FusedMoEKernel.make_mk(
+        kernel = mk.FusedMoEKernel(
             MoEPrepareAndFinalizeNoEP(),
             FlashInferExperts(
                 moe_config=moe_config,
@@ -187,7 +187,7 @@ def make_unquantized_moe_kernel(
             AiterExperts,
         )
 
-        kernel = mk.FusedMoEKernel.make_mk(
+        kernel = mk.FusedMoEKernel(
             MoEPrepareAndFinalizeNoEP(),
             AiterExperts(
                 moe_config=moe_config,
@@ -197,7 +197,7 @@ def make_unquantized_moe_kernel(
     elif backend == UnquantizedMoeBackend.TRITON:
         from vllm.model_executor.layers.fused_moe import TritonExperts
 
-        kernel = mk.FusedMoEKernel.make_mk(
+        kernel = mk.FusedMoEKernel(
             MoEPrepareAndFinalizeNoEP(),
             TritonExperts(
                 moe_config=moe_config,
@@ -207,7 +207,7 @@ def make_unquantized_moe_kernel(
     elif backend == UnquantizedMoeBackend.XPU:
         from vllm.model_executor.layers.fused_moe import XPUExperts
 
-        kernel = mk.FusedMoEModularKernel(
+        kernel = mk.FusedMoEKernel(
             MoEPrepareAndFinalizeNoEP(),
             XPUExperts(
                 moe_config=moe_config,

@@ -197,7 +197,7 @@ def run_with_expert_maps(
     for kwargs, new_quant_config in slice_experts():
         w2 = kwargs["w2"]
         a = kwargs["hidden_states"]
-        kernel = mk.FusedMoEKernel.make_mk(
+        kernel = mk.FusedMoEKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
                 moe_config=make_dummy_moe_config(
@@ -257,7 +257,7 @@ def run_8_bit(
     num_experts = moe_tensors.w1.size(0)  # type: ignore[attr-defined]
     with_ep = num_local_experts is not None or num_local_experts == num_experts
     if not with_ep:
-        kernel = mk.FusedMoEKernel.make_mk(
+        kernel = mk.FusedMoEKernel(
             MoEPrepareAndFinalizeNoEP(),
             CutlassExpertsFp8(
                 moe_config=make_dummy_moe_config(

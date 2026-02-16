@@ -137,7 +137,7 @@ def bench_run(
         per_out_ch_quant=per_out_ch,
     )
 
-    fn = mk.FusedMoEKernel.make_mk(
+    fn = mk.FusedMoEKernel(
         MoEPrepareAndFinalizeNoEP(),
         CutlassExpertsFp8(
             moe_config=make_dummy_moe_config(
