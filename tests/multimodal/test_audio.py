@@ -592,11 +592,11 @@ class TestAudioPipelineE2E:
 
 
 class TestAudioChunking:
-    """Tests for split_audio and find_split_point utilities in vllm.utils.audio."""
+    """Tests for split_audio and find_split_point utilities in vllm.multimodal.audio."""
 
     def test_split_audio_short_clip(self):
         """Audio shorter than max_clip_duration_s should not be split."""
-        from vllm.utils.audio import split_audio
+        from vllm.multimodal.audio import split_audio
 
         # 10 seconds of audio at 16kHz
         audio = np.random.randn(160000).astype(np.float32)
@@ -614,7 +614,7 @@ class TestAudioChunking:
 
     def test_split_audio_exact_length(self):
         """Audio exactly at max_clip_duration_s should not be split."""
-        from vllm.utils.audio import split_audio
+        from vllm.multimodal.audio import split_audio
 
         # Exactly 30 seconds at 16kHz
         audio = np.random.randn(480000).astype(np.float32)
@@ -632,7 +632,7 @@ class TestAudioChunking:
 
     def test_split_audio_long_clip(self):
         """Long audio should be split into multiple chunks."""
-        from vllm.utils.audio import split_audio
+        from vllm.multimodal.audio import split_audio
 
         # 65 seconds of audio at 16kHz
         audio = np.random.randn(1040000).astype(np.float32)
@@ -653,7 +653,7 @@ class TestAudioChunking:
 
     def test_split_audio_chunks_have_correct_length(self):
         """Each chunk (except last) should be approximately max_clip_duration_s."""
-        from vllm.utils.audio import split_audio
+        from vllm.multimodal.audio import split_audio
 
         # 65 seconds of audio at 16kHz
         audio = np.random.randn(1040000).astype(np.float32)
@@ -675,7 +675,7 @@ class TestAudioChunking:
 
     def test_find_split_point_finds_quiet_region(self):
         """find_split_point should identify low-energy regions."""
-        from vllm.utils.audio import find_split_point
+        from vllm.multimodal.audio import find_split_point
 
         # Create audio with a quiet section in the middle
         segment = np.ones(32000, dtype=np.float32)
@@ -694,7 +694,7 @@ class TestAudioChunking:
 
     def test_find_split_point_handles_uniform_audio(self):
         """find_split_point should handle uniform energy audio gracefully."""
-        from vllm.utils.audio import find_split_point
+        from vllm.multimodal.audio import find_split_point
 
         segment = np.ones(32000, dtype=np.float32) * 0.5
 
@@ -709,7 +709,7 @@ class TestAudioChunking:
 
     def test_find_split_point_silence(self):
         """find_split_point should find complete silence."""
-        from vllm.utils.audio import find_split_point
+        from vllm.multimodal.audio import find_split_point
 
         segment = np.random.randn(32000).astype(np.float32) * 0.5
         # Complete silence at 20000-21600
@@ -726,7 +726,7 @@ class TestAudioChunking:
 
     def test_split_audio_preserves_boundaries(self):
         """Verify first and last samples are preserved when chunking."""
-        from vllm.utils.audio import split_audio
+        from vllm.multimodal.audio import split_audio
 
         audio = np.arange(1120000, dtype=np.float32)  # 70s at 16kHz
 
@@ -743,7 +743,7 @@ class TestAudioChunking:
 
     def test_split_audio_with_different_sample_rates(self):
         """Test chunking works with different sample rates."""
-        from vllm.utils.audio import split_audio
+        from vllm.multimodal.audio import split_audio
 
         # 40 seconds at 8kHz
         audio_8k = np.random.randn(320000).astype(np.float32)

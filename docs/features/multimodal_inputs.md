@@ -302,7 +302,7 @@ Speech-to-text models like Whisper have a maximum audio length they can process 
 ```python
 import librosa
 from vllm import LLM, SamplingParams
-from vllm.utils.audio import split_audio
+from vllm.multimodal.audio import split_audio
 
 # Load long audio file
 audio, sr = librosa.load("long_audio.wav", sr=16000)
