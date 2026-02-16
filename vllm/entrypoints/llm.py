@@ -1135,7 +1135,15 @@ class LLM:
                 )
 
             # Validate the request data is valid for the loaded plugin
-            validated_prompt = self.io_processor.parse_data(prompts)
+            prompt_data = prompts.get("data")
+            if prompt_data is None:
+                raise ValueError(
+                    "The 'data' field of the prompt is expected to contain "
+                    "the prompt data and it cannot be None. "
+                    "Refer to the documentation of the IOProcessor "
+                    "in use for more details."
+                )
+            validated_prompt = self.io_processor.parse_data(prompt_data)
 
             # obtain the actual model prompts from the pre-processor
             prompts = self.io_processor.pre_process(prompt=validated_prompt)

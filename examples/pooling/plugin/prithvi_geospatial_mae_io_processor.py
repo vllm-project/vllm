@@ -20,12 +20,14 @@ def main():
     torch.set_default_dtype(torch.float16)
     image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff"  # noqa: E501
 
-    img_prompt = dict(
+    img_data = dict(
         data=image_url,
         data_format="url",
         image_format="tiff",
         out_data_format="b64_json",
     )
+
+    prompt = dict(data=img_data)
 
     llm = LLM(
         model="ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
@@ -41,7 +43,7 @@ def main():
         enable_mm_embeds=True,
     )
 
-    pooler_output = llm.encode(img_prompt, pooling_task="plugin")
+    pooler_output = llm.encode(prompt, pooling_task="plugin")
     output = pooler_output[0].outputs
 
     print(output)
