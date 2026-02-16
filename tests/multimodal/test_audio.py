@@ -584,3 +584,189 @@ class TestAudioPipelineE2E:
         assert audio_output.ndim == 1
         assert audio_output.shape == (10,)
         np.testing.assert_array_almost_equal(audio_output, np.zeros(10))
+
+
+# ============================================================
+# Tests for Audio Chunking Utilities
+# ============================================================
+
+
+class TestAudioChunking:
+    """Tests for split_audio and find_split_point utilities in vllm.utils.audio."""
+
+    def test_split_audio_short_clip(self):
+        """Audio shorter than max_clip_duration_s should not be split."""
+        from vllm.utils.audio import split_audio
+
+        # 10 seconds of audio at 16kHz
+        audio = np.random.randn(160000).astype(np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert len(chunks) == 1
+        np.testing.assert_array_equal(chunks[0], audio)
+
+    def test_split_audio_exact_length(self):
+        """Audio exactly at max_clip_duration_s should not be split."""
+        from vllm.utils.audio import split_audio
+
+        # Exactly 30 seconds at 16kHz
+        audio = np.random.randn(480000).astype(np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert len(chunks) == 1
+        np.testing.assert_array_equal(chunks[0], audio)
+
+    def test_split_audio_long_clip(self):
+        """Long audio should be split into multiple chunks."""
+        from vllm.utils.audio import split_audio
+
+        # 65 seconds of audio at 16kHz
+        audio = np.random.randn(1040000).astype(np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert len(chunks) > 1
+        # First sample preserved
+        assert chunks[0][0] == audio[0]
+        # Last sample preserved
+        assert chunks[-1][-1] == audio[-1]
+
+    def test_split_audio_chunks_have_correct_length(self):
+        """Each chunk (except last) should be approximately max_clip_duration_s."""
+        from vllm.utils.audio import split_audio
+
+        # 65 seconds of audio at 16kHz
+        audio = np.random.randn(1040000).astype(np.float32)
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        max_samples = int(30.0 * 16000)
+        overlap_samples = int(1.0 * 16000)
+
+        for chunk in chunks[:-1]:
+            assert chunk.shape[0] >= max_samples - overlap_samples
+            assert chunk.shape[0] <= max_samples
+
+    def test_find_split_point_finds_quiet_region(self):
+        """find_split_point should identify low-energy regions."""
+        from vllm.utils.audio import find_split_point
+
+        # Create audio with a quiet section in the middle
+        segment = np.ones(32000, dtype=np.float32)
+        # Insert quiet region at sample 16000-17600 (100ms)
+        segment[16000:17600] = 0.01
+
+        split_idx = find_split_point(
+            wav=segment,
+            start_idx=0,
+            end_idx=32000,
+            min_energy_window=1600,
+        )
+
+        # Split should be in or near the quiet region
+        assert 16000 <= split_idx <= 17600
+
+    def test_find_split_point_handles_uniform_audio(self):
+        """find_split_point should handle uniform energy audio gracefully."""
+        from vllm.utils.audio import find_split_point
+
+        segment = np.ones(32000, dtype=np.float32) * 0.5
+
+        split_idx = find_split_point(
+            wav=segment,
+            start_idx=0,
+            end_idx=32000,
+            min_energy_window=1600,
+        )
+
+        assert 0 <= split_idx <= 32000
+
+    def test_find_split_point_silence(self):
+        """find_split_point should find complete silence."""
+        from vllm.utils.audio import find_split_point
+
+        segment = np.random.randn(32000).astype(np.float32) * 0.5
+        # Complete silence at 20000-21600
+        segment[20000:21600] = 0.0
+
+        split_idx = find_split_point(
+            wav=segment,
+            start_idx=16000,
+            end_idx=28000,
+            min_energy_window=1600,
+        )
+
+        assert 20000 <= split_idx <= 21600
+
+    def test_split_audio_preserves_boundaries(self):
+        """Verify first and last samples are preserved when chunking."""
+        from vllm.utils.audio import split_audio
+
+        audio = np.arange(1120000, dtype=np.float32)  # 70s at 16kHz
+
+        chunks = split_audio(
+            audio_data=audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        assert chunks[0][0] == audio[0]
+        assert chunks[-1][-1] == audio[-1]
+
+    def test_split_audio_with_different_sample_rates(self):
+        """Test chunking works with different sample rates."""
+        from vllm.utils.audio import split_audio
+
+        # 40 seconds at 8kHz
+        audio_8k = np.random.randn(320000).astype(np.float32)
+
+        chunks = split_audio(
+            audio_data=audio_8k,
+            sample_rate=8000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=800,
+        )
+
+        assert len(chunks) >= 2
+
+        # 40 seconds at 48kHz
+        audio_48k = np.random.randn(1920000).astype(np.float32)
+
+        chunks_48k = split_audio(
+            audio_data=audio_48k,
+            sample_rate=48000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=4800,
+        )
+
+        assert len(chunks_48k) >= 2
