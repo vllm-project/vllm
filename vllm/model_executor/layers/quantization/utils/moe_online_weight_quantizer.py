@@ -10,10 +10,10 @@ from collections.abc import Callable
 import torch
 from torch.nn import Module
 
-from vllm.model_executor.layers.quantization.utils.copy_numel_counter import (
-    CopyNumelCounter,
+from vllm.model_executor.model_loader.reload.meta import (
+    CopyCounter,
+    materialize_meta_tensor,
 )
-from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
 )
@@ -191,10 +191,9 @@ class MoeOnlineWeightQuantizer:
                 param = layer.w2_weight
 
             # Load the current weight chunk with tracking
-            copy_numel_counter = CopyNumelCounter()
-            with copy_numel_counter:
+            with CopyCounter() as counter:
                 res = weight_loader(param, loaded_weight, *args, **kwargs)
-            layer._loaded_numel += copy_numel_counter.copied_numel
+            layer._loaded_numel += counter.copied_numel
 
             target_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
             if layer._loaded_numel == target_numel:

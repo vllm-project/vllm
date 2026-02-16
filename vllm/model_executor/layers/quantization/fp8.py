@@ -50,7 +50,6 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.copy_numel_counter import (
-    CopyNumelCounter,
     copy_missing_attrs,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
@@ -93,6 +92,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_fp8_supported,
     normalize_e4m3fn_to_e4m3fnuz,
 )
+from vllm.model_executor.model_loader.reload.meta import CopyCounter
 from vllm.model_executor.model_loader.weight_utils import initialize_single_dummy_weight
 from vllm.model_executor.parameter import (
     BlockQuantScaleParameter,
@@ -545,10 +545,9 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             param = layer.weight
 
             # load the current weight chunk
-            copy_numel_counter = CopyNumelCounter()
-            with copy_numel_counter:
+            with CopyCounter() as counter:
                 res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
-            layer._loaded_numel += copy_numel_counter.copied_numel
+            layer._loaded_numel += counter.copied_numel
 
             # if we have loaded all of the elements, call
             # process_weights_after_loading
