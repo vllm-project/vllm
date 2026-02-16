@@ -730,7 +730,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
-        is_available_online=False,
     ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
@@ -755,7 +754,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
-        is_available_online=False,
         min_transformers_version="5.1.0",
     ),
     "H2OVLChatModel": _HfExamplesInfo(
