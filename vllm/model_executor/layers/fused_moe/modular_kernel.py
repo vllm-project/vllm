@@ -533,6 +533,11 @@ class FusedMoEExperts(ABC):
             moe_config.routing_method, weight_key, activation_key
         ):
             return False, _make_reason("routing method")
+        elif not cls._supports_router_logits_dtype(
+            moe_config.router_logits_dtype,
+            moe_config.routing_method,
+        ):
+            return False, _make_reason("router logits dtype")
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
         return True, None
@@ -594,7 +599,19 @@ class FusedMoEExperts(ABC):
         Can be overriden by monolithic kernels that execute the router
         in addition to the experts if certain routers are not supported.
         """
-        raise NotImplementedError
+        return True
+
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        """
+        Whether a kernel supports a particular dtype for router logits input.
+
+        Can be overriden by monolithic kernels that execute the router
+        in addition to the experts if certain dtypes are not supported.
+        """
+        return True
 
     #
     # Various helpers for accessing quantization parameters from the
@@ -699,20 +716,6 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     An abstract base class for the [Permute-Experts-Unpermute] step described
         above.
     """
-
-    @staticmethod
-    def _supports_routing_method(
-        routing_method: RoutingMethodType,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        """
-        Whether the kernel supports a routing method (e.g. GroupedTopK).
-
-        Modular kernels support all routing methods, since the Expert
-        kernel does not apply the activation.
-        """
-        return True
 
     @staticmethod
     def is_monolithic() -> bool:
@@ -902,8 +905,32 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     """
 
     @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        """
+        Whether the kernel supports a routing method (e.g. GroupedTopK).
+
+        Monolithic kernels should explicitly opt-in to support.
+        """
+        raise NotImplementedError
+
+    def _supports_router_logits_dtype(
+        router_logits_dtype: torch.dtype | None,
+        routing_method: RoutingMethodType,
+    ) -> bool:
+        """
+        Whether the kernel supports a dtype for router logits.
+
+        Modular kernels should opt-in to support.
+        """
+        raise NotImplementedError
+
+    @staticmethod
     def is_monolithic() -> bool:
-        return False
+        return True
 
     def apply(
         self,

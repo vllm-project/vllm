@@ -131,6 +131,9 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             and not moe_parallel_config.enable_eplb
         )
 
+    # @staticmethod
+    # def _supports_router_logits_dtype()
+
     def supports_chunking(self) -> bool:
         return False
 
