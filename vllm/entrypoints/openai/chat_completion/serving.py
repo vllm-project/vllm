@@ -373,7 +373,9 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_token_ids = self._extract_prompt_components(engine_prompt).tokens
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_prompt
+                ).token_ids
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
