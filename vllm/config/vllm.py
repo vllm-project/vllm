@@ -727,8 +727,27 @@ class VllmConfig:
                 "Enforce eager set, disabling torch.compile and CUDAGraphs. "
                 "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
             )
+            if (cc := self.compilation_config.mode) and cc != CompilationMode.NONE:
+                logger.warning(
+                    "Enforce eager set, overriding compilation config mode from %s to "
+                    "NONE",
+                    self.compilation_config.mode,
+                )
+            if (
+                cg := self.compilation_config.cudagraph_mode
+            ) and cg != CUDAGraphMode.NONE:
+                logger.warning(
+                    "Enforce eager set, overriding compilation config cudagraph mode"
+                    " from %s to NONE",
+                    self.compilation_config.cudagraph_mode,
+                )
             self.compilation_config.mode = CompilationMode.NONE
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            # Override related settings when enforce eager
+            self.compilation_config.max_cudagraph_capture_size = 0
+            self.compilation_config.cudagraph_capture_sizes: list[int] = []
+        else:
+            self.compilation_config.cudagraph_num_of_warmups = 1
 
         if self.compilation_config.backend == "eager" or (
             self.compilation_config.mode is not None
@@ -842,17 +861,6 @@ class VllmConfig:
                     self.compilation_config.cudagraph_mode = (
                         CUDAGraphMode.FULL_DECODE_ONLY
                     )
-
-            # disable cudagraph when enforce eager execution
-            if self.model_config is not None and self.model_config.enforce_eager:
-                logger.info("Cudagraph is disabled under eager mode")
-                self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-                # override related settings when enforce eager
-                self.compilation_config.max_cudagraph_capture_size = 0
-                self.compilation_config.cudagraph_capture_sizes = []
-            else:
-                self.compilation_config.cudagraph_num_of_warmups = 1
-
             self._set_cudagraph_sizes()
         else:
             self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
