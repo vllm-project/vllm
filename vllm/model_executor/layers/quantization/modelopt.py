@@ -946,8 +946,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.moe_kernel is not None
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1471,8 +1471,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.moe_kernel is not None
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,

@@ -610,7 +610,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert isinstance(self.moe_kernel, mk.FusedMoEKMonolithicKernel)
-        return self.moe_mk(
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -633,8 +633,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_mk is not None
-        return self.moe_mk(
+        assert self.moe_kernel is not None
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -985,7 +985,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert isinstance(self.moe_kernel, mk.FusedMoEKMonolithicKernel)
-        return self.moe_mk(
+        return self.moe_kernel(
             x,
             layer.w13_weight,
             layer.w2_weight,

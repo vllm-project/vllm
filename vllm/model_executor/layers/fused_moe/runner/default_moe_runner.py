@@ -308,8 +308,8 @@ class DefaultMoERunner(MoERunner):
         """
         assert self.quant_method is not None
         return (
-            self.quant_method.moe_mk is not None
-            and self.quant_method.moe_mk.output_is_reduced()
+            self.quant_method.moe_kernel is not None
+            and self.quant_method.moe_kernel.output_is_reduced()
         )
 
     def maybe_all_reduce_tensor_model_parallel(self, final_hidden_states: torch.Tensor):
