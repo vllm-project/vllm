@@ -21,15 +21,15 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     is_supported_config_trtllm,
     prepare_nvfp4_moe_layer_for_fi_or_cutlass,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    FlashinferMoeBackend,
-    get_flashinfer_moe_backend,
-)
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
     prepare_nvfp4_moe_layer_for_marlin,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+)
+from vllm.utils.flashinfer import (
+    FlashinferMoeBackend,
+    get_flashinfer_moe_backend,
 )
 
 logger = init_logger(__name__)
