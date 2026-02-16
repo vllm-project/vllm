@@ -688,7 +688,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.0.0.dev"
+        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
@@ -786,11 +786,20 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"0.2-2B-Preview": "PerceptronAI/Isaac-0.2-2B-Preview"},
     ),
     "InternS1ForConditionalGeneration": _HfExamplesInfo(
-        "internlm/Intern-S1", trust_remote_code=True
+        "internlm/Intern-S1",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom tokenizer code is not compatible with Transformers v5."
+        },
     ),
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom model code is not compatible with Transformers v5."
+        },
     ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
@@ -870,7 +879,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
     ),
-    "MiniCPMO": _HfExamplesInfo("openbmb/MiniCPM-o-2_6", trust_remote_code=True),
+    "MiniCPMO": _HfExamplesInfo(
+        "openbmb/MiniCPM-o-2_6",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom processor code is not compatible with Transformers v5."
+        },
+    ),
     "MiniCPMV": _HfExamplesInfo(
         "openbmb/MiniCPM-Llama3-V-2_5",
         extras={
@@ -959,12 +975,24 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "1.6-gemma": "AIDC-AI/Ovis1.6-Gemma2-9B",
         },
     ),
-    "Ovis2_5": _HfExamplesInfo("AIDC-AI/Ovis2.5-2B", trust_remote_code=True),
+    "Ovis2_5": _HfExamplesInfo(
+        "AIDC-AI/Ovis2.5-2B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom processor code is not compatible with Transformers v5."
+        },
+    ),
     "Ovis2_6ForCausalLM": _HfExamplesInfo(
         "AIDC-AI/Ovis2.6-2B", is_available_online=False, trust_remote_code=True
     ),
     "Ovis2_6_MoeForCausalLM": _HfExamplesInfo(
-        "AIDC-AI/Ovis2.6-30B-A3B", trust_remote_code=True
+        "AIDC-AI/Ovis2.6-30B-A3B",
+        trust_remote_code=True,
+        max_transformers_version="4.57",
+        transformers_version_reason={
+            "hf": "Custom processor code is not compatible with Transformers v5."
+        },
     ),
     "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
         "PaddlePaddle/PaddleOCR-VL",
