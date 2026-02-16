@@ -3,6 +3,7 @@
 import json
 
 import openai
+import openai.types.responses as openai_responses_types
 import pytest
 from pydantic import BaseModel
 
@@ -48,6 +49,62 @@ async def test_structured_output(client: openai.AsyncOpenAI):
     assert len(participants) == 2
     assert participants[0] == "Alice"
     assert participants[1] == "Bob"
+
+
+@pytest.mark.asyncio
+async def test_structured_output_streaming(client: openai.AsyncOpenAI):
+    """Test streaming with json_schema format.
+
+    Regression test: ResponseCreatedEvent previously failed validation when
+    json_schema format was used because .model_dump() serialized the response
+    with Python attribute names (schema_) instead of JSON aliases (schema).
+    """
+    stream = await client.responses.create(
+        input=[
+            {"role": "system", "content": "Extract the event information."},
+            {
+                "role": "user",
+                "content": "Alice and Bob are going to a science fair on Friday.",
+            },
+        ],
+        text={
+            "format": {
+                "type": "json_schema",
+                "name": "calendar_event",
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "event_name": {"type": "string"},
+                        "date": {"type": "string"},
+                        "participants": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                    },
+                    "required": ["event_name", "date", "participants"],
+                    "additionalProperties": False,
+                },
+                "description": "A calendar event.",
+                "strict": True,
+            }
+        },
+        stream=True,
+    )
+    events = [event async for event in stream]
+    assert isinstance(events[0], openai_responses_types.ResponseCreatedEvent)
+    assert any(
+        isinstance(event, openai_responses_types.ResponseTextDeltaEvent)
+        for event in events
+    )
+    assert isinstance(events[-1], openai_responses_types.ResponseCompletedEvent)
+
+    # Verify the completed response has valid structured output.
+    completed_event = events[-1]
+    output_text = completed_event.response.output[-1].content[0].text
+    event = json.loads(output_text)
+    assert "event_name" in event
+    assert "date" in event
+    assert "participants" in event
 
 
 @pytest.mark.asyncio
