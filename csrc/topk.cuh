@@ -1,4 +1,6 @@
 /*
+ * Adapted from https://github.com/flashinfer-ai/flashinfer/pull/2215
+ *
  * Copyright (c) 2024 by FlashInfer team.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
