@@ -1922,14 +1922,14 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         else:
             is_rocm_on_gfx9 = False
 
-        device_supports_fp8 = is_rocm_on_gfx9 or (
-            p.is_cuda() and p.has_device_capability((8, 9))
-        )
-
         SUPPORTED_W_A: list[tuple[QuantKey | None, QuantKey | None]] = [
             (None, None),
             (kInt8StaticChannelSym, None),
         ]
+
+        device_supports_fp8 = is_rocm_on_gfx9 or (
+            p.is_cuda() and p.has_device_capability((8, 9))
+        )
 
         if device_supports_fp8:
             SUPPORTED_W_A.extend(

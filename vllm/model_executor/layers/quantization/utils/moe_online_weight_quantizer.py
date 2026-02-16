@@ -12,8 +12,8 @@ from torch.nn import Module
 
 from vllm.model_executor.layers.quantization.utils.copy_numel_counter import (
     CopyNumelCounter,
-    copy_missing_attrs,
 )
+from vllm.model_executor.model_loader.reload.meta import materialize_meta_tensor
 from vllm.model_executor.model_loader.weight_utils import (
     initialize_single_dummy_weight,
 )
@@ -170,21 +170,20 @@ class MoeOnlineWeightQuantizer:
 
                 # When the first `loaded_weight` is about to be loaded,
                 # materialize weights just-in-time
-                w13_weight = torch.nn.Parameter(
-                    torch.empty_like(layer.w13_weight, device=layer._load_device),
-                    requires_grad=False,
-                )
-                set_weight_attrs(w13_weight, extra_weight_attrs)
-                copy_missing_attrs(layer.w13_weight, w13_weight)
-                layer.register_parameter("w13_weight", w13_weight)
+                with torch.device(layer._load_device):
+                    w13_weight = torch.nn.Parameter(
+                        materialize_meta_tensor(layer.w13_weight),
+                        requires_grad=False,
+                    )
+                    set_weight_attrs(w13_weight, extra_weight_attrs)
+                    layer.register_parameter("w13_weight", w13_weight)
 
-                w2_weight = torch.nn.Parameter(
-                    torch.empty_like(layer.w2_weight, device=layer._load_device),
-                    requires_grad=False,
-                )
-                set_weight_attrs(w2_weight, extra_weight_attrs)
-                copy_missing_attrs(layer.w2_weight, w2_weight)
-                layer.register_parameter("w2_weight", w2_weight)
+                    w2_weight = torch.nn.Parameter(
+                        materialize_meta_tensor(layer.w2_weight),
+                        requires_grad=False,
+                    )
+                    set_weight_attrs(w2_weight, extra_weight_attrs)
+                    layer.register_parameter("w2_weight", w2_weight)
                 del layer._load_device
 
             # Refresh the reference to `param` to reflect JIT materialization
@@ -243,25 +242,25 @@ class MoeOnlineWeightQuantizer:
 
     def _materialize_dummy_weights(self, layer: Module) -> None:
         if layer.w13_weight.device == torch.device("meta"):
-            w13_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w13_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w13_weight, {"weight_loader": layer.w13_weight.weight_loader}
-            )
-            copy_missing_attrs(layer.w13_weight, w13_weight)
-            layer.register_parameter("w13_weight", w13_weight)
+            with torch.device(layer._load_device):
+                w13_weight = torch.nn.Parameter(
+                    materialize_meta_tensor(layer.w13_weight),
+                    requires_grad=False,
+                )
+                set_weight_attrs(
+                    w13_weight, {"weight_loader": layer.w13_weight.weight_loader}
+                )
+                layer.register_parameter("w13_weight", w13_weight)
             initialize_single_dummy_weight(layer.w13_weight)
 
         if layer.w2_weight.device == torch.device("meta"):
-            w2_weight = torch.nn.Parameter(
-                torch.empty_like(layer.w2_weight, device=layer._load_device),
-                requires_grad=False,
-            )
-            set_weight_attrs(
-                w2_weight, {"weight_loader": layer.w2_weight.weight_loader}
-            )
-            copy_missing_attrs(layer.w2_weight, w2_weight)
-            layer.register_parameter("w2_weight", w2_weight)
+            with torch.device(layer._load_device):
+                w2_weight = torch.nn.Parameter(
+                    materialize_meta_tensor(layer.w2_weight),
+                    requires_grad=False,
+                )
+                set_weight_attrs(
+                    w2_weight, {"weight_loader": layer.w2_weight.weight_loader}
+                )
+                layer.register_parameter("w2_weight", w2_weight)
             initialize_single_dummy_weight(layer.w2_weight)
