@@ -1,0 +1,777 @@
+{
+  "summary": {
+    "experiment": "conditioned_prediction",
+    "description": "Tests whether the fine-tuned model responds to scene corrections in the prompt.",
+    "total_samples": 20,
+    "condition_a_baseline": {
+      "correct_scene_count": 7,
+      "correct_scene_pct": 35.0,
+      "incident_zone_count": 13,
+      "odd_distribution": {
+        "incident_zone": 13,
+        "nominal": 7
+      }
+    },
+    "condition_b_conditioned": {
+      "correct_scene_count": 7,
+      "correct_scene_pct": 35.0,
+      "incident_zone_count": 13,
+      "odd_distribution": {
+        "incident_zone": 13,
+        "nominal": 7
+      }
+    },
+    "comparison": {
+      "scene_changed_count": 0,
+      "scene_changed_pct": 0.0,
+      "actions_changed_count": 11,
+      "actions_changed_pct": 55.0,
+      "follows_correction_count": 0,
+      "follows_correction_pct": 0.0,
+      "ignores_correction_count": 13,
+      "ignores_correction_pct": 100.0
+    }
+  },
+  "samples": [
+    {
+      "trial_num": 0,
+      "dataset_index": 0,
+      "chum_uri": "chum://20241026T034140-kitt_327@1729918122-1729918135",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.00_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>"
+        ],
+        "time_s": 3.13
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.00_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>"
+        ],
+        "time_s": 0.22
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 1,
+      "dataset_index": 13,
+      "chum_uri": "chum://20240220T174343-kitt_155@1708451488.009-1708451501.009",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.52_y_0.13|><|action_x_-0.39_y_0.00|><|action_x_0.52_y_0.00|><|action_x_0.90_y_-0.13|><|action_x_0.90_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.52_y_0.13|>",
+          "<|action_x_-0.39_y_0.00|>",
+          "<|action_x_0.52_y_0.00|>",
+          "<|action_x_0.90_y_-0.13|>",
+          "<|action_x_0.90_y_0.00|>"
+        ],
+        "time_s": 0.25
+      },
+      "condition_b": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.52_y_0.13|><|action_x_-0.65_y_-0.13|><|action_x_0.13_y_0.13|><|action_x_0.52_y_0.00|><|action_x_0.77_y_-0.13|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.52_y_0.13|>",
+          "<|action_x_-0.65_y_-0.13|>",
+          "<|action_x_0.13_y_0.13|>",
+          "<|action_x_0.52_y_0.00|>",
+          "<|action_x_0.77_y_-0.13|>"
+        ],
+        "time_s": 0.22
+      },
+      "scene_changed": false,
+      "a_correct_scene": true,
+      "b_correct_scene": true,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 2,
+      "dataset_index": 20,
+      "chum_uri": "chum://20241120T170028-kitt_323@1732129124.5-1732129137.5",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.00_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_0.00_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.31
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.26_y_0.13|><|action_x_-0.26_y_-0.13|><|action_x_-0.26_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.26_y_0.13|>",
+          "<|action_x_-0.26_y_-0.13|>",
+          "<|action_x_-0.26_y_0.00|>"
+        ],
+        "time_s": 0.21
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 3,
+      "dataset_index": 30,
+      "chum_uri": "chum://20240113T002105-kitt_193@1705107598.753-1705107611.753",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_nominal|><actions><|action_x_0.13_y_0.00|><|action_x_0.00_y_-0.13|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.00_y_-0.13|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.25
+      },
+      "condition_b": {
+        "response": "<|odd_nominal|><actions><|action_x_0.13_y_0.00|><|action_x_0.00_y_-0.13|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.00_y_-0.13|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": true,
+      "b_correct_scene": true,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 4,
+      "dataset_index": 36,
+      "chum_uri": "chum://20230707T155557-kitt_145@1688746967.167-1688746980.167",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.26_y_0.00|><|action_x_-0.65_y_0.00|><|action_x_-0.52_y_0.00|><|action_x_-0.39_y_0.00|><|action_x_-0.26_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.26_y_0.00|>",
+          "<|action_x_-0.65_y_0.00|>",
+          "<|action_x_-0.52_y_0.00|>",
+          "<|action_x_-0.39_y_0.00|>",
+          "<|action_x_-0.26_y_0.00|>"
+        ],
+        "time_s": 0.25
+      },
+      "condition_b": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.26_y_0.00|><|action_x_-0.65_y_0.00|><|action_x_-0.52_y_0.00|><|action_x_-0.39_y_0.00|><|action_x_-0.26_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.26_y_0.00|>",
+          "<|action_x_-0.65_y_0.00|>",
+          "<|action_x_-0.52_y_0.00|>",
+          "<|action_x_-0.39_y_0.00|>",
+          "<|action_x_-0.26_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": true,
+      "b_correct_scene": true,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 5,
+      "dataset_index": 64,
+      "chum_uri": "chum://20230707T155557-kitt_145@1688746968.167-1688746981.167",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.13_y_0.13|><|action_x_-0.26_y_0.13|><|action_x_-0.26_y_0.13|><|action_x_-0.26_y_0.00|><|action_x_-0.26_y_-0.13|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.13_y_0.13|>",
+          "<|action_x_-0.26_y_0.13|>",
+          "<|action_x_-0.26_y_0.13|>",
+          "<|action_x_-0.26_y_0.00|>",
+          "<|action_x_-0.26_y_-0.13|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.13_y_0.13|><|action_x_-0.26_y_0.13|><|action_x_-0.26_y_0.13|><|action_x_-0.26_y_0.00|><|action_x_-0.26_y_-0.13|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.13_y_0.13|>",
+          "<|action_x_-0.26_y_0.13|>",
+          "<|action_x_-0.26_y_0.13|>",
+          "<|action_x_-0.26_y_0.00|>",
+          "<|action_x_-0.26_y_-0.13|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": true,
+      "b_correct_scene": true,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 6,
+      "dataset_index": 90,
+      "chum_uri": "chum://20230611T140546-kitt_149@1686505293.867-1686505306.867",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.39_y_-0.39|><|action_x_0.13_y_-1.03|><|action_x_-0.39_y_-1.16|><|action_x_-0.77_y_-0.90|><|action_x_-0.39_y_-0.77|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.39_y_-0.39|>",
+          "<|action_x_0.13_y_-1.03|>",
+          "<|action_x_-0.39_y_-1.16|>",
+          "<|action_x_-0.77_y_-0.90|>",
+          "<|action_x_-0.39_y_-0.77|>"
+        ],
+        "time_s": 0.25
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.39_y_-0.39|><|action_x_0.13_y_-1.03|><|action_x_-0.39_y_-1.16|><|action_x_-0.65_y_-1.03|><|action_x_-0.52_y_-0.90|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.39_y_-0.39|>",
+          "<|action_x_0.13_y_-1.03|>",
+          "<|action_x_-0.39_y_-1.16|>",
+          "<|action_x_-0.65_y_-1.03|>",
+          "<|action_x_-0.52_y_-0.90|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 7,
+      "dataset_index": 92,
+      "chum_uri": "chum://20230703T150216-kitt_95@1688408284.223-1688408297.223",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.52_y_-0.52|><|action_x_0.13_y_-1.42|><|action_x_-0.65_y_-1.55|><|action_x_-0.90_y_-1.29|><|action_x_-0.39_y_-1.03|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.52_y_-0.52|>",
+          "<|action_x_0.13_y_-1.42|>",
+          "<|action_x_-0.65_y_-1.55|>",
+          "<|action_x_-0.90_y_-1.29|>",
+          "<|action_x_-0.39_y_-1.03|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.52_y_-0.52|><|action_x_0.13_y_-1.55|><|action_x_-0.77_y_-1.68|><|action_x_-0.77_y_-1.29|><|action_x_-0.26_y_-1.03|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.52_y_-0.52|>",
+          "<|action_x_0.13_y_-1.55|>",
+          "<|action_x_-0.77_y_-1.68|>",
+          "<|action_x_-0.77_y_-1.29|>",
+          "<|action_x_-0.26_y_-1.03|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 8,
+      "dataset_index": 110,
+      "chum_uri": "chum://20241022T151138-kitt_228@1729612385.3-1729612398.3",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.13_y_-0.13|><|action_x_0.13_y_-0.13|><|action_x_0.00_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.13_y_-0.13|>",
+          "<|action_x_0.13_y_-0.13|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.13_y_-0.13|><|action_x_0.13_y_-0.13|><|action_x_0.00_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.13_y_-0.13|>",
+          "<|action_x_0.13_y_-0.13|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 9,
+      "dataset_index": 160,
+      "chum_uri": "chum://20230611T140546-kitt_149@1686505292.867-1686505305.867",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.65_y_-0.13|><|action_x_0.77_y_-0.65|><|action_x_0.13_y_-1.16|><|action_x_-0.65_y_-1.29|><|action_x_-0.90_y_-1.03|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.65_y_-0.13|>",
+          "<|action_x_0.77_y_-0.65|>",
+          "<|action_x_0.13_y_-1.16|>",
+          "<|action_x_-0.65_y_-1.29|>",
+          "<|action_x_-0.90_y_-1.03|>"
+        ],
+        "time_s": 0.22
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.65_y_-0.13|><|action_x_0.77_y_-0.65|><|action_x_0.13_y_-1.16|><|action_x_-0.65_y_-1.29|><|action_x_-0.90_y_-1.03|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.65_y_-0.13|>",
+          "<|action_x_0.77_y_-0.65|>",
+          "<|action_x_0.13_y_-1.16|>",
+          "<|action_x_-0.65_y_-1.29|>",
+          "<|action_x_-0.90_y_-1.03|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 10,
+      "dataset_index": 185,
+      "chum_uri": "chum://20241213T014312-kitt_268@1734057046.7-1734057059.7",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_-0.39_y_0.00|><|action_x_-0.90_y_0.00|><|action_x_-1.16_y_0.00|><|action_x_-1.16_y_0.00|><|action_x_-1.16_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_-0.39_y_0.00|>",
+          "<|action_x_-0.90_y_0.00|>",
+          "<|action_x_-1.16_y_0.00|>",
+          "<|action_x_-1.16_y_0.00|>",
+          "<|action_x_-1.16_y_0.00|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_-0.39_y_0.00|><|action_x_-0.90_y_0.00|><|action_x_-1.16_y_0.00|><|action_x_-1.16_y_0.00|><|action_x_-1.16_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_-0.39_y_0.00|>",
+          "<|action_x_-0.90_y_0.00|>",
+          "<|action_x_-1.16_y_0.00|>",
+          "<|action_x_-1.16_y_0.00|>",
+          "<|action_x_-1.16_y_0.00|>"
+        ],
+        "time_s": 0.19
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 11,
+      "dataset_index": 209,
+      "chum_uri": "chum://20230703T150216-kitt_95@1688408270.223-1688408283.223",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.26_y_-0.13|><|action_x_-0.26_y_0.00|><|action_x_-0.52_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.26_y_-0.13|>",
+          "<|action_x_-0.26_y_0.00|>",
+          "<|action_x_-0.52_y_0.00|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.26_y_-0.13|><|action_x_-0.26_y_0.00|><|action_x_-0.52_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.26_y_-0.13|>",
+          "<|action_x_-0.26_y_0.00|>",
+          "<|action_x_-0.52_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": true,
+      "b_correct_scene": true,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 12,
+      "dataset_index": 215,
+      "chum_uri": "chum://20241026T011110-kitt_179@1729907525.7-1729907538.7",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.26_y_0.00|><|action_x_0.26_y_-0.13|><|action_x_0.00_y_0.00|><|action_x_0.00_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.26_y_0.00|>",
+          "<|action_x_0.26_y_-0.13|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.26_y_0.00|><|action_x_0.26_y_-0.13|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.26_y_0.00|>",
+          "<|action_x_0.26_y_-0.13|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>"
+        ],
+        "time_s": 0.19
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 13,
+      "dataset_index": 228,
+      "chum_uri": "chum://20240726T150749-kitt_141@1722011078.981-1722011091.981",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 14,
+      "dataset_index": 244,
+      "chum_uri": "chum://20250127T033259-kitt_222@1737955167.382-1737955180.382",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.00_y_0.13|><|action_x_0.00_y_0.26|><|action_x_0.00_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_0.00_y_-0.13|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.00_y_0.13|>",
+          "<|action_x_0.00_y_0.26|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_0.00_y_-0.13|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.00_y_0.13|><|action_x_0.00_y_0.26|><|action_x_0.00_y_0.13|><|action_x_0.00_y_-0.13|><|action_x_0.00_y_-0.13|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.00_y_0.13|>",
+          "<|action_x_0.00_y_0.26|>",
+          "<|action_x_0.00_y_0.13|>",
+          "<|action_x_0.00_y_-0.13|>",
+          "<|action_x_0.00_y_-0.13|>"
+        ],
+        "time_s": 0.19
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 15,
+      "dataset_index": 247,
+      "chum_uri": "chum://20230611T140546-kitt_149@1686505299.867-1686505312.867",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.13_y_0.00|><|action_x_0.26_y_0.13|><|action_x_0.00_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.26_y_0.13|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.25
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.13|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.13|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 16,
+      "dataset_index": 248,
+      "chum_uri": "chum://20230703T150216-kitt_95@1688408275.223-1688408288.223",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.39_y_0.00|><|action_x_-0.77_y_0.00|><|action_x_-0.90_y_0.00|><|action_x_-1.03_y_0.00|><|action_x_-1.16_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.39_y_0.00|>",
+          "<|action_x_-0.77_y_0.00|>",
+          "<|action_x_-0.90_y_0.00|>",
+          "<|action_x_-1.03_y_0.00|>",
+          "<|action_x_-1.16_y_0.00|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.39_y_0.00|><|action_x_-0.77_y_0.00|><|action_x_-0.90_y_0.00|><|action_x_-1.03_y_0.00|><|action_x_-1.16_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.39_y_0.00|>",
+          "<|action_x_-0.77_y_0.00|>",
+          "<|action_x_-0.90_y_0.00|>",
+          "<|action_x_-1.03_y_0.00|>",
+          "<|action_x_-1.16_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": true,
+      "b_correct_scene": true,
+      "actions_changed": false
+    },
+    {
+      "trial_num": 17,
+      "dataset_index": 281,
+      "chum_uri": "chum://20241127T192040-kitt_182@1732738056.9-1732738069.9",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_0.13_y_0.00|><|action_x_0.52_y_0.00|><|action_x_0.52_y_0.00|><|action_x_0.52_y_0.00|><|action_x_0.39_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.52_y_0.00|>",
+          "<|action_x_0.52_y_0.00|>",
+          "<|action_x_0.52_y_0.00|>",
+          "<|action_x_0.39_y_0.00|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_0.00_y_0.00|><|action_x_0.39_y_0.00|><|action_x_0.52_y_0.00|><|action_x_0.52_y_0.00|><|action_x_0.39_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_0.39_y_0.00|>",
+          "<|action_x_0.52_y_0.00|>",
+          "<|action_x_0.52_y_0.00|>",
+          "<|action_x_0.39_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 18,
+      "dataset_index": 282,
+      "chum_uri": "chum://20240726T150749-kitt_141@1722011075.981-1722011088.981",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_incident|><actions><|action_x_-0.13_y_0.00|><|action_x_0.00_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.25
+      },
+      "condition_b": {
+        "response": "<|odd_incident|><actions><|action_x_-0.13_y_0.00|><|action_x_0.00_y_0.00|><|action_x_0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|></actions>",
+        "odd_predicted": "incident_zone",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": false,
+      "b_correct_scene": false,
+      "actions_changed": true
+    },
+    {
+      "trial_num": 19,
+      "dataset_index": 302,
+      "chum_uri": "chum://20250127T033259-kitt_222@1737955163.382-1737955176.382",
+      "gt_odd_label": "nominal",
+      "fine_class": "negative_incident_zone",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "condition_a": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.13_y_0.00|><|action_x_0.00_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_0.13_y_0.00|><|action_x_0.00_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_0.00_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_0.13_y_0.00|>",
+          "<|action_x_0.00_y_0.00|>"
+        ],
+        "time_s": 0.24
+      },
+      "condition_b": {
+        "response": "<|odd_nominal|><actions><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_-0.13_y_0.00|><|action_x_0.00_y_0.00|></actions>",
+        "odd_predicted": "nominal",
+        "actions": [
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_-0.13_y_0.00|>",
+          "<|action_x_0.00_y_0.00|>"
+        ],
+        "time_s": 0.2
+      },
+      "scene_changed": false,
+      "a_correct_scene": true,
+      "b_correct_scene": true,
+      "actions_changed": true
+    }
+  ]
+}

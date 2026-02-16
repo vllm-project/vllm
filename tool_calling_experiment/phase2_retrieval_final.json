@@ -1,0 +1,512 @@
+{
+  "experiment": "phase2_retrieval_final",
+  "timestamp": "2026-02-16T16:47:42",
+  "task44": {
+    "summary": {
+      "total": 100,
+      "correct": 0,
+      "accuracy": 0,
+      "baseline_accuracy": 0.0,
+      "improvement": 0.0
+    },
+    "samples": [
+      {
+        "sample_id": 8536,
+        "error": "load failed: Invalid sample index `8536`: 0 <= 8536 < 8378"
+      },
+      {
+        "sample_id": 1069,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7229,
+        "gt_scene": "flagger",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1054,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 361,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2083,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1911,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 573,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 226,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 491,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6323,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4693,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4275,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 125,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5700,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2353,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 8587,
+        "error": "load failed: Invalid sample index `8587`: 0 <= 8587 < 8378"
+      },
+      {
+        "sample_id": 5357,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 341,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7944,
+        "gt_scene": "flooded",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4188,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4658,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7170,
+        "gt_scene": "flagger",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 408,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3142,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7978,
+        "gt_scene": "flooded",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3559,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7901,
+        "gt_scene": "flooded",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3191,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3913,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6066,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3394,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7226,
+        "gt_scene": "flagger",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5612,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5411,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7864,
+        "gt_scene": "flooded",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6540,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6216,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3023,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7832,
+        "gt_scene": "flooded",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6714,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2327,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6060,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1599,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1157,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4042,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3232,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2489,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4059,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5467,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1660,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 192,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1360,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4521,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1300,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1374,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5634,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4711,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2797,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3981,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5859,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6392,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4667,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6012,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7292,
+        "gt_scene": "flagger",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4706,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2093,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4848,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 8405,
+        "error": "load failed: Invalid sample index `8405`: 0 <= 8405 < 8378"
+      },
+      {
+        "sample_id": 91,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 713,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2648,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7877,
+        "gt_scene": "flooded",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3100,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4993,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 664,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6687,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3529,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 49,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 6528,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 7115,
+        "gt_scene": "flagger",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1527,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3877,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3246,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1329,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4083,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 968,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3615,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4173,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5922,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5301,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3436,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 1502,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 719,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5960,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 5189,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 3481,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2950,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 4262,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      },
+      {
+        "sample_id": 2190,
+        "gt_scene": "nominal",
+        "error": "chat returned None"
+      }
+    ]
+  }
+}

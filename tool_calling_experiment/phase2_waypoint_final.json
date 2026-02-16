@@ -1,0 +1,23 @@
+{
+  "experiment": "phase2_waypoint_final",
+  "timestamp": "2026-02-16T16:47:35",
+  "task34": {
+    "model_2b": {
+      "model": "2B",
+      "n_samples": 0,
+      "avg_initial_dist": null,
+      "avg_refined_dist": null,
+      "n_improved": 0,
+      "improvement_rate": 0
+    },
+    "model_8b": {
+      "model": "8B",
+      "n_samples": 0,
+      "avg_initial_dist": null,
+      "avg_refined_dist": null,
+      "n_improved": 0,
+      "improvement_rate": 0
+    }
+  },
+  "token_costs": {}
+}

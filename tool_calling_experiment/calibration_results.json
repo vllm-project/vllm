@@ -1,0 +1,778 @@
+{
+  "baseline": {
+    "accuracy": 0.4686,
+    "macro_f1": 0.4286,
+    "per_class": {
+      "nominal": {
+        "precision": 0.8694,
+        "recall": 0.476,
+        "f1": 0.6152,
+        "support": 6741,
+        "predicted_count": 3691
+      },
+      "flagger": {
+        "precision": 0.8514,
+        "recall": 0.5818,
+        "f1": 0.6913,
+        "support": 660,
+        "predicted_count": 451
+      },
+      "flooded": {
+        "precision": 0.8239,
+        "recall": 0.3786,
+        "f1": 0.5188,
+        "support": 618,
+        "predicted_count": 284
+      },
+      "incident_zone": {
+        "precision": 0.0399,
+        "recall": 0.5062,
+        "f1": 0.074,
+        "support": 322,
+        "predicted_count": 4081
+      },
+      "mounted_police": {
+        "precision": 0.434,
+        "recall": 0.1691,
+        "f1": 0.2434,
+        "support": 272,
+        "predicted_count": 106
+      }
+    },
+    "confusion_matrix": {
+      "nominal": {
+        "nominal": 3209,
+        "flagger": 48,
+        "flooded": 35,
+        "incident_zone": 3430,
+        "mounted_police": 19
+      },
+      "flagger": {
+        "nominal": 39,
+        "flagger": 384,
+        "flooded": 8,
+        "incident_zone": 227,
+        "mounted_police": 2
+      },
+      "flooded": {
+        "nominal": 173,
+        "flagger": 15,
+        "flooded": 234,
+        "incident_zone": 173,
+        "mounted_police": 23
+      },
+      "incident_zone": {
+        "nominal": 132,
+        "flagger": 4,
+        "flooded": 7,
+        "incident_zone": 163,
+        "mounted_police": 16
+      },
+      "mounted_police": {
+        "nominal": 138,
+        "flagger": 0,
+        "flooded": 0,
+        "incident_zone": 88,
+        "mounted_police": 46
+      }
+    }
+  },
+  "strategy_1_naive_flip": {
+    "accuracy": 0.8479,
+    "macro_f1": 0.4737,
+    "per_class": {
+      "nominal": {
+        "precision": 0.8542,
+        "recall": 0.9849,
+        "f1": 0.9149,
+        "support": 6741,
+        "predicted_count": 7772
+      },
+      "flagger": {
+        "precision": 0.8514,
+        "recall": 0.5818,
+        "f1": 0.6913,
+        "support": 660,
+        "predicted_count": 451
+      },
+      "flooded": {
+        "precision": 0.8239,
+        "recall": 0.3786,
+        "f1": 0.5188,
+        "support": 618,
+        "predicted_count": 284
+      },
+      "incident_zone": {
+        "precision": 0.0,
+        "recall": 0.0,
+        "f1": 0.0,
+        "support": 322,
+        "predicted_count": 0
+      },
+      "mounted_police": {
+        "precision": 0.434,
+        "recall": 0.1691,
+        "f1": 0.2434,
+        "support": 272,
+        "predicted_count": 106
+      }
+    },
+    "confusion_matrix": {
+      "nominal": {
+        "nominal": 6639,
+        "flagger": 48,
+        "flooded": 35,
+        "incident_zone": 0,
+        "mounted_police": 19
+      },
+      "flagger": {
+        "nominal": 266,
+        "flagger": 384,
+        "flooded": 8,
+        "incident_zone": 0,
+        "mounted_police": 2
+      },
+      "flooded": {
+        "nominal": 346,
+        "flagger": 15,
+        "flooded": 234,
+        "incident_zone": 0,
+        "mounted_police": 23
+      },
+      "incident_zone": {
+        "nominal": 295,
+        "flagger": 4,
+        "flooded": 7,
+        "incident_zone": 0,
+        "mounted_police": 16
+      },
+      "mounted_police": {
+        "nominal": 226,
+        "flagger": 0,
+        "flooded": 0,
+        "incident_zone": 0,
+        "mounted_police": 46
+      }
+    },
+    "description": "All IZ predictions flipped to nominal",
+    "saved": 3430,
+    "broken": 163
+  },
+  "strategy_2_prior_threshold": {
+    "threshold_5pct": {
+      "accuracy": 0.8448,
+      "macro_f1": 0.4242,
+      "per_class": {
+        "nominal": {
+          "precision": 0.8451,
+          "recall": 0.9877,
+          "f1": 0.9109,
+          "support": 6741,
+          "predicted_count": 7878
+        },
+        "flagger": {
+          "precision": 0.8514,
+          "recall": 0.5818,
+          "f1": 0.6913,
+          "support": 660,
+          "predicted_count": 451
+        },
+        "flooded": {
+          "precision": 0.8239,
+          "recall": 0.3786,
+          "f1": 0.5188,
+          "support": 618,
+          "predicted_count": 284
+        },
+        "incident_zone": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 322,
+          "predicted_count": 0
+        },
+        "mounted_police": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 272,
+          "predicted_count": 0
+        }
+      },
+      "confusion_matrix": {
+        "nominal": {
+          "nominal": 6658,
+          "flagger": 48,
+          "flooded": 35,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "flagger": {
+          "nominal": 268,
+          "flagger": 384,
+          "flooded": 8,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "flooded": {
+          "nominal": 369,
+          "flagger": 15,
+          "flooded": 234,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "incident_zone": {
+          "nominal": 311,
+          "flagger": 4,
+          "flooded": 7,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "mounted_police": {
+          "nominal": 272,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        }
+      },
+      "threshold": 0.05,
+      "flipped_classes": [
+        "incident_zone",
+        "mounted_police"
+      ],
+      "saved": 3449,
+      "broken": 209
+    },
+    "threshold_10pct": {
+      "accuracy": 0.7827,
+      "macro_f1": 0.1756,
+      "per_class": {
+        "nominal": {
+          "precision": 0.7827,
+          "recall": 1.0,
+          "f1": 0.8781,
+          "support": 6741,
+          "predicted_count": 8613
+        },
+        "flagger": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 660,
+          "predicted_count": 0
+        },
+        "flooded": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 618,
+          "predicted_count": 0
+        },
+        "incident_zone": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 322,
+          "predicted_count": 0
+        },
+        "mounted_police": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 272,
+          "predicted_count": 0
+        }
+      },
+      "confusion_matrix": {
+        "nominal": {
+          "nominal": 6741,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "flagger": {
+          "nominal": 660,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "flooded": {
+          "nominal": 618,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "incident_zone": {
+          "nominal": 322,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "mounted_police": {
+          "nominal": 272,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        }
+      },
+      "threshold": 0.1,
+      "flipped_classes": [
+        "flagger",
+        "flooded",
+        "incident_zone",
+        "mounted_police"
+      ],
+      "saved": 3532,
+      "broken": 827
+    },
+    "threshold_15pct": {
+      "accuracy": 0.7827,
+      "macro_f1": 0.1756,
+      "per_class": {
+        "nominal": {
+          "precision": 0.7827,
+          "recall": 1.0,
+          "f1": 0.8781,
+          "support": 6741,
+          "predicted_count": 8613
+        },
+        "flagger": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 660,
+          "predicted_count": 0
+        },
+        "flooded": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 618,
+          "predicted_count": 0
+        },
+        "incident_zone": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 322,
+          "predicted_count": 0
+        },
+        "mounted_police": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 272,
+          "predicted_count": 0
+        }
+      },
+      "confusion_matrix": {
+        "nominal": {
+          "nominal": 6741,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "flagger": {
+          "nominal": 660,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "flooded": {
+          "nominal": 618,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "incident_zone": {
+          "nominal": 322,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "mounted_police": {
+          "nominal": 272,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        }
+      },
+      "threshold": 0.15,
+      "flipped_classes": [
+        "flagger",
+        "flooded",
+        "incident_zone",
+        "mounted_police"
+      ],
+      "saved": 3532,
+      "broken": 827
+    },
+    "threshold_20pct": {
+      "accuracy": 0.7827,
+      "macro_f1": 0.1756,
+      "per_class": {
+        "nominal": {
+          "precision": 0.7827,
+          "recall": 1.0,
+          "f1": 0.8781,
+          "support": 6741,
+          "predicted_count": 8613
+        },
+        "flagger": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 660,
+          "predicted_count": 0
+        },
+        "flooded": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 618,
+          "predicted_count": 0
+        },
+        "incident_zone": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 322,
+          "predicted_count": 0
+        },
+        "mounted_police": {
+          "precision": 0.0,
+          "recall": 0.0,
+          "f1": 0.0,
+          "support": 272,
+          "predicted_count": 0
+        }
+      },
+      "confusion_matrix": {
+        "nominal": {
+          "nominal": 6741,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "flagger": {
+          "nominal": 660,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "flooded": {
+          "nominal": 618,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "incident_zone": {
+          "nominal": 322,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        },
+        "mounted_police": {
+          "nominal": 272,
+          "flagger": 0,
+          "flooded": 0,
+          "incident_zone": 0,
+          "mounted_police": 0
+        }
+      },
+      "threshold": 0.2,
+      "flipped_classes": [
+        "flagger",
+        "flooded",
+        "incident_zone",
+        "mounted_police"
+      ],
+      "saved": 3532,
+      "broken": 827
+    }
+  },
+  "strategy_3_confusion_aware": {
+    "accuracy": 0.8668,
+    "macro_f1": 0.6102,
+    "per_class": {
+      "nominal": {
+        "precision": 0.8725,
+        "recall": 0.9849,
+        "f1": 0.9253,
+        "support": 6741,
+        "predicted_count": 7609
+      },
+      "flagger": {
+        "precision": 0.8514,
+        "recall": 0.5818,
+        "f1": 0.6913,
+        "support": 660,
+        "predicted_count": 451
+      },
+      "flooded": {
+        "precision": 0.8239,
+        "recall": 0.3786,
+        "f1": 0.5188,
+        "support": 618,
+        "predicted_count": 284
+      },
+      "incident_zone": {
+        "precision": 1.0,
+        "recall": 0.5062,
+        "f1": 0.6722,
+        "support": 322,
+        "predicted_count": 163
+      },
+      "mounted_police": {
+        "precision": 0.434,
+        "recall": 0.1691,
+        "f1": 0.2434,
+        "support": 272,
+        "predicted_count": 106
+      }
+    },
+    "confusion_matrix": {
+      "nominal": {
+        "nominal": 6639,
+        "flagger": 48,
+        "flooded": 35,
+        "incident_zone": 0,
+        "mounted_police": 19
+      },
+      "flagger": {
+        "nominal": 266,
+        "flagger": 384,
+        "flooded": 8,
+        "incident_zone": 0,
+        "mounted_police": 2
+      },
+      "flooded": {
+        "nominal": 346,
+        "flagger": 15,
+        "flooded": 234,
+        "incident_zone": 0,
+        "mounted_police": 23
+      },
+      "incident_zone": {
+        "nominal": 132,
+        "flagger": 4,
+        "flooded": 7,
+        "incident_zone": 163,
+        "mounted_police": 16
+      },
+      "mounted_police": {
+        "nominal": 226,
+        "flagger": 0,
+        "flooded": 0,
+        "incident_zone": 0,
+        "mounted_police": 46
+      }
+    },
+    "description": "IZ->nominal, except fine_class=IZ (oracle)",
+    "saved": 3430,
+    "broken": 0,
+    "iz_pred_with_iz_fineclass": 163,
+    "iz_pred_total": 4081
+  },
+  "strategy_4_oracle_ceiling": {
+    "accuracy": 0.9235,
+    "macro_f1": 0.7751,
+    "per_class": {
+      "nominal": {
+        "precision": 0.9323,
+        "recall": 0.9849,
+        "f1": 0.9579,
+        "support": 6741,
+        "predicted_count": 7121
+      },
+      "flagger": {
+        "precision": 0.9012,
+        "recall": 0.9258,
+        "f1": 0.9133,
+        "support": 660,
+        "predicted_count": 678
+      },
+      "flooded": {
+        "precision": 0.8906,
+        "recall": 0.6586,
+        "f1": 0.7572,
+        "support": 618,
+        "predicted_count": 457
+      },
+      "incident_zone": {
+        "precision": 1.0,
+        "recall": 0.5062,
+        "f1": 0.6722,
+        "support": 322,
+        "predicted_count": 163
+      },
+      "mounted_police": {
+        "precision": 0.6907,
+        "recall": 0.4926,
+        "f1": 0.5751,
+        "support": 272,
+        "predicted_count": 194
+      }
+    },
+    "confusion_matrix": {
+      "nominal": {
+        "nominal": 6639,
+        "flagger": 48,
+        "flooded": 35,
+        "incident_zone": 0,
+        "mounted_police": 19
+      },
+      "flagger": {
+        "nominal": 39,
+        "flagger": 611,
+        "flooded": 8,
+        "incident_zone": 0,
+        "mounted_police": 2
+      },
+      "flooded": {
+        "nominal": 173,
+        "flagger": 15,
+        "flooded": 407,
+        "incident_zone": 0,
+        "mounted_police": 23
+      },
+      "incident_zone": {
+        "nominal": 132,
+        "flagger": 4,
+        "flooded": 7,
+        "incident_zone": 163,
+        "mounted_police": 16
+      },
+      "mounted_police": {
+        "nominal": 138,
+        "flagger": 0,
+        "flooded": 0,
+        "incident_zone": 0,
+        "mounted_police": 134
+      }
+    },
+    "description": "Oracle: perfect IZ corrections using GT",
+    "saved": 3918,
+    "broken": 0,
+    "total_errors_baseline": 4577,
+    "errors_from_iz_overprediction": 3918,
+    "pct_errors_from_iz": 85.6
+  },
+  "strategy_5_selective_fineclass": {
+    "accuracy": 0.6369,
+    "macro_f1": 0.4696,
+    "per_class": {
+      "nominal": {
+        "precision": 0.9062,
+        "recall": 0.6911,
+        "f1": 0.7842,
+        "support": 6741,
+        "predicted_count": 5141
+      },
+      "flagger": {
+        "precision": 0.8514,
+        "recall": 0.5818,
+        "f1": 0.6913,
+        "support": 660,
+        "predicted_count": 451
+      },
+      "flooded": {
+        "precision": 0.8239,
+        "recall": 0.3786,
+        "f1": 0.5188,
+        "support": 618,
+        "predicted_count": 284
+      },
+      "incident_zone": {
+        "precision": 0.062,
+        "recall": 0.5062,
+        "f1": 0.1104,
+        "support": 322,
+        "predicted_count": 2631
+      },
+      "mounted_police": {
+        "precision": 0.434,
+        "recall": 0.1691,
+        "f1": 0.2434,
+        "support": 272,
+        "predicted_count": 106
+      }
+    },
+    "confusion_matrix": {
+      "nominal": {
+        "nominal": 4659,
+        "flagger": 48,
+        "flooded": 35,
+        "incident_zone": 1980,
+        "mounted_police": 19
+      },
+      "flagger": {
+        "nominal": 39,
+        "flagger": 384,
+        "flooded": 8,
+        "incident_zone": 227,
+        "mounted_police": 2
+      },
+      "flooded": {
+        "nominal": 173,
+        "flagger": 15,
+        "flooded": 234,
+        "incident_zone": 173,
+        "mounted_police": 23
+      },
+      "incident_zone": {
+        "nominal": 132,
+        "flagger": 4,
+        "flooded": 7,
+        "incident_zone": 163,
+        "mounted_police": 16
+      },
+      "mounted_police": {
+        "nominal": 138,
+        "flagger": 0,
+        "flooded": 0,
+        "incident_zone": 88,
+        "mounted_police": 46
+      }
+    },
+    "description": "IZ+nominal_triggers -> nominal (oracle FC)",
+    "saved": 1450,
+    "broken": 0,
+    "iz_by_fineclass": {
+      "nominal_triggers": 1450,
+      "nominal_clean": 1980,
+      "flagger": 227,
+      "flooded": 173,
+      "incident_zone": 163,
+      "mounted_police": 88
+    }
+  },
+  "summary": {
+    "baseline_accuracy": 0.4686,
+    "baseline_macro_f1": 0.4286,
+    "best_practical_strategy": "S1",
+    "best_practical_accuracy": 0.8479,
+    "best_practical_macro_f1": 0.4737,
+    "oracle_ceiling_accuracy": 0.9235,
+    "oracle_ceiling_macro_f1": 0.7751,
+    "pct_errors_from_iz": 85.6,
+    "max_f1_gain_simple_pp": 4.5,
+    "max_f1_gain_oracle_fineclass": 18.2,
+    "max_f1_gain_oracle_ceiling": 34.7
+  }
+}

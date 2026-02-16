@@ -1,0 +1,76 @@
+{
+  "class_frequencies": {
+    "flagger": 0.0766,
+    "flooded": 0.0718,
+    "incident_zone": 0.0374,
+    "mounted_police": 0.0316,
+    "nominal": 0.7827
+  },
+  "confusion_pairs": {
+    "flagger": {
+      "confused_with": "incident_zone",
+      "error_rate": 0.344,
+      "error_count": 227,
+      "total": 660,
+      "note": "34.4% of flagger scenes are misclassified as incident_zone."
+    },
+    "flooded": {
+      "confused_with": "incident_zone",
+      "error_rate": 0.28,
+      "error_count": 173,
+      "total": 618,
+      "note": "28.0% of flooded scenes are misclassified as incident_zone."
+    },
+    "incident_zone": {
+      "confused_with": "nominal",
+      "error_rate": 0.41,
+      "error_count": 132,
+      "total": 322,
+      "note": "41.0% of incident_zone scenes are misclassified as nominal."
+    },
+    "mounted_police": {
+      "confused_with": "nominal",
+      "error_rate": 0.507,
+      "error_count": 138,
+      "total": 272,
+      "note": "50.7% of mounted_police scenes are misclassified as nominal."
+    },
+    "nominal": {
+      "confused_with": "incident_zone",
+      "error_rate": 0.509,
+      "error_count": 3430,
+      "total": 6741,
+      "note": "50.9% of nominal scenes are misclassified as incident_zone."
+    }
+  },
+  "cooccurrence": {
+    "flagger": {
+      "proceed|null": 69,
+      "slowdown|null": 207,
+      "stop|null": 384
+    },
+    "flooded": {
+      "proceed|null": 103,
+      "slowdown|null": 346,
+      "stop|null": 169
+    },
+    "incident_zone": {
+      "proceed|lc_left": 8,
+      "proceed|lc_right": 5,
+      "proceed|null": 34,
+      "slowdown|lc_left": 41,
+      "slowdown|lc_right": 23,
+      "slowdown|null": 104,
+      "stop|lc_left": 22,
+      "stop|lc_right": 4,
+      "stop|null": 81
+    },
+    "mounted_police": {
+      "null|null": 272
+    },
+    "nominal": {
+      "null|null": 6741
+    }
+  },
+  "waypoint_stats": {}
+}

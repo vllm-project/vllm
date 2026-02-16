@@ -1,0 +1,721 @@
+{
+  "experiment": "phase2_geometry_final",
+  "timestamp": "2026-02-16T16:47:42",
+  "task41": {
+    "summary": {
+      "total": 100,
+      "valid_waypoints": 0,
+      "parse_rate": 0.0,
+      "in_drivable": 0,
+      "drivable_rate": 0
+    },
+    "samples": [
+      {
+        "sample_index": 0,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 11.7
+      },
+      {
+        "sample_index": 83,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 6.2
+      },
+      {
+        "sample_index": 166,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 249,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 332,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 415,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 498,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 581,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 664,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 747,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 830,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 913,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 996,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 1079,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 1162,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 1245,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 1328,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 1411,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 1494,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 1577,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 1660,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 1743,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 1826,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 1909,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 7.9
+      },
+      {
+        "sample_index": 1992,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.9
+      },
+      {
+        "sample_index": 2075,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 2158,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 2241,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "gentle_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 2324,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 7.6
+      },
+      {
+        "sample_index": 2407,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 2490,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 2573,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 2656,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 2739,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 2822,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 2905,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 2988,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 3071,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 3154,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 3237,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 3320,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 3403,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 3486,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 3569,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 3652,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.8
+      },
+      {
+        "sample_index": 3735,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 3818,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 3901,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 3984,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 4067,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 4150,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 4233,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 4316,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 4399,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 4482,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 4565,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 4648,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 4731,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 4814,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 4897,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.2
+      },
+      {
+        "sample_index": 4980,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 5063,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 5146,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 5229,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 5312,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 5395,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 5478,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 5561,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 5644,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 5727,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 5810,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 5893,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 5976,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 6059,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 6142,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 6225,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 6308,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 6391,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 6474,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 6557,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 6640,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 6723,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 6806,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 6889,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.8
+      },
+      {
+        "sample_index": 6972,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.4
+      },
+      {
+        "sample_index": 7055,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 7138,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 7221,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.6
+      },
+      {
+        "sample_index": 7304,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 7387,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.2
+      },
+      {
+        "sample_index": 7470,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 7553,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 7636,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.7
+      },
+      {
+        "sample_index": 7719,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 7802,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.2
+      },
+      {
+        "sample_index": 7885,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.3
+      },
+      {
+        "sample_index": 7968,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 8051,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 8134,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "sharp_right",
+        "latency_ms": 5.5
+      },
+      {
+        "sample_index": 8217,
+        "predicted_waypoint": null,
+        "in_drivable": false,
+        "road_curvature": "straight",
+        "latency_ms": 5.4
+      }
+    ]
+  },
+  "comparison_2b_vs_8b": {
+    "2b_parse_rate": 0,
+    "8b_parse_rate": 0.0,
+    "2b_drivable_rate": 0,
+    "8b_drivable_rate": 0
+  }
+}
