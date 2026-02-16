@@ -9,7 +9,6 @@ Reference: https://huggingface.co/ModernVBERT/colmodernvbert-merged
 """
 
 from collections.abc import Iterable, Mapping, Sequence
-from functools import cached_property
 from typing import ClassVar, Literal
 
 import torch
@@ -37,12 +36,13 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
+from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import default_pooling_type
 from .modernbert import ModernBertEmbeddings, ModernBertLayer
 from .siglip import SiglipVisionModel
-from .utils import maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 # ---------------------------------------------------------------------------
 # Connector: pixel shuffle + simple linear projection
@@ -152,14 +152,6 @@ class ColModernVBertDummyInputsBuilder(
 class ColModernVBertMultiModalProcessor(
     BaseMultiModalProcessor[ColModernVBertProcessingInfo],
 ):
-    @cached_property
-    def _image_processor(self):
-        from transformers import AutoImageProcessor
-
-        return AutoImageProcessor.from_pretrained(
-            self.info.ctx.model_config.model,
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -177,7 +169,17 @@ class ColModernVBertMultiModalProcessor(
 
         images = mm_data.get("images")
         if images:
-            image_outputs = self._image_processor(
+            # ColModernVBERT has no registered HF processor class, so we
+            # load the image processor directly (cached by lru_cache).
+            from transformers import Idefics3ImageProcessor
+
+            image_processor = cached_get_processor(
+                self.info.ctx.model_config.model,
+                processor_cls=Idefics3ImageProcessor,
+                revision=self.info.ctx.model_config.revision,
+                trust_remote_code=(self.info.ctx.model_config.trust_remote_code),
+            )
+            image_outputs = image_processor(
                 images=images,
                 do_image_splitting=False,
                 return_tensors="pt",
@@ -350,97 +352,52 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
 
     # ---- weight loading -----------------------------------------------------
 
+    # Checkpoint prefix → vLLM param prefix.
+    # More-specific prefixes must appear before shorter ones.
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.text_model.layers.": "text_layers.",
+            "model.text_model.embeddings.": "text_embeddings.",
+            "model.text_model.final_norm.": "text_final_norm.",
+            "model.connector.modality_projection.": "connector.",
+            "model.custom_text_proj.": "custom_text_proj.",
+            "model.vision_model.": "vision_model.vision_model.",
+            "model.": "",
+        },
+    )
+
+    # Checkpoint names for DecoupledEmbedding parts
+    _BASE_EMB = "model.text_model.embeddings.tok_embeddings.weight"
+    _EXTRA_EMB = (
+        "model.text_model.embeddings.tok_embeddings.additional_embedding.weight"
+    )
+
     def load_weights(
         self,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> set[str]:
-        # Collect all weights so we can handle DecoupledEmbedding
-        # (base + additional embedding weights must be concatenated).
-        weights_list = list(weights)
-
-        vision_weights: list[tuple[str, torch.Tensor]] = []
+        # DecoupledEmbedding requires concatenating base + additional
+        # embedding tensors before loading, so we extract them first.
         base_embedding_weight: torch.Tensor | None = None
         additional_embedding_weight: torch.Tensor | None = None
+        remaining: list[tuple[str, torch.Tensor]] = []
 
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
+        for name, tensor in weights:
+            if name == self._BASE_EMB:
+                base_embedding_weight = tensor
+            elif name == self._EXTRA_EMB:
+                additional_embedding_weight = tensor
+            else:
+                remaining.append((name, tensor))
 
-        for name, weight in weights_list:
-            # Strip checkpoint "model." prefix
-            if name.startswith("model."):
-                name = name[len("model.") :]
+        # Load all non-embedding weights via AutoWeightsLoader
+        loader = AutoWeightsLoader(self)
+        loaded_params = loader.load_weights(
+            remaining,
+            mapper=self.hf_to_vllm_mapper,
+        )
 
-            # --- Vision model ---
-            if name.startswith("vision_model."):
-                vision_weights.append((name, weight))
-                continue
-
-            # --- Connector ---
-            if name.startswith("connector."):
-                mapped = name.replace(
-                    "modality_projection.proj",
-                    "proj",
-                )
-                if mapped in params_dict:
-                    param = params_dict[mapped]
-                    loader = getattr(
-                        param,
-                        "weight_loader",
-                        default_weight_loader,
-                    )
-                    loader(param, weight)
-                    loaded_params.add(mapped)
-                continue
-
-            # --- DecoupledEmbedding (buffer for concatenation) ---
-            if name == ("text_model.embeddings.tok_embeddings.weight"):
-                base_embedding_weight = weight
-                continue
-            if name == (
-                "text_model.embeddings.tok_embeddings.additional_embedding.weight"
-            ):
-                additional_embedding_weight = weight
-                continue
-
-            # --- ColBERT projection ---
-            if name.startswith("custom_text_proj."):
-                if name in params_dict:
-                    param = params_dict[name]
-                    loader = getattr(
-                        param,
-                        "weight_loader",
-                        default_weight_loader,
-                    )
-                    loader(param, weight)
-                    loaded_params.add(name)
-                continue
-
-            # --- Text model (remap prefixes) ---
-            if name.startswith("text_model."):
-                suffix = name[len("text_model.") :]
-                if suffix.startswith("layers."):
-                    mapped = "text_layers." + suffix[len("layers.") :]
-                elif suffix.startswith("embeddings."):
-                    mapped = "text_embeddings." + suffix[len("embeddings.") :]
-                elif suffix.startswith("final_norm."):
-                    mapped = "text_final_norm." + suffix[len("final_norm.") :]
-                else:
-                    mapped = suffix
-
-                if mapped.endswith(".bias") and mapped not in params_dict:
-                    continue
-                if mapped in params_dict:
-                    param = params_dict[mapped]
-                    loader = getattr(
-                        param,
-                        "weight_loader",
-                        default_weight_loader,
-                    )
-                    loader(param, weight)
-                    loaded_params.add(mapped)
-                continue
-
-        # --- Concatenate DecoupledEmbedding weights ---
+        # Concatenate and load DecoupledEmbedding weights
         if base_embedding_weight is not None:
             combined = base_embedding_weight
             if additional_embedding_weight is not None:
@@ -449,14 +406,15 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
                     dim=0,
                 )
             param_name = "text_embeddings.tok_embeddings.weight"
+            params_dict = dict(self.named_parameters())
             if param_name in params_dict:
                 param = params_dict[param_name]
-                loader = getattr(
+                weight_loader = getattr(
                     param,
                     "weight_loader",
                     default_weight_loader,
                 )
-                loader(param, combined)
+                weight_loader(param, combined)
                 loaded_params.add(param_name)
         elif additional_embedding_weight is not None:
             raise ValueError(
@@ -465,14 +423,8 @@ class ColModernVBertForRetrieval(nn.Module, SupportsMultiModal):
                 "'text_model.embeddings.tok_embeddings.weight'"
             )
 
-        # --- Load vision weights via SiglipVisionModel ---
-        vision_loaded = self.vision_model.load_weights(vision_weights)
-        loaded_params.update({"vision_model." + n for n in vision_loaded})
-
-        # --- Mark pooler projection weights as loaded ---
         # The pooler wraps ``custom_text_proj`` as its head projector.
-        # We already loaded those weights above, but the pooler registers
-        # them under a different path, so mark them explicitly.
+        # Mark those params as loaded under the pooler path too.
         if hasattr(self, "pooler") and hasattr(self.pooler, "head"):
             head = self.pooler.head
             projector = getattr(head, "projector", None)
