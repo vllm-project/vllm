@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import pickle as pkl
-import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from itertools import product
@@ -58,10 +56,10 @@ def unfused_fp8_impl(
     """Unfused: SiLU+Mul then per-tensor quantize."""
     hidden = x.shape[-1] // 2
     gate, up = x.split(hidden, dim=-1)
-    
+
     # SiLU(gate) * up
     silu_out = F.silu(gate) * up
-    
+
     # Per-tensor quantize (no group_size used here)
     silu_out, _ = ops.scaled_fp8_quant(silu_out)
 
@@ -74,10 +72,10 @@ def unfused_groupwise_fp8_impl(
     """Unfused: SiLU+Mul then group-wise quantize."""
     hidden = x.shape[-1] // 2
     gate, up = x.split(hidden, dim=-1)
-    
+
     # SiLU(gate) * up
     silu_out = F.silu(gate) * up
-    
+
     # Group quantize - use group_size directly
     silu_out, _ = per_token_group_quant_fp8(
         silu_out, group_size=group_size, use_ue8m0=False
@@ -195,25 +193,20 @@ def main():
     bench_params = get_bench_params()
 
     print(f"Running {len(bench_params)} benchmark configurations...")
-    print(f"This will take approximately {len(bench_params) * 3} seconds (1s per variant)")
+    print(
+        f"This will take approximately {len(bench_params) * 3} seconds (1s per variant)"
+    )
     print()
 
     timers = []
     for bp in tqdm(bench_params):
         result_timers = bench(bp, "silu-mul-block-quant", bp.description())
         timers.extend(result_timers)
-    
-    print("\n" + "="*80)
-    print("FINAL COMPARISON - ALL RESULTS")
-    print("="*80)
-    print_timers(timers)
 
-    # Pickle all the results
-    timestamp = int(time.time())
-    filename = f"silu_mul_block_quant-{timestamp}.pkl"
-    with open(filename, "wb") as f:
-        pkl.dump(timers, f)
-    print(f"\nResults saved to: {filename}")
+    print("\n" + "=" * 80)
+    print("FINAL COMPARISON - ALL RESULTS")
+    print("=" * 80)
+    print_timers(timers)
 
 
 if __name__ == "__main__":
