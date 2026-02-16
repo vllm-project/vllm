@@ -692,7 +692,7 @@ class LLM:
         eos_token_id = tokenizer.eos_token_id
         sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
-        engine_prompts = self._preprocess_cmpl(prompts, use_tqdm=use_tqdm)
+        engine_prompts = self._preprocess_cmpl(prompts)
         lora_requests = self._lora_request_to_seq(lora_request, len(engine_prompts))
 
         if use_tqdm and concurrency_limit is not None:
@@ -825,8 +825,6 @@ class LLM:
         self,
         prompts: Sequence[PromptType],
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        use_tqdm: bool | Callable[..., tqdm] = False,
     ) -> Sequence[ProcessorInputs]:
         """
         Convert prompt inputs from LLM APIs (other than [LLM.chat][]) into
@@ -847,7 +845,7 @@ class LLM:
             **(tokenization_kwargs or {})
         )
 
-        return renderer.render_cmpl(parsed_prompts, tok_params, use_tqdm=use_tqdm)
+        return renderer.render_cmpl(parsed_prompts, tok_params)
 
     def _preprocess_cmpl_one(
         self,
@@ -868,8 +866,6 @@ class LLM:
         tools: list[dict[str, Any]] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         mm_processor_kwargs: dict[str, Any] | None = None,
-        *,
-        use_tqdm: bool | Callable[..., tqdm] = False,
     ) -> Sequence[ProcessorInputs]:
         """
         Convert a list of conversations into prompts so that they can then
@@ -904,7 +900,6 @@ class LLM:
             chat_params,
             tok_params,
             prompt_extras={"mm_processor_kwargs": mm_processor_kwargs},
-            use_tqdm=use_tqdm,
         )
 
         return engine_prompts

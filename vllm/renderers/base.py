@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
-from tqdm.auto import tqdm
 from typing_extensions import TypeVar
 
 from vllm.inputs import (
@@ -25,7 +25,6 @@ from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.utils.tqdm_utils import maybe_tqdm
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
 from .embed_utils import safe_load_prompt_embeds
@@ -647,11 +646,18 @@ class BaseRenderer(ABC, Generic[_T]):
             decoder_start_token_id=self.get_dec_start_token_id(),
         )
 
-    def process_for_engine(self, prompt: TokPrompt) -> ProcessorInputs:
+    def process_for_engine(
+        self, prompt: TokPrompt, arrival_time: float
+    ) -> ProcessorInputs:
+        engine_prompt: ProcessorInputs
         if "encoder_prompt" in prompt:
-            return self._process_enc_dec(prompt)  # type: ignore[arg-type]
+            engine_prompt = self._process_enc_dec(prompt)  # type: ignore[arg-type]
+        else:
+            engine_prompt = self._process_singleton(prompt)
 
-        return self._process_singleton(prompt)
+        engine_prompt["arrival_time"] = arrival_time
+
+        return engine_prompt
 
     # Top-level methods
     def render_cmpl(
@@ -660,27 +666,18 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
-        use_tqdm: bool | Callable[..., tqdm] = False,
     ):
+        arrival_time = time.time()
+
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
-        dict_prompts = self.render_prompts(
-            maybe_tqdm(prompts, use_tqdm=use_tqdm, desc="Rendering prompts")
-        )
-        tok_prompts = self.tokenize_prompts(
-            maybe_tqdm(dict_prompts, use_tqdm=use_tqdm, desc="Tokenizing prompts"),
-            tok_params,
-        )
+        dict_prompts = self.render_prompts(prompts)
+        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return [
-            self.process_for_engine(prompt)
-            for prompt in maybe_tqdm(
-                tok_prompts, use_tqdm=use_tqdm, desc="Processing prompts"
-            )
-        ]
+        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
 
     async def render_cmpl_async(
         self,
@@ -689,6 +686,8 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        arrival_time = time.time()
+
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
@@ -697,7 +696,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return [self.process_for_engine(prompt) for prompt in tok_prompts]
+        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
 
     def render_chat(
         self,
@@ -706,16 +705,15 @@ class BaseRenderer(ABC, Generic[_T]):
         tok_params: TokenizeParams | None = None,
         *,
         prompt_extras: dict[str, Any] | None = None,
-        use_tqdm: bool | Callable[..., tqdm] = False,
     ):
+        arrival_time = time.time()
+
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
         rendered = [
             self.render_messages(conversation, chat_params)
-            for conversation in maybe_tqdm(
-                conversations, use_tqdm=use_tqdm, desc="Rendering conversations"
-            )
+            for conversation in conversations
         ]
 
         out_conversations = list[list["ConversationMessage"]]()
@@ -724,18 +722,12 @@ class BaseRenderer(ABC, Generic[_T]):
             out_conversations.append(conv)
             dict_prompts.append(prompt)
 
-        tok_prompts = self.tokenize_prompts(
-            maybe_tqdm(dict_prompts, use_tqdm=use_tqdm, desc="Tokenizing prompts"),
-            tok_params,
-        )
+        tok_prompts = self.tokenize_prompts(dict_prompts, tok_params)
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
         eng_prompts = [
-            self.process_for_engine(prompt)
-            for prompt in maybe_tqdm(
-                tok_prompts, use_tqdm=use_tqdm, desc="Processing prompts"
-            )
+            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
         ]
 
         return out_conversations, eng_prompts
@@ -748,6 +740,8 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        arrival_time = time.time()
+
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
@@ -766,6 +760,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        eng_prompts = [self.process_for_engine(prompt) for prompt in tok_prompts]
+        eng_prompts = [
+            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
+        ]
 
         return out_conversations, eng_prompts

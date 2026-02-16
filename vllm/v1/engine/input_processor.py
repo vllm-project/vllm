@@ -210,16 +210,15 @@ class InputProcessor:
                 f"is out of range [0, {num_ranks})."
             )
 
-        if arrival_time is None:
-            arrival_time = time.time()
-
-        # Process inputs, which includes:
-        # 1. Tokenize text prompt, with LoRA request if one exists.
-        # 2. For multimodal models with a merged preprocessor, preprocess
-        #   multimodal data and expand prompt token ids accordingly.
         if isinstance(prompt, dict) and "type" in prompt:
+            if arrival_time is None:
+                arrival_time = prompt.get("arrival_time", time.time())
+
             processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
         else:
+            if arrival_time is None:
+                arrival_time = time.time()
+
             processed_inputs = self.input_preprocessor.preprocess(
                 prompt,
                 tokenization_kwargs=tokenization_kwargs,

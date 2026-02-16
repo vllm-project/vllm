@@ -187,6 +187,9 @@ class _InputOptions(TypedDict):
     Additional options available to all input types.
     """
 
+    arrival_time: NotRequired[float]
+    """The time when the input was received (before rendering)."""
+
     cache_salt: NotRequired[str]
     """Optional cache salt to be used for prefix caching."""
 
