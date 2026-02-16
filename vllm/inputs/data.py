@@ -303,6 +303,9 @@ class EncoderDecoderInputs(TypedDict):
     decoder_prompt: DecoderInputs
     """The inputs for the decoder portion."""
 
+    arrival_time: NotRequired[float]
+    """The time when the input was received (before rendering)."""
+
 
 ProcessorInputs: TypeAlias = DecoderOnlyInputs | EncoderDecoderInputs
 """
