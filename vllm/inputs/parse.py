@@ -7,7 +7,7 @@ from .data import ProcessorInputs, SingletonInputs
 def split_enc_dec_inputs(
     inputs: ProcessorInputs,
 ) -> tuple[SingletonInputs | None, SingletonInputs]:
-    if "encoder_prompt" in inputs and "decoder_prompt" in inputs:
+    if inputs["type"] == "enc_dec":
         return inputs["encoder_prompt"], inputs["decoder_prompt"]
 
     return None, inputs
