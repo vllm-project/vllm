@@ -517,12 +517,14 @@ class Lfm2MoeModel(nn.Module):
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
-                if weight_name not in name:
+                # Use segment-boundary matching (trailing dot) to prevent
+                # e.g. ".w1" from matching inside ".w13" in pre-fused keys.
+                if weight_name + "." not in name:
                     continue
 
                 if ("feed_forward.experts." in name) and name not in params_dict:
                     continue
-                name = name.replace(weight_name, param_name)
+                name = name.replace(weight_name + ".", param_name + ".")
                 # Skip loading extra bias for GPTQ models.
                 if (
                     name.endswith(".bias") or name.endswith("_bias")
