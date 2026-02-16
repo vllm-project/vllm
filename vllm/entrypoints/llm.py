@@ -1135,10 +1135,12 @@ class LLM:
                 )
 
             # Validate the request data is valid for the loaded plugin
-            validated_prompt = self.io_processor.parse_data(prompts)
+            validated_prompt = self.io_processor.parse_data(prompts.get("data", None))
 
             # obtain the actual model prompts from the pre-processor
-            prompts = self.io_processor.pre_process(prompt=validated_prompt)
+            prompts = self.io_processor.pre_process(
+                prompt=validated_prompt, renderer=self.renderer
+            )
             prompts_seq = prompt_to_seq(prompts)
 
             params_seq: Sequence[PoolingParams] = [
