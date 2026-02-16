@@ -96,3 +96,5 @@ albumentations==1.4.6
 transformers==5.0.0
 # Pin HF Hub version
 huggingface-hub==1.4.1
+# Pin Mistral Common
+mistral-common[image,audio]==1.9.1
