@@ -186,8 +186,10 @@ class Qwen2AudioDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2AudioProcessingIn
 
         hf_processor = self.info.get_hf_processor()
         audio_token = hf_processor.audio_token
+        audio_bos_token = hf_processor.audio_bos_token
+        audio_eos_token = hf_processor.audio_eos_token
 
-        return audio_token * num_audios
+        return (audio_bos_token + audio_token + audio_eos_token) * num_audios
 
     def get_dummy_mm_data(
         self,
