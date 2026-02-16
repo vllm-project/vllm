@@ -15,7 +15,7 @@ from argparse import Namespace
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 import vllm.envs as envs
@@ -29,7 +29,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.system_utils import set_ulimit
-from vllm.v1.engine import FaultToleranceRequest
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger("vllm.entrypoints.api_server")
@@ -55,54 +54,6 @@ async def generate(request: Request) -> Response:
     """
     request_dict = await request.json()
     return await _generate(request_dict, raw_request=request)
-
-
-@app.post("/fault_tolerance/apply")
-async def process_fault_tolerance_instruction(request: Request) -> Response:
-    """Apply fault tolerance instructions to the engine.
-
-    This endpoint handles fault recovery operations such as retrying operations.
-
-    The request should be a JSON object with the following fields:
-    - fault_tolerance_instruction: The name of fault tolerance method.
-    - fault_tolerance_timeout: Timeout in seconds for the operation to complete.
-    - fault_tolerance_params: dict, optional. Additional dynamic parameters for
-    the fault tolerance operation.
-    """
-    request_dict = await request.json()
-
-    fault_tolerance_instruction = request_dict.get("fault_tolerance_instruction")
-    fault_tolerance_timeout = request_dict.get("fault_tolerance_timeout")
-    kwargs = request_dict.get("fault_tolerance_params", {})
-    assert engine is not None
-    kwargs["timeout"] = fault_tolerance_timeout
-    ft_request = FaultToleranceRequest(
-        request_id=random_uuid(),
-        instruction=fault_tolerance_instruction,
-        params=kwargs,
-    )
-    ft_result = await engine.handle_fault(ft_request)
-    success, reason = ft_result.success, ft_result.reason
-    if success:
-        return JSONResponse(
-            status_code=200,
-            content={"message": "Instruction executed successfully."},
-        )
-
-    logger.error("Fault tolerance operation failed. Shutting down the engine.")
-    engine.shutdown()
-    raise HTTPException(
-        status_code=400,
-        detail=f"Instruction execution failed. Reason: {reason}",
-    )
-
-
-@app.get("/fault_tolerance/status")
-async def get_fault_info() -> Response:
-    """Health check."""
-    assert engine is not None
-    engine_status_dict = await engine.get_fault_info()
-    return Response(json.dumps(engine_status_dict), status_code=200)
 
 
 @with_cancellation

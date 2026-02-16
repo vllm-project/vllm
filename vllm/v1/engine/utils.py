@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import contextlib
 import multiprocessing
 import os
@@ -63,7 +64,6 @@ class EngineZmqAddresses:
     inputs: list[str]
     # ZMQ output socket addresses for each front-end client (responses)
     outputs: list[str]
-
     # ZMQ input socket address of DP coordinator if applicable
     coordinator_input: str | None = None
     # ZMQ output socket address of DP coordinator if applicable
@@ -74,10 +74,6 @@ class EngineZmqAddresses:
     frontend_stats_publish_address: str | None = None
     # ZMQ fault_state_pub_socket address of client sentinel
     fault_state_pub_socket_addr: str | None = None
-    # ZMQ client_sentinel_request socket address of client sentinel
-    client_sentinel_request_addr: str | None = None
-    # ZMQ engine_core_sentinel_cmd socket address of engine_core sentinel
-    engine_core_sentinel_cmd_addr: str | None = None
     # ZMQ engine_fault socket address of EngineCoreSentinel
     engine_fault_socket_addr: str | None = None
     # Identities of engine core DEALER sockets, keyed by engine index.
@@ -243,6 +239,7 @@ class CoreEngineProcManager:
                 sentinels.remove(sentinel)
 
     def join_first(self):
+        """Wait for any process to exit."""
         connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:
@@ -446,7 +443,6 @@ class CoreEngineActorManager:
                     local_dp_rank=local_index,
                 )
             )
-
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
@@ -966,12 +962,6 @@ def launch_core_engines(
             local_only=False,
             host=vllm_config.parallel_config.data_parallel_master_ip,
             port=vllm_config.fault_tolerance_config.internal_fault_report_port,
-        )
-        addresses.client_sentinel_request_addr = get_engine_client_zmq_addr(
-            local_only=True, host=host
-        )
-        addresses.engine_core_sentinel_cmd_addr = get_engine_client_zmq_addr(
-            local_only=local_engines_only, host=host
         )
         identity_group = generate_identity_group(
             peer1="client",

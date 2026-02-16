@@ -23,15 +23,6 @@ class EngineDeadError(Exception):
         self.__suppress_context__ = suppress_context
 
 
-class EngineLoopPausedError(Exception):
-    """
-    Raised when the EngineCore loop is temporarily paused on purpose,
-    e.g., to handle fault-tolerance.
-    """
-
-    pass
-
-
 @dataclass
 class FaultInfo:
     type: str
