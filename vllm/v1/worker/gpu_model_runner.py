@@ -169,7 +169,10 @@ from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
-from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
+from vllm.v1.worker.kv_connector_model_runner_mixin import (
+    CrossLayerGroup,
+    KVConnectorModelRunnerMixin,
+)
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
@@ -433,8 +436,7 @@ class GPUModelRunner(
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
         # Initialize in initialize_kv_cache_tensors
-        self.cross_layers_kv_cache: torch.Tensor | None = None
-        self.cross_layers_attn_backend: type[AttentionBackend] | None = None
+        self.cross_layer_groups: list[CrossLayerGroup] | None = None
         # indexes: [kv_cache_group_id][attn_group]
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
@@ -5978,17 +5980,14 @@ class GPUModelRunner(
         # Try creating KV caches optimized for kv-connector transfers
         cache_dtype = self.cache_config.cache_dtype
         if self.use_uniform_kv_cache(self.attn_groups, cache_dtype):
-            kv_caches, cross_layers_kv_cache, attn_backend = (
-                self.allocate_uniform_kv_caches(
-                    kv_cache_config,
-                    self.attn_groups,
-                    cache_dtype,
-                    self.device,
-                    kernel_block_sizes,
-                )
+            kv_caches, cross_layer_groups = self.allocate_uniform_kv_caches(
+                kv_cache_config,
+                self.attn_groups,
+                cache_dtype,
+                self.device,
+                kernel_block_sizes,
             )
-            self.cross_layers_kv_cache = cross_layers_kv_cache
-            self.cross_layers_attn_backend = attn_backend
+            self.cross_layer_groups = cross_layer_groups
         else:
             # Fallback to the general case
             # Initialize the memory buffer for KV cache
@@ -6082,10 +6081,15 @@ class GPUModelRunner(
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()
-            if self.cross_layers_kv_cache is not None:
-                assert self.cross_layers_attn_backend is not None
+            if (
+                self.cross_layer_groups is not None
+                and len(self.cross_layer_groups) == 1
+                and isinstance(self.cross_layer_groups[0].spec, AttentionSpec)
+            ):
+                # Optimized path: single attention group can use cross-layer API
+                group = self.cross_layer_groups[0]
                 kv_transfer_group.register_cross_layers_kv_cache(
-                    self.cross_layers_kv_cache, self.cross_layers_attn_backend
+                    group.tensor, group.backend
                 )
             else:
                 kv_transfer_group.register_kv_caches(kv_caches)
