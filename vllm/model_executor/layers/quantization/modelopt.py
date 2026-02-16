@@ -977,11 +977,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         assert self.moe_mk is not None
         return self.moe_mk(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights,
-            topk_ids,
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
@@ -1549,11 +1549,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         else:
             assert self.moe_mk is not None
             return self.moe_mk(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights,
-                topk_ids,
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
