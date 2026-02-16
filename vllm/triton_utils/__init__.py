@@ -17,4 +17,6 @@ else:
     tl = TritonLanguagePlaceholder()
     tldevice = TritonLanguagePlaceholder()
 
-__all__ = ["HAS_TRITON", "triton", "tl", "tldevice"]
+from vllm.triton_utils.autotune import vllm_autotune
+
+__all__ = ["HAS_TRITON", "triton", "tl", "tldevice", "vllm_autotune"]
