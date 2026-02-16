@@ -132,6 +132,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
+    VLLM_ENABLE_PREGRAD_PASSES: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -229,6 +230,8 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
+    VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
 
@@ -271,7 +274,7 @@ def use_aot_compile() -> bool:
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.11.0.dev") and not disable_compile_cache()
+        if is_torch_equal_or_newer("2.10.0") and not disable_compile_cache()
         else "0"
     )
 
@@ -566,6 +569,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # enabled by default.
     "VLLM_USE_STANDALONE_COMPILE": lambda: os.environ.get(
         "VLLM_USE_STANDALONE_COMPILE", "1"
+    )
+    == "1",
+    # Inductor's pre-grad passes don't do anything for vLLM.
+    # The pre-grad passes get run even on cache-hit and negatively impact
+    # vllm cold compile times by O(1s)
+    # Can remove this after the following issue gets fixed
+    # https://github.com/pytorch/pytorch/issues/174502
+    "VLLM_ENABLE_PREGRAD_PASSES": lambda: os.environ.get(
+        "VLLM_ENABLE_PREGRAD_PASSES", "0"
     )
     == "1",
     # Debug pattern matching inside custom passes.
@@ -1532,6 +1544,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # Disable using pytorch's pin memory for CPU offloading.
+    "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
+    ),
+    # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
+    "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+    ),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
@@ -1604,6 +1624,15 @@ def is_set(name: str):
     if name in environment_variables:
         return name in os.environ
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def validate_environ(hard_fail: bool) -> None:
+    for env in os.environ:
+        if env.startswith("VLLM_") and env not in environment_variables:
+            if hard_fail:
+                raise ValueError(f"Unknown vLLM environment variable detected: {env}")
+            else:
+                logger.warning("Unknown vLLM environment variable detected: %s", env)
 
 
 def compile_factors() -> dict[str, object]:

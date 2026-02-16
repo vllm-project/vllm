@@ -31,14 +31,6 @@ import torch
 from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
-from transformers.models.qwen3_5.configuration_qwen3_5 import (
-    Qwen3_5Config,
-    Qwen3_5TextConfig,
-)
-from transformers.models.qwen3_5_moe.configuration_qwen3_5_moe import (
-    Qwen3_5MoeConfig,
-    Qwen3_5MoeTextConfig,
-)
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
@@ -87,6 +79,14 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils.configs.qwen3_5 import (
+    Qwen3_5Config,
+    Qwen3_5TextConfig,
+)
+from vllm.transformers_utils.configs.qwen3_5_moe import (
+    Qwen3_5MoeConfig,
+    Qwen3_5MoeTextConfig,
+)
 
 from .interfaces import (
     HasInnerState,
@@ -99,6 +99,7 @@ from .interfaces import (
 )
 from .qwen2_moe import Qwen2MoeMLP as Qwen3NextMLP
 from .qwen3_next import (
+    ChunkGatedDeltaRule,
     Qwen3NextAttention,
     Qwen3NextDecoderLayer,
     Qwen3NextGatedDeltaNet,
@@ -205,7 +206,7 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             output_size=self.num_v_heads,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_ba",
+            prefix=f"{prefix}.in_proj_b",
         )
         self.in_proj_a = ColumnParallelLinear(
             input_size=self.hidden_size,
@@ -267,6 +268,8 @@ class Qwen3_5GatedDeltaNet(Qwen3NextGatedDeltaNet):
             quant_config=quant_config,
             prefix=f"{prefix}.out_proj",
         )
+
+        self.chunk_gated_delta_rule = ChunkGatedDeltaRule()
 
         compilation_config = get_current_vllm_config().compilation_config
         if prefix in compilation_config.static_forward_context:
@@ -868,7 +871,9 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
