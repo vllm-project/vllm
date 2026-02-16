@@ -898,26 +898,37 @@ __global__ void gather_cache(
     const int64_t block_table_stride, const int64_t cache_block_stride,
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
     const float* __restrict__ scale,
-    const int32_t* __restrict__ seq_starts) {  // Optional: starting offsets
+    const int32_t* __restrict__ seq_starts,  // Optional: starting offsets
+    const int32_t batch_dim,                 // Number of batches in block_table
+    const int32_t block_table_width,         // block_table.size(1)
+    const int32_t cache_num_blocks) {        // src_cache.size(0)
   assert(CTA_SIZE == blockDim.x);
 
   if constexpr (TOKEN_MAJOR) {
     for (int token_id = blockIdx.x; token_id < num_tokens;
          token_id += gridDim.x) {
       const int64_t batch_id = token_to_seq[token_id];
+      // Bounds-check batch_id against batch dimension.
+      if (batch_id < 0 || batch_id >= batch_dim) continue;
+
       const int64_t batch_start = cu_seq_lens[batch_id];
       const int64_t batch_end = cu_seq_lens[batch_id + 1];
       int32_t batch_offset = token_id - batch_start;
 
-      if (token_id >= batch_end) continue;
+      if (token_id < batch_start || token_id >= batch_end) continue;
       if (seq_starts != nullptr) {
-        batch_offset += seq_starts[batch_id];
+        const int32_t seq_start_val = seq_starts[batch_id];
+        if (seq_start_val < 0) continue;  // Guard negative seq_starts.
+        batch_offset += seq_start_val;
       }
       const int32_t block_table_id = batch_offset / block_size;
       const int32_t slot_id = batch_offset % block_size;
+      // Bounds-check block_table column index.
+      if (block_table_id < 0 || block_table_id >= block_table_width) continue;
       const int64_t block_table_offset =
           batch_id * block_table_stride + block_table_id;
       const int32_t block_id = block_table[block_table_offset];
+      if (block_id < 0 || block_id >= cache_num_blocks) continue;
       const int64_t cache_offset =
           block_id * cache_block_stride + slot_id * cache_entry_stride;
       scalar_t* dst_ptr = dst + token_id * dst_entry_stride;
@@ -942,7 +953,9 @@ __global__ void gather_cache(
 
     int32_t offset = split_start;
     if (seq_starts != nullptr) {
-      offset += seq_starts[bid];
+      const int32_t seq_start_val = seq_starts[bid];
+      if (seq_start_val < 0) return;  // Guard negative seq_starts.
+      offset += seq_start_val;
     }
     int32_t offset_div = offset / block_size;
     offset = offset % block_size;
@@ -951,13 +964,17 @@ __global__ void gather_cache(
     scalar_t* dst_batch = dst + seq_start * dst_entry_stride;
 
     for (int pid = split_start; pid < split_end; ++pid) {
+      // Bounds-check block_table column index.
+      if (offset_div < 0 || offset_div >= block_table_width) break;
       const int32_t block_id = block_table[batch_offset + offset_div];
-      const int64_t cache_offset =
-          block_id * cache_block_stride + offset * cache_entry_stride;
-      scalar_t* dst_ptr = dst_batch + pid * dst_entry_stride;
-      const cache_t* src_ptr = src_cache + cache_offset;
-      copy_or_dequant_entry<scalar_t, cache_t, kv_dt, DO_DEQUANT, ENTRY_SIZE,
-                            CTA_SIZE>(src_ptr, dst_ptr, entry_size, scale);
+      if (block_id >= 0 && block_id < cache_num_blocks) {
+        const int64_t cache_offset =
+            block_id * cache_block_stride + offset * cache_entry_stride;
+        scalar_t* dst_ptr = dst_batch + pid * dst_entry_stride;
+        const cache_t* src_ptr = src_cache + cache_offset;
+        copy_or_dequant_entry<scalar_t, cache_t, kv_dt, DO_DEQUANT, ENTRY_SIZE,
+                              CTA_SIZE>(src_ptr, dst_ptr, entry_size, scale);
+      }
       offset += 1;
       if (offset == block_size) {
         offset_div += 1;
@@ -976,14 +993,17 @@ void launch_token_major_gather_cache(
     const int32_t num_tokens, const int32_t block_size,
     const int64_t block_table_stride, const int64_t cache_block_stride,
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
-    const float* scale, const int32_t* seq_starts) {
+    const float* scale, const int32_t* seq_starts,
+    const int32_t batch_dim, const int32_t block_table_width,
+    const int32_t cache_num_blocks) {
   constexpr bool do_dequant = kv_dt != Fp8KVCacheDataType::kAuto;
   gather_cache<scalar_t, cache_t, kv_dt, true, do_dequant, ENTRY_SIZE, CTA_SIZE>
       <<<grid, block, 0, stream>>>(
           src_cache, dst, block_table, cu_seq_lens, token_to_seq, num_tokens,
           /*batch_size=*/0, block_size, /*entry_size=*/ENTRY_SIZE,
           block_table_stride, cache_block_stride, cache_entry_stride,
-          dst_entry_stride, scale, seq_starts);
+          dst_entry_stride, scale, seq_starts, batch_dim, block_table_width,
+          cache_num_blocks);
 }
 
 }  // namespace vllm
@@ -1001,7 +1021,9 @@ void launch_token_major_gather_cache(
       token_to_seq.data_ptr<int32_t>(), static_cast<int32_t>(num_tokens),     \
       block_size, block_table_stride, cache_block_stride, cache_entry_stride, \
       dst_entry_stride, reinterpret_cast<const float*>(scale.data_ptr()),     \
-      seq_starts_ptr);
+      seq_starts_ptr, static_cast<int32_t>(batch_dim),                        \
+      static_cast<int32_t>(block_table.size(1)),                              \
+      static_cast<int32_t>(src_cache.size(0)));
 
 // Token-major gather path with optional FP8 dequantization.
 static void gather_cache_token_major(
@@ -1032,6 +1054,15 @@ static void gather_cache_token_major(
   if (seq_starts.has_value()) {
     TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
                 "seq_starts must be int32");
+    int64_t batch_dim = block_table.size(0);
+    TORCH_CHECK(seq_starts.value().numel() >= batch_dim,
+                "seq_starts length (", seq_starts.value().numel(),
+                ") must be >= batch dimension (", batch_dim, ")");
+#ifndef NDEBUG
+    TORCH_CHECK(
+        seq_starts.value().slice(0, 0, batch_dim).min().item<int32_t>() >= 0,
+        "seq_starts must be non-negative");
+#endif
   }
   TORCH_CHECK(head_dim == 576,
               "gather_cache only support the head_dim to 576 "
@@ -1043,10 +1074,44 @@ static void gather_cache_token_major(
               "src_cache and block_table must be on the same device");
   TORCH_CHECK(src_cache.device() == cu_seq_lens.device(),
               "src_cache and cu_seq_lens must be on the same device");
+  TORCH_CHECK(src_cache.device() == token_to_seq.device(),
+              "src_cache and token_to_seq must be on the same device");
+  TORCH_CHECK(src_cache.device() == scale.device(),
+              "src_cache and scale must be on the same device");
+  TORCH_CHECK(scale.scalar_type() == torch::kFloat32,
+              "scale must be float32");
+  TORCH_CHECK(scale.numel() > 0,
+              "scale must have at least 1 element");
   if (seq_starts.has_value()) {
     TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
                 "src_cache and seq_starts must be on the same device");
   }
+
+  const int64_t batch_dim = block_table.size(0);
+
+  // Expensive GPU-sync checks: validate metadata values.
+  // Gated behind debug builds to avoid host-device sync in production.
+#ifndef NDEBUG
+  // Validate token_to_seq values are in [0, batch_dim)
+  {
+    auto t2s = token_to_seq.narrow(0, 0, num_tokens);
+    TORCH_CHECK(t2s.min().item<int32_t>() >= 0 &&
+                t2s.max().item<int32_t>() < batch_dim,
+                "token_to_seq contains out-of-range batch ids");
+  }
+
+  // Validate block_table width is sufficient for seq metadata
+  {
+    auto seq_lens = cu_seq_lens.slice(0, 1, batch_dim + 1) -
+                    cu_seq_lens.slice(0, 0, batch_dim);
+    auto starts = seq_starts.has_value()
+                    ? seq_starts.value().slice(0, 0, batch_dim)
+                    : torch::zeros_like(seq_lens);
+    auto need_blocks = (starts + seq_lens + block_size - 1) / block_size;
+    TORCH_CHECK(need_blocks.max().item<int32_t>() <= block_table.size(1),
+                "gather_cache metadata exceeds block_table width");
+  }
+#endif
 
   int64_t block_table_stride = block_table.stride(0);
   int64_t cache_block_stride = src_cache.stride(0);
@@ -1154,7 +1219,10 @@ __global__ void gather_and_dequant_cache_fp8_ds_mla(
       /*token_to_seq=*/nullptr, /*num_tokens=*/0,                           \
       static_cast<int32_t>(batch_size), block_size, entry_size,             \
       block_table_stride, cache_block_stride, cache_entry_stride,           \
-      dst_entry_stride, /*scale=*/nullptr, seq_starts_ptr);
+      dst_entry_stride, /*scale=*/nullptr, seq_starts_ptr,                  \
+      static_cast<int32_t>(batch_size),                                     \
+      static_cast<int32_t>(block_table.size(1)),                            \
+      static_cast<int32_t>(src_cache.size(0)));
 
 // Batch-major gather path with copy-only semantics.
 static void gather_cache_batch_major(
@@ -1181,6 +1249,14 @@ static void gather_cache_batch_major(
   if (seq_starts.has_value()) {
     TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
                 "seq_starts must be int32");
+    TORCH_CHECK(seq_starts.value().numel() >= batch_size,
+                "seq_starts length (", seq_starts.value().numel(),
+                ") must be >= batch_size (", batch_size, ")");
+#ifndef NDEBUG
+    TORCH_CHECK(
+        seq_starts.value().slice(0, 0, batch_size).min().item<int32_t>() >= 0,
+        "seq_starts must be non-negative");
+#endif
   }
 
   TORCH_CHECK(src_cache.device() == dst.device(),
@@ -1204,8 +1280,24 @@ static void gather_cache_batch_major(
   dim3 grid(batch_size, num_splits);
   dim3 block(1024);
 
-  TORCH_CHECK(src_cache.element_size() == dst.element_size(),
-              "src_cache and dst must have the same element size");
+  TORCH_CHECK(src_cache.scalar_type() == dst.scalar_type(),
+              "src_cache and dst must have the same dtype, got ",
+              src_cache.scalar_type(), " vs ", dst.scalar_type());
+
+  // Expensive GPU-sync checks: validate metadata values.
+  // Gated behind debug builds to avoid host-device sync in production.
+#ifndef NDEBUG
+  {
+    auto seq_lens = cu_seq_lens.slice(0, 1, batch_size + 1) -
+                    cu_seq_lens.slice(0, 0, batch_size);
+    auto starts = seq_starts.has_value()
+                    ? seq_starts.value().slice(0, 0, batch_size)
+                    : torch::zeros_like(seq_lens);
+    auto need_blocks = (starts + seq_lens + block_size - 1) / block_size;
+    TORCH_CHECK(need_blocks.max().item<int32_t>() <= block_table.size(1),
+                "gather_cache metadata exceeds block_table width");
+  }
+#endif
 
   const int dtype_bits = src_cache.element_size() * 8;
   const int32_t* seq_starts_ptr =
@@ -1249,6 +1341,9 @@ void gather_cache(
                 "gather_cache expects token_to_seq to be int32");
     TORCH_CHECK(num_tokens <= token_to_seq.value().numel(),
                 "gather_cache expects num_tokens <= token_to_seq.numel()");
+    TORCH_CHECK(num_tokens <= dst.size(0),
+                "gather_cache: num_tokens (", num_tokens,
+                ") exceeds dst.size(0) (", dst.size(0), ")");
     if (num_tokens == 0) {
       return;
     }
@@ -1267,6 +1362,10 @@ void gather_cache(
                 "pass kv_cache_dtype='auto'");
     TORCH_CHECK(batch_size <= block_table.size(0),
                 "gather_cache expects batch_size <= block_table.size(0)");
+    TORCH_CHECK(cu_seq_lens.numel() >= batch_size + 1,
+                "gather_cache batch-major: cu_seq_lens.numel() (",
+                cu_seq_lens.numel(), ") must be >= batch_size + 1 (",
+                batch_size + 1, ")");
     if (batch_size == 0) {
       return;
     }

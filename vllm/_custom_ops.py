@@ -2523,7 +2523,7 @@ def gather_and_dequant_cache_fp8_ds_mla(
     workspace_starts: torch.Tensor,
     batch_size: int,
 ) -> None:
-    """Gather and upconvert FP8 KV cache to BF16 workspace.
+    """Gather and dequant FP8 KV cache to BF16 workspace.
 
     Args:
         src_cache: FP8 KV cache [num_blocks, block_size, 656]
