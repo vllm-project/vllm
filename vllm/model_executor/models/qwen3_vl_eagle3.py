@@ -24,6 +24,8 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.qwen3 import (
     Qwen3DecoderLayer as BaseQwen3DecoderLayer,
+)
+from vllm.model_executor.models.qwen3 import (
     Qwen3ForCausalLM,
 )
 from vllm.multimodal.inputs import NestedTensors
