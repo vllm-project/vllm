@@ -70,6 +70,15 @@ _NEEDS_DIRECT_CACHE_UPDATE = frozenset(
     }
 )
 
+# Backends with known test-harness incompatibilities - see the TODOs
+# inside _get_available_reference_backends for details.
+_INCOMPATIBLE_REFERENCE_BACKENDS = frozenset(
+    {
+        AttentionBackendEnum.ROCM_AITER_FA,
+        AttentionBackendEnum.ROCM_ATTN,
+    }
+)
+
 
 def _adapt_kv_cache_for_backend(
     kv_cache: torch.Tensor,
@@ -100,8 +109,11 @@ def _get_platform_default_backend() -> AttentionBackendEnum:
         attn_selector_config=config,
     )
     for backend in AttentionBackendEnum:
-        if backend.value is not None and backend.get_path() == backend_path:
-            return backend
+        try:
+            if backend.get_path() == backend_path:
+                return backend
+        except ValueError:
+            continue
     raise RuntimeError(
         f"Platform returned backend path '{backend_path}' "
         f"that doesn't match any AttentionBackendEnum member."
@@ -119,7 +131,9 @@ def _get_available_reference_backends() -> list[AttentionBackendEnum]:
         backends: list[AttentionBackendEnum] = []
 
         # 1. Whatever the platform would auto-select at runtime.
-        backends.append(_get_platform_default_backend())
+        default_backend = _get_platform_default_backend()
+        if default_backend not in _INCOMPATIBLE_REFERENCE_BACKENDS:
+            backends.append(default_backend)
 
         # 2. TRITON_ATTN - always available on ROCm.
         if AttentionBackendEnum.TRITON_ATTN not in backends:
