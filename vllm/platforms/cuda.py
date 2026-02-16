@@ -403,17 +403,17 @@ class CudaPlatformBase(Platform):
         if selected_backend is not None:
             try:
                 backend_class = selected_backend.get_class()
-                invalid_reasons = backend_class.validate_configuration(
+                validation_errors = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
-                invalid_reasons = ["ImportError"]
-            if invalid_reasons:
+                validation_errors = ["ImportError"]
+            if validation_errors:
                 if raise_on_invalid:
                     raise ValueError(
                         f"Selected backend {selected_backend} is not valid for "
-                        f"this configuration. Reason: {invalid_reasons}"
+                        f"this configuration. Reason: {validation_errors}"
                     )
                 return None
             return selected_backend
