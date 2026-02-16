@@ -5,6 +5,7 @@ import os
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING
 
+import regex as re
 import torch
 
 import vllm.envs as envs
@@ -441,9 +442,16 @@ class RocmPlatform(Platform):
         torch.cuda.set_device(device)
 
     @classmethod
+    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
-        major, minor = torch.cuda.get_device_capability(device_id)
+        h = amdsmi_get_processor_handles()[device_id]
+        gfx = amdsmi_get_gpu_asic_info(h)["target_graphics_version"]
+        m = re.match(r"gfx(\d)(\d)", gfx)
+        if not m:
+            raise RuntimeError(f"Unexpected gfx format: {gfx}")
+        major = int(m.group(1))
+        minor = int(m.group(2))
         return DeviceCapability(major=major, minor=minor)
 
     @classmethod
