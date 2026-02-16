@@ -245,6 +245,33 @@ class CudaPlatformBase(Platform):
                 num_heads=num_heads,
             )
 
+            # If the user's --block-size forced a non-optimal backend,
+            # warn them. Only relevant when the user didn't also specify
+            # --attention-backend (in which case the choice is explicit).
+            if (
+                chosen_backend is not None
+                and user_specified_block_size
+                and selected_backend is None
+            ):
+                optimal = cls.select_attention_backend(
+                    selected_backend=None,
+                    attn_selector_config=attn_selector_config._replace(
+                        block_size=None,
+                    ),
+                    device_capability=device_capability,
+                    raise_on_invalid=False,
+                    num_heads=num_heads,
+                )
+                if optimal is not None and optimal != chosen_backend:
+                    logger.warning(
+                        "--block-size %d is not supported by the preferred "
+                        "%s backend. Using %s instead. Consider removing "
+                        "--block-size to auto-select the optimal block size.",
+                        cache_config.block_size,
+                        optimal.name,
+                        chosen_backend.name,
+                    )
+
         if chosen_backend is not None:
             if user_specified_block_size:
                 # User's block_size is compatible with the chosen backend.
