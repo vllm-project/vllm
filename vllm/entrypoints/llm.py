@@ -821,7 +821,7 @@ class LLM:
 
             for beam in best_beams:
                 beam.text = tokenizer.decode(beam.tokens)
-                print("beam", beam.text, beam.tokens)
+
             outputs.append(BeamSearchOutput(sequences=best_beams))
 
         return outputs
