@@ -86,7 +86,6 @@ from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
-from vllm.v1.sample.logits_processor import validate_logits_processors_parameters
 
 logger = init_logger(__name__)
 
@@ -130,9 +129,6 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_log_outputs = enable_log_outputs
         self.enable_log_deltas = enable_log_deltas
 
-        # set up logits processors
-        self.logits_processors = self.model_config.logits_processors
-
         # set up reasoning parser
         self.reasoning_parser_cls = ParserManager.get_reasoning_parser(
             reasoning_parser_name=reasoning_parser
@@ -149,6 +145,12 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
@@ -239,8 +241,7 @@ class OpenAIServingChat(OpenAIServing):
             raise self.engine_client.dead_error
 
         try:
-            renderer = self.engine_client.renderer
-            tokenizer = renderer.tokenizer
+            tokenizer = self.renderer.tokenizer
 
             tool_parser = self.tool_parser
 
@@ -375,6 +376,7 @@ class OpenAIServingChat(OpenAIServing):
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
         # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
@@ -387,10 +389,13 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
                 max_tokens = get_max_tokens(
-                    self.max_model_len,
-                    request,
+                    max_model_len,
+                    request.max_completion_tokens
+                    if request.max_completion_tokens is not None
+                    else request.max_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
+                    self.override_max_tokens,
                 )
 
                 sampling_params: SamplingParams | BeamSearchParams
@@ -401,12 +406,7 @@ class OpenAIServingChat(OpenAIServing):
                 else:
                     sampling_params = request.to_sampling_params(
                         max_tokens,
-                        self.model_config.logits_processor_pattern,
                         self.default_sampling_params,
-                    )
-                    validate_logits_processors_parameters(
-                        self.logits_processors,
-                        sampling_params,
                     )
 
                 self._log_inputs(
