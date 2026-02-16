@@ -235,6 +235,10 @@ class Fp8Config(QuantizationConfig):
         # If no matches, return None
         return None
 
+    @classmethod
+    def uses_meta_device_weights(cls) -> bool:
+        return True
+
 
 class CopyNumelCounter(TorchDispatchMode):
     """

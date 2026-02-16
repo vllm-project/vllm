@@ -184,3 +184,8 @@ class QuantizationConfig(ABC):
             True if this config uses MXFP4 quantization, False otherwise
         """
         return False
+
+    @classmethod
+    def uses_meta_device_weights(cls) -> bool:
+        """Whether this method creates weights on meta device for online quant."""
+        return False
