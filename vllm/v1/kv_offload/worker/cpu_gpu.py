@@ -125,21 +125,76 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         dst_blocks = dst_spec.block_ids
         assert src_blocks.ndim == 1
         assert dst_blocks.ndim == 1
+        num_src_blocks = len(src_blocks)
+        num_dst_blocks = len(dst_blocks)
 
-        src_sub_block_count = src_blocks.size * self.src_block_size_factor
-        dst_sub_block_count = dst_blocks.size * self.dst_block_size_factor
-        src_sub_blocks_to_skip = -dst_blocks.size % self.src_block_size_factor
+        # There are 2 types of transfers:
+        # 1. GPU -> CPU
+        # 2. CPU -> GPU
+        #
+        # GPU->CPU transfers are always aligned to CPU block size
+        # i.e. each CPU block in dst_blocks must have
+        # a matching set of GPU blocks in src_blocks.
+        # In this case, group_sizes is not needed, so we assert it is None
+        #
+        # CPU->GPU transfers are also aligned to CPU blocks,
+        # EXCEPT MAYBE for the first block.
+        # i.e. the first CPU block in src_blocks will match against
+        # a smaller (byte-wise) set of GPU blocks in dst_blocks.
+        # In such cases, we may need to skip some gpu-sized sub-blocks,
+        # and start reading from the middle of the first CPU block.
+        # If we have multiple KV cache groups (when using HMA with hybrid models),
+        # we may need to skip the first CPU block per each group.
+        # The group_sizes parameter encodes the size of each group of blocks
+        # in the GPU dst_blocks.
+        # If group_sizes is None, we assume all blocks belong to a single group.
+        output_sub_blocks_count = len(dst_blocks) * self.dst_block_size_factor
+        assert src_spec.group_sizes is None
+        group_sizes = dst_spec.group_sizes
+        if group_sizes is None:
+            group_sizes = [len(dst_blocks)]
 
-        assert dst_sub_block_count == src_sub_block_count - src_sub_blocks_to_skip
+        src_to_dst = np.empty((output_sub_blocks_count, 2), dtype=np.int64)
+        src_offset = 0
+        dst_offset = 0
+        output_offset = 0
+        for group_size in group_sizes:
+            dst_end_offset = dst_offset + group_size
+            assert dst_end_offset <= num_dst_blocks
 
-        src_to_dst = np.empty((dst_sub_block_count, 2), dtype=np.int64)
-        expand_block_ids(
-            src_blocks,
-            self.src_block_size_factor,
-            src_to_dst[:, 0],
-            skip_count=src_sub_blocks_to_skip,
-        )
-        expand_block_ids(dst_blocks, self.dst_block_size_factor, src_to_dst[:, 1])
+            # sub blocks always correspond to GPU (logical) block
+            dst_sub_block_count = group_size * self.dst_block_size_factor
+            src_sub_blocks_to_skip = -group_size % self.src_block_size_factor
+            src_sub_block_count = dst_sub_block_count + src_sub_blocks_to_skip
+
+            assert src_sub_block_count % self.src_block_size_factor == 0
+            src_blocks_count = src_sub_block_count // self.src_block_size_factor
+            src_end_offset = src_offset + src_blocks_count
+            assert src_end_offset <= num_src_blocks
+
+            # expand source blocks and write to src_to_dst
+            # maybe skip some source sub-blocks for an unaligned CPU->GPU transfer
+            expand_block_ids(
+                src_blocks[src_offset:src_end_offset],
+                self.src_block_size_factor,
+                src_to_dst[output_offset:, 0],
+                skip_count=src_sub_blocks_to_skip,
+            )
+            # expand destination blocks and write to src_to_dst
+            expand_block_ids(
+                dst_blocks[dst_offset:dst_end_offset],
+                self.dst_block_size_factor,
+                src_to_dst[output_offset:, 1],
+            )
+
+            src_offset = src_end_offset
+            dst_offset = dst_end_offset
+            output_offset += dst_sub_block_count
+
+        assert src_offset == num_src_blocks
+        assert dst_offset == num_dst_blocks
+        assert output_offset == output_sub_blocks_count
+
         src_to_dst_tensor = torch.from_numpy(src_to_dst)
 
         stream = self._stream_pool.pop() if self._stream_pool else torch.cuda.Stream()
@@ -184,7 +239,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 stream=stream,
                 start_event=start_event,
                 end_event=end_event,
-                num_bytes=dst_sub_block_count * self.total_block_size_in_bytes,
+                num_bytes=output_offset * self.total_block_size_in_bytes,
             )
         )
 
