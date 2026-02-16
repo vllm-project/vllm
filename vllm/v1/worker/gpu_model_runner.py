@@ -4091,22 +4091,7 @@ class GPUModelRunner(
                 # inputs and falls back to text-only mode on inconsistency
                 # to avoid silent corruption.
                 mm_embeds, is_mm_embed = mm_embed_inputs
-                if is_mm_embed is None:
-                    # Disable multimodal draft path when mask construction fails.
-                    logger.warning_once(
-                        "mm_embed_inputs returned None mask; "
-                        "using text-only draft path."
-                    )
-                    mm_embed_inputs = None
-                elif mm_embeds is None:
-                    # Disable multimodal draft path when embeddings are
-                    # missing unexpectedly.
-                    logger.warning_once(
-                        "mm_embed_inputs returned None embeddings; "
-                        "using text-only draft path."
-                    )
-                    mm_embed_inputs = None
-                elif (
+                if (
                     hasattr(mm_embeds, "__len__")
                     and len(mm_embeds) == 0
                     and bool(is_mm_embed.any().item())
