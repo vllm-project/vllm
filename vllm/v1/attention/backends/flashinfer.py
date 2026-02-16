@@ -49,7 +49,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
+from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
@@ -405,37 +405,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
-<<<<<<< HEAD
-        # Use model dtype as q dtype when TRTLLM attn is not supported, or
-        # --attention-config.disable_flashinfer_q_quantization is set to 1. Otherwise,
-        # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
-        # if TRTLLM attention kernel is not used when building attn metadata
-        can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
-
-        # TRTLLM attention requires strictly contiguous KV cache tensors.
-        # When KV transfer (P/D disaggregation) is enabled, the KV cache may be
-        # permuted into non-contiguous views, which causes assertion failures.
-        self._kv_transfer_enabled = vllm_config.kv_transfer_config is not None
-        if can_use_trtllm and self._kv_transfer_enabled:
-            logger.info_once(
-                "TRTLLM attention is disabled because KV transfer "
-                "(P/D disaggregation) is enabled. TRTLLM attention requires "
-                "strictly contiguous KV cache tensors which may not be "
-                "guaranteed with KV transfer."
-            )
-            can_use_trtllm = False
-
-        if (
-            can_use_trtllm
-            and not vllm_config.attention_config.disable_flashinfer_q_quantization
-        ):
-            self.q_data_type = self.kv_cache_dtype
-        else:
-            self.q_data_type = self.model_config.dtype
-=======
-        # FlashInfer native backend uses model dtype for queries
+        # FlashInfer native always uses model dtype for query.
         self.q_data_type = self.model_config.dtype
->>>>>>> 3769954f5 (POC - separate TRTLLM and flashinfer backends for gqa)
 
         # FlashInfer native does not support speculative decoding as decode
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=False)
@@ -498,45 +469,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-<<<<<<< HEAD
         """Get the cudagraph support level for FlashInfer attention.
 
-        This depends on whether we can use TRTLLM attention for decodes, since we can
-        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
-        To check this, we must call can_use_trtllm_attention with the number of KV
-        heads from the kv_cache_spec. We check all available KV cache specs and
-        only return UNIFORM_BATCH if all of them support TRTLLM attention.
+        FlashInfer native only supports UNIFORM_SINGLE_TOKEN_DECODE.
+        UNIFORM_BATCH requires TRTLLM attention (separate backend).
         """
-        # For UniformTypeKVCacheSpecs, check all contained specs
-        kv_specs = (
-            kv_cache_spec.kv_cache_specs.values()
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
-            else [kv_cache_spec]
-        )
-        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
-        has_trtllm_support: bool = len(kv_specs) > 0
-        for spec in kv_specs:
-            if not isinstance(spec, AttentionSpec):
-                # FlashInfer only applies to attention, so we don't consider other types
-                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
-                continue
-            if not can_use_trtllm_attention(
-                num_qo_heads=num_qo_heads,
-                num_kv_heads=spec.num_kv_heads,
-            ):
-                has_trtllm_support = False
-                break
-
-        if has_trtllm_support:
-            return AttentionCGSupport.UNIFORM_BATCH
-        else:
-            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-=======
-        # FlashInfer native backend only supports uniform single-token decode
         return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
->>>>>>> 3769954f5 (POC - separate TRTLLM and flashinfer backends for gqa)
 
     def _get_workspace_buffer(self):
         if self._workspace_buffer is None:
@@ -685,29 +623,6 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Step 1: Decide dispatch mode (cascade vs regular)
         use_cascade = common_prefix_len > 0
-<<<<<<< HEAD
-        uses_spec_reorder = self.reorder_batch_threshold > 1
-        prefill_use_trtllm = use_trtllm_attention(
-            self.num_qo_heads,
-            self.num_kv_heads,
-            num_prefill_tokens,
-            max_seq_len,
-            self.dcp_world_size,
-            self.cache_dtype,
-            self.q_data_type,
-            is_prefill=True,
-            force_use_trtllm=self.attention_config.use_trtllm_attention,
-            has_sinks=self.has_sinks,
-            has_spec=uses_spec_reorder,
-        )
-        # KV transfer requires non-contiguous KV cache views, incompatible with TRTLLM
-        if self._kv_transfer_enabled:
-            prefill_use_trtllm = False
-        decode_use_trtllm = (
-            self.use_trtllm_decode_attention and self.dcp_world_size <= 1
-        )
-=======
->>>>>>> 3769954f5 (POC - separate TRTLLM and flashinfer backends for gqa)
 
         # Validate global hyperparameters for FlashInfer native backend
         if not self.global_hyperparameters.has_same_window_lefts:
@@ -740,23 +655,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             cascade_wrapper=None,
         )
 
-<<<<<<< HEAD
-        # Guard access to seq_lens_cpu, which may not always be needed
-        # and can be expensive to retrieve in async mode.
-        needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
-        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
-        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
-        num_blocks_np = (
-            (seq_lens_np + (page_size - 1)) // page_size
-            if seq_lens_np is not None
-            else None
-        )
-=======
-        # FlashInfer native always needs seq_lens_cpu
-        seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+        # FlashInfer native always needs seq_lens_cpu for KV metadata.
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu
         seq_lens_np = seq_lens_cpu.numpy()
         num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
->>>>>>> 3769954f5 (POC - separate TRTLLM and flashinfer backends for gqa)
 
         # Adjust seq_lens_cpu for DCP
         if self.use_dcp:

@@ -345,6 +345,17 @@ class TRTLLMMetadataBuilder(AttentionMetadataBuilder[TRTLLMMetadata]):
                 f"num_qo_heads={self.num_qo_heads}, num_kv_heads={self.num_kv_heads}"
             )
 
+        # TRTLLM attention requires strictly contiguous KV cache tensors.
+        # KV transfer (P/D disaggregation) may permute KV cache into
+        # non-contiguous views, causing assertion failures.
+        if vllm_config.kv_transfer_config is not None:
+            raise ValueError(
+                "TRTLLM attention is incompatible with KV transfer "
+                "(P/D disaggregation). TRTLLM attention requires strictly "
+                "contiguous KV cache tensors which are not guaranteed "
+                "with KV transfer. Use FlashInfer or Flash Attention backend."
+            )
+
         # TRTLLM does not support DCP
         try:
             from vllm.distributed.parallel_state import get_dcp_group
