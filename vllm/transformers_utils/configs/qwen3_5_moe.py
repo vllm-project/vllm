@@ -75,10 +75,10 @@ class Qwen3_5MoeTextConfig(PretrainedConfig):
         eos_token_id=None,
         **kwargs,
     ):
-        kwargs["ignore_keys_at_rope_validation"] = [
+        kwargs["ignore_keys_at_rope_validation"] = {
             "mrope_section",
             "mrope_interleaved",
-        ]
+        }
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size
