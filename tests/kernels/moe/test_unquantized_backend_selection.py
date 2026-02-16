@@ -66,7 +66,9 @@ def test_select_default_backend_by_platform(
     "vllm.model_executor.layers.fused_moe.oracle.unquantized.is_supported_config_trtllm_bf16",
     return_value=(True, None),
 )
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms.")
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
+)
 def test_select_cuda_flashinfer_trtllm_backend(
     mock_has_flashinfer, mock_is_supported_trtllm, monkeypatch
 ):
@@ -103,7 +105,9 @@ def test_select_cuda_flashinfer_trtllm_backend(
     "vllm.model_executor.layers.fused_moe.oracle.unquantized.is_supported_config_trtllm_bf16",
     return_value=(False, None),
 )
-@pytest.mark.skipif(not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms.")
+@pytest.mark.skipif(
+    not current_platform.is_cuda(), reason="Only supported on NVIDIA platforms."
+)
 def test_select_cuda_flashinfer_cutlass_backend(
     mock_has_flashinfer, mock_is_supported_trtllm, monkeypatch
 ):
