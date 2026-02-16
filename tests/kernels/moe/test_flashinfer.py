@@ -253,12 +253,12 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             ),
         )
 
-        flashinfer_output = kernel(
+        flashinfer_output = kernel.apply_monolithic(
             hidden_states=td.hidden_states,
             w1=td.layer.w13_weight,
             w2=td.layer.w2_weight,
             router_logits=score,
-            activation="silu",
+            activation=activation,
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,
