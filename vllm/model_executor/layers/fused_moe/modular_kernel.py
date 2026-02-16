@@ -601,6 +601,7 @@ class FusedMoEExperts(ABC):
         """
         return True
 
+    @staticmethod
     def _supports_router_logits_dtype(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
@@ -917,6 +918,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         """
         raise NotImplementedError
 
+    @staticmethod
     def _supports_router_logits_dtype(
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
@@ -938,7 +940,7 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
         w1: torch.Tensor,
         w2: torch.Tensor,
         router_logits: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -1704,8 +1706,8 @@ class FusedMoEKernel:
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        topk_ids: torch.Tensor,
         topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,

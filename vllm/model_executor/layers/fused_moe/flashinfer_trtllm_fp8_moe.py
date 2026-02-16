@@ -159,7 +159,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         w1: torch.Tensor,
         w2: torch.Tensor,
         router_logits: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -171,7 +171,7 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         topk_group: int | None = None,
     ) -> torch.Tensor:
         assert not apply_router_weight_on_input
-        assert activation == "silu"
+        assert activation == MoEActivation.SILU
         assert (
             e_score_correction_bias is None
             or e_score_correction_bias.dtype == hidden_states.dtype
