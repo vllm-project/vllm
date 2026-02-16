@@ -127,9 +127,11 @@ class CopyCounter(TorchDispatchMode):
         if kwargs is None:
             kwargs = {}
 
-        if func is torch.ops.aten.copy_.default:
-            if self.device_filter is None or args[0].device.type == self.device_filter:
-                self.copied_numel += args[0].numel()
+        device_matches = (
+            self.device_filter is None or args[0].device.type == self.device_filter
+        )
+        if func is torch.ops.aten.copy_.default and device_matches:
+            self.copied_numel += args[0].numel()
 
         return func(*args, **kwargs)
 
