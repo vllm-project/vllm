@@ -20,6 +20,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -192,8 +193,7 @@ def fused_moe_mxfp4_kernel(
         return
 
     # N-dimension offsets
-    offs_bn = (pid_n * BLOCK_SIZE_N +
-               tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
+    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
     if HAS_BIAS:
         bias_ptrs = b_bias_ptr + off_experts * stride_bbe + offs_bn * stride_bbn
         bias = tl.load(bias_ptrs, mask=(offs_bn < N), other=0.0)
@@ -207,23 +207,25 @@ def fused_moe_mxfp4_kernel(
     num_k_iters = tl.cdiv(K, BLOCK_SIZE_K)
     for k_iter in range(0, num_k_iters):
         k_start = k_iter * BLOCK_SIZE_K  # logical K offset
-        k_packed_start = k_start // 2     # packed K offset
+        k_packed_start = k_start // 2  # packed K offset
 
         # Remaining elements mask
         k_remaining = K - k_start
 
         # --- Load B packed: [HALF_K, BLOCK_N] uint8 ---
         offs_bk = tl.arange(0, HALF_K)
-        b_ptrs = (b_ptr
-                  + off_experts * stride_be
-                  + offs_bn[None, :] * stride_bn
-                  + (k_packed_start + offs_bk[:, None]) * stride_bk)
+        b_ptrs = (
+            b_ptr
+            + off_experts * stride_be
+            + offs_bn[None, :] * stride_bn
+            + (k_packed_start + offs_bk[:, None]) * stride_bk
+        )
         b_mask = offs_bk[:, None] < (k_remaining // 2)
         b_packed = tl.load(b_ptrs, mask=b_mask, other=0)
 
         # Unpack nibbles
-        lo_nibble = b_packed & 0x0F          # even K indices
-        hi_nibble = (b_packed >> 4) & 0x0F   # odd K indices
+        lo_nibble = b_packed & 0x0F  # even K indices
+        hi_nibble = (b_packed >> 4) & 0x0F  # odd K indices
 
         # Dequant to bf16
         lo_bf16 = dequant_mxfp4_nibble_to_bf16(lo_nibble.to(tl.int32))
@@ -237,10 +239,12 @@ def fused_moe_mxfp4_kernel(
         # scale pointers.
         scale_k_start = k_start // 32
         scale_k_offs = offs_bk // 16  # [HALF_K] - scale group for each row
-        scale_ptrs = (b_scale_ptr
-                      + off_experts * stride_bse
-                      + offs_bn[None, :] * stride_bsn
-                      + (scale_k_start + scale_k_offs[:, None]) * stride_bsk)
+        scale_ptrs = (
+            b_scale_ptr
+            + off_experts * stride_bse
+            + offs_bn[None, :] * stride_bsn
+            + (scale_k_start + scale_k_offs[:, None]) * stride_bsk
+        )
         scale_mask = (scale_k_start + scale_k_offs[:, None]) < tl.cdiv(K, 32)
         raw_scales = tl.load(scale_ptrs, mask=scale_mask, other=127)
         # Convert E8M0 -> bf16: [HALF_K, BLOCK_N]
@@ -253,23 +257,25 @@ def fused_moe_mxfp4_kernel(
         # --- Load A even/odd columns ---
         # A is [M, K] bf16, we need even columns [0,2,4,...] and odd [1,3,5,...]
         # for this K-block starting at k_start
-        offs_a_even = k_start + tl.arange(0, HALF_K) * 2      # [0,2,4,...]
-        offs_a_odd = k_start + tl.arange(0, HALF_K) * 2 + 1   # [1,3,5,...]
+        offs_a_even = k_start + tl.arange(0, HALF_K) * 2  # [0,2,4,...]
+        offs_a_odd = k_start + tl.arange(0, HALF_K) * 2 + 1  # [1,3,5,...]
 
-        a_even_ptrs = (a_ptr
-                       + (offs_token[:, None] // top_k) * stride_am
-                       + offs_a_even[None, :] * stride_ak)
-        a_odd_ptrs = (a_ptr
-                      + (offs_token[:, None] // top_k) * stride_am
-                      + offs_a_odd[None, :] * stride_ak)
+        a_even_ptrs = (
+            a_ptr
+            + (offs_token[:, None] // top_k) * stride_am
+            + offs_a_even[None, :] * stride_ak
+        )
+        a_odd_ptrs = (
+            a_ptr
+            + (offs_token[:, None] // top_k) * stride_am
+            + offs_a_odd[None, :] * stride_ak
+        )
 
         a_even_mask = token_mask[:, None] & (offs_a_even[None, :] < K)
         a_odd_mask = token_mask[:, None] & (offs_a_odd[None, :] < K)
 
-        a_even = tl.load(a_even_ptrs, mask=a_even_mask,
-                         other=0.0).to(tl.bfloat16)
-        a_odd = tl.load(a_odd_ptrs, mask=a_odd_mask,
-                        other=0.0).to(tl.bfloat16)
+        a_even = tl.load(a_even_ptrs, mask=a_even_mask, other=0.0).to(tl.bfloat16)
+        a_odd = tl.load(a_odd_ptrs, mask=a_odd_mask, other=0.0).to(tl.bfloat16)
 
         # --- Two half-dots ---
         accumulator += tl.dot(a_even, lo_scaled)
@@ -291,9 +297,7 @@ def fused_moe_mxfp4_kernel(
     # Write output
     accumulator = accumulator.to(compute_type)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = (c_ptr
-              + stride_cm * offs_token[:, None]
-              + stride_cn * offs_cn[None, :])
+    c_ptrs = c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
     tl.store(c_ptrs, accumulator, mask=c_mask)
 
@@ -304,9 +308,9 @@ def fused_moe_mxfp4_kernel(
 
 
 def invoke_fused_moe_mxfp4_kernel(
-    A: torch.Tensor,       # [M, K] bf16
-    B: torch.Tensor,       # [E, N, K//2] uint8 packed
-    C: torch.Tensor,       # output
+    A: torch.Tensor,  # [M, K] bf16
+    B: torch.Tensor,  # [E, N, K//2] uint8 packed
+    C: torch.Tensor,  # output
     B_scale: torch.Tensor,  # [E, N, K//32] uint8
     topk_weights: torch.Tensor | None,
     sorted_token_ids: torch.Tensor,
@@ -332,8 +336,7 @@ def invoke_fused_moe_mxfp4_kernel(
     N = B.size(1)
 
     grid = lambda META: (
-        triton.cdiv(EM, META["BLOCK_SIZE_M"])
-        * triton.cdiv(N, META["BLOCK_SIZE_N"]),
+        triton.cdiv(EM, META["BLOCK_SIZE_M"]) * triton.cdiv(N, META["BLOCK_SIZE_N"]),
     )
 
     config = config.copy()
@@ -412,9 +415,7 @@ def _add_expert_bias(
     else:
         routed_expert_ids = expert_map[topk_ids.to(torch.long)]
 
-    valid_expert = (
-        (routed_expert_ids >= 0) & (routed_expert_ids < expert_bias.size(0))
-    )
+    valid_expert = (routed_expert_ids >= 0) & (routed_expert_ids < expert_bias.size(0))
     safe_expert_ids = torch.where(valid_expert, routed_expert_ids, 0).to(torch.long)
     bias = expert_bias[safe_expert_ids].to(output.dtype)
     output.add_(bias * valid_expert.unsqueeze(-1).to(output.dtype))
@@ -422,15 +423,15 @@ def _add_expert_bias(
 
 def mxfp4_dequant_fused_experts(
     hidden_states: torch.Tensor,  # [M, K] bf16
-    w1: torch.Tensor,             # [E, N, K//2] uint8 packed
-    w2: torch.Tensor,             # [E, K, N//2] uint8 packed
-    w1_scale: torch.Tensor,       # [E, N, K//32] uint8
-    w2_scale: torch.Tensor,       # [E, K, N//32] uint8
+    w1: torch.Tensor,  # [E, N, K//2] uint8 packed
+    w2: torch.Tensor,  # [E, K, N//2] uint8 packed
+    w1_scale: torch.Tensor,  # [E, N, K//32] uint8
+    w2_scale: torch.Tensor,  # [E, K, N//32] uint8
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    activation: str = "silu",
+    activation: MoEActivation = MoEActivation.SILU,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
@@ -462,8 +463,7 @@ def mxfp4_dequant_fused_experts(
         config["BLOCK_SIZE_K"] = 64
 
     # Determine activation output dim (gated activations halve N)
-    is_no_mul = activation.endswith("_no_mul")
-    activation_out_dim = N if is_no_mul else N // 2
+    activation_out_dim = N if not activation.is_gated else N // 2
 
     # Allocate workspace
     intermediate_cache1 = torch.empty(
@@ -478,10 +478,8 @@ def mxfp4_dequant_fused_experts(
         (M, top_k, K), device=hidden_states.device, dtype=torch.bfloat16
     )
 
-    sorted_token_ids, expert_ids, num_tokens_post_padded = (
-        moe_align_block_size(
-            topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
-        )
+    sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        topk_ids, config["BLOCK_SIZE_M"], global_num_experts, expert_map
     )
 
     # --- First GEMM: hidden_states × w1 ---
@@ -502,7 +500,7 @@ def mxfp4_dequant_fused_experts(
     )
 
     # --- Activation ---
-    from vllm.model_executor.layers.fused_moe.utils import apply_moe_activation
+    from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
 
     apply_moe_activation(
         activation,
@@ -574,8 +572,13 @@ class Mxfp4DequantTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         return (weight_key, activation_key) == (None, None)
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "gelu", "swigluoai", "swiglustep"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
+        ]
 
     @staticmethod
     def _supports_parallel_config(
@@ -622,7 +625,7 @@ class Mxfp4DequantTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         activation_out_dim = self.adjust_N_for_activation(N, activation)
         workspace1 = (M, topk, max(activation_out_dim, K))
@@ -638,7 +641,7 @@ class Mxfp4DequantTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -671,24 +674,18 @@ class Mxfp4DequantTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         if "BLOCK_SIZE_K" not in config or config["BLOCK_SIZE_K"] < 64:
             config["BLOCK_SIZE_K"] = 64
 
-        intermediate_cache1 = _resize_cache(
-            workspace2, (num_tokens, top_k_num, N)
-        )
+        intermediate_cache1 = _resize_cache(workspace2, (num_tokens, top_k_num, N))
         cache2_dim = self.adjust_N_for_activation(N, activation)
         intermediate_cache2 = _resize_cache(
             workspace13, (num_tokens * top_k_num, cache2_dim)
         )
-        intermediate_cache3 = _resize_cache(
-            workspace2, (num_tokens, top_k_num, K)
-        )
+        intermediate_cache3 = _resize_cache(workspace2, (num_tokens, top_k_num, K))
 
-        sorted_token_ids, expert_ids, num_tokens_post_padded = (
-            moe_align_block_size(
-                topk_ids,
-                config["BLOCK_SIZE_M"],
-                global_num_experts,
-                expert_map,
-            )
+        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+            topk_ids,
+            config["BLOCK_SIZE_M"],
+            global_num_experts,
+            expert_map,
         )
 
         # --- First GEMM: hidden_states × w1 -> intermediate_cache1 ---

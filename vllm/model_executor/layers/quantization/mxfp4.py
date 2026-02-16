@@ -947,9 +947,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     Mxfp4DequantTritonExperts,
                 )
 
-                return Mxfp4DequantTritonExperts(
-                    self.moe, self.moe_quant_config
-                )
+                return Mxfp4DequantTritonExperts(self.moe, self.moe_quant_config)
             else:
                 raise NotImplementedError(
                     f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for EP"
