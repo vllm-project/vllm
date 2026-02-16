@@ -299,24 +299,20 @@ class OpenAIServing:
         completed = []
 
         for _ in range(max_tokens):
-            prompts_batch, lora_req_batch = zip(
-                *[(beam.get_prompt(), beam.lora_request) for beam in all_beams]
-            )
-
             tasks = []
             request_id_batch = f"{request_id}-{random_uuid()}"
 
-            for i, (individual_prompt, lora_req) in enumerate(
-                zip(prompts_batch, lora_req_batch)
-            ):
+            for i, beam in enumerate(all_beams):
+                prompt_item = beam.get_prompt()
+                lora_request_item = beam.lora_request
                 request_id_item = f"{request_id_batch}-beam-{i}"
                 task = asyncio.create_task(
                     collect_from_async_generator(
                         self.engine_client.generate(
-                            individual_prompt,
+                            prompt_item,
                             beam_search_params,
                             request_id_item,
-                            lora_request=lora_req,
+                            lora_request=lora_request_item,
                             trace_headers=trace_headers,
                         )
                     )

@@ -461,7 +461,7 @@ class LLM:
         self,
         prompts: PromptType | Sequence[PromptType],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
         tokenization_kwargs: dict[str, Any] | None = None,
@@ -547,7 +547,7 @@ class LLM:
     def _get_modality_specific_lora_reqs(
         self,
         prompts: Sequence[ProcessorInputs],
-        lora_request: Sequence[LoRARequest] | LoRARequest | None,
+        lora_request: Sequence[LoRARequest | None] | LoRARequest | None,
     ):
         # Grab the lora config off the vllm config on the engine,
         # since this is the same for both v0 & v1.
@@ -562,11 +562,7 @@ class LLM:
         ):
             return lora_request
 
-        optional_loras = (
-            [lora_request] * len(prompts)
-            if not isinstance(lora_request, Sequence)
-            else lora_request
-        )
+        optional_loras = self._lora_request_to_seq(lora_request, len(prompts))
 
         return [
             self._resolve_single_prompt_mm_lora(
@@ -670,22 +666,6 @@ class LLM:
         """
         return self.llm_engine.apply_model(func)
 
-    def _get_beam_search_lora_requests(
-        self,
-        lora_request: list[LoRARequest] | LoRARequest | None,
-        prompts: Sequence[ProcessorInputs],
-    ) -> list[LoRARequest | None]:
-        """Get the optional lora request corresponding to each prompt."""
-        if isinstance(lora_request, Sequence) and len(lora_request) != len(prompts):
-            raise ValueError(
-                "Lora request list should be the same length as the prompts"
-            )
-
-        if lora_request is None or isinstance(lora_request, LoRARequest):
-            return [lora_request] * len(prompts)
-
-        raise TypeError(f"Invalid lora_request type {type(lora_request)}")
-
     def beam_search(
         self,
         prompts: list[TokensPrompt | TextPrompt],
@@ -719,9 +699,7 @@ class LLM:
         sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
         engine_prompts = self._preprocess_cmpl(prompts)
-        lora_requests = self._get_beam_search_lora_requests(
-            lora_request, engine_prompts
-        )
+        lora_requests = self._lora_request_to_seq(lora_request, len(engine_prompts))
 
         if use_tqdm and concurrency_limit is not None:
             logger.warning(
@@ -762,7 +740,7 @@ class LLM:
                 ),
             )
 
-        for prompt_start in range(0, len(engine_prompts), concurrency_limit):
+        for prompt_start in range(0, len(instances), concurrency_limit):
             instances_batch = instances[prompt_start : prompt_start + concurrency_limit]
 
             token_iter = range(max_tokens)
@@ -791,19 +769,15 @@ class LLM:
                 if len(all_beams) == 0:
                     break
 
-                # create corresponding batch entries for prompt & optional lora
-                prompts_batch, lora_req_batch = zip(
-                    *[(beam.get_prompt(), beam.lora_request) for beam in all_beams]
-                )
-
                 # only runs for one step
                 # we don't need to use tqdm here
-                output = self.generate(
-                    prompts_batch,
-                    sampling_params=beam_search_params,
+                raw_output = self._validate_and_run_requests(
+                    prompts=[beam.get_prompt() for beam in all_beams],
+                    params=beam_search_params,
                     use_tqdm=False,
-                    lora_request=lora_req_batch,
+                    lora_request=[beam.lora_request for beam in all_beams],
                 )
+                output = self.engine_class.validate_outputs(raw_output, RequestOutput)
 
                 for (start, end), instance in zip(
                     instance_start_and_end, instances_batch
@@ -848,6 +822,7 @@ class LLM:
 
             for beam in best_beams:
                 beam.text = tokenizer.decode(beam.tokens)
+                print("beam", beam.text, beam.tokens)
             outputs.append(BeamSearchOutput(sequences=best_beams))
 
         return outputs
@@ -933,7 +908,7 @@ class LLM:
         | Sequence[list[ChatCompletionMessageParam]],
         sampling_params: SamplingParams | Sequence[SamplingParams] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: LoRARequest | None = None,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
@@ -1799,18 +1774,14 @@ class LLM:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        self._validate_and_add_requests(
+        return self._validate_and_run_requests(
             prompts=engine_prompts,
             params=seq_params,
             use_tqdm=use_tqdm,
-            lora_request=self._get_modality_specific_lora_reqs(
-                engine_prompts, lora_request
-            ),
+            lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
-
-        return self._run_engine(use_tqdm=use_tqdm)
 
     def _run_chat(
         self,
@@ -1821,7 +1792,7 @@ class LLM:
         | Sequence[SamplingParams | PoolingParams],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: LoRARequest | None = None,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         chat_template: str | None = None,
         chat_template_content_format: ChatTemplateContentFormatOption = "auto",
         add_generation_prompt: bool = True,
@@ -1843,14 +1814,33 @@ class LLM:
             mm_processor_kwargs=mm_processor_kwargs,
         )
 
-        self._validate_and_add_requests(
+        return self._validate_and_run_requests(
             prompts=engine_prompts,
             params=params,
             use_tqdm=use_tqdm,
-            lora_request=self._get_modality_specific_lora_reqs(
-                engine_prompts, lora_request
-            ),
+            lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
+        )
+
+    def _validate_and_run_requests(
+        self,
+        prompts: Sequence[ProcessorInputs],
+        params: SamplingParams
+        | PoolingParams
+        | Sequence[SamplingParams | PoolingParams],
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: Sequence[LoRARequest | None] | LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        priority: list[int] | None = None,
+    ):
+        self._validate_and_add_requests(
+            prompts=prompts,
+            params=params,
+            use_tqdm=use_tqdm,
+            lora_request=self._get_modality_specific_lora_reqs(prompts, lora_request),
+            tokenization_kwargs=tokenization_kwargs,
+            priority=priority,
         )
 
         return self._run_engine(use_tqdm=use_tqdm)
