@@ -403,14 +403,12 @@ void flashinfer_radix_topk(const torch::Tensor& logits,
   TORCH_CHECK(workspace.size(0) >= 1024 * 1024,
               "workspace buffer too small, need at least 1MB (1048576 bytes)");
 
-  cudaError_t status =
-      vllm::sampling::TopKRaggedTransformDispatch<float, int32_t>(
-          logits.data_ptr<float>(), output.data_ptr<int32_t>(),
-          lengths.data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
-          static_cast<uint32_t>(k), static_cast<uint32_t>(max_len),
-          reinterpret_cast<vllm::sampling::RadixRowState*>(
-              workspace.data_ptr()),
-          at::cuda::getCurrentCUDAStream());
+  cudaError_t status = vllm::TopKRaggedTransformDispatch<float, int32_t>(
+      logits.data_ptr<float>(), output.data_ptr<int32_t>(),
+      lengths.data_ptr<int32_t>(), static_cast<uint32_t>(num_rows),
+      static_cast<uint32_t>(k), static_cast<uint32_t>(max_len),
+      reinterpret_cast<vllm::RadixRowState*>(workspace.data_ptr()),
+      at::cuda::getCurrentCUDAStream());
 
   TORCH_CHECK(status == cudaSuccess, "TopKRaggedTransformDispatch failed: ",
               cudaGetErrorString(status));
