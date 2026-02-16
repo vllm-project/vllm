@@ -230,9 +230,9 @@ def _bincount_kernel(
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     if block_idx * BLOCK_SIZE < prompt_len:
         mask = block < prompt_len
-        prefill_tokens = tl.load(all_token_ids_ptr + block, mask=mask)
-        idx = prefill_tokens // 32
-        bit_idx = prefill_tokens % 32
+        prompt_tokens = tl.load(all_token_ids_ptr + block, mask=mask)
+        idx = prompt_tokens // 32
+        bit_idx = prompt_tokens % 32
         bit = tl.full((BLOCK_SIZE,), 1, tl.int32) << bit_idx
         tl.atomic_or(prompt_bin_mask_ptr + idx, bit, mask=mask)
     if (block_idx + 1) * BLOCK_SIZE >= prompt_len:
