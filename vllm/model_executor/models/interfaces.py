@@ -1063,6 +1063,8 @@ class SupportsRealtime(Protocol):
 
     supports_realtime: ClassVar[Literal[True]] = True
 
+    realtime_max_tokens: ClassVar[int] = 1
+
     @classmethod
     async def buffer_realtime_audio(
         cls,
