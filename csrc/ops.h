@@ -118,9 +118,8 @@ void large_context_topk(const torch::Tensor& score, torch::Tensor& indices,
                         const torch::Tensor& lengths,
                         std::optional<torch::Tensor> row_starts_opt);
 
-void flashinfer_radix_topk(const torch::Tensor& logits,
-                           const torch::Tensor& lengths, torch::Tensor& output,
-                           torch::Tensor& workspace, int64_t k);
+void radix_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+                torch::Tensor& output, torch::Tensor& workspace, int64_t k);
 
 void rms_norm_static_fp8_quant(torch::Tensor& out, torch::Tensor& input,
                                torch::Tensor& weight, torch::Tensor& scale,

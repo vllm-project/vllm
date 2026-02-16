@@ -87,7 +87,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     requires_padding: bool
     schedule_metadata: torch.Tensor
     use_large_context_topk: bool
-    use_flashinfer_topk: bool
+    use_radix_topk: bool
     offsets: torch.Tensor | None  # Precomputed offsets for speculative decoding
 
 
@@ -326,7 +326,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # Decision logic based on micro-benchmark results.
             # See: https://github.com/vllm-project/vllm/pull/34265
             max_seq_len = common_attn_metadata.max_seq_len
-            use_flashinfer_topk = max_seq_len >= 65536
+            use_radix_topk = max_seq_len >= 65536
             use_large_context_topk = max_seq_len == 2048 or (8192 < max_seq_len < 65536)
 
             next_n = 1 + self.num_speculative_tokens
@@ -347,7 +347,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
                 use_large_context_topk=use_large_context_topk,
-                use_flashinfer_topk=use_flashinfer_topk,
+                use_radix_topk=use_radix_topk,
                 offsets=offsets,
             )
 

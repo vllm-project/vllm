@@ -422,7 +422,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["flashinfer_radix_topk", "large_context_topk"])
+@pytest.mark.parametrize("kernel_name", ["radix_topk", "large_context_topk"])
 @pytest.mark.parametrize(
     "seq_len_range,test_id",
     [
@@ -434,7 +434,7 @@ def test_deepseek_hybrid_topk(clean_logits: bool) -> None:
 @pytest.mark.parametrize("top_k", [2048])
 @pytest.mark.parametrize("next_n", [1, 4])
 @torch.inference_mode()
-def test_deepseek_flashinfer_topk(
+def test_deepseek_radix_topk(
     kernel_name: str,
     seq_len_range: tuple[int, int],
     test_id: str,
@@ -444,7 +444,7 @@ def test_deepseek_flashinfer_topk(
 ) -> None:
     """
     Test top-k kernels with varying sequence lengths and speculative decoding.
-    Tests both flashinfer_radix_topk and large_context_topk kernels.
+    Tests both radix_topk and large_context_topk kernels.
     Supports speculative decoding with next_n > 1.
     """
     set_random_seed(42 if test_id == "short_sequences" else 43)
@@ -479,9 +479,9 @@ def test_deepseek_flashinfer_topk(
         offsets = torch.arange(next_n, device=logits.device, dtype=torch.int32)
         lengths = (seq_lens.unsqueeze(1) - next_n + 1 + offsets).flatten()
 
-    if kernel_name == "flashinfer_radix_topk":
+    if kernel_name == "radix_topk":
         workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
-        torch.ops._C.flashinfer_radix_topk(logits, lengths, indices, workspace, top_k)
+        torch.ops._C.radix_topk(logits, lengths, indices, workspace, top_k)
     elif kernel_name == "large_context_topk":
         torch.ops._C.large_context_topk(logits, indices, lengths, None)
     else:
@@ -492,13 +492,13 @@ def test_deepseek_flashinfer_topk(
     )
 
 
-def run_flashinfer_topk_test(
+def run_radix_topk_test(
     batch_size: int,
     seq_lens: list[int],
     top_k: int,
     data_type: str = "random",
     seed: int = 42,
-    kernel_name: str = "flashinfer_radix_topk",
+    kernel_name: str = "radix_topk",
 ) -> None:
     """
     Helper to run top-k kernel test with given parameters.
@@ -509,7 +509,7 @@ def run_flashinfer_topk_test(
         top_k: Number of top elements to select
         data_type: Type of test data to generate
         seed: Random seed for reproducibility
-        kernel_name: Which kernel to test ("flashinfer_radix_topk"
+        kernel_name: Which kernel to test ("radix_topk"
                      or "large_context_topk")
     """
     torch.set_default_device("cuda:0")
@@ -567,9 +567,9 @@ def run_flashinfer_topk_test(
     # Create output tensor
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
-    if kernel_name == "flashinfer_radix_topk":
+    if kernel_name == "radix_topk":
         workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
-        torch.ops._C.flashinfer_radix_topk(logits, lengths, indices, workspace, top_k)
+        torch.ops._C.radix_topk(logits, lengths, indices, workspace, top_k)
     elif kernel_name == "large_context_topk":
         torch.ops._C.large_context_topk(logits, indices, lengths, None)
     else:
@@ -645,7 +645,7 @@ def run_flashinfer_topk_test(
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["flashinfer_radix_topk", "large_context_topk"])
+@pytest.mark.parametrize("kernel_name", ["radix_topk", "large_context_topk"])
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -727,7 +727,7 @@ def run_flashinfer_topk_test(
     ],
 )
 @torch.inference_mode()
-def test_flashinfer_topk_correctness(kernel_name: str, test_config: dict) -> None:
+def test_radix_topk_correctness(kernel_name: str, test_config: dict) -> None:
     """
     Comprehensive correctness tests covering:
     - Sequence length edge cases (trivial, boundary, varied)
@@ -737,9 +737,9 @@ def test_flashinfer_topk_correctness(kernel_name: str, test_config: dict) -> Non
     - Data distributions (sorted, ties, precision)
     - Memory alignment / vectorization boundaries
 
-    Tests both flashinfer_radix_topk and large_context_topk kernels.
+    Tests both radix_topk and large_context_topk kernels.
     """
-    run_flashinfer_topk_test(
+    run_radix_topk_test(
         batch_size=len(test_config["seq_lens"]),
         seq_lens=test_config["seq_lens"],
         top_k=test_config["top_k"],
@@ -749,7 +749,7 @@ def test_flashinfer_topk_correctness(kernel_name: str, test_config: dict) -> Non
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["flashinfer_radix_topk", "large_context_topk"])
+@pytest.mark.parametrize("kernel_name", ["radix_topk", "large_context_topk"])
 @pytest.mark.parametrize(
     "test_config",
     [
@@ -795,7 +795,7 @@ def test_flashinfer_topk_correctness(kernel_name: str, test_config: dict) -> Non
     ],
 )
 @torch.inference_mode()
-def test_flashinfer_topk_algorithm_paths(kernel_name: str, test_config: dict) -> None:
+def test_radix_topk_algorithm_paths(kernel_name: str, test_config: dict) -> None:
     """
     Test different algorithm execution paths (capped at 163840 for DeepSeek V3.2):
     - Batch size scalability (1, 4, 32, 256, 1024)
@@ -803,9 +803,9 @@ def test_flashinfer_topk_algorithm_paths(kernel_name: str, test_config: dict) ->
     - Single-CTA vs Multi-CTA execution
     - Extreme configurations (large batch, max context length)
 
-    Tests both flashinfer_radix_topk and large_context_topk kernels.
+    Tests both radix_topk and large_context_topk kernels.
     """
-    run_flashinfer_topk_test(
+    run_radix_topk_test(
         batch_size=test_config["batch_size"],
         seq_lens=[test_config["seq_len"]] * test_config["batch_size"],
         top_k=test_config["top_k"],
@@ -814,14 +814,14 @@ def test_flashinfer_topk_algorithm_paths(kernel_name: str, test_config: dict) ->
 
 
 @pytest.mark.skipif(not current_platform.is_cuda(), reason="This test requires CUDA")
-@pytest.mark.parametrize("kernel_name", ["flashinfer_radix_topk", "large_context_topk"])
+@pytest.mark.parametrize("kernel_name", ["radix_topk", "large_context_topk"])
 @torch.inference_mode()
-def test_flashinfer_topk_stress(kernel_name: str) -> None:
+def test_radix_topk_stress(kernel_name: str) -> None:
     """
     Stress test with random configurations to catch edge cases.
     Capped at 163840 (DeepSeek V3.2 max context) for realistic testing.
 
-    Tests both flashinfer_radix_topk and large_context_topk kernels.
+    Tests both radix_topk and large_context_topk kernels.
     """
     torch.set_default_device("cuda:0")
     top_k = 2048
@@ -835,7 +835,7 @@ def test_flashinfer_topk_stress(kernel_name: str) -> None:
         # Random sequence lengths capped at DeepSeek V3.2 max context
         seq_lens = torch.randint(100, 163840, (batch_size,)).tolist()
 
-        run_flashinfer_topk_test(
+        run_radix_topk_test(
             batch_size=batch_size,
             seq_lens=seq_lens,
             top_k=top_k,

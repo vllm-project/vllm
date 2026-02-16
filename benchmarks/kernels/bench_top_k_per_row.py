@@ -45,11 +45,11 @@ def get_decode_configs():
         x_names=["batch_size", "seq_len", "topk"],
         x_vals=[list(_) for _ in get_decode_configs()],
         line_arg="provider",
-        line_vals=["vllm_decode", "large_context_topk", "flashinfer"],
+        line_vals=["vllm_decode", "large_context_topk", "radix_topk"],
         line_names=[
             "vLLM top_k_per_row_decode",
             "vLLM large_context_topk",
-            "FlashInfer radix_topk",
+            "vLLM radix_topk",
         ],
         styles=[("blue", "--"), ("orange", "-."), ("green", "-")],
         ylabel="Latency (μs)",
@@ -80,22 +80,17 @@ def bench_decode(batch_size, seq_len, topk, provider):
                 topk,
             ),
             quantiles=quantiles,
-            rep=200,
         )
     elif provider == "large_context_topk":
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
             lambda: torch.ops._C.large_context_topk(logits, indices, lengths, None),
             quantiles=quantiles,
-            rep=200,
         )
-    else:  # flashinfer
+    else:  # radix_topk
         workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: torch.ops._C.flashinfer_radix_topk(
-                logits, lengths, indices, workspace, topk
-            ),
+            lambda: torch.ops._C.radix_topk(logits, lengths, indices, workspace, topk),
             quantiles=quantiles,
-            rep=200,
         )
 
     return ms * 1000, max_ms * 1000, min_ms * 1000
@@ -118,9 +113,7 @@ if __name__ == "__main__":
     print("\n" + "=" * 70)
     print("TOP-K DECODE KERNEL BENCHMARKS")
     print("=" * 70)
-    print(
-        "Kernels: top_k_per_row_decode vs large_context_topk vs flashinfer_radix_topk"
-    )
+    print("Kernels: top_k_per_row_decode vs large_context_topk vs radix_topk")
     print(f"Batch sizes: {BATCH_SIZES}")
     print(f"Sequence lengths: {SEQ_LENS}")
     print(f"Top-k values: {TOP_K_VALUES}")
