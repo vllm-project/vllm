@@ -375,8 +375,6 @@ class SarvamMLAMoE(nn.Module):
         else:
             shared_output, expert_output = None, final_hidden
 
-        expert_output *= self.routed_scaling_factor
-
         if shared_output is not None:
             expert_output = expert_output + shared_output
 
