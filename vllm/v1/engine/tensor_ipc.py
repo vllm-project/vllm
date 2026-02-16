@@ -11,11 +11,12 @@ in serial_utils.py handle emitting/consuming tensor references
 
 import dataclasses
 import threading
-from typing import Any, NamedTuple
+from typing import Any
 
 import torch
 
 from vllm.logger import init_logger
+from vllm.v1.serial_utils import TensorIpcHandle
 
 logger = init_logger(__name__)
 
@@ -32,23 +33,6 @@ class TensorIpcData:
     request_id: str | None
     tensor_id: str
     tensor: torch.Tensor
-
-
-class TensorIpcHandle(NamedTuple):
-    """
-    Handle for a tensor sent via IPC queue (zero-copy transfer).
-
-    Contains only metadata about the tensor. This is serialized via msgpack
-    and used by the decoder to retrieve the actual tensor from the queue.
-    The actual tensor is sent separately via torch.multiprocessing.Queue
-    as TensorIpcData. Works for both CUDA and CPU tensors.
-    """
-
-    request_id: str | None
-    tensor_id: str
-    shape: tuple[int, ...]
-    dtype: str
-    device: str
 
 
 class TensorIpcSender:
@@ -79,9 +63,7 @@ class TensorIpcSender:
 
         Contains: share_memory_(), queue.put(), TensorIpcHandle creation.
         """
-        assert self.target_engine_index is not None, (
-            "Target engine index is not set"
-        )
+        assert self.target_engine_index is not None, "Target engine index is not set"
 
         # Move tensor to shared memory for IPC
         # This is required for proper inter-process communication
@@ -125,9 +107,7 @@ class TensorIpcReceiver:
     def __init__(self, queue: Any):
         self.queue = queue
         self._tensor_buffer: dict[tuple[str | None, str], torch.Tensor] = {}
-        self._request_to_tensors: dict[
-            str, list[tuple[str | None, str]]
-        ] = {}
+        self._request_to_tensors: dict[str, list[tuple[str | None, str]]] = {}
         self._buffer_lock = threading.Lock()
 
     def recv_tensor(self, handle: TensorIpcHandle) -> torch.Tensor:
@@ -155,17 +135,13 @@ class TensorIpcReceiver:
                         handle.request_id is not None
                         and handle.request_id in self._request_to_tensors
                     ):
-                        tensors = self._request_to_tensors.get(
-                            handle.request_id
-                        )
+                        tensors = self._request_to_tensors.get(handle.request_id)
                         if tensors:
                             tensors.remove(lookup_key)
                             # Clean up if this is the last tensor for
                             # the request
                             if not tensors:
-                                del self._request_to_tensors[
-                                    handle.request_id
-                                ]
+                                del self._request_to_tensors[handle.request_id]
 
                     return tensor
 
@@ -183,9 +159,7 @@ class TensorIpcReceiver:
                 if ipc_data.request_id is not None:
                     if ipc_data.request_id not in self._request_to_tensors:
                         self._request_to_tensors[ipc_data.request_id] = []
-                    self._request_to_tensors[ipc_data.request_id].append(
-                        tensor_key
-                    )
+                    self._request_to_tensors[ipc_data.request_id].append(tensor_key)
 
     def cleanup_request_tensors(self, request_id: str) -> int:
         """Remove all orphaned tensors associated with a request.

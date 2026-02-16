@@ -10,7 +10,7 @@ from collections.abc import Callable, Sequence
 from functools import partial
 from inspect import isclass
 from types import FunctionType
-from typing import TYPE_CHECKING, Any, TypeAlias, get_type_hints
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, get_type_hints
 
 import cloudpickle
 import msgspec
@@ -39,7 +39,6 @@ from vllm.v1.utils import tensor_data
 
 if TYPE_CHECKING:
     from vllm.v1.engine.tensor_ipc import (
-        TensorIpcHandle,
         TensorIpcReceiver,
         TensorIpcSender,
     )
@@ -51,10 +50,20 @@ CUSTOM_TYPE_CLOUDPICKLE = 2
 CUSTOM_TYPE_RAW_VIEW = 3
 
 
-def _get_ipc_types():
-    """Lazy import to avoid circular dependency with vllm.v1.engine."""
-    from vllm.v1.engine.tensor_ipc import TensorIpcHandle
-    return TensorIpcHandle
+class TensorIpcHandle(NamedTuple):
+    """Handle for a tensor sent via IPC queue (zero-copy transfer).
+
+    Contains only metadata about the tensor. This is serialized via msgpack
+    and used by the decoder to retrieve the actual tensor from the queue.
+    The actual tensor is sent separately via torch.multiprocessing.Queue.
+    Works for both CUDA and CPU tensors.
+    """
+
+    request_id: str | None
+    tensor_id: str
+    shape: tuple[int, ...]
+    dtype: str
+    device: str
 
 
 # MultiModalField class serialization type map.
@@ -268,9 +277,7 @@ class MsgpackEncoder:
                 # Generate unique tensor ID
                 tensor_id = f"{id(self)}_{self._tensor_id_counter}"
                 self._tensor_id_counter += 1
-                return sender.send_tensor(
-                    obj, self._current_request_id, tensor_id
-                )
+                return sender.send_tensor(obj, self._current_request_id, tensor_id)
             except Exception as e:
                 logger.warning(
                     "Failed to send tensor via IPC queue: %s. "
@@ -370,11 +377,6 @@ class MsgpackDecoder:
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
-    @staticmethod
-    def _ipc_handle_type() -> type:
-        """Lazy import of TensorIpcHandle to avoid circular imports."""
-        return _get_ipc_types()
-
     def decode(self, bufs: bytestr | Sequence[bytestr]) -> Any:
         if isinstance(bufs, bytestr):  # type: ignore
             return self.decoder.decode(bufs)
@@ -390,12 +392,11 @@ class MsgpackDecoder:
         if isclass(t):
             if issubclass(t, np.ndarray):
                 return self._decode_ndarray(obj)
-            IpcHandle = self._ipc_handle_type()
-            if issubclass(t, IpcHandle):
+            if issubclass(t, TensorIpcHandle):
                 # msgspec deserializes dataclasses to dicts, so convert
                 # to TensorIpcHandle
                 if isinstance(obj, dict):
-                    obj = IpcHandle(**obj)
+                    obj = TensorIpcHandle(**obj)
                 return self._decode_ipc_queue_tensor(obj)
             if issubclass(t, torch.Tensor):
                 return self._decode_tensor(obj)
@@ -442,10 +443,9 @@ class MsgpackDecoder:
         return arr.reshape(shape)
 
     def _decode_tensor(self, arr: Any) -> torch.Tensor:
-        IpcHandle = self._ipc_handle_type()
         # Check if this is a TensorIpcHandle (sent via IPC queue)
         # This can happen when IPC is enabled for non-multimodal tensor fields
-        if isinstance(arr, IpcHandle):
+        if isinstance(arr, TensorIpcHandle):
             return self._decode_ipc_queue_tensor(arr)
         # Check if this is a dict that represents a TensorIpcHandle
         # (msgspec serializes dataclasses as dicts without type info)
@@ -457,13 +457,13 @@ class MsgpackDecoder:
             and "device" in arr
         ):
             # Convert dict to TensorIpcHandle and decode it
-            handle = IpcHandle(**arr)
+            handle = TensorIpcHandle(**arr)
             return self._decode_ipc_queue_tensor(handle)
         # Check if this is a list/tuple with 5 elements (TensorIpcHandle)
         # msgspec serializes NamedTuples as lists
         if isinstance(arr, (list, tuple)) and len(arr) == 5:
             # Convert list to TensorIpcHandle and decode it
-            handle = IpcHandle(*arr)
+            handle = TensorIpcHandle(*arr)
             return self._decode_ipc_queue_tensor(handle)
 
         # Standard tensor decoding
@@ -493,9 +493,7 @@ class MsgpackDecoder:
 
         Delegates to the TensorIpcReceiver. Works for CUDA and CPU.
         """
-        assert self.tensor_ipc_receiver is not None, (
-            "Tensor IPC receiver is not set"
-        )
+        assert self.tensor_ipc_receiver is not None, "Tensor IPC receiver is not set"
         return self.tensor_ipc_receiver.recv_tensor(handle)
 
     def _decode_mm_items(self, obj: dict[str, Any]) -> MultiModalKwargsItems:
@@ -532,8 +530,7 @@ class MsgpackDecoder:
             # Although it violates NestedTensors type, MultiModalKwargs
             # values are sometimes floats.
             return obj
-        IpcHandle = self._ipc_handle_type()
-        if isinstance(obj, IpcHandle):
+        if isinstance(obj, TensorIpcHandle):
             return self._decode_ipc_queue_tensor(obj)
         # Check if this is a dict that represents a TensorIpcHandle
         # (msgspec serializes dataclasses as dicts without type info
@@ -547,7 +544,7 @@ class MsgpackDecoder:
         ):
             # Convert dict to TensorIpcHandle and decode it
             # Handle both new format (with request_id) and old format (without)
-            handle = IpcHandle(**obj)
+            handle = TensorIpcHandle(**obj)
             return self._decode_ipc_queue_tensor(handle)
         if not isinstance(obj, list):
             raise TypeError(f"Unexpected NestedTensors contents: {type(obj)}")

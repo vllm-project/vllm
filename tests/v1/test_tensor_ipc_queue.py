@@ -15,11 +15,10 @@ import torch.multiprocessing as torch_mp
 
 from vllm.v1.engine.tensor_ipc import (
     TensorIpcData,
-    TensorIpcHandle,
     TensorIpcReceiver,
     TensorIpcSender,
 )
-from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
+from vllm.v1.serial_utils import MsgpackEncoder, TensorIpcHandle
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -350,7 +349,7 @@ def mixed_tensor_encoder_process(
     try:
         sender = TensorIpcSender(tensor_queues)
         sender.set_target_engine(0)
-        encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+        _encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
         # Create only CUDA tensor for IPC (CPU will be serialized)
         # But actually, let's just send CUDA tensor directly
