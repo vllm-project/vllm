@@ -355,6 +355,12 @@ class ElasticEPScalingExecutor:
                 num_physical_experts=num_physical_experts,
                 num_local_physical_experts=num_local_experts,
             )
+            # Force re-creation of the modular kernel (and all2all manager)
+            # for the new EP size by resetting quant_method to base
+            for module in moe_modules:
+                if hasattr(module.quant_method, "old_quant_method"):
+                    module.quant_method = module.quant_method.old_quant_method
+                    module.runner = module._init_runner()
             prepare_communication_buffer_for_model(self.worker.model_runner.model)
         if (
             self.worker.vllm_config.compilation_config.mode
