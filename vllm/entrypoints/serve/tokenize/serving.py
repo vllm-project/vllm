@@ -117,7 +117,7 @@ class OpenAIServingTokenization(OpenAIServing):
             tokens=input_ids,
             token_strs=token_strs,
             count=len(input_ids),
-            max_model_len=self.max_model_len,
+            max_model_len=self.model_config.max_model_len,
         )
 
     async def create_detokenize(
