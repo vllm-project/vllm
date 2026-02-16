@@ -1,0 +1,30 @@
+# ServiceMonitor for Prometheus Operator to auto-discover and scrape all vLLM pods.
+# Assumes your vLLM Service has the labels: app=vllm, model=qwen3-235b
+# Adjust labels/namespace to match your deployment.
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: vllm-metrics
+  namespace: vllm
+  labels:
+    app: vllm
+    model: qwen3-235b
+spec:
+  selector:
+    matchLabels:
+      app: vllm
+  namespaceSelector:
+    matchNames:
+      - vllm
+  endpoints:
+    - port: http  # must match the port name in your vLLM Service
+      path: /metrics
+      interval: 15s
+      scrapeTimeout: 10s
+      honorLabels: true
+      relabelings:
+        # Expose the pod name as a label for per-replica drill-down
+        - sourceLabels: [__meta_kubernetes_pod_name]
+          targetLabel: pod
+        - sourceLabels: [__meta_kubernetes_pod_node_name]
+          targetLabel: node

@@ -1,0 +1,16 @@
+# Kustomization to deploy the full vLLM monitoring stack.
+# Usage: kubectl apply -k examples/online_serving/prometheus_grafana/k8s-monitoring/
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: vllm
+
+resources:
+  - vllm-deployment.yaml
+  - servicemonitor.yaml
+  - prometheusrule.yaml
+  - otel-collector.yaml
+
+# The Grafana dashboard ConfigMap lives in the "monitoring" namespace,
+# so apply it separately:
+#   kubectl apply -f grafana-dashboard-configmap.yaml

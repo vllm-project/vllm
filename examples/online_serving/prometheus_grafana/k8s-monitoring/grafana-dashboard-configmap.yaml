@@ -1,0 +1,15 @@
+# ConfigMap that the Grafana sidecar auto-discovers and provisions as a dashboard.
+# Requires the Grafana Helm chart's sidecar.dashboards.enabled=true (default in
+# kube-prometheus-stack).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: vllm-fleet-dashboard
+  namespace: monitoring   # must be in the namespace Grafana scans (usually "monitoring")
+  labels:
+    grafana_dashboard: "1"  # label the sidecar watches for
+data:
+  vllm-fleet-dashboard.json: |
+    # This file is auto-generated. See grafana-dashboard.json for the source.
+    # To use: copy the contents of grafana-dashboard.json into this field,
+    # or mount grafana-dashboard.json directly. See README for details.

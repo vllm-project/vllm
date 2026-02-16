@@ -1,0 +1,117 @@
+# Reference vLLM Deployment for Qwen3-235B with 4-GPU tensor parallelism.
+# 40 replicas, each pod gets 4 H100 GPUs.
+#
+# Key flags for observability:
+#   --otlp-traces-endpoint  -> sends per-request traces to the OTel Collector
+#   /metrics endpoint       -> Prometheus metrics (enabled by default)
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: vllm
+  namespace: vllm
+  labels:
+    app: vllm
+    model: qwen3-235b
+spec:
+  selector:
+    app: vllm
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen3-235b
+  namespace: vllm
+  labels:
+    app: vllm
+    model: qwen3-235b
+spec:
+  replicas: 40
+  selector:
+    matchLabels:
+      app: vllm
+      model: qwen3-235b
+  template:
+    metadata:
+      labels:
+        app: vllm
+        model: qwen3-235b
+      annotations:
+        # Prometheus scrape annotations (fallback if not using ServiceMonitor)
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: vllm
+          image: vllm/vllm-openai:latest  # pin to a specific version in production
+          args:
+            - "serve"
+            - "Qwen/Qwen3-235B-A22B"
+            # Tensor parallelism across the 4 GPUs in this pod
+            - "--tensor-parallel-size=4"
+            # OpenTelemetry: send traces to the in-cluster OTel Collector
+            - "--otlp-traces-endpoint=http://otel-collector.vllm.svc.cluster.local:4317"
+            # Enable request logging for debugging (logs to stdout)
+            - "--log-requests"
+            # Tune as needed for Qwen3-235B on H100
+            - "--max-model-len=32768"
+            - "--gpu-memory-utilization=0.92"
+            - "--enable-prefix-caching"
+            - "--port=8000"
+          ports:
+            - containerPort: 8000
+              name: http
+          env:
+            - name: VLLM_WORKER_MULTIPROC_METHOD
+              value: "spawn"
+          resources:
+            requests:
+              cpu: "8"
+              memory: "64Gi"
+              nvidia.com/gpu: "4"
+            limits:
+              cpu: "16"
+              memory: "128Gi"
+              nvidia.com/gpu: "4"
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 120
+            periodSeconds: 10
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 180
+            periodSeconds: 30
+            failureThreshold: 5
+          volumeMounts:
+            - name: model-cache
+              mountPath: /root/.cache/huggingface
+            - name: shm
+              mountPath: /dev/shm
+      volumes:
+        - name: model-cache
+          # Use a PVC or hostPath for model weights caching
+          persistentVolumeClaim:
+            claimName: hf-model-cache
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
+      # Schedule on GPU nodes with H100s
+      nodeSelector:
+        nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule

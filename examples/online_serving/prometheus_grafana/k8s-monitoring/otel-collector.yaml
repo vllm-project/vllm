@@ -1,0 +1,170 @@
+# OpenTelemetry Collector that receives traces from all 40 vLLM pods,
+# filters to keep only slow/outlier requests, and exports them.
+#
+# Slow-request criteria (tunable in the tail_sampling processor):
+#   1. E2E trace duration > 120 s  (catches >2 min requests)
+#   2. TTFT span attribute > 10 s  (catches high-TTFT outliers)
+#   3. ITL  span attribute > 0.5 s (catches high-ITL outliers)
+#
+# Filtered traces are exported to:
+#   - stdout/logs  (always, for kubectl logs inspection)
+#   - OTLP endpoint (optional, e.g. Jaeger / Grafana Tempo)
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: vllm
+data:
+  otel-collector-config.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+          http:
+            endpoint: 0.0.0.0:4318
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 512
+
+      # Keep only traces that match at least one slow-request policy.
+      # decision_wait must be >= your longest expected request time.
+      tail_sampling:
+        decision_wait: 300s
+        num_traces: 50000
+        policies:
+          # Policy 1: any trace whose root span exceeds 120 s
+          - name: e2e-over-2min
+            type: latency
+            latency:
+              threshold_ms: 120000
+
+          # Policy 2: TTFT > 10 s (adjust to match your p99 threshold)
+          - name: high-ttft
+            type: numeric_attribute
+            numeric_attribute:
+              key: gen_ai.latency.time_to_first_token
+              min_value: 10
+              max_value: 999999
+
+          # Policy 3: per-token latency > 0.5 s
+          - name: high-itl
+            type: numeric_attribute
+            numeric_attribute:
+              key: gen_ai.latency.time_in_model_decode
+              min_value: 60
+              max_value: 999999
+
+      # Add k8s metadata to spans for correlation
+      resource:
+        attributes:
+          - key: deployment
+            value: vllm-qwen3-235b
+            action: upsert
+
+    exporters:
+      # Always log slow traces so you can `kubectl logs` to inspect them
+      debug:
+        verbosity: detailed
+        sampling_initial: 100
+        sampling_thereafter: 100
+
+      # Uncomment and configure to send to a tracing backend:
+      # otlp/jaeger:
+      #   endpoint: jaeger-collector.observability.svc.cluster.local:4317
+      #   tls:
+      #     insecure: true
+      #
+      # otlp/tempo:
+      #   endpoint: tempo.observability.svc.cluster.local:4317
+      #   tls:
+      #     insecure: true
+
+    extensions:
+      health_check:
+        endpoint: 0.0.0.0:13133
+
+    service:
+      extensions: [health_check]
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [tail_sampling, resource, batch]
+          exporters: [debug]
+          # exporters: [debug, otlp/jaeger]   # uncomment to add a backend
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: vllm
+  labels:
+    app: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: otel-collector
+  template:
+    metadata:
+      labels:
+        app: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: otel/opentelemetry-collector-contrib:0.98.0
+          args: ["--config=/etc/otel/otel-collector-config.yaml"]
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+            - containerPort: 4318
+              name: otlp-http
+            - containerPort: 13133
+              name: health
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1Gi"
+            limits:
+              cpu: "2"
+              memory: "4Gi"
+          livenessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /
+              port: health
+            initialDelaySeconds: 5
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otel
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: vllm
+  labels:
+    app: otel-collector
+spec:
+  selector:
+    app: otel-collector
+  ports:
+    - name: otlp-grpc
+      port: 4317
+      targetPort: 4317
+    - name: otlp-http
+      port: 4318
+      targetPort: 4318

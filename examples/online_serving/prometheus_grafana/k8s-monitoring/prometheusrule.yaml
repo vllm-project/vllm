@@ -1,0 +1,140 @@
+# PrometheusRule: alerts for slow requests and unhealthy fleet conditions.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: vllm-alerts
+  namespace: vllm
+  labels:
+    app: vllm
+    role: alert-rules
+spec:
+  groups:
+    # ---------------------------------------------------------------
+    # Latency SLO alerts
+    # ---------------------------------------------------------------
+    - name: vllm-latency-slo
+      interval: 30s
+      rules:
+        # P99 E2E latency > 2 minutes (120 s)
+        - alert: VllmE2ELatencyP99TooHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, model_name) (
+                rate(vllm:e2e_request_latency_seconds_bucket[5m])
+              )
+            ) > 120
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vLLM p99 E2E latency exceeds 2 minutes"
+            description: >
+              The fleet-wide p99 E2E request latency is
+              {{ $value | humanizeDuration }} for model {{ $labels.model_name }}.
+
+        # P99 TTFT > 30 seconds (tune this to your SLO)
+        - alert: VllmTTFTP99TooHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, model_name) (
+                rate(vllm:time_to_first_token_seconds_bucket[5m])
+              )
+            ) > 30
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vLLM p99 TTFT exceeds 30 s"
+            description: >
+              Fleet p99 TTFT is {{ $value | humanizeDuration }}
+              for model {{ $labels.model_name }}.
+
+        # P99 inter-token latency (TPOT) > 1 second
+        - alert: VllmITLP99TooHigh
+          expr: |
+            histogram_quantile(0.99,
+              sum by (le, model_name) (
+                rate(vllm:inter_token_latency_seconds_bucket[5m])
+              )
+            ) > 1
+          for: 2m
+          labels:
+            severity: warning
+          annotations:
+            summary: "vLLM p99 inter-token latency exceeds 1 s"
+            description: >
+              Fleet p99 ITL is {{ $value | humanizeDuration }}
+              for model {{ $labels.model_name }}.
+
+        # Any single request takes longer than 2 min (raw E2E histogram bucket check)
+        - alert: VllmSlowRequestsPresent
+          expr: |
+            increase(
+              vllm:e2e_request_latency_seconds_bucket{le="120"}[5m]
+            )
+            <
+            increase(
+              vllm:e2e_request_latency_seconds_count[5m]
+            )
+          for: 1m
+          labels:
+            severity: info
+          annotations:
+            summary: "Requests exceeding 2-minute E2E threshold detected"
+            description: >
+              Pod {{ $labels.pod }} is seeing requests that exceed 120 s E2E.
+
+    # ---------------------------------------------------------------
+    # Fleet health alerts
+    # ---------------------------------------------------------------
+    - name: vllm-fleet-health
+      interval: 30s
+      rules:
+        # KV cache pressure: usage > 95 %
+        - alert: VllmKVCacheNearFull
+          expr: |
+            vllm:kv_cache_usage_perc > 0.95
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "KV cache usage above 95 % on {{ $labels.pod }}"
+            description: >
+              KV cache usage is {{ $value | humanizePercentage }} on pod
+              {{ $labels.pod }}.  Requests may queue or be preempted.
+
+        # High queue depth: > 50 waiting requests per pod
+        - alert: VllmHighQueueDepth
+          expr: |
+            vllm:num_requests_waiting > 50
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "High queue depth on {{ $labels.pod }}"
+            description: >
+              {{ $value }} requests waiting on pod {{ $labels.pod }}.
+
+        # Preemption spike
+        - alert: VllmPreemptionSpike
+          expr: |
+            rate(vllm:num_preemptions[5m]) > 1
+          for: 3m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Elevated preemption rate on {{ $labels.pod }}"
+            description: >
+              Preemptions running at {{ $value }}/s on pod {{ $labels.pod }}.
+
+        # Pod down: fewer than 40 replicas reporting metrics
+        - alert: VllmReplicaDown
+          expr: |
+            count(up{job="vllm"} == 1) < 40
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "vLLM fleet is degraded"
+            description: >
+              Only {{ $value }} of 40 vLLM replicas are up and reporting metrics.
