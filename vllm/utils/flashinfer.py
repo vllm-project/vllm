@@ -12,7 +12,7 @@ import importlib.util
 import os
 import shutil
 from collections.abc import Callable
-from typing import Any, NoReturn
+from typing import Any, NoReturn 
 
 import requests
 import torch
@@ -454,10 +454,12 @@ if has_flashinfer():
         B: torch.Tensor,
         A_scale: torch.Tensor,
         B_scale: torch.Tensor,
-        g_scale: torch.Tensor,
         dtype: torch.dtype,
         use_8x4_sf_layout: bool,
         backend: str,
+        g_scale: torch.Tensor = None,
+        block_size: int = 16,
+        use_nvfp4: bool = True
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
@@ -468,9 +470,10 @@ if has_flashinfer():
             B_scale,
             g_scale,
             dtype,
-            block_size=16,
+            block_size=block_size,
             use_8x4_sf_layout=use_8x4_sf_layout,
             backend=backend,
+            use_nvfp4=use_nvfp4,
         )
 
     @torch.library.register_fake(
