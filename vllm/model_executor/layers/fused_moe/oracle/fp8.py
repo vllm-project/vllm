@@ -473,7 +473,7 @@ def make_fp8_moe_kernel(
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explict in
     # the new MoE runner class.
-    return mk.FusedMoEKernel(
+    kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
         shared_experts=(
@@ -482,4 +482,10 @@ def make_fp8_moe_kernel(
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
+        inplace=(
+            not moe_config.disable_inplace
+            and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
+        ),
     )
+
+    return kernel

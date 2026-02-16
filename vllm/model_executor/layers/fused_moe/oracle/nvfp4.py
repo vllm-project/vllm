@@ -405,7 +405,7 @@ def make_nvfp4_moe_kernel(
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explict in
     # the new MoE runner class.
-    return mk.FusedMoEKernel(
+    kernel = mk.FusedMoEKernel(
         prepare_finalize,
         experts,
         shared_experts=(
@@ -414,4 +414,8 @@ def make_nvfp4_moe_kernel(
             else None
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
+        inplace=False,
     )
+
+    # TODO(rob): update inplace logic to be part of the kernel.
+    return kernel
