@@ -685,6 +685,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         users who intentionally send multimodal system messages.
         See: https://platform.openai.com/docs/api-reference/chat/create#chat_create-messages-system_message
         """
+        if not isinstance(data, dict):
+            return data
         messages = data.get("messages", [])
         for msg in messages:
             # Check if this is a system message

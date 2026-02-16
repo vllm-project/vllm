@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import logging
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -15,7 +14,6 @@ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.logger import _print_warning_once
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config
@@ -237,14 +235,6 @@ async def test_chat_error_stream():
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
-@pytest.fixture(autouse=True)
-def _clear_warning_once_cache():
-    """Clear the warning_once lru_cache so each test gets a fresh state."""
-    _print_warning_once.cache_clear()
-    yield
-    _print_warning_once.cache_clear()
-
-
 @pytest.mark.parametrize(
     "image_content",
     [
@@ -252,9 +242,11 @@ def _clear_warning_once_cache():
         [{"image_url": {"url": "https://example.com/image.jpg"}}],
     ],
 )
-def test_system_message_warns_on_image(image_content, caplog):
+def test_system_message_warns_on_image(image_content):
     """Test that system messages with image content trigger a warning."""
-    with caplog.at_level(logging.WARNING):
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[
@@ -265,10 +257,10 @@ def test_system_message_warns_on_image(image_content, caplog):
             ],
         )
 
-    assert any(
-        "System messages should only contain text" in msg and "image_url" in msg
-        for msg in caplog.messages
-    )
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "image_url" in call_args
 
 
 def test_system_message_accepts_text():
@@ -331,9 +323,11 @@ def test_user_message_accepts_image():
         [{"input_audio": {"data": "base64data", "format": "wav"}}],
     ],
 )
-def test_system_message_warns_on_audio(audio_content, caplog):
+def test_system_message_warns_on_audio(audio_content):
     """Test that system messages with audio content trigger a warning."""
-    with caplog.at_level(logging.WARNING):
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[
@@ -344,10 +338,10 @@ def test_system_message_warns_on_audio(audio_content, caplog):
             ],
         )
 
-    assert any(
-        "System messages should only contain text" in msg and "input_audio" in msg
-        for msg in caplog.messages
-    )
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "input_audio" in call_args
 
 
 @pytest.mark.parametrize(
@@ -357,9 +351,11 @@ def test_system_message_warns_on_audio(audio_content, caplog):
         [{"video_url": {"url": "https://example.com/video.mp4"}}],
     ],
 )
-def test_system_message_warns_on_video(video_content, caplog):
+def test_system_message_warns_on_video(video_content):
     """Test that system messages with video content trigger a warning."""
-    with caplog.at_level(logging.WARNING):
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
         ChatCompletionRequest(
             model=MODEL_NAME,
             messages=[
@@ -370,7 +366,7 @@ def test_system_message_warns_on_video(video_content, caplog):
             ],
         )
 
-    assert any(
-        "System messages should only contain text" in msg and "video_url" in msg
-        for msg in caplog.messages
-    )
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "video_url" in call_args
