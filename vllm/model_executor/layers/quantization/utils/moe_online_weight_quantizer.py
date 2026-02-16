@@ -75,6 +75,9 @@ class MoeOnlineWeightQuantizer:
         layer.num_experts = num_experts
         layer.orig_dtype = params_dtype
 
+        # Stash device for JIT materialization (must be set before weight loader)
+        layer._load_device = torch.get_default_device()
+
         weight_loader = extra_weight_attrs["weight_loader"]
         new_extra_weight_attrs = extra_weight_attrs.copy()
         new_extra_weight_attrs["weight_loader"] = self._create_moe_weight_loader(
@@ -108,9 +111,6 @@ class MoeOnlineWeightQuantizer:
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
-
-        # Stash device for JIT materialization
-        layer._load_device = torch.get_default_device()
 
         # Create scale parameters for quantization
         w13_weight_scale, w2_weight_scale = (
@@ -157,18 +157,23 @@ class MoeOnlineWeightQuantizer:
         Returns:
             A patched weight loader callable that wraps the original.
         """
+        # Closure variables to track loading state without polluting layer
+        load_device = layer._load_device
+        loaded_numel = 0
+        w13_orig_id: int | None = None
+        w2_orig_id: int | None = None
 
         def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-            if not hasattr(layer, "_loaded_numel"):
-                layer._loaded_numel = 0
+            nonlocal loaded_numel, w13_orig_id, w2_orig_id
 
+            if w13_orig_id is None:
                 # Save the ids of original w13 and w2 so that we can
                 # distinguish which one `param` should map to
-                layer._w13_weight_orig_id = id(layer.w13_weight)
-                layer._w2_weight_orig_id = id(layer.w2_weight)
+                w13_orig_id = id(layer.w13_weight)
+                w2_orig_id = id(layer.w2_weight)
 
                 # Materialize weights just-in-time
-                with torch.device(layer._load_device):
+                with torch.device(load_device):
                     w13_weight = torch.nn.Parameter(
                         materialize_meta_tensor(layer.w13_weight),
                         requires_grad=False,
@@ -182,21 +187,20 @@ class MoeOnlineWeightQuantizer:
                     )
                     set_weight_attrs(w2_weight, extra_weight_attrs)
                     layer.register_parameter("w2_weight", w2_weight)
-                del layer._load_device
 
             # Refresh the reference to `param` to reflect JIT materialization
-            if id(param) == layer._w13_weight_orig_id:
+            if id(param) == w13_orig_id:
                 param = layer.w13_weight
-            elif id(param) == layer._w2_weight_orig_id:
+            elif id(param) == w2_orig_id:
                 param = layer.w2_weight
 
             # Load the current weight chunk with tracking
             with CopyCounter() as counter:
                 res = weight_loader(param, loaded_weight, *args, **kwargs)
-            layer._loaded_numel += counter.copied_numel
+            loaded_numel += counter.copied_numel
 
             target_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
-            if layer._loaded_numel == target_numel:
+            if loaded_numel == target_numel:
                 self.quantize_and_setup_kernel(layer)
 
                 # Prevent the usual `process_weights_after_loading` call
