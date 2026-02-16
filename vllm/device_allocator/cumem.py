@@ -232,19 +232,47 @@ class CuMemAllocator:
             back to GPU memory. If None, all memory allocation will be loaded
             back to GPU memory.
         """
-        for ptr, data in self.pointer_to_data.items():
-            if tags is None or data.tag in tags:
-                handle = data.handle
-                create_and_map(handle)
-                if data.cpu_backup_tensor is not None:
-                    cpu_backup_tensor = data.cpu_backup_tensor
-                    if cpu_backup_tensor is not None:
-                        size_in_bytes = (
-                            cpu_backup_tensor.numel() * cpu_backup_tensor.element_size()
-                        )
-                        cpu_ptr = cpu_backup_tensor.data_ptr()
-                        libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
-                        data.cpu_backup_tensor = None
+        # Track successfully mapped allocations for rollback on failure
+        successfully_mapped = []
+
+        try:
+            for ptr, data in self.pointer_to_data.items():
+                if tags is None or data.tag in tags:
+                    handle = data.handle
+                    create_and_map(handle)
+                    successfully_mapped.append(ptr)
+
+                    if data.cpu_backup_tensor is not None:
+                        cpu_backup_tensor = data.cpu_backup_tensor
+                        if cpu_backup_tensor is not None:
+                            size_in_bytes = (
+                                cpu_backup_tensor.numel()
+                                * cpu_backup_tensor.element_size()
+                            )
+                            cpu_ptr = cpu_backup_tensor.data_ptr()
+                            libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
+                            data.cpu_backup_tensor = None
+        except Exception as e:
+            # Rollback all successfully mapped allocations on failure
+            logger.error(
+                "Failed to wake up allocator: %s. Rolling back %d successfully "
+                "mapped allocations.",
+                str(e),
+                len(successfully_mapped),
+            )
+            for ptr in successfully_mapped:
+                try:
+                    data = self.pointer_to_data[ptr]
+                    handle = data.handle
+                    unmap_and_release(handle)
+                except Exception as rollback_error:
+                    logger.error(
+                        "Failed to rollback allocation at ptr %s: %s",
+                        ptr,
+                        str(rollback_error),
+                    )
+            # Re-raise the original exception after cleanup
+            raise
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
