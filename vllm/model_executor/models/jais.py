@@ -244,7 +244,6 @@ class JAISModel(nn.Module):
         quant_config = vllm_config.quant_config
 
         self.config = config
-        assert not config.add_cross_attention
         assert not config.scale_attn_by_inverse_layer_idx
         assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size

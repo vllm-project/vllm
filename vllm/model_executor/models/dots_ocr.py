@@ -107,10 +107,13 @@ class DotsOCRDummyInputsBuilder(Qwen2VLDummyInputsBuilder):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
+        mm_processor_kwargs = mm_processor_kwargs or {}
         target_width, target_height = self.info.get_image_size_with_most_features(  # noqa: E501
+            mm_processor_kwargs.get("max_pixels", None)
         )
 
         image_overrides = mm_options.get("image") if mm_options else None
@@ -570,10 +573,11 @@ class DotsVisionTransformer(nn.Module):
 
     def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> int | None:
         max_seqlen = None
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
-        ):
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 

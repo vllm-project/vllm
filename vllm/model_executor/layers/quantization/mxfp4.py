@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import (
@@ -160,7 +161,7 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
             logger.info_once("Using Triton backend")
             return Mxfp4Backend.TRITON
     elif current_platform.is_xpu():
-        logger.info_once("Using ipex marlin backend on XPU")
+        logger.info_once("Using xpu backend on XPU")
         return Mxfp4Backend.MARLIN
     elif current_platform.is_rocm() and has_triton_kernels():
         logger.info_once("Using Triton backend")
@@ -235,6 +236,8 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
+    """MXFP4 MoE quantization method."""
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
@@ -900,6 +903,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
         if layer.enable_eplb:
@@ -1138,8 +1142,9 @@ class XpuMxfp4MoEMethod(Mxfp4MoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        assert layer.activation == "swigluoai", (
-            "Only swiglu_oai activation is supported for XPU MXFP4 MoE"
+        assert layer.activation == MoEActivation.SWIGLUOAI, (
+            "Only swiglu_oai activation is supported for "
+            f"XPU MXFP4 MoE, not {layer.activation}."
         )
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
