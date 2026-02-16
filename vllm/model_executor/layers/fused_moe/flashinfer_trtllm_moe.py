@@ -35,8 +35,8 @@ def _supports_current_device() -> bool:
 
 
 def _supports_no_act_and_mul() -> bool:
-    """Does not support non-gated MoE (i.e. Nanotron-Mini)."""
-    return False
+    """Supports non-gated MoE."""
+    return True
 
 
 def _supports_quant_scheme(
@@ -52,8 +52,7 @@ def _supports_quant_scheme(
 
 
 def _supports_activation(activation: MoEActivation) -> bool:
-    """Supports silu activation only."""
-    return activation == MoEActivation.SILU
+    return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
 
 def _supports_routing_method(
@@ -74,6 +73,7 @@ def _supports_routing_method(
     elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
         # NOTE(dbari): as above, potentially allow others here.
         return routing_method in [
+            RoutingMethodType.DeepSeekV3,
             RoutingMethodType.Llama4,
             RoutingMethodType.Renormalize,
             RoutingMethodType.RenormalizeNaive,
@@ -201,6 +201,7 @@ def flashinfer_fused_moe_blockscale_fp8(
 ) -> torch.Tensor:
     from vllm.utils.flashinfer import flashinfer_trtllm_fp8_block_scale_moe
 
+    num_expert_group = num_expert_group if num_expert_group is not None else 0
     topk_group = topk_group if topk_group is not None else 0
     assert top_k <= global_num_experts
     assert top_k <= 10
@@ -291,6 +292,7 @@ def fi_trtllm_fp8_per_tensor_moe(
     local_num_experts: int,
     use_routing_scales_on_input: bool,
     routing_method_type: int,
+    activation_type: int,
     routed_scaling_factor: float = 1.0,
 ) -> torch.Tensor:
     num_expert_group = num_expert_group if num_expert_group is not None else 0
@@ -326,9 +328,9 @@ def fi_trtllm_fp8_per_tensor_moe(
         routed_scaling_factor=routed_scaling_factor,
         use_routing_scales_on_input=use_routing_scales_on_input,
         routing_method_type=routing_method_type,
-        # TODO: Required for flashinfer==0.6.3, remove with update
+        # TODO: enum type Required for flashinfer==0.6.3, remove with update
         # https://github.com/flashinfer-ai/flashinfer/pull/2508
-        activation_type=ActivationType.Swiglu,
+        activation_type=ActivationType(activation_type),
     )
 
 
@@ -351,6 +353,7 @@ def fi_trtllm_fp8_per_tensor_moe_fake(
     local_num_experts: int,
     use_routing_scales_on_input: bool,
     routing_method_type: int,
+    activation_type: int,
     routed_scaling_factor: float = 1.0,
 ) -> torch.Tensor:
     return torch.empty_like(hidden_states)
