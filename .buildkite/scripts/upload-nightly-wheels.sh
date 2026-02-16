@@ -6,7 +6,7 @@ set -ex
 
 BUCKET="vllm-wheels"
 INDICES_OUTPUT_DIR="indices"
-DEFAULT_VARIANT_ALIAS="cu129" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
+DEFAULT_VARIANT_ALIAS="cu130" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
 PYTHON=${PYTHON_PROG:=python3} # try to read from env var, otherwise use python3
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
@@ -90,7 +90,7 @@ $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --curr
 echo "Uploading indices to $S3_COMMIT_PREFIX"
 aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "$S3_COMMIT_PREFIX"
 
-# copy to /nightly/ only if it is on the main branch and not a PR 
+# copy to /nightly/ only if it is on the main branch and not a PR
 if [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]]; then
     echo "Uploading indices to overwrite /nightly/"
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/nightly/"
