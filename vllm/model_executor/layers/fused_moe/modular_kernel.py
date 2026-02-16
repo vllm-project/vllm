@@ -1502,6 +1502,8 @@ class FusedMoEKernelModularImpl:
             expert_map,
             apply_router_weight_on_input,
         )
+        # print(f"{a1q.dtype=}")
+        # print(f"{a1q_scale.dtype=}")
 
         fused_out = self._fused_experts(
             in_dtype=hidden_states.dtype,
