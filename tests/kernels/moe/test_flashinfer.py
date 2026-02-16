@@ -15,8 +15,8 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     fp8_w8a8_moe_quant_config,
 )
-from vllm.model_executor.layers.fused_moe.experts.flashinfer_trtllm_fp8_moe import (
-    FlashInferTrtLlmFp8Experts,
+from vllm.model_executor.layers.fused_moe.experts.trtllm_fp8_moe import (
+    TrtLlmFp8Experts,
 )
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
@@ -24,7 +24,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
-    MoEPrepareAndFinalizeNoDPEPModularMonolithic,
+    MoEPrepareAndFinalizeNoDPEPMonolithic,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
@@ -241,8 +241,8 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
         )
 
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModularMonolithic(),
-            FlashInferTrtLlmFp8Experts(
+            MoEPrepareAndFinalizeNoDPEPMonolithic(),
+            TrtLlmFp8Experts(
                 moe_config=td.layer.moe,
                 quant_config=quant_config,
             ),
