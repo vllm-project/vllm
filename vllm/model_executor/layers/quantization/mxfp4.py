@@ -77,6 +77,10 @@ class Mxfp4Backend(Enum):
     # Triton Backend
     TRITON = 6
 
+    # Custom Triton with inline MXFP4 dequant (for hardware without
+    # tl.dot_scaled, e.g. RDNA4/gfx12)
+    TRITON_MXFP4_DEQUANT = 7
+
 
 def get_mxfp4_backend_with_lora() -> Mxfp4Backend:
     """
@@ -164,9 +168,17 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
     elif current_platform.is_xpu():
         logger.info_once("Using xpu backend on XPU")
         return Mxfp4Backend.MARLIN
-    elif current_platform.is_rocm() and has_triton_kernels():
-        logger.info_once("Using Triton backend")
-        return Mxfp4Backend.TRITON
+    elif current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx1x
+
+        if on_gfx1x():
+            logger.info_once(
+                "Using custom Triton MXFP4 dequant backend for RDNA4/gfx12"
+            )
+            return Mxfp4Backend.TRITON_MXFP4_DEQUANT
+        elif has_triton_kernels():
+            logger.info_once("Using Triton backend")
+            return Mxfp4Backend.TRITON
 
     return Mxfp4Backend.NONE
 
@@ -809,6 +821,21 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             del layer.w2_weight
             layer.w13_weight = w13_weight
             layer.w2_weight = w2_weight
+        elif self.mxfp4_backend == Mxfp4Backend.TRITON_MXFP4_DEQUANT:
+            # No swizzle or de-interleaving needed.
+            # The checkpoint stores w13 as interleaved [g0, u0, g1, u1, ...]
+            # along dim-1. On ROCm, swigluoai_and_mul dispatches to the
+            # native implementation which expects this interleaved layout
+            # (it reads gate=x[::2], up=x[1::2]). So we keep weights as-is.
+            # Only convert biases to fp32.
+            layer.w13_bias = Parameter(
+                layer.w13_bias.data.to(torch.float32).contiguous(),
+                requires_grad=False,
+            )
+            layer.w2_bias = Parameter(
+                layer.w2_bias.data.to(torch.float32).contiguous(),
+                requires_grad=False,
+            )
         else:
             raise ValueError(
                 f"Unsupported mxfp4_backend: {self.mxfp4_backend}: "
@@ -845,6 +872,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_scale=layer.w2_weight_scale,
             )
         elif self.mxfp4_backend in [Mxfp4Backend.SM100_FI_MXFP4_BF16]:
+            return mxfp4_w4a16_moe_quant_config(
+                w1_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                w1_scale=layer.w13_weight_scale,
+                w2_scale=layer.w2_weight_scale,
+            )
+        elif self.mxfp4_backend == Mxfp4Backend.TRITON_MXFP4_DEQUANT:
+            # Raw tensor scales — no PrecisionConfig wrapping needed
             return mxfp4_w4a16_moe_quant_config(
                 w1_bias=layer.w13_bias,
                 w2_bias=layer.w2_bias,
@@ -907,6 +942,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 if self.moe.is_lora_enabled:
                     return UnfusedOAITritonExperts(self.moe, self.moe_quant_config)
                 return OAITritonExperts(self.moe, self.moe_quant_config)
+            elif self.mxfp4_backend == Mxfp4Backend.TRITON_MXFP4_DEQUANT:
+                from vllm.model_executor.layers.fused_moe.fused_moe_mxfp4 import (
+                    Mxfp4DequantTritonExperts,
+                )
+
+                return Mxfp4DequantTritonExperts(
+                    self.moe, self.moe_quant_config
+                )
             else:
                 raise NotImplementedError(
                     f"Incompatible Mxfp4 backend ({self.mxfp4_backend}) for EP"
@@ -945,6 +988,28 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            )
+
+        if self.mxfp4_backend == Mxfp4Backend.TRITON_MXFP4_DEQUANT:
+            from vllm.model_executor.layers.fused_moe.fused_moe_mxfp4 import (
+                mxfp4_dequant_fused_experts,
+            )
+
+            return mxfp4_dequant_fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                layer.w13_weight_scale,
+                layer.w2_weight_scale,
+                topk_weights,
+                topk_ids,
+                w13_bias=layer.w13_bias,
+                w2_bias=layer.w2_bias,
+                activation=layer.activation,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                inplace=not self.moe.disable_inplace,
             )
         assert _can_support_mxfp4(
             layer.use_grouped_topk,
