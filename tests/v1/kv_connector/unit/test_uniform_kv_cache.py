@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-Tests for multi-group HMA support in uniform KV cache allocation.
-"""
+"""Tests for uniform cross-layer KV cache allocation."""
 
 from unittest.mock import MagicMock, patch
 
@@ -14,6 +12,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheTensor,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
@@ -44,8 +43,22 @@ class _MockBackend:
         return (0, 1, 2, 3, 4)
 
 
+class _MockMambaBackend:
+    @staticmethod
+    def get_kv_cache_shape(*a, **kw):
+        raise NotImplementedError
+
+    @staticmethod
+    def get_kv_cache_stride_order(*a, **kw):
+        raise NotImplementedError
+
+
 def _make_group(
-    group_id=0, spec_cls=FullAttentionSpec, layer_names=None, num_kv_heads=NUM_KV_HEADS
+    group_id=0,
+    spec_cls=FullAttentionSpec,
+    layer_names=None,
+    num_kv_heads=NUM_KV_HEADS,
+    backend=_MockBackend,
 ):
     kwargs = dict(
         block_size=BLOCK_SIZE,
@@ -57,7 +70,7 @@ def _make_group(
         kwargs["sliding_window"] = 128
     return [
         AttentionGroup(
-            backend=_MockBackend,
+            backend=backend,
             layer_names=layer_names or [],
             kv_cache_spec=spec_cls(**kwargs),
             kv_cache_group_id=group_id,
@@ -85,9 +98,9 @@ def test_multi_group_compatible():
     )
 
 
-def test_multi_group_incompatible():
-    """Groups with different num_kv_heads are rejected."""
-    assert not _use_uniform(
+def test_different_page_sizes_accepted():
+    """Groups with different page_size_bytes are accepted (separate groups)."""
+    assert _use_uniform(
         [
             _make_group(num_kv_heads=4, group_id=0),
             _make_group(num_kv_heads=8, group_id=1),
@@ -116,43 +129,72 @@ def test_allocate_multi_group_shared_tensors():
         kv_cache_groups=[],
     )
 
-    kv_caches, cross_layer, _ = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-        kv_cache_config=kv_cache_config,
-        attn_groups=[
-            _make_group(group_id=0, layer_names=[f"full.{i}" for i in range(4)]),
-            _make_group(group_id=1, layer_names=[f"sw.{i}" for i in range(4)]),
-        ],
-        cache_dtype="auto",
-        device=torch.device("cpu"),
-        kernel_block_sizes=[BLOCK_SIZE, BLOCK_SIZE],
+    kv_caches, cross_layer_groups = (
+        KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+            kv_cache_config=kv_cache_config,
+            attn_groups=[
+                _make_group(group_id=0, layer_names=[f"full.{i}" for i in range(4)]),
+                _make_group(
+                    group_id=1,
+                    spec_cls=SlidingWindowSpec,
+                    layer_names=[f"sw.{i}" for i in range(4)],
+                ),
+            ],
+            cache_dtype="auto",
+            device=torch.device("cpu"),
+            kernel_block_sizes=[BLOCK_SIZE, BLOCK_SIZE],
+        )
     )
 
     assert len(kv_caches) == 8
+    assert len(cross_layer_groups) == 1
     for i in range(num_positions):
         assert kv_caches[f"full.{i}"].data_ptr() == kv_caches[f"sw.{i}"].data_ptr()
-    assert cross_layer.shape[0] == num_positions
 
 
-def test_allocate_rejects_mismatched_kernel_block_sizes():
-    """Different kernel_block_sizes across groups are rejected."""
-    spec = FullAttentionSpec(
+def test_mamba_allocation():
+    """Mamba layers produce list[Tensor] views with data isolation."""
+    spec = MambaSpec(
         block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_SIZE,
-        dtype=torch.float16,
+        shapes=((4, 2), (8,)),
+        dtypes=(torch.float32, torch.float32),
+    )
+    nb = 2
+
+    kv, groups = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=nb,
+            kv_cache_tensors=[
+                KVCacheTensor(size=spec.page_size_bytes * nb, shared_by=[f"m.{i}"])
+                for i in range(2)
+            ],
+            kv_cache_groups=[],
+        ),
+        attn_groups=[
+            [
+                AttentionGroup(
+                    backend=_MockMambaBackend,
+                    layer_names=["m.0", "m.1"],
+                    kv_cache_spec=spec,
+                    kv_cache_group_id=0,
+                )
+            ]
+        ],
+        cache_dtype="auto",
+        device=torch.device("cpu"),
+        kernel_block_sizes=[BLOCK_SIZE],
     )
 
-    with pytest.raises(AssertionError, match="same kernel block size"):
-        KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-            kv_cache_config=KVCacheConfig(
-                num_blocks=4,
-                kv_cache_tensors=[
-                    KVCacheTensor(size=spec.page_size_bytes * 4, shared_by=["l0"])
-                ],
-                kv_cache_groups=[],
-            ),
-            attn_groups=[_make_group()],
-            cache_dtype="auto",
-            device=torch.device("cpu"),
-            kernel_block_sizes=[16, 32],
-        )
+    assert len(groups) == 1 and groups[0].dtype == torch.int8
+    for n in ["m.0", "m.1"]:
+        assert isinstance(kv[n], list) and len(kv[n]) == 2
+        assert kv[n][0].shape == (nb, 4, 2)
+        assert kv[n][1].shape == (nb, 8)
+
+    # Data isolation: writing to one layer shouldn't affect the other
+    kv["m.0"][0][0].fill_(42.0)
+    kv["m.1"][0][1].fill_(99.0)
+    assert torch.all(kv["m.0"][0][0] == 42.0)
+    assert torch.all(kv["m.1"][0][1] == 99.0)
+    assert torch.all(kv["m.1"][0][0] == 0.0)
+    assert torch.all(kv["m.0"][0][1] == 0.0)
