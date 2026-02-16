@@ -13,7 +13,6 @@ from vllm.model_executor.models import (
 )
 from vllm.model_executor.models.adapters import (
     as_embedding_model,
-    as_reward_model,
     as_seq_cls_model,
 )
 from vllm.model_executor.models.registry import (
@@ -32,7 +31,11 @@ from .registry import HF_EXAMPLE_MODELS
 def test_registry_imports(model_arch):
     # Skip if transformers version is incompatible
     model_info = HF_EXAMPLE_MODELS.get_hf_info(model_arch)
-    model_info.check_transformers_version(on_fail="skip")
+    model_info.check_transformers_version(
+        on_fail="skip",
+        check_max_version=False,
+        check_version_reason="vllm",
+    )
     # Ensure all model classes can be imported successfully
     model_cls = ModelRegistry._try_load_model_cls(model_arch)
     assert model_cls is not None
@@ -46,7 +49,6 @@ def test_registry_imports(model_arch):
     # All vLLM models should be convertible to a pooling model
     assert is_pooling_model(as_seq_cls_model(model_cls))
     assert is_pooling_model(as_embedding_model(model_cls))
-    assert is_pooling_model(as_reward_model(model_cls))
 
     if model_arch in _MULTIMODAL_MODELS:
         assert supports_multimodal(model_cls)

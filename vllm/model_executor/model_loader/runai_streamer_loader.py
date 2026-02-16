@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-# ruff: noqa: SIM117
 import os
 from collections.abc import Generator
 
@@ -109,8 +108,8 @@ class RunaiModelStreamerLoader(BaseModelLoader):
     def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
         """Load weights into a model."""
         model_weights = model_config.model
-        if hasattr(model_config, "model_weights"):
-            model_weights = model_config.model_weights
+        if model_weights_override := model_config.model_weights:
+            model_weights = model_weights_override
         model.load_weights(
             self._get_weights_iterator(model_weights, model_config.revision)
         )

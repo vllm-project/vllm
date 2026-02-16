@@ -17,7 +17,6 @@ def test_idefics_multimodal(
     with vllm_runner(
         model_name="HuggingFaceM4/Idefics3-8B-Llama3",
         runner="pooling",
-        task="classify",
         convert="classify",
         load_format="dummy",
         max_model_len=512,
@@ -86,11 +85,10 @@ def test_gemma_multimodal(
     with vllm_runner(
         model_name="google/gemma-3-4b-it",
         runner="pooling",
-        task="classify",
         convert="classify",
         load_format="auto",
         hf_overrides=update_config,
-        pooler_config=PoolerConfig(pooling_type="LAST"),
+        pooler_config=PoolerConfig(seq_pooling_type="LAST"),
         max_model_len=512,
         enforce_eager=True,
         tensor_parallel_size=1,
@@ -98,7 +96,7 @@ def test_gemma_multimodal(
         dtype="bfloat16",
     ) as vllm_model:
         llm = vllm_model.get_llm()
-        prompts = llm.preprocess_chat(messages)
+        prompts = llm._preprocess_chat([messages])
 
         result = llm.classify(prompts)
         assert result[0].outputs.probs[0] > 0.95

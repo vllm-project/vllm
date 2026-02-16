@@ -9,11 +9,14 @@ from typing import TYPE_CHECKING
 import regex as re
 
 if TYPE_CHECKING:
-    from vllm.transformers_utils.tokenizer import AnyTokenizer
-
-from vllm.entrypoints.openai.protocol import (
+    from vllm.tokenizers import TokenizerLike
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
@@ -220,7 +223,7 @@ class Olmo3ReasoningParser(ReasoningParser):
           token is missing from generation.
     """
 
-    def __init__(self, tokenizer: "AnyTokenizer", *args, **kwargs):
+    def __init__(self, tokenizer: "TokenizerLike", *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         self.think_start = r"<think>"
@@ -231,7 +234,7 @@ class Olmo3ReasoningParser(ReasoningParser):
         # reasoning template.
         reasoning_expr = (
             rf"^(?:{self.think_start})?(?P<reasoning>.*?)"
-            + rf"{self.think_end}(?P<content>.*)$"
+            rf"{self.think_end}(?P<content>.*)$"
         )
         self.reasoning_regex = re.compile(reasoning_expr, re.DOTALL)
 
@@ -239,7 +242,7 @@ class Olmo3ReasoningParser(ReasoningParser):
             think_start=self.think_start, think_end=self.think_end
         )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         text = self.model_tokenizer.decode(input_ids)
         return self.think_end in text
 

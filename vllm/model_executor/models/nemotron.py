@@ -30,11 +30,11 @@ from itertools import islice
 import torch
 from torch import nn
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -178,7 +178,6 @@ class NemotronAttention(nn.Module):
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
-        self.partial_rotary_factor = config.partial_rotary_factor
         self.max_position_embeddings = max_position_embeddings
 
         self.qkv_proj = QKVParallelLinear(
@@ -200,10 +199,8 @@ class NemotronAttention(nn.Module):
 
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            partial_rotary_factor=self.partial_rotary_factor,
         )
         self.attn = Attention(
             self.num_heads,
@@ -439,7 +436,6 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
@@ -481,7 +477,7 @@ class NemotronForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

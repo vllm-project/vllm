@@ -28,12 +28,10 @@ Dependencies:
 - openai
 """
 
-import base64
-import io
-
-import torch
 import transformers
 from openai import OpenAI
+
+from vllm.utils.serial_utils import tensor2base64
 
 
 def main():
@@ -51,24 +49,18 @@ def main():
     # Refer to the HuggingFace repo for the correct format to use
     chat = [{"role": "user", "content": "Please tell me about the capital of France."}]
     token_ids = tokenizer.apply_chat_template(
-        chat, add_generation_prompt=True, return_tensors="pt"
-    )
+        chat, add_generation_prompt=True, return_tensors="pt", return_dict=True
+    ).input_ids
 
     embedding_layer = transformers_model.get_input_embeddings()
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
 
     # Prompt embeddings
-    buffer = io.BytesIO()
-    torch.save(prompt_embeds, buffer)
-    buffer.seek(0)
-    binary_data = buffer.read()
-    encoded_embeds = base64.b64encode(binary_data).decode("utf-8")
+    encoded_embeds = tensor2base64(prompt_embeds)
 
     completion = client.completions.create(
         model=model_name,
-        # NOTE: The OpenAI client does not allow `None` as an input to
-        # `prompt`. Use an empty string if you have no text prompts.
-        prompt="",
+        prompt=None,
         max_tokens=5,
         temperature=0.0,
         # NOTE: The OpenAI client allows passing in extra JSON body via the

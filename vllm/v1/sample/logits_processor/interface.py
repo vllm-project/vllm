@@ -4,7 +4,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -94,7 +94,7 @@ class LogitsProcessor(ABC):
     @abstractmethod
     def update_state(
         self,
-        batch_update: Optional["BatchUpdate"],
+        batch_update: "BatchUpdate | None",
     ) -> None:
         """Called when there are new output tokens, prior
         to each forward pass.

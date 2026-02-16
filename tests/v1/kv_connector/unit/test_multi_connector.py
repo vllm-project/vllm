@@ -49,6 +49,33 @@ class MockConnector(KVConnectorBase_V1):
     ) -> KVConnectorStats | None:
         return MockConnectorStats(data=data) if data is not None else None
 
+    def start_load_kv(self, forward_context, **kwargs):
+        pass
+
+    def wait_for_layer_load(self, layer_name):
+        pass
+
+    def save_kv_layer(self, layer_name, kv_layer, attn_metadata, **kwargs):
+        pass
+
+    def wait_for_save(self):
+        pass
+
+    def build_connector_meta(self, scheduler_output):
+        return None
+
+    def get_num_new_matched_tokens(self, request, num_computed_tokens):
+        return (0, False)
+
+    def update_state_after_alloc(self, request, blocks, num_tokens) -> None:
+        pass
+
+
+class MockCrossLayerConnector(MockConnector):
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        return True
+
 
 # Register the mock connector
 KVConnectorFactory.register_connector("MockConnector", __name__, MockConnector.__name__)
@@ -77,9 +104,9 @@ def _compare_directories(dir1: Path, dir2: Path) -> bool:
         "https://github.com/ROCm/pytorch/issues/2822"
     ),
 )
-def test_multi_shared_storage_connector_consistency():
+def test_multi_example_connector_consistency():
     """
-    Tests that MultiConnector with two SharedStorageConnectors saves
+    Tests that MultiConnector with two ExampleConnectors saves
     identical KV cache data to separate storage locations.
     """
     storage_1_path = Path("storage_1/")
@@ -89,14 +116,14 @@ def test_multi_shared_storage_connector_consistency():
     storage_1_path.mkdir()
     storage_2_path.mkdir()
 
-    # Configure MultiConnector with two SharedStorageConnectors
+    # Configure MultiConnector with two ExampleConnectors
     kv_transfer_config = KVTransferConfig(
         kv_connector="MultiConnector",
         kv_role="kv_both",
         kv_connector_extra_config={
             "connectors": [
                 {
-                    "kv_connector": "TestSharedStorageConnector",
+                    "kv_connector": "TestExampleConnector",
                     "kv_role": "kv_both",
                     "kv_connector_extra_config": {
                         "shared_storage_path": str(storage_1_path),
@@ -105,7 +132,7 @@ def test_multi_shared_storage_connector_consistency():
                     "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
                 },
                 {
-                    "kv_connector": "TestSharedStorageConnector",
+                    "kv_connector": "TestExampleConnector",
                     "kv_role": "kv_both",
                     "kv_connector_extra_config": {
                         "shared_storage_path": str(storage_2_path),
@@ -124,7 +151,8 @@ def test_multi_shared_storage_connector_consistency():
         kv_transfer_config=kv_transfer_config,
     )
     # Run generation - this should trigger saving KV cache
-    _ = llm.generate(PROMPTS, SAMPLING_PARAMS)
+    # Use a single prompt to avoid race conditions depending on the order of scheduling
+    _ = llm.generate(PROMPTS[0], SAMPLING_PARAMS)
 
     # --- Verification ---
 
@@ -162,27 +190,35 @@ def test_multi_shared_storage_connector_consistency():
         )
 
     events = get_connector_events()
-    # get_num_new_matched_tokens and update_state_after_alloc will be called
-    # on each connector in turn.
-    assert events["storage1-SCHEDULER"][:3] == [
+    # First event is set_xfer_handshake_metadata from initialization, then
+    # get_num_new_matched_tokens and update_state_after_alloc from generate().
+    assert events["storage1-SCHEDULER"][:4] == [
+        "set_xfer_handshake_metadata",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage1-WORKER"][:5] == [
+    # First three events are from initialization (register_kv_caches,
+    # set_host_xfer_buffer_ops, get_handshake_metadata), then generate() events.
+    assert events["storage1-WORKER"][:7] == [
         "register_kv_caches",
+        "set_host_xfer_buffer_ops",
+        "get_handshake_metadata",
         "bind_connector_metadata",
         "start_load_kv",
         "wait_for_layer_load",
         "save_kv_layer",
     ]
-    assert events["storage2-SCHEDULER"][:3] == [
+    assert events["storage2-SCHEDULER"][:4] == [
+        "set_xfer_handshake_metadata",
         "get_num_new_matched_tokens 0",
         "update_state_after_alloc num_blocks=[0] 0",
         "build_connector_meta",
     ]
-    assert events["storage2-WORKER"][:5] == [
+    assert events["storage2-WORKER"][:7] == [
         "register_kv_caches",
+        "set_host_xfer_buffer_ops",
+        "get_handshake_metadata",
         "bind_connector_metadata",
         "start_load_kv",
         "wait_for_layer_load",
@@ -194,7 +230,7 @@ def test_multi_shared_storage_connector_consistency():
 
     # Run generation again - this should trigger loading from the first
     # connector.
-    _ = llm.generate(PROMPTS, SAMPLING_PARAMS)
+    _ = llm.generate(PROMPTS[1], SAMPLING_PARAMS)
 
     events = get_connector_events()
     # get_num_new_matched_tokens will return new tokens from the first
@@ -220,7 +256,7 @@ def test_multi_shared_storage_connector_consistency():
 
     # Run generation again - this should trigger loading from the first
     # connector.
-    _ = llm.generate(PROMPTS, SAMPLING_PARAMS)
+    _ = llm.generate(PROMPTS[0], SAMPLING_PARAMS)
 
     events = get_connector_events()
     # get_num_new_matched_tokens will be called for both connectors but will
@@ -267,6 +303,90 @@ def test_engine_id_conflict():
     assert ids[0] != ids[1], (
         f"Engine IDs should be different for different configs. Got {ids}"
     )
+
+
+def test_multi_connector_handle_preemptions_integration():
+    """
+    Integration test: verify MultiConnector delegates handle_preemptions
+    to all sub-connectors.
+
+    Uses TestExampleConnector which logs all method calls to temp files.
+    This test directly calls handle_preemptions on a MultiConnector with
+    TestExampleConnector sub-connectors and verifies the calls are logged.
+    """
+    from tests.v1.kv_connector.unit.utils import (
+        create_scheduler,
+        create_vllm_config,
+    )
+
+    storage_path = Path(tempfile.mkdtemp())
+
+    try:
+        # Configure MultiConnector with two TestExampleConnectors
+        kv_transfer_config = KVTransferConfig(
+            kv_connector="MultiConnector",
+            kv_role="kv_both",
+            kv_connector_extra_config={
+                "connectors": [
+                    {
+                        "kv_connector": "TestExampleConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "shared_storage_path": str(storage_path / "s1"),
+                            "name": "preempt1",
+                        },
+                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                    },
+                    {
+                        "kv_connector": "TestExampleConnector",
+                        "kv_role": "kv_both",
+                        "kv_connector_extra_config": {
+                            "shared_storage_path": str(storage_path / "s2"),
+                            "name": "preempt2",
+                        },
+                        "kv_connector_module_path": "tests.v1.kv_connector.unit.utils",
+                    },
+                ]
+            },
+        )
+
+        vllm_config = create_vllm_config(
+            block_size=16,
+            max_num_batched_tokens=100,
+            kv_connector_extra_config=kv_transfer_config.kv_connector_extra_config,
+        )
+        vllm_config.kv_transfer_config = kv_transfer_config
+
+        # Create scheduler - this initializes the MultiConnector with SCHEDULER role
+        scheduler = create_scheduler(vllm_config, num_blocks=10)
+
+        # Clear any events from initialization
+        get_connector_events()
+
+        # Directly call handle_preemptions on the scheduler's connector
+        # Note: handle_preemptions is normally a worker-side method, but we're
+        # testing the delegation behavior of MultiConnector here.
+        # The connector attribute contains the KV connector.
+        assert scheduler.connector is not None, "Scheduler should have a connector"
+        preempted_req_ids = {"req-1", "req-2", "req-3"}
+        scheduler.connector.handle_preemptions(preempted_req_ids)
+
+        # Verify both connectors received the handle_preemptions call
+        events = get_connector_events()
+
+        # Both SCHEDULER-role connectors should have logged handle_preemptions
+        assert "handle_preemptions" in events.get("preempt1-SCHEDULER", []), (
+            f"preempt1-SCHEDULER should have handle_preemptions call. "
+            f"Got events: {events}"
+        )
+        assert "handle_preemptions" in events.get("preempt2-SCHEDULER", []), (
+            f"preempt2-SCHEDULER should have handle_preemptions call. "
+            f"Got events: {events}"
+        )
+
+    finally:
+        # Cleanup
+        shutil.rmtree(storage_path, ignore_errors=True)
 
 
 class TestMultiConnectorStats:
@@ -427,7 +547,7 @@ class TestMultiConnectorStats:
 
     def test_build_kv_connector_stats_skips_connectors_without_custom_stats(self):
         """Test that connectors without custom stats (return None) are skipped."""
-        # SharedStorageConnector doesn't override build_kv_connector_stats,
+        # ExampleConnector doesn't override build_kv_connector_stats,
         # so it returns None and should be skipped
         serialized_data = {
             "NixlConnector": {
@@ -440,7 +560,7 @@ class TestMultiConnectorStats:
                     "num_failed_notifications": [],
                 }
             },
-            "SharedStorageConnector": {"data": {"some_field": [1, 2, 3]}},
+            "ExampleConnector": {"data": {"some_field": [1, 2, 3]}},
         }
 
         stats = MultiConnector.build_kv_connector_stats(data=serialized_data)
@@ -451,8 +571,8 @@ class TestMultiConnectorStats:
         assert len(stats.data) == 1
         assert "NixlConnector" in stats.data
         assert isinstance(stats.data["NixlConnector"], NixlKVConnectorStats)
-        # SharedStorageConnector should be skipped (returns None)
-        assert "SharedStorageConnector" not in stats.data
+        # ExampleConnector should be skipped (returns None)
+        assert "ExampleConnector" not in stats.data
 
     def test_build_kv_connector_stats_handles_malformed_data(self):
         """Test that malformed data raises appropriate errors."""
@@ -527,13 +647,13 @@ class TestMultiConnectorStats:
         )
 
         stats2 = MultiKVConnectorStats(
-            data={"SharedStorageConnector": KVConnectorStats(data={"field": [1, 2]})}
+            data={"ExampleConnector": KVConnectorStats(data={"field": [1, 2]})}
         )
 
         result = stats1.aggregate(stats2)
 
         assert "NixlConnector" in result.data
-        assert "SharedStorageConnector" in result.data
+        assert "ExampleConnector" in result.data
 
     def test_reduce(self):
         """Test that reduce() correctly reduces all nested connector stats."""
@@ -601,3 +721,57 @@ class TestMultiConnectorStats:
         # One non-empty
         stats.data["NixlConnector"].data["transfer_duration"].append(1.0)
         assert not stats.is_empty()
+
+
+class TestMultiConnectorPreferCrossLayerBlocks:
+    def test_all_connectors_prefer_cross_layer_blocks(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        mc._connectors = [
+            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
+            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
+        ]
+        assert mc.prefer_cross_layer_blocks is True
+
+    def test_mixed_connectors_do_not_prefer_cross_layer_blocks(self):
+        mc = MultiConnector.__new__(MultiConnector)
+        mc._connectors = [
+            MockCrossLayerConnector.__new__(MockCrossLayerConnector),
+            MockConnector.__new__(MockConnector),  # default False
+        ]
+        assert mc.prefer_cross_layer_blocks is False
+
+
+def test_multi_connector_overrides_all_base_methods():
+    """
+    Ensure MultiConnector overrides all public methods from KVConnectorBase_V1.
+    """
+    # These are fine to inherit from KVConnectorBase_V1
+    # TODO(https://github.com/vllm-project/vllm/pull/31811): Remove
+    # get_kv_connector_kv_cache_events from INHERITED_OK once implemented.
+    INHERITED_OK = {
+        "role",
+        "has_connector_metadata",
+        "get_kv_connector_kv_cache_events",
+    }
+
+    base_members = {
+        name for name in dir(KVConnectorBase_V1) if not name.startswith("_")
+    } - KVConnectorBase_V1.__abstractmethods__
+
+    missing = [
+        name
+        for name in sorted(base_members)
+        if name not in INHERITED_OK and name not in MultiConnector.__dict__
+    ]
+
+    if missing:
+        pytest.fail(f"""
+MultiConnector does not override these KVConnectorBase_V1 methods: {missing}
+
+MultiConnector wraps other connectors and must delegate all methods.
+Please add overrides that delegate to self._connectors.
+
+Options:
+  1. Add delegation in MultiConnector (preferred)
+  2. Add to INHERITED_OK if the base implementation works correctly
+""")

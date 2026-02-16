@@ -5,7 +5,7 @@ import pytest
 import pytest_asyncio
 import requests
 
-from vllm.transformers_utils.tokenizer import get_tokenizer
+from vllm.tokenizers import get_tokenizer
 
 from ...utils import RemoteOpenAIServer
 
@@ -53,7 +53,7 @@ async def test_tokenize_completions(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_special in [False, True]:
         prompt = "vllm1 This is a test prompt."
@@ -87,7 +87,7 @@ async def test_tokenize_chat(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
@@ -140,7 +140,7 @@ async def test_tokenize_chat_with_tools(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     for add_generation in [False, True]:
         for add_special in [False, True]:
@@ -210,7 +210,7 @@ async def test_tokenize_with_return_token_strs(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     prompt = "This is a token_strs test prompt! vllm1"
     response = requests.post(
@@ -240,7 +240,7 @@ async def test_detokenize(
     model_name: str,
     tokenizer_name: str,
 ):
-    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name, tokenizer_mode="fast")
+    tokenizer = get_tokenizer(tokenizer_name=tokenizer_name)
 
     prompt = "This is a test prompt. vllm1"
     tokens = tokenizer.encode(prompt, add_special_tokens=False)
@@ -298,26 +298,6 @@ async def test_tokenizer_info_schema(server: RemoteOpenAIServer):
         if field in result and result[field] is not None:
             assert isinstance(result[field], expected_type), (
                 f"{field} should be {expected_type.__name__}"
-            )
-
-
-@pytest.mark.asyncio
-async def test_tokenizer_info_added_tokens_structure(
-    server: RemoteOpenAIServer,
-):
-    """Test added_tokens_decoder structure if present."""
-    response = requests.get(server.url_for("tokenizer_info"))
-    response.raise_for_status()
-    result = response.json()
-    added_tokens = result.get("added_tokens_decoder")
-    if added_tokens:
-        for token_id, token_info in added_tokens.items():
-            assert isinstance(token_id, str), "Token IDs should be strings"
-            assert isinstance(token_info, dict), "Token info should be a dict"
-            assert "content" in token_info, "Token info should have content"
-            assert "special" in token_info, "Token info should have special flag"
-            assert isinstance(token_info["special"], bool), (
-                "Special flag should be boolean"
             )
 
 

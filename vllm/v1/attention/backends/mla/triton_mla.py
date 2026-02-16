@@ -5,30 +5,33 @@ from typing import ClassVar
 
 import torch
 
-from vllm.attention.backends.abstract import (
-    AttentionLayer,
-    AttentionType,
-    is_quantized_kv_cache,
-)
-from vllm.attention.ops.triton_decode_attention import decode_attention_fwd
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.batch_invariant import (
-    vllm_is_batch_invariant,
-)
-from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backends.mla.common import (
+from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
 )
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
+from vllm.platforms.interface import DeviceCapability
+from vllm.v1.attention.backend import (
+    AttentionLayer,
+    AttentionType,
+    is_quantized_kv_cache,
+)
+from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
 
 logger = init_logger(__name__)
 
 
 class TritonMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+    ]
 
     @staticmethod
     def get_name() -> str:
@@ -107,7 +110,7 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
             **kwargs,
         )
 
-    def _forward_decode(
+    def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
@@ -140,8 +143,8 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 B,
                 q_num_heads,
                 num_kv_splits,
-                # NOTE(lucas) idk why the +1 is here but sglang has it so we
-                # just mirror that
+                # NOTE: the +1 stores the LogSumExp (LSE) that the stage2
+                # kernel uses to merge partial attention outputs across splits.
                 self.kv_lora_rank + 1,
             ),
             dtype=torch.float32,

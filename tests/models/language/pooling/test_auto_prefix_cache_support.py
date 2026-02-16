@@ -25,7 +25,8 @@ def test_classify_models(
     with vllm_runner(
         model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
     ) as vllm_model:
-        cache_config = vllm_model.llm.llm_engine.cache_config
+        vllm_config = vllm_model.llm.llm_engine.vllm_config
+        cache_config = vllm_config.cache_config
         assert cache_config.enable_prefix_caching
 
         # First Run
@@ -74,7 +75,8 @@ def test_embed_models(
         max_model_len=None,
         enable_prefix_caching=True,
     ) as vllm_model:
-        cache_config = vllm_model.llm.llm_engine.cache_config
+        vllm_config = vllm_model.llm.llm_engine.vllm_config
+        cache_config = vllm_config.cache_config
         assert cache_config.enable_prefix_caching
 
         # First Run
@@ -105,8 +107,7 @@ def test_embed_models(
 def test_non_causal_models(
     hf_runner, vllm_runner, example_prompts, model: str, dtype: str
 ) -> None:
-    with vllm_runner(
-        model, max_model_len=512, dtype=dtype, enable_prefix_caching=True
-    ) as vllm_model:
-        cache_config = vllm_model.llm.llm_engine.cache_config
+    with vllm_runner(model, max_model_len=512, dtype=dtype) as vllm_model:
+        vllm_config = vllm_model.llm.llm_engine.vllm_config
+        cache_config = vllm_config.cache_config
         assert not cache_config.enable_prefix_caching

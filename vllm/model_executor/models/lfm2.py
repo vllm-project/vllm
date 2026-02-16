@@ -7,11 +7,11 @@ import torch
 import torch.nn as nn
 from transformers import Lfm2Config
 
-from vllm.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -20,6 +20,8 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -143,7 +145,6 @@ class Lfm2Attention(nn.Module):
         )
         self.rotary_emb = get_rope(
             self.head_dim,
-            rotary_dim=self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=config.rope_parameters,
             is_neox_style=True,
@@ -249,7 +250,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.layer_idx = layer_idx
-        self.conv = ShortConv(
+        self.short_conv = ShortConv(
             config=config,
             dim=config.conv_dim,
             layer_idx=layer_idx,
@@ -282,7 +283,7 @@ class Lfm2ShortConvDecoderLayer(nn.Module):
         else:
             hidden_states, residual = self.operator_norm(hidden_states, residual)
         output = torch.empty_like(hidden_states)
-        self.conv(
+        self.short_conv(
             hidden_states,
             output,
         )
@@ -341,7 +342,7 @@ class Lfm2Model(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -381,6 +382,9 @@ class Lfm2Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if ".conv." in name:
+                name = name.replace(".conv.", ".short_conv.", 1)
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -415,6 +419,7 @@ class Lfm2ForCausalLM(
             "w1",
             "w3",
         ],
+        "in_proj": ["in_proj"],
     }
 
     # LoRA specific attributes
@@ -422,7 +427,6 @@ class Lfm2ForCausalLM(
         "embed_tokens": "input_embeddings",
         "lm_head": "output_embeddings",
     }
-    embedding_padding_modules = ["lm_head"]
 
     @classmethod
     def get_mamba_state_dtype_from_config(
@@ -457,14 +461,19 @@ class Lfm2ForCausalLM(
             conv_kernel=hf_config.conv_L_cache,
         )
 
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.short_conv_state_copy_func()
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         cache_config = vllm_config.cache_config
-
-        assert not cache_config.enable_prefix_caching, (
-            "Lfm2 currently does not support prefix caching"
-        )
+        if cache_config.mamba_cache_mode == "all":
+            raise NotImplementedError(
+                "Lfm2 currently does not support 'all' prefix caching, "
+                "please use '--mamba-cache-mode=align' instead"
+            )
 
         super().__init__()
         self.config = config
@@ -494,7 +503,7 @@ class Lfm2ForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

@@ -22,13 +22,13 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     MultiModalDataItems,
 )
-from vllm.multimodal.processing import (
+from vllm.multimodal.processing.processor import (
     MultiModalProcessingInfo,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
 )
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 from .intern_vit import InternVisionModel
 from .internvl import (
@@ -241,7 +241,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
     def __init__(
         self,
         config: PretrainedConfig,
-        tokenizer: AnyTokenizer,
+        tokenizer: TokenizerLike,
         *,
         min_dynamic_patch: int | None = None,
         max_dynamic_patch: int | None = None,
@@ -424,12 +424,9 @@ class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: H2OVLProcessor | None,
+        processor: H2OVLProcessor,
         use_msac: bool | None = None,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         return processor.get_num_image_tokens(
             image_width=image_width,
             image_height=image_height,

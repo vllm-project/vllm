@@ -5,14 +5,11 @@ import importlib
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-# yapf: disable
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorBase,
     ECConnectorRole,
 )
 from vllm.logger import init_logger
-
-# yapf: enable
 
 if TYPE_CHECKING:
     from vllm.config import ECTransferConfig, VllmConfig
@@ -82,7 +79,7 @@ class ECConnectorFactory:
 # only load the files corresponding to the current connector.
 
 ECConnectorFactory.register_connector(
-    "ECSharedStorageConnector",
-    "vllm.distributed.ec_transfer.ec_connector.shared_storage_connector",
-    "ECSharedStorageConnector",
+    "ECExampleConnector",
+    "vllm.distributed.ec_transfer.ec_connector.example_connector",
+    "ECExampleConnector",
 )

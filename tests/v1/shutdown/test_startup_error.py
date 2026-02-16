@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Test that we handle a startup Error and shutdown."""
 
+import inspect
+
 import pytest
 
 from tests.utils import wait_for_gpu_memory_to_clear
@@ -28,12 +30,28 @@ def evil_method(self, *args, **kwargs):
     return self.model(*args, **kwargs, intermediate_tensors=None)
 
 
+@pytest.fixture
+def rocm_evil_method(rocm_sitecustomize_factory, request):
+    failing_method = request.getfixturevalue("failing_method")
+    lines = [
+        "from vllm.distributed import get_tensor_model_parallel_rank",
+        "from vllm.model_executor.models.llama import LlamaForCausalLM",
+        inspect.getsource(evil_method),
+        f"LlamaForCausalLM.{failing_method} = {evil_method.__name__}",
+    ]
+    rocm_sitecustomize_factory(lines)
+
+
 @pytest.mark.timeout(SHUTDOWN_TEST_TIMEOUT_SEC)
 @pytest.mark.parametrize("model", MODELS)
 @pytest.mark.parametrize("tensor_parallel_size", [2, 1])
 @pytest.mark.parametrize("failing_method", ["forward", "load_weights"])
 def test_async_llm_startup_error(
-    monkeypatch, model: str, tensor_parallel_size: int, failing_method: str
+    monkeypatch,
+    rocm_evil_method,
+    model: str,
+    tensor_parallel_size: int,
+    failing_method: str,
 ) -> None:
     """Test that AsyncLLM propagates an __init__ error & frees memory.
     Test profiling (forward()) and load weights failures.
@@ -67,6 +85,7 @@ def test_async_llm_startup_error(
 @pytest.mark.parametrize("failing_method", ["forward", "load_weights"])
 def test_llm_startup_error(
     monkeypatch,
+    rocm_evil_method,
     model: str,
     tensor_parallel_size: int,
     enable_multiprocessing: bool,

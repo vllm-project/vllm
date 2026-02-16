@@ -1,6 +1,6 @@
-# NVIDIA TensorRT Model Optimizer
+# NVIDIA Model Optimizer
 
-The [NVIDIA TensorRT Model Optimizer](https://github.com/NVIDIA/TensorRT-Model-Optimizer) is a library designed to optimize models for inference with NVIDIA GPUs. It includes tools for Post-Training Quantization (PTQ) and Quantization Aware Training (QAT) of Large Language Models (LLMs), Vision Language Models (VLMs), and diffusion models.
+The [NVIDIA Model Optimizer](https://github.com/NVIDIA/Model-Optimizer) is a library designed to optimize models for inference with NVIDIA GPUs. It includes tools for Post-Training Quantization (PTQ) and Quantization Aware Training (QAT) of Large Language Models (LLMs), Vision Language Models (VLMs), and diffusion models.
 
 We recommend installing the library with:
 
@@ -8,9 +8,20 @@ We recommend installing the library with:
 pip install nvidia-modelopt
 ```
 
+## Supported ModelOpt checkpoint formats
+
+vLLM detects ModelOpt checkpoints via `hf_quant_config.json` and supports the
+following `quantization.quant_algo` values:
+
+- `FP8`: per-tensor weight scale (+ optional static activation scale).
+- `FP8_PER_CHANNEL_PER_TOKEN`: per-channel weight scale and dynamic per-token activation quantization.
+- `FP8_PB_WO` (ModelOpt may emit `fp8_pb_wo`): block-scaled FP8 weight-only (typically 128×128 blocks).
+- `NVFP4`: ModelOpt NVFP4 checkpoints (use `quantization="modelopt_fp4"`).
+- `MXFP8`: ModelOpt MXFP8 checkpoints (use `quantization="modelopt_mxfp8"`).
+
 ## Quantizing HuggingFace Models with PTQ
 
-You can quantize HuggingFace models using the example scripts provided in the TensorRT Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.
+You can quantize HuggingFace models using the example scripts provided in the Model Optimizer repository. The primary script for LLM PTQ is typically found within the `examples/llm_ptq` directory.
 
 Below is an example showing how to quantize a model using modelopt's PTQ API:
 
@@ -80,3 +91,24 @@ The quantized checkpoint can then be deployed with vLLM. As an example, the foll
     if __name__ == "__main__":
         main()
     ```
+
+## Running the OpenAI-compatible server
+
+To serve a local ModelOpt checkpoint via the OpenAI-compatible API:
+
+```bash
+vllm serve <path_to_exported_checkpoint> \
+  --quantization modelopt \
+  --host 0.0.0.0 --port 8000
+```
+
+## Testing (local checkpoints)
+
+vLLM's ModelOpt unit tests are gated by local checkpoint paths and are skipped
+by default in CI. To run the tests locally:
+
+```bash
+export VLLM_TEST_MODELOPT_FP8_PC_PT_MODEL_PATH=<path_to_fp8_pc_pt_checkpoint>
+export VLLM_TEST_MODELOPT_FP8_PB_WO_MODEL_PATH=<path_to_fp8_pb_wo_checkpoint>
+pytest -q tests/quantization/test_modelopt.py
+```

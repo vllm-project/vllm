@@ -109,6 +109,10 @@ def _add_query_options(parser: FlexibleArgumentParser) -> FlexibleArgumentParser
         help=(
             "API key for OpenAI services. If provided, this api key "
             "will overwrite the api key obtained through environment variables."
+            " It is important to note that this option only applies to the "
+            "OpenAI-compatible API endpoints and NOT other endpoints that may "
+            "be present in the server. See the security guide in the vLLM docs "
+            "for more details."
         ),
     )
     return parser

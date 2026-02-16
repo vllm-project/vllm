@@ -4,6 +4,11 @@
 set -e
 set -x
 
+if command -v rocminfo >/dev/null 2>&1; then
+  echo "Skipping test for ROCm platform"
+  exit 0
+fi
+
 cd /vllm-workspace/
 
 rm -rf .venv
@@ -36,7 +41,7 @@ if diff before.txt after.txt; then
   echo "torch version not overridden."
 else
   echo "torch version overridden by nightly_torch_test.txt, \
-  if the dependency is not triggered by the pytroch nightly test,\
+  if the dependency is not triggered by the pytorch nightly test,\
   please add the dependency to the list 'white_list' in tools/pre_commit/generate_nightly_torch_test.py"
   exit 1
 fi

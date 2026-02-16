@@ -27,27 +27,32 @@ class MedusaProposer:
     ):
         # Save config parameters
         self.vllm_config = vllm_config
+        assert vllm_config.speculative_config is not None, (
+            "Speculative config must be set"
+        )
+        self.spec_config = vllm_config.speculative_config
         self.device = device
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
-        self.hidden_size = (
-            vllm_config.speculative_config.draft_model_config.get_hidden_size()
-        )
+        self.hidden_size = self.spec_config.draft_model_config.get_hidden_size()
         self.dtype = vllm_config.model_config.dtype
 
     def propose(
         self,
         target_hidden_states: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-    ) -> list[list[int]]:
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
+    ) -> torch.Tensor:
         # Generate blocks and compute logits
         blocks = self.model(target_hidden_states)
         logits = self.model.compute_logits(blocks)
 
-        # Get draft tokens and transpose the result
-        # TODO(woosuk): OPTIMIZATION: Return GPU tensor without GPU-CPU
-        # synchronization.
-        draft_tokens = [logit.argmax(dim=-1).tolist() for logit in logits]
-        return [list(row) for row in zip(*draft_tokens)]
+        # Compute argmax for each Medusa head and stack into a single tensor
+        # Shape: [batch_size, num_heads]
+        draft_tokens = torch.stack([logit.argmax(dim=-1) for logit in logits], dim=1)
+
+        return draft_tokens
 
     def load_model(self, target_model: nn.Module) -> None:
         from vllm.compilation.backends import set_model_tag
@@ -55,7 +60,7 @@ class MedusaProposer:
         with set_model_tag("medusa_head"):
             self.model = get_model(
                 vllm_config=self.vllm_config,
-                model_config=self.vllm_config.speculative_config.draft_model_config,
+                model_config=self.spec_config.draft_model_config,
             )
         assert not (
             is_mixture_of_experts(self.model)

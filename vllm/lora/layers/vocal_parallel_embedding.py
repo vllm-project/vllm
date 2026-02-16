@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -77,12 +76,15 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
+        assert isinstance(lora_a, torch.Tensor)
+        assert isinstance(lora_b, torch.Tensor)
         self.reset_lora(index)
         # NOTE self.lora_a_stacked is row-major, and lora_a is col-major,
         # so we need transpose here
+
         self.lora_a_stacked[index, : lora_a.shape[1], : lora_a.shape[0]].copy_(
             lora_a.T, non_blocking=True
         )
@@ -128,7 +130,7 @@ class VocabParallelEmbeddingWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         return type(source_layer) is VocabParallelEmbedding
 

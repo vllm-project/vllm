@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
@@ -128,9 +127,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
     def set_lora(
         self,
         index: int,
-        lora_a: torch.Tensor,
-        lora_b: torch.Tensor,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
     ):
+        assert isinstance(lora_a, torch.Tensor)
+        assert isinstance(lora_b, torch.Tensor)
         self.reset_lora(index)
         self.lora_a_stacked[index, 0, : lora_a.shape[0], : lora_a.shape[1]].copy_(
             lora_a, non_blocking=True
@@ -146,7 +147,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         embedding_bias: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states)
+        if hasattr(lm_head, "base_layer"):
+            actual_lm_head = lm_head.base_layer
+        else:
+            actual_lm_head = lm_head
+        logits = actual_lm_head.quant_method.apply(actual_lm_head, hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
 
@@ -195,7 +200,7 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         source_layer: nn.Module,
         lora_config: LoRAConfig,
         packed_modules_list: list,
-        model_config: PretrainedConfig | None,
+        model_config: PretrainedConfig | None = None,
     ) -> bool:
         # Special handling for the LogitsProcessor.
         return False

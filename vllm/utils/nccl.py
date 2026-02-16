@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-import importlib
+import importlib.util
 import os
 
 import torch
@@ -47,8 +47,8 @@ def find_nccl_include_paths() -> list[str] | None:
 
     try:
         spec = importlib.util.find_spec("nvidia.nccl")
-        if spec and getattr(spec, "submodule_search_locations", None):
-            for loc in spec.submodule_search_locations:
+        if spec and (locs := getattr(spec, "submodule_search_locations", None)):
+            for loc in locs:
                 inc_dir = os.path.join(loc, "include")
                 if os.path.exists(os.path.join(inc_dir, "nccl.h")):
                     paths.append(inc_dir)

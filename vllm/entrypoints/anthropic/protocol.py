@@ -3,9 +3,9 @@
 """Pydantic models for Anthropic API protocol"""
 
 import time
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 
 class AnthropicError(BaseModel):
@@ -76,6 +76,12 @@ class AnthropicToolChoice(BaseModel):
     type: Literal["auto", "any", "tool"]
     name: str | None = None
 
+    @model_validator(mode="after")
+    def validate_name_required_for_tool(self) -> "AnthropicToolChoice":
+        if self.type == "tool" and not self.name:
+            raise ValueError("tool_choice.name is required when type is 'tool'")
+        return self
+
 
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
@@ -135,7 +141,7 @@ class AnthropicStreamEvent(BaseModel):
         "ping",
         "error",
     ]
-    message: Optional["AnthropicMessagesResponse"] = None
+    message: "AnthropicMessagesResponse | None" = None
     delta: AnthropicDelta | None = None
     content_block: AnthropicContentBlock | None = None
     index: int | None = None
