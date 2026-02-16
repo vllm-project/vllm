@@ -346,7 +346,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.moe_kernel is not None
-        return self.moe_kernel(
+        return self.moe_kernel.apply(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -609,8 +609,9 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(self.moe_kernel, mk.FusedMoEKMonolithicKernel)
-        return self.moe_kernel(
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -634,17 +635,17 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.moe_kernel is not None
-        return self.moe_kernel(
+        return self.moe_kernel.apply(
             x,
             layer.w13_weight,
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            inplace=False,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
         )
 
 
@@ -984,8 +985,8 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert isinstance(self.moe_kernel, mk.FusedMoEKMonolithicKernel)
-        return self.moe_kernel(
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -1010,7 +1011,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
-        return self.moe_kernel(
+        return self.moe_kernel.apply(
             x,
             layer.w13_weight,
             layer.w2_weight,

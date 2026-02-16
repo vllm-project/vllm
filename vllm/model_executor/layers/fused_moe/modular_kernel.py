@@ -1593,7 +1593,7 @@ class FusedMoEKernelMonolithicImpl:
 
 
 @final
-class FusedMoEKernel(torch.nn.Module):
+class FusedMoEKernel:
     def __init__(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
@@ -1661,12 +1661,12 @@ class FusedMoEKernel(torch.nn.Module):
         """
         return self.impl.prepare_finalize.output_is_reduced()
 
-    def forward(
+    def apply_monolithic(
         self,
         hidden_states: torch.Tensor,
         w1: torch.Tensor,
         w2: torch.Tensor,
-        routing_input: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        router_logits: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         activation: str,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
@@ -1677,41 +1677,45 @@ class FusedMoEKernel(torch.nn.Module):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
-        if isinstance(self.impl, FusedMoEKernelModularImpl):
-            assert isinstance(routing_input, tuple)
-            topk_ids, topk_weights = routing_input
-            assert num_expert_group is None
-            assert e_score_correction_bias is None
-            assert routed_scaling_factor is None
-            assert topk_group is None
+        assert isinstance(self.impl, FusedMoEKernelMonolithicImpl)
+        return self.impl.apply(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            router_logits=router_logits,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            num_expert_group=num_expert_group,
+            e_score_correction_bias=e_score_correction_bias,
+            routed_scaling_factor=routed_scaling_factor,
+            topk_group=topk_group,
+        )
 
-            return self.impl.apply(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-            )
-
-        elif isinstance(self.impl, FusedMoEKernelMonolithicImpl):
-            assert isinstance(routing_input, torch.Tensor)
-            router_logits = routing_input
-
-            return self.impl.apply(
-                hidden_states=hidden_states,
-                w1=w1,
-                w2=w2,
-                router_logits=router_logits,
-                activation=activation,
-                global_num_experts=global_num_experts,
-                expert_map=expert_map,
-                apply_router_weight_on_input=apply_router_weight_on_input,
-                num_expert_group=num_expert_group,
-                e_score_correction_bias=e_score_correction_bias,
-                routed_scaling_factor=routed_scaling_factor,
-                topk_group=topk_group,
-            )
+    def apply(
+        self,
+        hidden_states: torch.Tensor,
+        w1: torch.Tensor,
+        w2: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        activation: str,
+        global_num_experts: int,
+        expert_map: torch.Tensor | None,
+        apply_router_weight_on_input: bool,
+        shared_experts_input: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        assert isinstance(self.impl, FusedMoEKernelModularImpl)
+        return self.impl.apply(
+            hidden_states=hidden_states,
+            w1=w1,
+            w2=w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
+        )

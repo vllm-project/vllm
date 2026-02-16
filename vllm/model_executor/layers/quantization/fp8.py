@@ -946,12 +946,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
-        if layer.enable_eplb:
-            raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
-
-        assert isinstance(self.moe_kernel, mk.FusedMoEKMonolithicKernel)
-        return self.moe_kernel(
+        assert self.is_monolithic
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply_monolithic(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -970,9 +967,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        assert self.moe_kernel is not None
         assert not self.is_monolithic
-        return self.moe_kernel(
+        assert self.moe_kernel is not None
+        return self.moe_kernel.apply(
             x,
             layer.w13_weight,
             layer.w2_weight,

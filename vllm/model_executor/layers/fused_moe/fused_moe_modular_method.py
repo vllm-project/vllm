@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel,
+    FusedMoEKernel,
     FusedMoEPrepareAndFinalizeModular,
 )
 
@@ -25,9 +25,7 @@ logger = init_logger(__name__)
 class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     # --8<-- [end:modular_fused_moe]
 
-    def __init__(
-        self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEModularKernel
-    ):
+    def __init__(self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEKernel):
         super().__init__(old_quant_method.moe)
         self.moe_quant_config = old_quant_method.moe_quant_config
         self.moe_kernel = experts
@@ -49,7 +47,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(
             old_quant_method,
-            FusedMoEModularKernel(
+            FusedMoEKernel(
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
                 shared_experts,
@@ -91,7 +89,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.moe_kernel is not None
-        return self.moe_kernel(
+        return self.moe_kernel.apply(
             hidden_states=x,
             w1=layer.w13_weight,
             w2=layer.w2_weight,
