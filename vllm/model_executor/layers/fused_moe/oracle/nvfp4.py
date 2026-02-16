@@ -109,7 +109,7 @@ def select_nvfp4_moe_backend(
     activation_key: QuantKey | None,
 ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
     """
-    Select the primary NvFP4 MoE backend
+    Select the primary NvFP4 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
 
@@ -135,133 +135,118 @@ def select_nvfp4_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    def _make_log_backend(backend: NvFp4MoeBackend):
-        available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
-        return (
-            f"Using '{backend.value}' NvFp4 MoE backend out "
-            f"of potential backends: {available_backend_strs}."
-        )
-
-    def _make_log_unsupported(backend: NvFp4MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"NvFp4 MoE backend '{backend.value}' does not support the "
-                f"deployment configuration since {reason}."
-            )
-        else:
-            return (
-                f"NvFp4 MoE backend '{backend.value}' does not support the "
-                "deployment configuration."
-            )
-
-    def _return_or_raise(
+    def _check_backend(
         backend: NvFp4MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
-        k_cls = backend_to_kernel_cls(backend)
-        supported, reason = k_cls.is_supported_config(
-            k_cls, config, weight_key, activation_key, activation_format
-        )
-        if supported:
-            logger.info_once(_make_log_backend(backend))
-            return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+    ) -> tuple[bool, str | None, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+        """Check if a backend is supported. Returns (supported, reason, k_cls)."""
+        if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            supported, reason = is_supported_config_trtllm(
+                config, weight_key, activation_key, activation_format
+            )
+            return supported, reason, None
+        else:
+            k_cls = backend_to_kernel_cls(backend)
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, weight_key, activation_key, activation_format
+            )
+            return supported, reason, k_cls if supported else None
 
+    def _filter_qualified(
+        candidates: list[NvFp4MoeBackend],
+    ) -> list[tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]]:
+        """Filter candidates to only those that pass is_supported_config."""
+        qualified: list[
+            tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]
+        ] = []
+        for backend in candidates:
+            supported, reason, k_cls = _check_backend(backend)
+            if supported:
+                qualified.append((backend, k_cls))
+            else:
+                logger.debug_once(
+                    f"NvFp4 MoE backend '{backend.value}' does not support the "
+                    f"deployment configuration{f' since {reason}' if reason else ''}.",
+                    scope="local",
+                )
+        return qualified
+
+    def _select_and_log(
+        qualified: list[
+            tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]
+        ],
+        error_msg: str,
+    ) -> tuple[NvFp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+        """Select the first qualified backend and log the selection."""
+        if not qualified:
+            raise NotImplementedError(error_msg)
+
+        backend, k_cls = qualified[0]
+        qualified_names = [b.value for b, _ in qualified]
+        logger.info_once(
+            f"Using '{backend.value}' NvFp4 MoE backend out of "
+            f"potential backends: {qualified_names}.",
+            scope="local",
+        )
+        return backend, k_cls
+
+    # Handle environment variable overrides.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP4:
-            # If the user rejects FlashInfer remove those backends.
+            # User explicitly disabled FlashInfer backends.
             for b in FLASHINFER_NVFP4_MOE_BACKENDS:
                 AVAILABLE_BACKENDS.remove(b)
 
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
+            # User explicitly requested a specific FlashInfer backend.
             fi_backend = get_flashinfer_moe_backend()
+            backend = (
+                NvFp4MoeBackend.FLASHINFER_TRTLLM
+                if fi_backend == FlashinferMoeBackend.TENSORRT_LLM
+                else fi_2_vllm_backend_map[fi_backend]
+            )
+            supported, reason, k_cls = _check_backend(backend)
+            if supported:
+                logger.info_once(
+                    f"Using '{backend.value}' NvFp4 MoE backend "
+                    "(explicitly requested).",
+                    scope="local",
+                )
+                return backend, k_cls
+            raise ValueError(
+                f"NvFp4 MoE backend '{backend.value}' does not support the "
+                f"deployment configuration{f' since {reason}' if reason else ''}."
+            )
 
-            if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = NvFp4MoeBackend.FLASHINFER_TRTLLM
-                supported, reason = is_supported_config_trtllm(
-                    config, weight_key, activation_key, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, None
-                else:
-                    raise ValueError(_make_log_unsupported(backend, reason))
-            else:
-                backend = fi_2_vllm_backend_map[fi_backend]
-                return _return_or_raise(
-                    backend, config, weight_key, activation_key, activation_format
-                )
         else:
-            # If the user is not explicit about the backend, try each.
-            for backend in FLASHINFER_NVFP4_MOE_BACKENDS:
-                if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-                    k_cls = None
-                    supported, reason = is_supported_config_trtllm(
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-                else:
-                    k_cls = backend_to_kernel_cls(backend)
-                    supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-                if supported:
-                    logger.info_once(_make_log_backend(backend), scope="local")
-                    return backend, None
-                else:
-                    logger.debug_once(
-                        _make_log_unsupported(backend, reason), scope="local"
-                    )
-
-            raise NotImplementedError(
+            # User enabled FlashInfer but didn't specify which backend.
+            # Only consider FlashInfer backends.
+            qualified = _filter_qualified(FLASHINFER_NVFP4_MOE_BACKENDS)
+            return _select_and_log(
+                qualified,
                 "Found VLLM_USE_FLASHINFER_MOE_FP4=1, but no "
-                "FlashInfer NVFP4 MoE backend supports the configuration."
+                "FlashInfer NVFP4 MoE backend supports the configuration.",
             )
 
     if envs.VLLM_TEST_FORCE_FP8_MARLIN:
+        # Force Marlin backend for testing.
         backend = NvFp4MoeBackend.MARLIN
-        return _return_or_raise(
-            backend, config, weight_key, activation_key, activation_format
+        supported, reason, k_cls = _check_backend(backend)
+        if supported:
+            logger.info_once(
+                f"Using '{backend.value}' NvFp4 MoE backend (forced via env var).",
+                scope="local",
+            )
+            return backend, k_cls
+        raise ValueError(
+            f"NvFp4 MoE backend '{backend.value}' does not support the "
+            f"deployment configuration{f' since {reason}' if reason else ''}."
         )
 
-    # Select kernels in order of backend.
-    for backend in AVAILABLE_BACKENDS:
-        if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            k_cls = None  # type: ignore[assignment]
-            supported, reason = is_supported_config_trtllm(
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-        else:
-            k_cls = backend_to_kernel_cls(backend)
-            supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-
-        if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
-            return backend, k_cls
-        else:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
-
-    raise NotImplementedError(
-        "No NvFp4 MoE backend supports the deployment configuration."
+    # Default: filter all candidates and select the first qualified one.
+    qualified = _filter_qualified(AVAILABLE_BACKENDS)
+    return _select_and_log(
+        qualified,
+        "No NvFp4 MoE backend supports the deployment configuration.",
     )
 
 

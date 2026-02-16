@@ -134,10 +134,9 @@ def select_fp8_moe_backend(
     allow_vllm_cutlass: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
     """
-    Select the primary FP8 MoE backend
+    Select the primary FP8 MoE backend.
     Note: Shape-specific fallbacks may still occur at runtime.
     """
-    k_cls: type[mk.FusedMoEPermuteExpertsUnpermute] | None = None
 
     if config.is_lora_enabled:
         return Fp8MoeBackend.TRITON, backend_to_kernel_cls(Fp8MoeBackend.TRITON)
@@ -165,109 +164,109 @@ def select_fp8_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
-    def _make_log_backend(backend: Fp8MoeBackend):
-        available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
-        return (
-            f"Using {backend.value} Fp8 MoE backend out "
-            f"of potential backends: {available_backend_strs}."
-        )
-
-    def _make_log_unsupported(backend: Fp8MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"FP8 MoE backend {backend.value} does not support the "
-                f"deployment configuration since {reason}."
-            )
-        else:
-            return (
-                f"FP8 MoE backend '{backend.value}' does not support the "
-                "deployment configuration."
-            )
-
-    def _return_or_raise(
+    def _check_backend(
         backend: Fp8MoeBackend,
-        config: FusedMoEConfig,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-        activation_format: mk.FusedMoEActivationFormat,
-    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
-        k_cls = backend_to_kernel_cls(backend)
-        supported, reason = k_cls.is_supported_config(
-            k_cls, config, weight_key, activation_key, activation_format
+    ) -> tuple[bool, str | None, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+        """Check if a backend is supported. Returns (supported, reason, k_cls)."""
+        if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            supported, reason = is_supported_config_trtllm(
+                config, weight_key, activation_key, activation_format
+            )
+            return supported, reason, None
+        else:
+            k_cls = backend_to_kernel_cls(backend)
+            supported, reason = k_cls.is_supported_config(
+                k_cls, config, weight_key, activation_key, activation_format
+            )
+            return supported, reason, k_cls if supported else None
+
+    def _filter_qualified(
+        candidates: list[Fp8MoeBackend],
+    ) -> list[tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]]:
+        """Filter candidates to only those that pass is_supported_config."""
+        qualified: list[
+            tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]
+        ] = []
+        for backend in candidates:
+            supported, reason, k_cls = _check_backend(backend)
+            if supported:
+                qualified.append((backend, k_cls))
+            else:
+                logger.debug_once(
+                    f"FP8 MoE backend '{backend.value}' does not support the "
+                    f"deployment configuration{f' since {reason}' if reason else ''}.",
+                    scope="local",
+                )
+        return qualified
+
+    def _select_and_log(
+        qualified: list[
+            tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]
+        ],
+    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+        """Select the first qualified backend and log the selection."""
+        if not qualified:
+            raise NotImplementedError("No supported FP8 MoE backend found.")
+
+        backend, k_cls = qualified[0]
+        qualified_names = [b.value for b, _ in qualified]
+        logger.info_once(
+            f"Using '{backend.value}' FP8 MoE backend out of "
+            f"potential backends: {qualified_names}.",
+            scope="local",
         )
+        return backend, k_cls
+
+    def _check_and_return_explicit(
+        backend: Fp8MoeBackend,
+    ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute] | None]:
+        """Check and return an explicitly requested backend, or raise."""
+        supported, reason, k_cls = _check_backend(backend)
         if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
+            logger.info_once(
+                f"Using '{backend.value}' FP8 MoE backend (explicitly requested).",
+                scope="local",
+            )
             return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
+        raise ValueError(
+            f"FP8 MoE backend '{backend.value}' does not support the "
+            f"deployment configuration{f' since {reason}' if reason else ''}."
+        )
+
+    # Handle environment variable overrides that modify the candidate list
+    # or force a specific backend.
 
     # Handle explicit FlashInfer FP8 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP8:
-            # If the user rejects FlashInfer remove those backends.
+            # User explicitly disabled FlashInfer backends.
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_CUTLASS)
 
         elif envs.is_set("VLLM_FLASHINFER_MOE_BACKEND"):
-            # If user is explicit about backend, validate it.
+            # User explicitly requested a specific FlashInfer backend.
             fi_backend = get_flashinfer_moe_backend()
-
             if fi_backend == FlashinferMoeBackend.TENSORRT_LLM:
-                backend = Fp8MoeBackend.FLASHINFER_TRTLLM
-                supported, reason = is_supported_config_trtllm(
-                    config, weight_key, activation_key, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(backend))
-                    return backend, None
-                else:
-                    raise ValueError(_make_log_unsupported(backend, reason))
-
+                return _check_and_return_explicit(Fp8MoeBackend.FLASHINFER_TRTLLM)
             elif fi_backend == FlashinferMoeBackend.CUTLASS:
-                backend = Fp8MoeBackend.FLASHINFER_CUTLASS
-                return _return_or_raise(
-                    backend, config, weight_key, activation_key, activation_format
-                )
-
+                return _check_and_return_explicit(Fp8MoeBackend.FLASHINFER_CUTLASS)
             else:
                 assert fi_backend == FlashinferMoeBackend.CUTEDSL
                 raise ValueError("FlashInfer MaskedGEMM not supported for FP8")
 
         else:
-            # If the user is not explicit about the backend, try both.
-            for backend in [
-                Fp8MoeBackend.FLASHINFER_TRTLLM,
-                Fp8MoeBackend.FLASHINFER_CUTLASS,
-            ]:
-                if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-                    k_cls = None
-                    supported, reason = is_supported_config_trtllm(
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-                else:
-                    k_cls = backend_to_kernel_cls(backend)
-                    supported, reason = k_cls.is_supported_config(
-                        k_cls,
-                        config,
-                        weight_key,
-                        activation_key,
-                        activation_format,
-                    )
-
-                if supported:
-                    logger.info_once(_make_log_backend(backend), scope="local")
-                    return backend, k_cls
-                else:
-                    logger.debug_once(
-                        _make_log_unsupported(backend, reason), scope="local"
-                    )
-
-            raise NotImplementedError(
-                "Found VLLM_USE_FLASHINFER_MOE_FP8=1, but no "
-                "FlashInfer FP8 MoE backend supports the configuration."
+            # User enabled FlashInfer but didn't specify which backend.
+            # Only consider FlashInfer backends.
+            qualified = _filter_qualified(
+                [Fp8MoeBackend.FLASHINFER_TRTLLM, Fp8MoeBackend.FLASHINFER_CUTLASS]
             )
+            if qualified:
+                return _select_and_log(qualified)
+            else:
+                raise NotImplementedError(
+                    "Found VLLM_USE_FLASHINFER_MOE_FP8=1, but no "
+                    "FlashInfer FP8 MoE backend supports the configuration."
+                )
 
     # Handle explicit DeepGEMM FP8 configuration.
     if envs.is_set("VLLM_USE_DEEP_GEMM") or envs.is_set("VLLM_MOE_USE_DEEP_GEMM"):
@@ -280,60 +279,32 @@ def select_fp8_moe_backend(
                 if activation_format == mk.FusedMoEActivationFormat.Standard
                 else Fp8MoeBackend.BATCHED_DEEPGEMM
             )
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
+            return _check_and_return_explicit(backend)
 
     # Handle explicit MARLIN FP8 configuration.
     if envs.VLLM_TEST_FORCE_FP8_MARLIN:
-        backend = Fp8MoeBackend.MARLIN
-        return _return_or_raise(
-            backend, config, weight_key, activation_key, activation_format
-        )
+        return _check_and_return_explicit(Fp8MoeBackend.MARLIN)
 
     # Handle explicit AITER FP8 configuration.
     if envs.is_set("VLLM_ROCM_USE_AITER") or envs.is_set("VLLM_ROCM_USE_AITER_MOE"):
         if not envs.VLLM_ROCM_USE_AITER or not envs.VLLM_ROCM_USE_AITER_MOE:
             AVAILABLE_BACKENDS.remove(Fp8MoeBackend.AITER)
         else:
-            backend = Fp8MoeBackend.AITER
-            return _return_or_raise(
-                backend, config, weight_key, activation_key, activation_format
-            )
+            return _check_and_return_explicit(Fp8MoeBackend.AITER)
 
+    # Handle explicit VLLM CUTLASS configuration.
     if not allow_vllm_cutlass:
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.VLLM_CUTLASS)
         AVAILABLE_BACKENDS.remove(Fp8MoeBackend.BATCHED_VLLM_CUTLASS)
 
-    # Select kernels in order of backend.
-    for backend in AVAILABLE_BACKENDS:
-        if backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-            k_cls = None
-            supported, reason = is_supported_config_trtllm(
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-        else:
-            k_cls = backend_to_kernel_cls(backend)
-            supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-
-        if supported:
-            logger.info_once(_make_log_backend(backend), scope="local")
-            return backend, k_cls
-        else:
-            logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+    # Default: filter all backends and select the first qualified one.
+    qualified = _filter_qualified(AVAILABLE_BACKENDS)
+    if qualified:
+        return _select_and_log(qualified)
 
     # TODO(rob): per discussion with TPU team, we need a way to register
     # MoE backends by OOT plugins, rather than having an explicit list
-    # of AVAILBLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
+    # of AVAILABLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
     # a temporary measure until these register APIs are complete.
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
