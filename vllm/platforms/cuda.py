@@ -78,19 +78,6 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
-        # NOTE:
-        # On some newer consumer GPUs (e.g. sm_120), FLASH_ATTN can stall
-        # during default V1 startup graph-capture ("decode, FULL"), causing
-        # API startup to never complete. Prefer Triton first on these devices
-        # for functional defaults; users can still force another backend via
-        # --attention-backend.
-        if device_capability.major >= 12:
-            return [
-                AttentionBackendEnum.TRITON_ATTN,
-                AttentionBackendEnum.FLASH_ATTN,
-                AttentionBackendEnum.FLASHINFER,
-                AttentionBackendEnum.FLEX_ATTENTION,
-            ]
         if device_capability.major == 10:
             return [
                 AttentionBackendEnum.FLASHINFER,
