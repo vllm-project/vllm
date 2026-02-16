@@ -282,7 +282,7 @@ class OpenAIServing:
         tokenized_length = len(prompt_token_ids)
 
         logprobs_num = 2 * beam_width
-        beam_search_params = SamplingParams(
+        sampling_params = SamplingParams(
             logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
@@ -310,7 +310,7 @@ class OpenAIServing:
                     collect_from_async_generator(
                         self.engine_client.generate(
                             prompt_item,
-                            beam_search_params,
+                            sampling_params,
                             request_id_item,
                             lora_request=lora_request_item,
                             trace_headers=trace_headers,

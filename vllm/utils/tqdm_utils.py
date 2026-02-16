@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable, Iterable, Sequence
-from typing import TypeVar, overload
+from typing import Any, TypeVar, overload
 
 from tqdm.auto import tqdm
 
@@ -13,7 +13,7 @@ def maybe_tqdm(
     it: Sequence[_T],
     *,
     use_tqdm: bool | Callable[..., tqdm],
-    desc: str,
+    **tqdm_kwargs: Any,
 ) -> Sequence[_T]: ...
 
 
@@ -22,7 +22,7 @@ def maybe_tqdm(
     it: Iterable[_T],
     *,
     use_tqdm: bool | Callable[..., tqdm],
-    desc: str,
+    **tqdm_kwargs: Any,
 ) -> Iterable[_T]: ...
 
 
@@ -30,10 +30,10 @@ def maybe_tqdm(
     it: Iterable[_T],
     *,
     use_tqdm: bool | Callable[..., tqdm],
-    desc: str,
+    **tqdm_kwargs: Any,
 ) -> Iterable[_T]:
     if not use_tqdm:
         return it
 
     tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
-    return tqdm_func(it, desc=desc)
+    return tqdm_func(it, **tqdm_kwargs)
