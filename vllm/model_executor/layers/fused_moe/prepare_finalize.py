@@ -251,6 +251,8 @@ class MoEPrepareAndFinalizeNaiveEPMonolithic(
 
 
 class MoEPrepareAndFinalizeNoEPBase(mk.FusedMoEPrepareAndFinalize):
+    """MoE prepare and finalize without expert parallelism."""
+
     """
     Base class for TP case Prepare/Finalize.
     * prepare: applies input quantization

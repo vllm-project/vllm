@@ -88,20 +88,6 @@ if TYPE_CHECKING:
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
-    # Deprecated env variables for profiling, kept for backward compatibility
-    # See also vllm/config/profiler.py and `--profiler-config` argument
-    VLLM_TORCH_CUDA_PROFILE: str | None = None
-    VLLM_TORCH_PROFILER_DIR: str | None = None
-    VLLM_TORCH_PROFILER_RECORD_SHAPES: str | None = None
-    VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY: str | None = None
-    VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM: str | None = None
-    VLLM_TORCH_PROFILER_WITH_STACK: str | None = None
-    VLLM_TORCH_PROFILER_WITH_FLOPS: str | None = None
-    VLLM_TORCH_PROFILER_USE_GZIP: str | None = None
-    VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL: str | None = None
-    VLLM_PROFILER_DELAY_ITERS: str | None = None
-    VLLM_PROFILER_MAX_ITERS: str | None = None
-    # End of deprecated env variables for profiling
     VLLM_USE_AOT_COMPILE: bool = False
     VLLM_USE_BYTECODE_HOOK: bool = False
     VLLM_FORCE_AOT_LOAD: bool = False
@@ -146,6 +132,7 @@ if TYPE_CHECKING:
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
     VLLM_USE_STANDALONE_COMPILE: bool = True
+    VLLM_ENABLE_PREGRAD_PASSES: bool = False
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_MOE_DP_CHUNK_SIZE: int = 256
@@ -182,18 +169,10 @@ if TYPE_CHECKING:
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
+    VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
-    VLLM_ALL2ALL_BACKEND: Literal[
-        "naive",
-        "pplx",
-        "deepep_high_throughput",
-        "deepep_low_latency",
-        "mori",
-        "allgather_reducescatter",
-        "flashinfer_all2allv",
-    ] = "allgather_reducescatter"
     VLLM_MAX_TOKENS_PER_EXPERT_FP4_MOE: int = 163840
     VLLM_TOOL_PARSE_REGEX_TIMEOUT_SECONDS: int = 1
     VLLM_SLEEP_WHEN_IDLE: bool = False
@@ -252,6 +231,8 @@ if TYPE_CHECKING:
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
+    VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
+    VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
 
@@ -294,7 +275,7 @@ def use_aot_compile() -> bool:
 
     default_value = (
         "1"
-        if is_torch_equal_or_newer("2.10.0.dev") and not disable_compile_cache()
+        if is_torch_equal_or_newer("2.10.0") and not disable_compile_cache()
         else "0"
     )
 
@@ -591,6 +572,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_USE_STANDALONE_COMPILE", "1"
     )
     == "1",
+    # Inductor's pre-grad passes don't do anything for vLLM.
+    # The pre-grad passes get run even on cache-hit and negatively impact
+    # vllm cold compile times by O(1s)
+    # Can remove this after the following issue gets fixed
+    # https://github.com/pytorch/pytorch/issues/174502
+    "VLLM_ENABLE_PREGRAD_PASSES": lambda: os.environ.get(
+        "VLLM_ENABLE_PREGRAD_PASSES", "0"
+    )
+    == "1",
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
     "VLLM_PATTERN_MATCH_DEBUG": lambda: os.environ.get(
@@ -877,53 +867,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Values should be comma separated.
     "VLLM_LORA_RESOLVER_HF_REPO_LIST": lambda: os.getenv(
         "VLLM_LORA_RESOLVER_HF_REPO_LIST", None
-    ),
-    # Enables torch CUDA profiling if set to 1.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_CUDA_PROFILE": lambda: os.getenv("VLLM_TORCH_CUDA_PROFILE"),
-    # Enables torch profiler if set.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_PROFILER_DIR": lambda: os.getenv("VLLM_TORCH_PROFILER_DIR"),
-    # Enable torch profiler to record shapes if set to 1.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_PROFILER_RECORD_SHAPES": lambda: (
-        os.getenv("VLLM_TORCH_PROFILER_RECORD_SHAPES")
-    ),
-    # Enable torch profiler to profile memory if set to 1.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY": lambda: (
-        os.getenv("VLLM_TORCH_PROFILER_WITH_PROFILE_MEMORY")
-    ),
-    # Enable torch profiler to profile stack if set to 1.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_PROFILER_WITH_STACK": lambda: (
-        os.getenv("VLLM_TORCH_PROFILER_WITH_STACK")
-    ),
-    # Enable torch profiler to profile flops if set to 1.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_PROFILER_WITH_FLOPS": lambda: (
-        os.getenv("VLLM_TORCH_PROFILER_WITH_FLOPS")
-    ),
-    # Disable torch profiling of the AsyncLLMEngine process if set to 1.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM": lambda: (
-        os.getenv("VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM")
-    ),
-    # Delay number of iterations before starting profiling when using
-    # the torch/torch CUDA profiler. If set to 0, will start profiling immediately.
-    # Deprecated, see profiler_config.
-    "VLLM_PROFILER_DELAY_ITERS": lambda: (os.getenv("VLLM_PROFILER_DELAY_ITERS")),
-    # Maximum number of iterations to profile when using the torch/torch CUDA profiler.
-    # If set to 0, will not limit the number of iterations.
-    "VLLM_PROFILER_MAX_ITERS": lambda: os.getenv("VLLM_PROFILER_MAX_ITERS"),
-    # Control whether torch profiler gzip-compresses profiling files.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_PROFILER_USE_GZIP": lambda: os.getenv("VLLM_TORCH_PROFILER_USE_GZIP"),
-    # Control whether torch profiler dumps the self_cuda_time_total table.
-    # Set to 0 to disable dumping the table.
-    # Deprecated, see profiler_config.
-    "VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL": lambda: (
-        os.getenv("VLLM_TORCH_PROFILER_DUMP_CUDA_TIME_TOTAL")
     ),
     # If set, vLLM will use Triton implementations of AWQ.
     "VLLM_USE_TRITON_AWQ": lambda: bool(int(os.getenv("VLLM_USE_TRITON_AWQ", "0"))),
@@ -1294,6 +1237,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_ALLOW_INSECURE_SERIALIZATION": lambda: bool(
         int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))
     ),
+    # Temporary: skip adding random suffix to internal request IDs. May be
+    # needed for KV connectors that match request IDs across instances.
+    "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "0"))
+    ),
     # IP address used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_HOST": lambda: os.getenv(
         "VLLM_NIXL_SIDE_CHANNEL_HOST", "localhost"
@@ -1305,30 +1253,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
         os.getenv("VLLM_MOONCAKE_BOOTSTRAP_PORT", "8998")
-    ),
-    # [DEPRECATED - will be removed in v0.15.0] all2all backend for vllm's
-    # expert parallel communication. Use --all2all-backend CLI argument instead.
-    # Available options:
-    # - "naive": naive all2all implementation using broadcasts
-    # - "allgather_reducescatter": all2all implementation based on allgather and
-    #  reducescatter
-    # - "pplx": use pplx kernels
-    # - "deepep_high_throughput", use deepep high-throughput kernels
-    # - "deepep_low_latency", use deepep low-latency kernels
-    # - "mori", use MoRI kernels
-    # - "flashinfer_all2allv", use flashinfer alltoallv kernels for mnnvl
-    "VLLM_ALL2ALL_BACKEND": env_with_choices(
-        "VLLM_ALL2ALL_BACKEND",
-        None,
-        [
-            "naive",
-            "pplx",
-            "deepep_high_throughput",
-            "deepep_low_latency",
-            "mori",
-            "allgather_reducescatter",
-            "flashinfer_all2allv",
-        ],
     ),
     # Flashinfer MoE backend for vLLM's fused Mixture-of-Experts support.
     # Both require compute capability 10.0 or above.
@@ -1626,6 +1550,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_MFU_METRICS": lambda: bool(
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
+    # Disable using pytorch's pin memory for CPU offloading.
+    "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
+    ),
+    # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
+    "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
+        int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
+    ),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
@@ -1698,6 +1630,15 @@ def is_set(name: str):
     if name in environment_variables:
         return name in os.environ
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+def validate_environ(hard_fail: bool) -> None:
+    for env in os.environ:
+        if env.startswith("VLLM_") and env not in environment_variables:
+            if hard_fail:
+                raise ValueError(f"Unknown vLLM environment variable detected: {env}")
+            else:
+                logger.warning("Unknown vLLM environment variable detected: %s", env)
 
 
 def compile_factors() -> dict[str, object]:

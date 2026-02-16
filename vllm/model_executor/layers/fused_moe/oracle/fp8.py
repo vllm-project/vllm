@@ -48,6 +48,7 @@ class Fp8MoeBackend(Enum):
     AITER = "AITER"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     BATCHED_VLLM_CUTLASS = "BATCHED_VLLM_CUTLASS"
+    XPU = "XPU"
 
 
 def backend_to_kernel_cls(
@@ -123,6 +124,13 @@ def backend_to_kernel_cls(
 
         return CutlassBatchedExpertsFp8
 
+    elif backend == Fp8MoeBackend.XPU:
+        from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+            XPUExpertsFp8,
+        )
+
+        return XPUExpertsFp8
+
     else:
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
 
@@ -152,6 +160,7 @@ def select_fp8_moe_backend(
         Fp8MoeBackend.TRITON,
         Fp8MoeBackend.BATCHED_TRITON,
         Fp8MoeBackend.MARLIN,
+        Fp8MoeBackend.XPU,
     ]
 
     # NOTE(rob): We need to peak into the P/F selection to determine
@@ -301,7 +310,7 @@ def select_fp8_moe_backend(
 
     # TODO(rob): per discussion with TPU team, we need a way to register
     # MoE backends by OOT plugins, rather than having an explicit list
-    # of AVAILBLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
+    # of AVAILABLE_BACKENDS. Enabling returning `Fp8MoeBackend.NONE` is
     # a temporary measure until these register APIs are complete.
     if current_platform.is_cuda() or current_platform.is_rocm():
         raise NotImplementedError(
@@ -361,6 +370,7 @@ def convert_to_fp8_moe_kernel_format(
             Fp8MoeBackend.BATCHED_TRITON,
             Fp8MoeBackend.VLLM_CUTLASS,
             Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            Fp8MoeBackend.XPU,
         ]:
             raise ValueError(f"Unsupported FP8 MoE backend: {fp8_backend.value}")
 
@@ -431,7 +441,7 @@ def make_fp8_moe_kernel(
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     shared_experts: torch.nn.Module | None = None,
-) -> tuple[mk.FusedMoEKernel, bool]:
+) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
         moe=moe_config,
@@ -442,7 +452,7 @@ def make_fp8_moe_kernel(
     )
     assert prepare_finalize is not None
 
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
 
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
@@ -463,7 +473,7 @@ def make_fp8_moe_kernel(
     # NOTE(rob): we only want the mk to control the shared_expert
     # if using all2all (for SBO). bnell is making this explict in
     # the new MoE runner class.
-    kernel = mk.FusedMoEKernel.make_mk(
+    return mk.FusedMoEKernel.make_mk(
         prepare_finalize,
         experts,
         shared_experts=(
@@ -473,7 +483,3 @@ def make_fp8_moe_kernel(
         ),
         moe_parallel_config=moe_config.moe_parallel_config,
     )
-
-    # TODO(rob): update inplace logic to be part of the kernel.
-    inplace = fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
-    return kernel, inplace

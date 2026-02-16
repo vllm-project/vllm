@@ -9,6 +9,7 @@ from tests.kernels.moe.utils import (
     make_dummy_moe_config,
     make_test_quant_config,
     make_test_weights,
+    modular_triton_fused_moe,
 )
 from tests.kernels.quant_utils import (
     native_per_token_group_quant_fp8,
@@ -25,9 +26,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.deep_gemm_moe import (
     _valid_deep_gemm_shape,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    modular_triton_fused_moe,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
@@ -261,6 +259,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             moe_config=make_dummy_moe_config(),
             quant_config=quant_config,
         ),
+        inplace=False,
     )
 
     def deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):

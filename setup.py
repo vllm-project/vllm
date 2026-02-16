@@ -1035,7 +1035,7 @@ setup(
     extras_require={
         "bench": ["pandas", "matplotlib", "seaborn", "datasets", "scipy"],
         "tensorizer": ["tensorizer==2.10.1"],
-        "fastsafetensors": ["fastsafetensors >= 0.1.10"],
+        "fastsafetensors": ["fastsafetensors >= 0.2.2"],
         "runai": ["runai-model-streamer[s3,gcs] >= 0.15.3"],
         "audio": [
             "librosa",
@@ -1049,6 +1049,13 @@ setup(
         "petit-kernel": ["petit-kernel"],
         # Optional deps for Helion kernel development
         "helion": ["helion"],
+        # Optional deps for OpenTelemetry tracing
+        "otel": [
+            "opentelemetry-sdk>=1.26.0",
+            "opentelemetry-api>=1.26.0",
+            "opentelemetry-exporter-otlp>=1.26.0",
+            "opentelemetry-semantic-conventions-ai>=0.4.1",
+        ],
     },
     cmdclass=cmdclass,
     package_data=package_data,

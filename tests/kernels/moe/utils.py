@@ -7,7 +7,7 @@ import vllm._custom_ops as ops
 from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
 from vllm.model_executor.layers.activation import SiluAndMul
-from vllm.model_executor.layers.fused_moe import fused_experts, fused_topk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -19,7 +19,15 @@ from vllm.model_executor.layers.fused_moe.fused_batched_moe import (
     BatchedTritonExperts,
     NaiveBatchedExperts,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import (
+    TritonExperts,
+    fused_experts,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
+from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
@@ -45,8 +53,9 @@ def make_dummy_moe_config(
         hidden_dim=hidden_dim,
         intermediate_size_per_partition=intermediate_size_per_partition,
         num_local_experts=num_experts,
+        num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        activation="silu",
+        activation=MoEActivation.SILU,
         in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
@@ -116,6 +125,7 @@ def batched_moe(
             quant_config=quant_config,
             moe_config=make_dummy_moe_config(),
         ),
+        inplace=False,
     )
 
     return fused_experts(a, w1, w2, topk_weight, topk_ids)
@@ -157,6 +167,7 @@ def naive_batched_moe(
             quant_config=quant_config,
             moe_config=make_dummy_moe_config(),
         ),
+        inplace=False,
     )
 
     return fused_experts(a, w1, w2, topk_weight, topk_ids)
@@ -554,3 +565,16 @@ def make_shared_experts(
         return RealMLP(K, N, w1, w2, "silu", quant_config, w1_s=w1_s, w2_s=w2_s)
     finally:
         torch.set_default_dtype(old_dtype)
+
+
+def modular_triton_fused_moe(
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig,
+    shared_experts: torch.nn.Module | None = None,
+) -> FusedMoEModularKernel:
+    return FusedMoEModularKernel(
+        MoEPrepareAndFinalizeNoEP(),
+        TritonExperts(moe_config, quant_config),
+        shared_experts,
+        inplace=False,
+    )

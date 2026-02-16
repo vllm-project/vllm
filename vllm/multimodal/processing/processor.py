@@ -34,6 +34,8 @@ from ..inputs import (
     MultiModalKwargsOptionalItems,
     MultiModalUUIDDict,
     PlaceholderRange,
+    mm_enc_dec_inputs,
+    mm_inputs,
 )
 from ..parse import (
     DictEmbeddingItems,
@@ -988,16 +990,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.dummy_inputs = dummy_inputs
         self.cache = cache
 
+        # TODO: Remove in v0.18
         if hasattr(self, "_get_data_parser"):
-            logger.warning_once(
-                "BaseMultiModalProcessor._get_data_parser is deprecated "
-                "and will be removed in v0.16."
-                "You should override `info.build_data_parser` instead."
+            raise ValueError(
+                "BaseMultiModalProcessor._get_data_parser has been "
+                "moved to `BaseProcessingInfo.build_data_parser` in v0.16. "
+                "You should override `BaseProcessingInfo.build_data_parser` instead."
             )
 
-            self.data_parser = self._get_data_parser()  # type: ignore
-        else:
-            self.data_parser = self.info.get_data_parser()
+        self.data_parser = self.info.get_data_parser()
 
     @property
     @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
@@ -1111,6 +1112,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        """Extract processor and passthrough data from multi-modal items."""
         processor_data = dict[str, object]()
         passthrough_data = dict[str, object]()
 
@@ -1396,7 +1398,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
 
-        mm_missing_items = self.info.parse_mm_data(mm_missing_data)
+        mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
 
         return mm_is_cached, mm_missing_items
 
@@ -1617,6 +1619,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Apply multi-modal prompt updates to token IDs."""
         tokenizer = self.info.get_tokenizer()
 
         new_token_ids, match_result = self._apply_token_matches(
@@ -1802,8 +1805,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
@@ -1847,12 +1849,10 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         else:
             decoder_prompt_ids = decoder_prompt_raw
 
-        mm_inputs = MultiModalEncDecInputs(
-            encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
-            **encoder_inputs,
+        return mm_enc_dec_inputs(
+            encoder_inputs,
+            decoder_prompt_ids,
         )
-        mm_inputs["prompt_token_ids"] = decoder_prompt_ids
-        return mm_inputs
 
     def apply(
         self,
