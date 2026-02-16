@@ -1637,6 +1637,10 @@ class FusedMoEKernel:
 
         self._post_init_setup()
 
+    @property
+    def is_monolithic(self) -> bool:
+        return isinstance(self.impl, FusedMoEKernelMonolithicImpl)
+
     def _post_init_setup(self):
         """
         Resolve any leftover setup dependencies between self.prepare_finalize

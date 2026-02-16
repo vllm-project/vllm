@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoeWeightScaleSupported,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
-    Fp8MoeBackend,
     convert_to_fp8_moe_kernel_format,
     make_fp8_moe_kernel,
     make_fp8_moe_quant_config,
@@ -910,7 +909,8 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
-        return self.fp8_backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+        assert self.moe_kernel is not None
+        return self.moe_kernel.is_monolithic
 
     def apply_monolithic(
         self,
@@ -1434,10 +1434,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
 
     @property
     def is_monolithic(self) -> bool:
-        return (
-            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM
-            and not self.moe.moe_parallel_config.use_all2all_kernels
-        )
+        assert self.moe_kernel is not None
+        return self.moe_kernel.is_monolithic
 
     def apply_monolithic(
         self,
