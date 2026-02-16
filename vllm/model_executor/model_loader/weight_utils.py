@@ -67,10 +67,6 @@ logger = init_logger(__name__)
 # system reboots, so users will not complain about annoying lock files
 temp_dir = tempfile.gettempdir()
 
-# Quantization methods that use online quantization with meta device weights.
-# These methods handle dummy weight initialization in `process_weights_after_loading`.
-QUANTS_WITH_META_DEVICE_WEIGHTS: frozenset[str] = frozenset({"fp8", "experts_int8"})
-
 
 def enable_hf_transfer():
     """automatically activates hf_transfer"""
