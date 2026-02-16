@@ -20,8 +20,8 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNaiveEPBase,
-    MoEPrepareAndFinalizeNoEPBase,
+    make_moe_prepare_and_finalize_naive_dp_ep,
+    make_moe_prepare_and_finalize_no_dp_ep,
 )
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
@@ -107,7 +107,7 @@ def maybe_make_prepare_finalize(
                 "Detected DP deployment with no --enable-expert-parallel. "
                 "Falling back to AllGather+ReduceScatter dispatch/combine."
             )
-            return MoEPrepareAndFinalizeNaiveEPBase.make(
+            return make_moe_prepare_and_finalize_naive_dp_ep(
                 is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
                 num_dispatchers=(
                     get_ep_group().device_communicator.all2all_manager.world_size
@@ -115,7 +115,7 @@ def maybe_make_prepare_finalize(
                 use_monolithic=use_monolithic,
             )
         else:
-            return MoEPrepareAndFinalizeNoEPBase.make(use_monolithic)
+            return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
 
     all2all_manager = get_ep_group().device_communicator.all2all_manager
     assert all2all_manager is not None
@@ -248,7 +248,7 @@ def maybe_make_prepare_finalize(
         )
 
     elif moe.use_naive_all2all_kernels and allow_new_interface:
-        prepare_finalize = MoEPrepareAndFinalizeNaiveEPBase.make(
+        prepare_finalize = make_moe_prepare_and_finalize_naive_dp_ep(
             use_monolithic=use_monolithic,
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
             num_dispatchers=all2all_manager.world_size,

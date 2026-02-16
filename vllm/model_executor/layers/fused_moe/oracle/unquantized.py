@@ -18,7 +18,7 @@ from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
     is_supported_config_trtllm_bf16,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     swap_w13_to_w31,
@@ -175,7 +175,7 @@ def make_unquantized_moe_kernel(
         )
 
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoDPEPModular(),
             FlashInferExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
@@ -189,7 +189,7 @@ def make_unquantized_moe_kernel(
         )
 
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoDPEPModular(),
             AiterExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
@@ -200,7 +200,7 @@ def make_unquantized_moe_kernel(
         from vllm.model_executor.layers.fused_moe import TritonExperts
 
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoDPEPModular(),
             TritonExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
@@ -211,7 +211,7 @@ def make_unquantized_moe_kernel(
         from vllm.model_executor.layers.fused_moe import XPUExperts
 
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoDPEPModular(),
             XPUExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,

@@ -171,6 +171,11 @@ PrepareMonolithicResultType = tuple[
 
 ReceiverType = Callable[[], PrepareResultType]
 
+################################################################################
+# Prepare/Finalize
+# TODO: make the below a separate file.
+################################################################################
+
 
 class FusedMoEPrepareAndFinalize(ABC):
     """
@@ -448,6 +453,12 @@ class FusedMoEPrepareAndFinalizeMonolithic(FusedMoEPrepareAndFinalize):
           experts, it will have (M, topk, K) shape.
         """
         raise NotImplementedError
+
+
+################################################################################
+# Experts
+# TODO: make the below a separate file.
+################################################################################
 
 
 # TODO: add supported activations method (return string)
@@ -971,6 +982,7 @@ def _slice_scales(
 
 
 ################################################################################
+# MoEKernel
 # TODO: make the below a separate file.
 ################################################################################
 

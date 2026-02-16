@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     run_cutlass_moe_fp8,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.platforms import current_platform
@@ -198,7 +198,7 @@ def run_with_expert_maps(
         w2 = kwargs["w2"]
         a = kwargs["hidden_states"]
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoDPEPModular(),
             CutlassExpertsFp8(
                 moe_config=make_dummy_moe_config(
                     num_experts=w2.shape[0],
@@ -258,7 +258,7 @@ def run_8_bit(
     with_ep = num_local_experts is not None or num_local_experts == num_experts
     if not with_ep:
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoEP(),
+            MoEPrepareAndFinalizeNoDPEPModular(),
             CutlassExpertsFp8(
                 moe_config=make_dummy_moe_config(
                     num_experts=moe_tensors.w2_q.shape[0],  # type: ignore[union-attr]

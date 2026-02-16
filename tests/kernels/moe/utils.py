@@ -25,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
@@ -573,7 +573,7 @@ def modular_triton_fused_moe(
     shared_experts: torch.nn.Module | None = None,
 ) -> FusedMoEKernel:
     return FusedMoEKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoDPEPModular(),
         TritonExperts(moe_config, quant_config),
         shared_experts,
         inplace=False,

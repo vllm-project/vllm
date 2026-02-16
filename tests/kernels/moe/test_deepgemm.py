@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
@@ -110,7 +110,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     )
 
     deep_gemm_experts = mk.FusedMoEKernel(
-        prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+        prepare_finalize=MoEPrepareAndFinalizeNoDPEPModular(),
         fused_experts=TritonOrDeepGemmExperts(
             moe_config=make_dummy_moe_config(),
             quant_config=quant_config,

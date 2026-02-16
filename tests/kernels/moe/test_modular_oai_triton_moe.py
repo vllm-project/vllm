@@ -31,7 +31,7 @@ from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoEP,
+    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.model_executor.layers.utils import shuffle_weight
 from vllm.platforms import current_platform
@@ -182,7 +182,7 @@ def oai_triton_moe_impl(
         fused_experts = OAITritonExperts(make_dummy_moe_config(), quant_config)
 
     mk = FusedMoEKernel(
-        MoEPrepareAndFinalizeNoEP(),
+        MoEPrepareAndFinalizeNoDPEPModular(),
         fused_experts,
         inplace=False,
     )
