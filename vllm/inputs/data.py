@@ -314,7 +314,7 @@ SingletonInputs: TypeAlias = DecoderOnlyInputs | MultiModalEncDecInputs
 """The inputs for a single encoder/decoder prompt."""
 
 
-def validate_enc_inputs(inputs: SingletonInputs) -> EncoderInputs:
+def _validate_enc_inputs(inputs: SingletonInputs) -> EncoderInputs:
     if inputs["type"] == "embeds":
         raise ValueError(
             "Embedding inputs are not supported for encoder-decoder models"
@@ -329,7 +329,7 @@ def validate_enc_inputs(inputs: SingletonInputs) -> EncoderInputs:
     return inputs  # type: ignore[return-value]
 
 
-def validate_dec_inputs(inputs: SingletonInputs) -> DecoderInputs:
+def _validate_dec_inputs(inputs: SingletonInputs) -> DecoderInputs:
     if inputs["type"] == "embeds":
         raise ValueError(
             "Embedding inputs are not supported for encoder-decoder models"
@@ -360,12 +360,12 @@ def build_enc_dec_inputs(
     decoder_inputs: SingletonInputs | None,
     decoder_start_token_id: int,
 ) -> EncoderDecoderInputs:
-    enc_inputs = validate_enc_inputs(encoder_inputs)
+    enc_inputs = _validate_enc_inputs(encoder_inputs)
 
     if decoder_inputs is None:
         dec_inputs: DecoderInputs = enc_inputs
     else:
-        dec_inputs = validate_dec_inputs(decoder_inputs)
+        dec_inputs = _validate_dec_inputs(decoder_inputs)
 
     enc_inputs_new: EncoderInputs
     dec_inputs_new: DecoderInputs
