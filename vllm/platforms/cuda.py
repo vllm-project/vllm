@@ -265,8 +265,9 @@ class CudaPlatformBase(Platform):
                 if optimal is not None and optimal != chosen_backend:
                     logger.warning(
                         "--block-size %d is not supported by the preferred "
-                        "%s backend. Using %s instead. Consider removing "
-                        "--block-size to auto-select the optimal block size.",
+                        "%s backend. Using %s instead, which may result in reduced "
+                        "performance. Consider removing --block-size to auto-select "
+                        "the optimal block size.",
                         cache_config.block_size,
                         optimal.name,
                         chosen_backend.name,
