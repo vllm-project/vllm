@@ -521,7 +521,6 @@ class MockModelConfig:
     hf_config = MockHFConfig()
     hf_text_config = MockHFConfig()
     logits_processors: list[str] | None = None
-    logits_processor_pattern = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
     allowed_media_domains: list[str] | None = None
@@ -530,16 +529,22 @@ class MockModelConfig:
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init: bool = False
     is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
 
 
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+
+
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    return HfRenderer(
-        model_config,
+    return HfRenderer.from_config(
+        MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
@@ -750,8 +755,10 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     mock_engine.io_processor = MagicMock()
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
-    mock_renderer = MistralRenderer(mock_engine.model_config, tokenizer_kwargs={})
-    mock_renderer._tokenizer = mock_tokenizer
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config),
+        tokenizer=mock_tokenizer,
+    )
     # Force the Mistral chat template renderer to return token IDs.
     # Choose a prompt length that is < max_model_len, but large enough that
     # adding max_tokens should exceed the model context window.
@@ -789,8 +796,10 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     mock_engine.io_processor = MagicMock()
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
-    mock_renderer = MistralRenderer(mock_engine.model_config, tokenizer_kwargs={})
-    mock_renderer._tokenizer = mock_tokenizer
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config),
+        tokenizer=mock_tokenizer,
+    )
     # prompt_token_ids length == max_model_len should be rejected for
     # completion-like requests (ChatCompletionRequest).
     mock_renderer.render_messages_async = AsyncMock(

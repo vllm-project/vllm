@@ -13,7 +13,7 @@ from tests.utils import create_new_process_for_each_test
     "model",
     [
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
-        "mgazz/Prithvi_v2_eo_300_tl_unet_agb",
+        "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars",
     ],
 )
 def test_inference(
