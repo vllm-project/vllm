@@ -32,8 +32,12 @@ if TYPE_CHECKING:
     import torch
     import torch.types
     from transformers.feature_extraction_utils import BatchFeature
+
+    from vllm.inputs.data import _InputOptions
 else:
     torch = LazyLoader("torch", globals(), "torch")
+
+    _InputOptions = dict
 
 _T = TypeVar("_T")
 
@@ -195,7 +199,6 @@ class PlaceholderRange:
     def embeds_cumsum(self) -> torch.Tensor | None:
         return None if self.is_embed is None else self.is_embed.cumsum(dim=0)
 
-    @cached_property
     def get_num_embeds(self) -> int:
         if self.embeds_cumsum is None:
             return self.length
@@ -1059,7 +1062,7 @@ A dictionary containing per-item placeholder ranges for each modality.
 """
 
 
-class MultiModalInputs(TypedDict):
+class MultiModalInputs(_InputOptions):
     """
     Represents the outputs of
     [`BaseMultiModalProcessor`][vllm.multimodal.processing.BaseMultiModalProcessor],
@@ -1071,6 +1074,9 @@ class MultiModalInputs(TypedDict):
 
     prompt_token_ids: list[int]
     """The processed token IDs which includes placeholder tokens."""
+
+    prompt: NotRequired[str]
+    """The prompt text corresponding to the token IDs, if available."""
 
     mm_kwargs: MultiModalKwargsOptionalItems
     """Keyword arguments to be directly passed to the model after batching."""
@@ -1084,10 +1090,30 @@ class MultiModalInputs(TypedDict):
     `prompt_token_ids`.
     """
 
-    cache_salt: NotRequired[str]
-    """
-    Optional cache salt to be used for prefix caching.
-    """
+
+def mm_inputs(
+    prompt_token_ids: list[int],
+    mm_kwargs: MultiModalKwargsOptionalItems,
+    mm_hashes: MultiModalHashes,
+    mm_placeholders: MultiModalPlaceholderDict,
+    *,
+    prompt: str | None = None,
+    cache_salt: str | None = None,
+) -> MultiModalInputs:
+    inputs = MultiModalInputs(
+        type="multimodal",
+        prompt_token_ids=prompt_token_ids,
+        mm_kwargs=mm_kwargs,
+        mm_hashes=mm_hashes,
+        mm_placeholders=mm_placeholders,
+    )
+
+    if prompt is not None:
+        inputs["prompt"] = prompt
+    if cache_salt is not None:
+        inputs["cache_salt"] = cache_salt
+
+    return inputs
 
 
 class MultiModalEncDecInputs(MultiModalInputs):
@@ -1103,3 +1129,31 @@ class MultiModalEncDecInputs(MultiModalInputs):
 
     encoder_prompt_token_ids: list[int]
     """The processed token IDs of the encoder prompt."""
+
+    encoder_prompt: NotRequired[str]
+    """The prompt text corresponding to the encoder token IDs, if available."""
+
+
+def mm_enc_dec_inputs(
+    encoder_inputs: MultiModalInputs,
+    decoder_prompt_token_ids: list[int],
+    *,
+    decoder_prompt: str | None = None,
+) -> MultiModalEncDecInputs:
+    inputs = MultiModalEncDecInputs(
+        type="multimodal",
+        prompt_token_ids=decoder_prompt_token_ids,
+        encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
+        mm_kwargs=encoder_inputs["mm_kwargs"],
+        mm_hashes=encoder_inputs["mm_hashes"],
+        mm_placeholders=encoder_inputs["mm_placeholders"],
+    )
+
+    if decoder_prompt is not None:
+        inputs["prompt"] = decoder_prompt
+    if "prompt" in encoder_inputs:
+        inputs["encoder_prompt"] = encoder_inputs["prompt"]
+    if "cache_salt" in encoder_inputs:
+        inputs["cache_salt"] = encoder_inputs["cache_salt"]
+
+    return inputs
