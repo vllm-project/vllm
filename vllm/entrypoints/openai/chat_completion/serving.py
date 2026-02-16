@@ -145,6 +145,12 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
@@ -389,6 +395,7 @@ class OpenAIServingChat(OpenAIServing):
                     else request.max_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
+                    self.override_max_tokens,
                 )
 
                 sampling_params: SamplingParams | BeamSearchParams

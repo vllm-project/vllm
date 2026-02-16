@@ -229,6 +229,12 @@ class OpenAIServingResponses(OpenAIServing):
         self.enable_force_include_usage = enable_force_include_usage
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
 
         # If False (default), the "store" option is (silently) ignored and the
         # response is not stored. If True, the response is stored in memory.
@@ -446,6 +452,7 @@ class OpenAIServingResponses(OpenAIServing):
                     request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
+                    self.override_max_tokens,
                 )
 
                 sampling_params = request.to_sampling_params(

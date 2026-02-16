@@ -1174,6 +1174,7 @@ class OpenAIServing:
                     context.request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,  # type: ignore
+                    self.override_max_tokens,  # type: ignore
                 )
 
             # OPTIMIZATION
