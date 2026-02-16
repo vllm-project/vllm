@@ -473,9 +473,11 @@ class BaseRenderer(ABC, Generic[_T]):
         modalities = mm_data.keys() | mm_uuids.keys()
 
         for modality in modalities:
-            data_items: ModalityDataItems | list[Any] = mm_items.get(modality, [])
+            data_items: ModalityDataItems | list[Any] = mm_items.get(modality) or []
 
-            uuid_items = mm_uuids.get(modality, [])
+            uuid_items: MultiModalUUIDDict | list[str] | str = (
+                mm_uuids.get(modality) or []
+            )
             if isinstance(uuid_items, str):
                 uuid_items = [uuid_items]
 
