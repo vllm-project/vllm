@@ -475,8 +475,11 @@ class BaseRenderer(ABC, Generic[_T]):
         for modality in modalities:
             data_items: ModalityDataItems | list[Any] = mm_items.get(modality) or []
 
-            uuid_items: MultiModalUUIDDict | list[str] | str = (
+            uuid_items_raw: MultiModalUUIDDict | list[str] | str = (
                 mm_uuids.get(modality) or []
+            )
+            uuid_items = (
+                [uuid_items_raw] if isinstance(uuid_items_raw, str) else uuid_items_raw
             )
             if isinstance(uuid_items, str):
                 uuid_items = [uuid_items]
@@ -502,12 +505,6 @@ class BaseRenderer(ABC, Generic[_T]):
                                 f"multi_modal_data[{modality!r}][{i}] is empty but "
                                 f"multi_modal_uuids[{modality!r}][{i}] is missing."
                             )
-            else:
-                if len(uuid_items) == 0:
-                    raise ValueError(
-                        f"multi_modal_data[{modality!r}] is empty but "
-                        f"multi_modal_uuids[{modality!r}] is missing."
-                    )
 
     def _process_mm_uuids(
         self,

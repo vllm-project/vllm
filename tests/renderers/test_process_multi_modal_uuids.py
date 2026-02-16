@@ -102,6 +102,36 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
     assert processed_mm_uuids == mm_uuids
 
 
+@pytest.mark.parametrize(
+    "mm_cache_gb, enable_prefix_caching",
+    [
+        (4.0, True),  # default behavior
+        (4.0, False),  # prefix caching disabled
+        (0.0, True),  # processor cache disabled
+    ],
+)
+def test_multi_modal_uuids_accepts_empty(
+    monkeypatch, mm_cache_gb: float, enable_prefix_caching: bool
+):
+    renderer = _build_renderer(
+        mm_cache_gb=mm_cache_gb,
+        enable_prefix_caching=enable_prefix_caching,
+    )
+
+    # While None means cached multi-modal input requiring UUIDs
+    # an empty list means no multi-modal input
+    mm_data = {"image": [], "video": []}  # type: ignore[var-annotated]
+    mm_uuids = {"image": [], "video": None}  # type: ignore[var-annotated]
+
+    mm_processor = renderer.get_mm_processor()
+    mm_items = mm_processor.info.parse_mm_data(mm_data)
+    processed_mm_uuids = renderer._process_mm_uuids(
+        mm_data, mm_items, mm_uuids, "req-4"
+    )
+
+    assert processed_mm_uuids == mm_uuids
+
+
 def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
     # When both processor cache is 0 and prefix caching disabled, the
     # processor builds overrides from request id instead of using user UUIDs.
