@@ -212,7 +212,7 @@ class InputProcessor:
 
         if isinstance(prompt, dict) and "type" in prompt:
             if arrival_time is None:
-                arrival_time = prompt.get("arrival_time", time.time())
+                arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
             processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
         else:
