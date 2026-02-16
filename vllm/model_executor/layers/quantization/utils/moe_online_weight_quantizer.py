@@ -159,7 +159,6 @@ class MoeOnlineWeightQuantizer:
         """
 
         def patched_weight_loader(param, loaded_weight, *args, **kwargs):
-            # Add a counter to track how many elements we have updated
             if not hasattr(layer, "_loaded_numel"):
                 layer._loaded_numel = 0
 
@@ -168,8 +167,7 @@ class MoeOnlineWeightQuantizer:
                 layer._w13_weight_orig_id = id(layer.w13_weight)
                 layer._w2_weight_orig_id = id(layer.w2_weight)
 
-                # When the first `loaded_weight` is about to be loaded,
-                # materialize weights just-in-time
+                # Materialize weights just-in-time
                 with torch.device(layer._load_device):
                     w13_weight = torch.nn.Parameter(
                         materialize_meta_tensor(layer.w13_weight),
@@ -198,18 +196,12 @@ class MoeOnlineWeightQuantizer:
                 res = weight_loader(param, loaded_weight, *args, **kwargs)
             layer._loaded_numel += copy_numel_counter.copied_numel
 
-            target_loaded_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
-            if layer._loaded_numel == target_loaded_numel:
-                self.process_weights_after_loading(layer)
+            target_numel = layer.w13_weight.numel() + layer.w2_weight.numel()
+            if layer._loaded_numel == target_numel:
+                self.quantize_and_setup_kernel(layer)
 
                 # Prevent the usual `process_weights_after_loading` call
                 layer._already_called_process_weights_after_loading = True
-
-                # Note that we keep `layer._loaded_numel`,
-                # `layer._w13_weight_orig_id` and `layer._w2_weight_orig_id`
-                # around because if EP is on, weight loaders for non-local
-                # experts will run but not actually copy any elements, and we
-                # need to not re-initialize in that case.
 
             return res
 
