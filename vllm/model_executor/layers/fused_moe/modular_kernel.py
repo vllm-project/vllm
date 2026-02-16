@@ -575,7 +575,10 @@ class FusedMoEExperts(ABC):
     @abstractmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """
-        Whether the kernel supports deployment in expert parallel.
+        Whether the kernel supports deployment in particular parallel config.
+
+        Can be overriden if a kernel does not support EP, SP or some other
+        configuration.
         """
         raise NotImplementedError
 
@@ -591,7 +594,7 @@ class FusedMoEExperts(ABC):
         Can be overriden by monolithic kernels that execute the router
         in addition to the experts if certain routers are not supported.
         """
-        return True
+        raise NotImplementedError
 
     #
     # Various helpers for accessing quantization parameters from the
@@ -696,6 +699,20 @@ class FusedMoEExpertsModular(FusedMoEExperts):
     An abstract base class for the [Permute-Experts-Unpermute] step described
         above.
     """
+
+    @staticmethod
+    def _supports_routing_method(
+        routing_method: RoutingMethodType,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        """
+        Whether the kernel supports a routing method (e.g. GroupedTopK).
+
+        Modular kernels support all routing methods, since the Expert
+        kernel does not apply the activation.
+        """
+        return True
 
     @staticmethod
     def is_monolithic() -> bool:

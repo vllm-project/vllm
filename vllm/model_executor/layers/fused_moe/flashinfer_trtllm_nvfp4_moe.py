@@ -23,7 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 from vllm.platforms import current_platform
 
 
-class FlashInferTrtLlmNvFp4ExpertsBase(mk.FusedMoEExperts):
+class FlashInferTrtLlmNvFp4ExpertsBase:
     """
     NvFp4 TRTLLM-Gen MoE kernels. Supports modular and monolithic interface.
     """
@@ -33,7 +33,8 @@ class FlashInferTrtLlmNvFp4ExpertsBase(mk.FusedMoEExperts):
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
     ):
-        super().__init__(moe_config=moe_config, quant_config=quant_config)
+        self.moe_config = moe_config
+        self.quant_config = quant_config
 
         self.routing_method_type = self.moe_config.routing_method
         self.topk = moe_config.experts_per_token
@@ -59,7 +60,7 @@ class FlashInferTrtLlmNvFp4ExpertsBase(mk.FusedMoEExperts):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        """Does not support non-gated MoE (i.e. Nemotron-Nano)."""
+        """Supports non-gated MoE (i.e. Nemotron-Nano)."""
         return True
 
     @staticmethod
@@ -95,19 +96,6 @@ class FlashInferTrtLlmNvFp4ExpertsModular(
     """
     Modular version of the implementation (just the experts).
     """
-
-    @staticmethod
-    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        """Supports EP and TP."""
-        return True
-
-    @staticmethod
-    def _supports_routing_method(
-        routing_method_type: RoutingMethodType,
-        weight_key: QuantKey | None,
-        activation_key: QuantKey | None,
-    ) -> bool:
-        return True
 
     def workspace_shapes(
         self,

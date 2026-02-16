@@ -103,16 +103,23 @@ class FlashInferTrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         activation_key: QuantKey | None,
     ) -> bool:
         """Monolithic kernels need to express router support."""
-        # NOTE(rob): potentially allow others here. This is a conservative list.
+        # NOTE(dbari): TopK routing could also be enabled, but need to validate models
+        # NOTE(dbari): Default is not implemented and should not be enabled until it is
         if (weight_key, activation_key) == (kFp8Static128BlockSym, kFp8Dynamic128Sym):
+            # NOTE(rob): potentially allow others here. This is a conservative list.
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
             ]
         elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
-            return routing_method == RoutingMethodType.Llama4
-
+            # NOTE(dbari): as above, potentially allow others here.
+            return routing_method in [
+                RoutingMethodType.DeepSeekV3,
+                RoutingMethodType.Llama4,
+                RoutingMethodType.Renormalize,
+                RoutingMethodType.RenormalizeNaive,
+            ]
         else:
             raise ValueError("Unsupported quantization scheme.")
 
