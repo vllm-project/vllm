@@ -170,89 +170,17 @@ class CudaPlatformBase(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
         cache_config = vllm_config.cache_config
-        user_specified_block_size = (
-            cache_config is not None and cache_config.block_size is not None
-        )
-        if cache_config and cache_config.block_size is None:
+        user_specified_block_size = cache_config.block_size is not None
+        if not user_specified_block_size:
             cache_config.block_size = 16
 
-        # For MLA models, determine the backend that will be selected and set
-        # block_size based on that backend's requirements. This ensures
-        # consistency between the block_size set here and the backend that
-        # get_attn_backend_cls will select later.
-        # Note: model_config may be None during testing
-        # Note: block_size is initialized in
-        # HybridAttentionMambaModelConfig.verify_and_update_config
-        # for models with both attention and mamba,
-        # and doesn't need to be reinitialized here
-        if (
-            model_config is not None
-            and model_config.use_mla
-            and cache_config.block_size is not None
-        ):
-            from vllm.config.vllm import set_current_vllm_config
-            from vllm.v1.attention.selector import AttentionSelectorConfig
-
-            use_sparse = hasattr(model_config.hf_config, "index_topk")
-            device_capability = cls.get_device_capability()
-
-            # Only adjust block size if we can determine device capability
-            if device_capability is not None:
-                # Build a minimal selector config to find which backend will
-                # be selected. Note: model_config.dtype is torch.dtype after init
-                attn_selector_config = AttentionSelectorConfig(
-                    head_size=model_config.get_head_size(),
-                    dtype=model_config.dtype,  # type: ignore[arg-type]
-                    kv_cache_dtype=cache_config.cache_dtype,
-                    block_size=None,
-                    use_mla=True,
-                    has_sink=False,
-                    use_sparse=use_sparse,
-                    use_mm_prefix=model_config.is_mm_prefix_lm,
-                )
-
-                # Use the same selection logic as get_attn_backend_cls
-                attention_config = vllm_config.attention_config
-                requested_backend = (
-                    attention_config.backend if attention_config else None
-                )
-                num_heads = model_config.get_num_attention_heads(parallel_config)
-                with set_current_vllm_config(vllm_config):
-                    chosen_backend = cls.select_attention_backend(
-                        selected_backend=requested_backend,
-                        attn_selector_config=attn_selector_config,
-                        device_capability=device_capability,
-                        raise_on_invalid=False,
-                        num_heads=num_heads,
-                    )
-
-                if chosen_backend is not None:
-                    try:
-                        backend_class = chosen_backend.get_class()
-                        preferred_block_size = backend_class.get_preferred_block_size(
-                            cache_config.block_size
-                        )
-                        if cache_config.block_size != preferred_block_size:
-                            if user_specified_block_size:
-                                raise ValueError(
-                                    f"User-specified block_size="
-                                    f"{cache_config.block_size} is "
-                                    f"incompatible with "
-                                    f"{chosen_backend.name} backend "
-                                    f"(requires block_size="
-                                    f"{preferred_block_size}). "
-                                    f"Either remove --block-size to "
-                                    f"auto-select, or use --block-size "
-                                    f"{preferred_block_size}."
-                                )
-                            logger.info(
-                                "Setting kv cache block size to %d for %s backend.",
-                                preferred_block_size,
-                                chosen_backend.name,
-                            )
-                            cache_config.block_size = preferred_block_size  # type: ignore[assignment]
-                    except ImportError:
-                        pass  # Backend selection will fail later with a better error
+        # Ensure block_size is compatible with the attention backend.
+        # Note: model_config may be None during testing.
+        if model_config is not None:
+            cls._update_block_size_for_backend(
+                vllm_config,
+                user_specified_block_size,
+            )
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
@@ -267,6 +195,116 @@ class CudaPlatformBase(Platform):
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
+
+    @classmethod
+    def _update_block_size_for_backend(
+        cls,
+        vllm_config: "VllmConfig",
+        user_specified_block_size: bool,
+    ) -> None:
+        """Ensure block_size is compatible with the attention backend.
+
+        If the user specified --block-size, the selector validates/filters
+        backends by that block size (raising on incompatibility). Otherwise,
+        the backend is selected unconstrained and block_size is set to the
+        backend's preferred value.
+        """
+        from vllm.config.vllm import set_current_vllm_config
+        from vllm.v1.attention.selector import AttentionSelectorConfig
+
+        model_config = vllm_config.model_config
+        cache_config = vllm_config.cache_config
+
+        device_capability = cls.get_device_capability()
+        if device_capability is None:
+            return
+
+        use_mla = model_config.use_mla
+        attn_selector_config = AttentionSelectorConfig(
+            head_size=model_config.get_head_size(),
+            dtype=model_config.dtype,  # type: ignore[arg-type]
+            kv_cache_dtype=cache_config.cache_dtype,
+            block_size=cache_config.block_size if user_specified_block_size else None,
+            use_mla=use_mla,
+            has_sink=False,
+            use_sparse=use_mla and hasattr(model_config.hf_config, "index_topk"),
+            use_mm_prefix=model_config.is_mm_prefix_lm,
+        )
+
+        selected_backend = vllm_config.attention_config.backend
+        num_heads = model_config.get_num_attention_heads(
+            vllm_config.parallel_config,
+        )
+        with set_current_vllm_config(vllm_config):
+            chosen_backend = cls.select_attention_backend(
+                selected_backend=selected_backend,
+                attn_selector_config=attn_selector_config,
+                device_capability=device_capability,
+                # Don't raise here — we produce better errors below.
+                raise_on_invalid=False,
+                num_heads=num_heads,
+            )
+
+        if chosen_backend is not None:
+            if user_specified_block_size:
+                # User's block_size is compatible with the chosen backend.
+                return
+            # User didn't specify --block-size, so auto-select the
+            # preferred block size for the chosen backend.
+            try:
+                backend_class = chosen_backend.get_class()
+            except ImportError:
+                return  # Will fail later with a better error
+            preferred = backend_class.get_preferred_block_size(
+                cache_config.block_size,
+            )
+            if cache_config.block_size != preferred:
+                logger.info(
+                    "Setting kv cache block size to %d for %s backend.",
+                    preferred,
+                    chosen_backend.name,
+                )
+                cache_config.block_size = preferred  # type: ignore[assignment]
+            return
+
+        # No valid backend found. If the user didn't constrain the
+        # selection, defer the error to get_attn_backend_cls where
+        # the full config (including per-layer settings) is available.
+        if not user_specified_block_size:
+            return
+
+        # User specified --block-size (and possibly --attention-backend)
+        # but no backend supports it. Build a helpful error message.
+        if selected_backend is not None:
+            try:
+                backend_class = selected_backend.get_class()
+                supported = backend_class.get_supported_kernel_block_sizes()
+            except ImportError:
+                supported = None
+            raise ValueError(
+                f"User-specified --block-size "
+                f"{cache_config.block_size} is incompatible with "
+                f"--attention-backend {selected_backend.name}"
+                f" (supported kernel block sizes: {supported})."
+                f" Either remove --block-size to auto-select,"
+                f" or choose a compatible value."
+            )
+        else:
+            _, invalid_reasons = cls.get_valid_backends(
+                device_capability=device_capability,
+                attn_selector_config=attn_selector_config,
+                num_heads=num_heads,
+            )
+            reasons_str = ", ".join(
+                f"{b.name}: [{', '.join(r)}]" for b, r in invalid_reasons.items()
+            )
+            raise ValueError(
+                f"No valid attention backend found for --block-size "
+                f"{cache_config.block_size}. "
+                f"Reasons: {{{reasons_str}}}."
+                f" Either remove --block-size to auto-select,"
+                f" or choose a compatible value."
+            )
 
     @classmethod
     def get_current_memory_usage(
@@ -337,9 +375,6 @@ class CudaPlatformBase(Platform):
             The selected backend enum, or None if no valid backend found
             and raise_on_invalid is False
         """
-        # Ensure we don't constrain by block_size during selection
-        attn_selector_config = attn_selector_config._replace(block_size=None)
-
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
@@ -413,7 +448,7 @@ class CudaPlatformBase(Platform):
             # Get all valid backends for logging
             valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
                 device_capability=device_capability,
-                attn_selector_config=attn_selector_config._replace(block_size=None),
+                attn_selector_config=attn_selector_config,
                 num_heads=num_heads,
             )
             reasons_str = (
