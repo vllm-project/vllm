@@ -25,10 +25,12 @@ logger = init_logger(__name__)
 class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
     # --8<-- [end:modular_fused_moe]
 
-    def __init__(self, old_quant_method: FusedMoEMethodBase, experts: FusedMoEKernel):
+    def __init__(
+        self, old_quant_method: FusedMoEMethodBase, moe_kernel: FusedMoEKernel
+    ):
         super().__init__(old_quant_method.moe)
         self.moe_quant_config = old_quant_method.moe_quant_config
-        self.moe_kernel = experts
+        self.moe_kernel = moe_kernel
         self.disable_expert_map = getattr(
             old_quant_method,
             "disable_expert_map",
