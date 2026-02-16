@@ -2,6 +2,29 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """vLLM: a high-throughput and memory-efficient inference engine for LLMs"""
 
+import sys
+
+if sys.platform == "darwin":
+    # Fix for multiprocessing spawn issue on macOS:
+    # When user code creates a Process without `if __name__ == '__main__':` protection,
+    # the spawn method (default on macOS) causes recursive process creation errors.
+    # We force the use of fork method globally on macOS to avoid this issue.
+    # This must be done before any other imports.
+    import warnings
+
+    try:
+        import multiprocessing
+
+        multiprocessing.set_start_method("fork", force=True)
+    except (OSError, ValueError, RuntimeError) as e:
+        warnings.warn(
+            "vLLM failed to set the multiprocessing start method to 'fork' on macOS. "
+            "This is a best-effort workaround for a known issue. If you "
+            "encounter recursive spawning errors, please ensure your main script "
+            "is protected by `if __name__ == '__main__':`. Error: " + str(e),
+            stacklevel=2,
+        )
+
 # The version.py should be independent library, and we always import the
 # version library first.  Such assumption is critical for some customization.
 from .version import __version__, __version_tuple__  # isort:skip
