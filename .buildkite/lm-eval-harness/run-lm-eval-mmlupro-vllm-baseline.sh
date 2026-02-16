@@ -20,14 +20,10 @@ usage() {
     echo
 }
 
-while getopts "m:b:l:f:t:" OPT; do
+while getopts "m:l:f:t:" OPT; do
   case ${OPT} in
     m )
         MODEL="$OPTARG"
-        ;;
-    b )
-        BATCH_SIZE="$OPTARG"
-        export BATCH_SIZE
         ;;
     l )
         LIMIT="$OPTARG"
