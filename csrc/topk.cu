@@ -377,9 +377,8 @@ void large_context_topk(
               "large_context_topk kernel failed: ", cudaGetErrorString(result));
 }
 
-void flashinfer_radix_topk(const torch::Tensor& logits,
-                           const torch::Tensor& lengths, torch::Tensor& output,
-                           torch::Tensor& workspace, int64_t k) {
+void radix_topk(const torch::Tensor& logits, const torch::Tensor& lengths,
+                torch::Tensor& output, torch::Tensor& workspace, int64_t k) {
   TORCH_CHECK(logits.is_cuda(), "logits must be CUDA tensor");
   TORCH_CHECK(lengths.is_cuda(), "lengths must be CUDA tensor");
   TORCH_CHECK(output.is_cuda(), "output must be CUDA tensor");
