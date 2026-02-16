@@ -14,12 +14,12 @@ from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import (
     CutlassExpertsFp4,
-)
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoDPEPModular,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
@@ -88,11 +88,17 @@ def test_cutlass_fp4_moe_no_graph(
             w1_scale=w1_blockscale,
             w2_scale=w2_blockscale,
         )
+        moe_config = make_dummy_moe_config()
 
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModular(),
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             CutlassExpertsFp4(
-                moe_config=make_dummy_moe_config(),
+                moe_config=moe_config,
                 quant_config=quant_config,
             ),
             inplace=False,

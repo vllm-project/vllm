@@ -8,6 +8,9 @@ from tests.kernels.quant_utils import per_block_cast_to_int8
 from tests.kernels.quantization.nvfp4_utils import FLOAT4_E2M1_MAX, FLOAT8_E4M3_MAX
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -24,9 +27,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     fused_experts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoDPEPModular,
-)
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
@@ -573,7 +573,12 @@ def modular_triton_fused_moe(
     shared_experts: torch.nn.Module | None = None,
 ) -> FusedMoEKernel:
     return FusedMoEKernel(
-        MoEPrepareAndFinalizeNoDPEPModular(),
+        maybe_make_prepare_finalize(
+            moe=moe_config,
+            quant_config=quant_config,
+            allow_new_interface=True,
+            use_monolithic=False,
+        ),
         TritonExperts(moe_config, quant_config),
         shared_experts,
         inplace=False,

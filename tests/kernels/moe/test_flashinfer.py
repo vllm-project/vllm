@@ -8,6 +8,9 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -22,10 +25,6 @@ from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts
-from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-    MoEPrepareAndFinalizeNoDPEPModular,
-    MoEPrepareAndFinalizeNoDPEPMonolithic,
-)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     rotate_weights_for_fi_trtllm_fp8_per_tensor_moe,
     swap_w13_to_w31,
@@ -241,7 +240,12 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
         )
 
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPMonolithic(),
+            maybe_make_prepare_finalize(
+                moe=td.layer.moe,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=True,
+            ),
             TrtLlmFp8Experts(
                 moe_config=td.layer.moe,
                 quant_config=quant_config,
@@ -348,7 +352,12 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
         )
 
         kernel = mk.FusedMoEKernel(
-            MoEPrepareAndFinalizeNoDPEPModular(),
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=False,
+            ),
             FlashInferExperts(
                 moe_config=moe_config,
                 quant_config=quant_config,
