@@ -516,7 +516,6 @@ class LLM:
         request_ids = self._validate_and_add_requests(
             prompts=engine_prompts,
             params=seq_params,
-            use_tqdm=use_tqdm,
             lora_request=self._get_modality_specific_lora_reqs(
                 engine_prompts, lora_request
             ),
@@ -1837,7 +1836,6 @@ class LLM:
         self._validate_and_add_requests(
             prompts=prompts,
             params=params,
-            use_tqdm=use_tqdm,
             lora_request=self._get_modality_specific_lora_reqs(prompts, lora_request),
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
@@ -1852,7 +1850,6 @@ class LLM:
         | PoolingParams
         | Sequence[SamplingParams | PoolingParams],
         *,
-        use_tqdm: bool | Callable[..., tqdm] = True,
         lora_request: Sequence[LoRARequest | None] | LoRARequest | None,
         tokenization_kwargs: dict[str, Any] | None = None,
         priority: list[int] | None = None,
@@ -1867,16 +1864,10 @@ class LLM:
                 # We only care about the final output
                 sp.output_kind = RequestOutputKind.FINAL_ONLY
 
-        # Add requests to the engine.
-        it = prompts
-        if use_tqdm:
-            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
-            it = tqdm_func(it, desc="Adding requests")
-
         added_request_ids: list[str] = []
 
         try:
-            for i, prompt in enumerate(it):
+            for i, prompt in enumerate(prompts):
                 request_id = self._add_request(
                     prompt,
                     seq_params[i],
