@@ -354,10 +354,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
-                assert not vllm_config.speculative_config, (
-                    "Mamba cache mode 'align' is currently not compatible "
-                    "with speculative decoding."
-                )
             logger.info(
                 "Warning: Prefix caching in Mamba cache '%s' "
                 "mode is currently enabled. "
@@ -540,12 +536,34 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
             )
 
 
-class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
+class DeepseekV3ForCausalLM(VerifyAndUpdateConfig):
+    @classmethod
+    def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        """Disable AR-RMS-Quant fusion for DeepSeekV3 in NVFP4"""
+        # TODO: https://github.com/vllm-project/vllm/issues/34395
+
+        # disable AR-rms-fp4 fusion for DSv3+
+        ar_rms_enabled = vllm_config.compilation_config.pass_config.fuse_allreduce_rms
+        nvfp4 = vllm_config.model_config.is_nvfp4_quantized()
+
+        # Disable by default, warn if manually enabled:
+        if ar_rms_enabled is None and nvfp4:
+            vllm_config.compilation_config.pass_config.fuse_allreduce_rms = False
+        if ar_rms_enabled and nvfp4:
+            logger.warning(
+                "Allreduce-rms fusion broken for DeepSeekV3 with NVFP4 quant,"
+                "see https://github.com/vllm-project/vllm/issues/34395."
+            )
+
+
+class DeepseekV32ForCausalLM(DeepseekV3ForCausalLM):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         """
         Updated fp8 cache to custom "fp8_ds_mla" format for DeepSeekV32
         """
+        super().verify_and_update_config(vllm_config)
+
         hf_config = vllm_config.model_config.hf_config
 
         # Mirror the check in vllm/model_executor/models/deepseek_v2.py
@@ -629,12 +647,14 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
+    "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "MambaForCausalLM": MambaModelConfig,
     "Mamba2ForCausalLM": MambaModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
+    "DeepseekV3ForCausalLM": DeepseekV3ForCausalLM,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
