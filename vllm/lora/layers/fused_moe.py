@@ -32,7 +32,7 @@ from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     UnfusedOAITritonExperts,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
-    FusedMoEModularKernel,
+    FusedMoEKernel,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
@@ -136,7 +136,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         else:
             # Create a new modular kernel via select_gemm_impl
             prepare_finalize = MoEPrepareAndFinalizeNoEP()
-            m_fused_moe_fn = FusedMoEModularKernel(
+            m_fused_moe_fn = FusedMoEKernel(
                 prepare_finalize,
                 self.base_layer.quant_method.select_gemm_impl(
                     prepare_finalize, self.base_layer

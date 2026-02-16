@@ -23,7 +23,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe import (
     TritonExperts,
     fused_experts,
 )
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
@@ -115,7 +115,7 @@ def batched_moe(
         a2_scale=a2_scale,
     )
 
-    fused_experts = FusedMoEModularKernel(
+    fused_experts = FusedMoEKernel(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
@@ -157,7 +157,7 @@ def naive_batched_moe(
         a2_scale=a2_scale,
     )
 
-    fused_experts = FusedMoEModularKernel(
+    fused_experts = FusedMoEKernel(
         BatchedPrepareAndFinalize(
             max_num_tokens, num_dispatchers=1, num_local_experts=w1.shape[0], rank=0
         ),
@@ -571,8 +571,8 @@ def modular_triton_fused_moe(
     moe_config: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig,
     shared_experts: torch.nn.Module | None = None,
-) -> FusedMoEModularKernel:
-    return FusedMoEModularKernel(
+) -> FusedMoEKernel:
+    return FusedMoEKernel(
         MoEPrepareAndFinalizeNoEP(),
         TritonExperts(moe_config, quant_config),
         shared_experts,
