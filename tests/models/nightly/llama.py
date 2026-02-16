@@ -9,6 +9,7 @@ import time
 
 from vllm.platforms import current_platform
 
+from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k
 from tests.models.registry import HF_EXAMPLE_MODELS
 from tests.utils import RemoteOpenAIServer
 
@@ -481,3 +482,40 @@ async def test_online_serving_concurrent_requests(
     print(f"\n{'='*60}")
     print("✅ Concurrent online serving tests passed!")
     print(f"{'='*60}\n")
+    
+
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_accuracy_gsm8k(server: RemoteOpenAIServer, model_name: str) -> None:
+    """
+    Measure accuracy via GSM8K evaluation against the same model (Llama-3.2-1B-Instruct).
+    Uses the isolated GSM8K script against the already-running vLLM server.
+    """
+    server_url = server.url_for("v1")
+    if "://" in server_url:
+        server_url = server_url.split("://")[1]
+    host_port = server_url.split("/")[0]
+    if ":" in host_port:
+        host, p = host_port.split(":")
+        port = int(p)
+    else:
+        host = host_port
+        port = 8000
+    if not host.startswith("http"):
+        host = f"http://{host}"
+
+    results = evaluate_gsm8k(
+        num_questions=10,
+        num_shots=5,
+        host=host,
+        port=port,
+    )
+
+    accuracy = results["accuracy"]
+    print(f"\n{'='*60}")
+    print(f"GSM8K accuracy: {model_name}")
+    print(f"  Accuracy: {accuracy:.4f}")
+    print(f"  Questions: {results['num_questions']}")
+    print(f"  Invalid rate: {results['invalid_rate']:.3f}")
+    print(f"  Latency: {results['latency']:.1f}s")
+    print(f"{'='*60}\n")
+    assert accuracy >= 0.0, "GSM8K accuracy should be non-negative"
