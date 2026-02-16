@@ -27,6 +27,20 @@ def _cleanup_global_patch():
 class TestVllmAutotune:
     """Tests for the vllm_autotune wrapper."""
 
+    @staticmethod
+    def _make_dummy_kernel():
+        """Create a minimal Triton JIT kernel for testing the autotune wrapper."""
+
+        @triton.jit
+        def _dummy_kernel(
+            X,
+            M: triton.language.constexpr,
+            BLOCK_M: triton.language.constexpr,
+        ):
+            pass
+
+        return _dummy_kernel
+
     def test_disabled_uses_first_config(self, monkeypatch: pytest.MonkeyPatch):
         """When VLLM_TRITON_AUTOTUNE=0, only configs[0] should be used."""
         monkeypatch.setattr(envs, "VLLM_TRITON_AUTOTUNE", False)
@@ -37,10 +51,11 @@ class TestVllmAutotune:
             triton.Config({"BLOCK_M": 256}, num_warps=8),
         ]
 
-        decorator = vllm_autotune(configs=configs, key=["M"])
-        # The returned decorator wraps triton.autotune with a single config.
-        # We verify by checking the Autotuner's config list.
-        assert hasattr(decorator, "configs") or callable(decorator)
+        # Apply the decorator to a real Triton kernel to get an Autotuner
+        autotuner = vllm_autotune(configs=configs, key=["M"])(self._make_dummy_kernel())
+        # Verify the Autotuner was constructed with only the first config
+        assert len(autotuner.configs) == 1
+        assert autotuner.configs[0] == configs[0]
 
     def test_enabled_uses_all_configs(self, monkeypatch: pytest.MonkeyPatch):
         """When VLLM_TRITON_AUTOTUNE=1, all configs should be passed."""
@@ -51,8 +66,9 @@ class TestVllmAutotune:
             triton.Config({"BLOCK_M": 128}, num_warps=8),
         ]
 
-        decorator = vllm_autotune(configs=configs, key=["M"])
-        assert hasattr(decorator, "configs") or callable(decorator)
+        autotuner = vllm_autotune(configs=configs, key=["M"])(self._make_dummy_kernel())
+        # Verify the Autotuner was constructed with all configs
+        assert len(autotuner.configs) == len(configs)
 
 
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton not installed")
