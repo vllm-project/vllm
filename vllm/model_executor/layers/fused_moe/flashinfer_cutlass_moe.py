@@ -152,14 +152,14 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                 ]
                 and p.has_device_capability(90)
             )
-            # fp8 block-scale, wmxfp4a16 on 9.0
+            # fp8 block-scale, wmxfp4a16 on 9.0, and fp8 block-scale on 12.0+ (SM121/GB10)
             or (
                 scheme
                 in [
                     (kMxfp4Static, None),
                     (kFp8Static128BlockSym, kFp8Dynamic128Sym),
                 ]
-                and p.is_device_capability(90)
+                and (p.is_device_capability(90) or p.is_device_capability_family(120))
             )
             # nvfp4, wmxfp4amxfp8 on 10.0+
             or (
