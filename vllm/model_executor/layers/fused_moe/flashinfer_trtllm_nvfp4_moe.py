@@ -5,6 +5,7 @@ import flashinfer
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -73,9 +74,9 @@ class FlashInferTrtLlmNvFp4ExpertsBase(mk.FusedMoEExperts):
         return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        """Supports only SiLU activation."""
-        return activation in ["silu"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        """Supports only SiLU and RELU^2 non-gated activation."""
+        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

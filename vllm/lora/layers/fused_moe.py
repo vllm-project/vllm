@@ -132,7 +132,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
             # Use the existing modular kernel from the quant method
-            m_fused_moe_fn = self.base_layer.quant_method.moe_mk
+            m_fused_moe_fn = self.base_layer.quant_method.moe_kernel
         else:
             # Create a new modular kernel via select_gemm_impl
             prepare_finalize = MoEPrepareAndFinalizeNoEP()
