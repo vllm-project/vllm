@@ -380,6 +380,17 @@ class GPUModelRunner(
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
         self.max_num_tokens = scheduler_config.max_num_batched_tokens
+        if self.speculative_config is not None and (
+            self.speculative_config.uses_draft_model()
+            or self.speculative_config.use_eagle()
+        ):
+            multiplier = (
+                self.speculative_config.num_speculative_tokens
+                if self.speculative_config.parallel_drafting
+                else 1
+            )
+            self.max_num_tokens += multiplier * scheduler_config.max_num_seqs
+
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Broadcast PP output for external_launcher (torchrun)
