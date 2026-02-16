@@ -54,6 +54,7 @@ class MockModelConfig:
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init = False
     is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
@@ -67,7 +68,7 @@ class MockVllmConfig:
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    return HfRenderer(
+    return HfRenderer.from_config(
         MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )

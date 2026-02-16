@@ -181,6 +181,7 @@ Some model architectures are supported via vLLM plugins. These plugins extend vL
 | Architecture | Models | Plugin Repository |
 |--------------|--------|-------------------|
 | `BartForConditionalGeneration` | BART | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
+| `Florence2ForConditionalGeneration` | Florence-2 | [bart-plugin](https://github.com/vllm-project/bart-plugin) |
 
 For other model architectures not natively supported, in particular for Encoder-Decoder models, we recommend following a similar pattern by implementing support through the plugin system.
 

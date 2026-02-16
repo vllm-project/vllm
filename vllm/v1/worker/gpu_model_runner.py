@@ -345,9 +345,13 @@ class GPUModelRunner(
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
 
-        from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        from vllm.model_executor.models.utils import (
+            set_cpu_offload_max_bytes,
+            set_cpu_offload_params,
+        )
 
         set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
+        set_cpu_offload_params(self.cache_config.cpu_offload_params)
 
         model_config = self.model_config
         cache_config = self.cache_config
