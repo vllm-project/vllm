@@ -6,8 +6,7 @@ import os
 os.environ["VLLM_NVTX_SCOPES_FOR_PROFILING"] = "1"
 # os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 os.environ["VLLM_MXFP4_USE_MARLIN"] = "1"
-os.environ["VLLM_ENABLE_LORA_STREAM"] = "1"
-os.environ["VLLM_TUNED_CONFIG_FOLDER"] = "/home/ubuntu/gpt_oss_20b_max_lora_8"
+os.environ["VLLM_TUNED_CONFIG_FOLDER"] = "/home/ubuntu/qwen_32B_max_lora_8"
 # os.environ['VLLM_DISABLE_SHARED_EXPERTS_STREAM'] = '1'
 
 
@@ -23,9 +22,9 @@ prompts = [
 
 # jeeejeee/gpt-oss-20b-lora-adapter-text2sql
 # ./gpt-oss-20b-coding-rank32-lr1e-5
-lora_path = "/home/ubuntu/gpt-oss-20b-coding-rank32-lr1e-5"
-# lora_path = "/home/ubuntu/tuned-qwen3-32b"
-max_num_seqs = 8
+# lora_path = "/home/ubuntu/gpt-oss-20b-coding-rank32-lr1e-5"
+lora_path = "/home/ubuntu/tuned-qwen3-32b"
+max_num_seqs = 16
 
 # Set to false for baseline profiling w/out lora
 use_lora = True
@@ -33,9 +32,9 @@ max_loras = 16
 
 if use_lora:
     llm = LLM(
-        model="openai/gpt-oss-20b",
+        model="Qwen/Qwen3-32B-FP8",
         trust_remote_code=True,
-        tensor_parallel_size=1,
+        tensor_parallel_size=4,
         max_num_seqs=max_num_seqs,
         gpu_memory_utilization=0.95,
         enable_lora=True,
@@ -43,11 +42,11 @@ if use_lora:
         max_lora_rank=32,
         max_cpu_loras=max_loras,
         # enforce_eager=True
-        # speculative_config = {
-        #    "model": "/home/ubuntu/qwen-32B-eagle2",
-        #    "method": "eagle",
-        #    "num_speculative_tokens": 5
-        # },
+        speculative_config={
+            "model": "/home/ubuntu/qwen-32B-eagle2",
+            "method": "eagle",
+            "num_speculative_tokens": 5,
+        },
         # fully_sharded_loras=True
     )
 
