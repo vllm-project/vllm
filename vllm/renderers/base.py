@@ -153,6 +153,27 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return self.tokenizer.eos_token_id
 
+    def get_dec_start_token_id(self) -> int:
+        """
+        Obtain the decoder start token id employed by an encoder/decoder model,
+        raising an error if it is not available.
+        """
+        dec_start_token_id = getattr(
+            self.model_config.hf_config, "decoder_start_token_id", None
+        )
+
+        if dec_start_token_id is None:
+            logger.warning_once(
+                "Falling back on <BOS> for decoder start token id "
+                "because decoder start token id is not available."
+            )
+            dec_start_token_id = self.get_bos_token_id()
+
+        if dec_start_token_id is None:
+            raise RuntimeError("Cannot find decoder start token id or <BOS>")
+
+        return dec_start_token_id
+
     @cached_property
     def default_cmpl_tok_params(self) -> TokenizeParams:
         mm_processor = self.mm_processor

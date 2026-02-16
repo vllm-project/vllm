@@ -7,6 +7,7 @@ from typing import Any, overload
 from typing_extensions import assert_never
 
 from vllm.config import VllmConfig
+from vllm.inputs.data import build_enc_dec_inputs
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.inputs import (
@@ -66,54 +67,6 @@ class InputPreprocessor:
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.renderer.get_tokenizer()
-
-    def get_decoder_start_token_id(self) -> int:
-        """
-        Obtain the decoder start token id employed by an encoder/decoder
-        model. Raises an error if it is not available.
-        """
-        dec_start_token_id = getattr(
-            self.model_config.hf_config, "decoder_start_token_id", None
-        )
-
-        if dec_start_token_id is None:
-            logger.warning_once(
-                "Falling back on <BOS> for decoder start token id "
-                "because decoder start token id is not available."
-            )
-            dec_start_token_id = self.renderer.get_bos_token_id()
-
-        if dec_start_token_id is None:
-            raise RuntimeError("Cannot find decoder start token id or <BOS>")
-
-        return dec_start_token_id
-
-    def _prepare_decoder_input_ids(self, decoder_input_ids: list[int]) -> list[int]:
-        """
-        Prepares `decoder_input_ids` for generation with encoder-decoder models.
-
-        Based on:
-        https://github.com/huggingface/transformers/blob/4037a2b5b1278736e566aec12e169100275545ea/src/transformers/generation/utils.py
-        specifically,
-        `GenerationMixin._prepare_decoder_input_ids_for_generation()`.
-
-        Arguments:
-
-        * decoder_input_ids: input token ids to preprocess
-
-        Returns:
-
-        * Processed token list
-        """
-        decoder_start_token_id = self.get_decoder_start_token_id()
-
-        if (
-            len(decoder_input_ids) == 0
-            or decoder_input_ids[0] != decoder_start_token_id
-        ):
-            decoder_input_ids = [decoder_start_token_id] + decoder_input_ids
-
-        return decoder_input_ids
 
     def _tokenize_prompt(
         self,
@@ -332,66 +285,6 @@ class InputPreprocessor:
 
         assert_never(prompt)  # type: ignore[arg-type]
 
-    def _validate_enc_inputs(self, inputs: SingletonInputs) -> EncoderInputs:
-        if inputs["type"] == "embeds":
-            raise ValueError(
-                "Embedding inputs are not supported for encoder-decoder models"
-            )
-
-        if inputs["type"] == "multimodal" and "encoder_prompt_token_ids" not in inputs:
-            raise RuntimeError(
-                "You should register an encoder-decoder "
-                "multi-modal processor for encoder-decoder models."
-            )
-
-        return inputs  # type: ignore[return-value]
-
-    def _validate_dec_inputs(self, inputs: SingletonInputs) -> DecoderInputs:
-        if inputs["type"] == "embeds":
-            raise ValueError(
-                "Embedding inputs are not supported for encoder-decoder models"
-            )
-
-        return inputs
-
-    def _build_enc_dec_inputs(
-        self,
-        encoder_inputs: SingletonInputs,
-        decoder_inputs: SingletonInputs | None = None,
-    ) -> EncoderDecoderInputs:
-        enc_inputs = self._validate_enc_inputs(encoder_inputs)
-
-        if decoder_inputs is None:
-            dec_inputs: DecoderInputs = enc_inputs  # type: ignore[assignment]
-        else:
-            dec_inputs = self._validate_dec_inputs(decoder_inputs)
-
-        enc_inputs_new: EncoderInputs
-        dec_inputs_new: DecoderInputs
-
-        if enc_inputs["type"] == "multimodal":
-            enc_inputs_new = token_inputs(enc_inputs["encoder_prompt_token_ids"])
-            dec_inputs_new = MultiModalInputs(
-                type="multimodal",
-                prompt_token_ids=dec_inputs["prompt_token_ids"],
-                mm_kwargs=enc_inputs["mm_kwargs"],
-                mm_hashes=enc_inputs["mm_hashes"],
-                mm_placeholders=enc_inputs["mm_placeholders"],
-            )
-        elif enc_inputs["type"] == "token":
-            enc_inputs_new = token_inputs(prompt_token_ids=[])
-            dec_inputs_new = dec_inputs
-        else:
-            assert_never(enc_inputs)
-
-        dec_inputs_new["prompt_token_ids"] = self._prepare_decoder_input_ids(
-            dec_inputs_new["prompt_token_ids"]
-        )
-        if cache_salt := enc_inputs.get("cache_salt"):
-            dec_inputs_new["cache_salt"] = cache_salt
-
-        return EncoderDecoderInputs(encoder=enc_inputs_new, decoder=dec_inputs_new)
-
     def _process_encoder_decoder_prompt(
         self,
         prompt: EncoderDecoderDictPrompt,
@@ -417,7 +310,7 @@ class InputPreprocessor:
         encoder_prompt = prompt["encoder_prompt"]
         decoder_prompt = prompt["decoder_prompt"]
 
-        return self._build_enc_dec_inputs(
+        return build_enc_dec_inputs(
             encoder_inputs=self._prompt_to_llm_inputs(
                 encoder_prompt,
                 tokenization_kwargs=tokenization_kwargs,
@@ -431,6 +324,7 @@ class InputPreprocessor:
                     tokenization_kwargs=tokenization_kwargs,
                 )
             ),
+            decoder_start_token_id=self.renderer.get_dec_start_token_id(),
         )
 
     def _process_decoder_only_prompt(

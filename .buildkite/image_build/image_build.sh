@@ -142,7 +142,12 @@ resolve_parent_commit() {
 
 print_bake_config() {
     echo "--- :page_facing_up: Resolved bake configuration"
-    BAKE_CONFIG_FILE="bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
+    # Write to a temp directory to avoid polluting the repo root (which is the
+    # Docker build context). Files left in the repo root get COPY'd into the
+    # image and can cause duplicate artifact uploads from downstream steps.
+    local bake_tmp
+    bake_tmp="$(mktemp -d)"
+    BAKE_CONFIG_FILE="${bake_tmp}/bake-config-build-${BUILDKITE_BUILD_NUMBER:-local}.json"
     docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
     echo "--- :arrow_down: Uploading bake config to Buildkite"

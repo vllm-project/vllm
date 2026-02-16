@@ -34,6 +34,8 @@ from ..inputs import (
     MultiModalKwargsOptionalItems,
     MultiModalUUIDDict,
     PlaceholderRange,
+    mm_enc_dec_inputs,
+    mm_inputs,
 )
 from ..parse import (
     DictEmbeddingItems,
@@ -1803,8 +1805,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
@@ -1848,12 +1849,10 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         else:
             decoder_prompt_ids = decoder_prompt_raw
 
-        mm_inputs = MultiModalEncDecInputs(
-            encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
-            **encoder_inputs,
+        return mm_enc_dec_inputs(
+            encoder_inputs,
+            decoder_prompt_ids,
         )
-        mm_inputs["prompt_token_ids"] = decoder_prompt_ids
-        return mm_inputs
 
     def apply(
         self,
