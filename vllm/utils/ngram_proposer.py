@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Provides lazy import of the ngram_proposer module.
-"""
+"""Provides lazy import of the ngram_proposer module."""
+
 from typing import TYPE_CHECKING
 
 from vllm.utils.import_utils import LazyLoader
