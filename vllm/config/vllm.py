@@ -103,15 +103,21 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1 and Hopper+ and flashinfer installed."""
+    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1
         and current_platform.is_cuda()
-        and current_platform.has_device_capability(90)
         and has_flashinfer()
+        and (
+            current_platform.is_device_capability(100)
+            or current_platform.is_device_capability(90)
+        )
+        # tp-dp combination broken:
+        # https://github.com/vllm-project/vllm/issues/34458
+        and cfg.parallel_config.data_parallel_size == 1
     )
 
 
