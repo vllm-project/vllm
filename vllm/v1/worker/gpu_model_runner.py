@@ -1799,7 +1799,9 @@ class GPUModelRunner(
         self.seq_lens[num_reqs:].fill_(0)
 
         self.input_batch.block_table.compute_slot_mapping(
-            req_indices_gpu, self.positions.gpu[:total_num_scheduled_tokens]
+            num_reqs,
+            self.query_start_loc.gpu[: num_reqs + 1],
+            self.positions.gpu[:total_num_scheduled_tokens],
         )
 
         # Copy the tensors to the GPU.
