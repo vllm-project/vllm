@@ -193,17 +193,29 @@ class AttentionBackend(ABC):
 
         valid_block_sizes: tuple[int, ...] = get_args(BlockSize)
 
-        # Prefer smaller fixed sizes
+        # Prefer smaller fixed sizes, but use default if it's valid
         fixed_sizes: list[int] = [s for s in supported_sizes if isinstance(s, int)]
         if fixed_sizes:
+            if (
+                default_block_size in fixed_sizes
+                and default_block_size in valid_block_sizes
+            ):
+                return default_block_size
             for size in sorted(fixed_sizes):
                 if size in valid_block_sizes:
                     return size
 
-        # Fall back to MultipleOf requirements - find smallest valid multiple
+        # Fall back to MultipleOf requirements
         multiple_sizes = [s for s in supported_sizes if isinstance(s, MultipleOf)]
         if multiple_sizes:
             max_base = max(s.base for s in multiple_sizes)
+            # Prefer the default if it satisfies the requirement
+            if (
+                default_block_size in valid_block_sizes
+                and default_block_size % max_base == 0
+            ):
+                return default_block_size
+            # Otherwise find smallest valid multiple
             for size in sorted(valid_block_sizes):
                 if size % max_base == 0:
                     return size
