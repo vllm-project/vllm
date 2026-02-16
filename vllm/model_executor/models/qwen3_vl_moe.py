@@ -341,7 +341,7 @@ class Qwen3MoeLLMForCausalLM(Qwen3MoeForCausalLM):
             quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
-        if self.config.tie_word_embeddings:
+        if getattr(self.config, "tie_word_embeddings", False):
             self.lm_head.weight = self.model.embed_tokens.weight
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
         self.make_empty_intermediate_tensors = (
