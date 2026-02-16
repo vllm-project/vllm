@@ -887,6 +887,12 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                 if loaded_shard_id
                 else None
             )
+            if isinstance(param, BlockQuantScaleParameter):
+                weight_block_size = getattr(self, "weight_block_size", None)
+                output_sizes = [
+                    adjust_block_scale_shard(weight_block_size, size, 0)[0]
+                    for size in (output_sizes or self.output_sizes)
+                ]
             # TODO: @dsikka - move to parameter.py
             self._load_fused_module_from_checkpoint(
                 param, loaded_weight, output_sizes=output_sizes
