@@ -31,6 +31,7 @@ from vllm.multimodal.inputs import (
     MultiModalInputs,
     MultiModalKwargsItems,
     MultiModalUUIDDict,
+    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -121,6 +122,7 @@ class LlavaImageEmbeddingInputs(TensorSchema):
 LlavaImageInputs: TypeAlias = (
     LlavaImagePixelInputs | PixtralHFImagePixelInputs | LlavaImageEmbeddingInputs
 )
+"""Alias for supported LLaVA image input types."""
 
 
 class LlavaMultiModalProjector(nn.Module):
@@ -231,6 +233,7 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -769,7 +772,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -785,13 +788,12 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
         result = super().apply(
             prompt,
-            mm_data,
+            mm_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
 
-        mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
         mm_hashes = result["mm_hashes"]
@@ -836,8 +838,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,

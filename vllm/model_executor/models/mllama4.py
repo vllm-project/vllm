@@ -66,6 +66,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -254,7 +255,10 @@ class Llama4VisionAttention(nn.Module):
         self.scaling = self.head_dim**-0.5
 
         self.attn = MMEncoderAttention(
-            self.num_local_heads, self.head_dim, self.scaling
+            self.num_local_heads,
+            self.head_dim,
+            self.scaling,
+            prefix=f"{prefix}.attn",
         )
 
         if use_data_parallel:
@@ -551,6 +555,9 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
             Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability
         # perspective, we do not recommend using >10 images in practice.
@@ -609,9 +616,8 @@ class Mllama4MultiModalProcessor(BaseMultiModalProcessor[Mllama4ProcessingInfo])
             )
 
             images = mm_data["images"]
-            parsed_images = self.data_parser.parse_mm_data({"image": images}).get_items(
-                "image", ImageProcessorItems
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", ImageProcessorItems)
 
             tile_size = vision_config.image_size
             possible_resolutions = find_supported_resolutions(
@@ -702,6 +708,7 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 

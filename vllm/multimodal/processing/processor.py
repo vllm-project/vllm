@@ -25,7 +25,6 @@ from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..hasher import MultiModalHasher
 from ..inputs import (
-    MultiModalDataDict,
     MultiModalEncDecInputs,
     MultiModalFieldConfig,
     MultiModalHashes,
@@ -35,6 +34,8 @@ from ..inputs import (
     MultiModalKwargsOptionalItems,
     MultiModalUUIDDict,
     PlaceholderRange,
+    mm_enc_dec_inputs,
+    mm_inputs,
 )
 from ..parse import (
     DictEmbeddingItems,
@@ -989,16 +990,15 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self.dummy_inputs = dummy_inputs
         self.cache = cache
 
+        # TODO: Remove in v0.18
         if hasattr(self, "_get_data_parser"):
-            logger.warning_once(
-                "BaseMultiModalProcessor._get_data_parser is deprecated "
-                "and will be removed in v0.16."
-                "You should override `info.build_data_parser` instead."
+            raise ValueError(
+                "BaseMultiModalProcessor._get_data_parser has been "
+                "moved to `BaseProcessingInfo.build_data_parser` in v0.16. "
+                "You should override `BaseProcessingInfo.build_data_parser` instead."
             )
 
-            self.data_parser = self._get_data_parser()  # type: ignore
-        else:
-            self.data_parser = self.info.get_data_parser()
+        self.data_parser = self.info.get_data_parser()
 
     @property
     @deprecated("Will be removed in v0.17. Use `info.supported_mm_limits` instead.")
@@ -1013,39 +1013,12 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def __call__(
         self,
         prompt: str,
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        return self.apply(prompt, mm_data, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
-
-    def _to_mm_items(
-        self,
-        mm_data: MultiModalDataDict,
-    ) -> MultiModalDataItems:
-        """
-        Normalize
-        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
-        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
-        before passing them to
-        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
-        """
-        mm_items = self.data_parser.parse_mm_data(mm_data)
-
-        mm_config = self.info.ctx.model_config.get_multimodal_config()
-        if not mm_config.enable_mm_embeds:
-            for modality, items in mm_items.items():
-                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
-                    raise ValueError(
-                        f"You must set `--enable-mm-embeds` to input "
-                        f"`{modality}_embeds`"
-                    )
-
-        for modality, items in mm_items.items():
-            self.info.validate_num_items(modality, len(items))
-
-        return mm_items
+        return self.apply(prompt, mm_items, hf_processor_mm_kwargs, mm_uuids=mm_uuids)
 
     @abstractmethod
     def _get_mm_fields_config(
@@ -1139,6 +1112,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         mm_items: MultiModalDataItems,
     ) -> tuple[Mapping[str, object], Mapping[str, object]]:
+        """Extract processor and passthrough data from multi-modal items."""
         processor_data = dict[str, object]()
         passthrough_data = dict[str, object]()
 
@@ -1409,6 +1383,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             ]
             for modality, items_is_cached in mm_is_cached.items()
         }
+
         mm_missing_data = {}
         for modality, idxs in mm_missing_idxs.items():
             missing_modality_data = []
@@ -1423,7 +1398,9 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                     missing_modality_data.append(data)
             mm_missing_data[modality] = missing_modality_data
 
-        return mm_is_cached, self._to_mm_items(mm_missing_data)
+        mm_missing_items = self.info.parse_mm_data(mm_missing_data, validate=False)
+
+        return mm_is_cached, mm_missing_items
 
     def _recompute_cached_prompt_update(
         self,
@@ -1642,6 +1619,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         token_ids: list[int],
         mm_prompt_updates: MultiModalPromptUpdates,
     ) -> tuple[list[int], Mapping[str, list[PlaceholderFeaturesInfo]]]:
+        """Apply multi-modal prompt updates to token IDs."""
         tokenizer = self.info.get_tokenizer()
 
         new_token_ids, match_result = self._apply_token_matches(
@@ -1774,7 +1752,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         *,
@@ -1796,8 +1774,6 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         request_id = get_current_request_id()
         if request_id is not None:
             self.info.ctx.create_timing_stats(request_id)
-
-        mm_items = self._to_mm_items(mm_data)
 
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
@@ -1829,8 +1805,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
@@ -1843,7 +1818,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def create_encoder_prompt(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
     ) -> str | list[int]:
         """
         Create input prompt for the encoder. HF processor will be applied on
@@ -1854,7 +1829,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def create_decoder_prompt(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
     ) -> str | list[int]:
         """Create input prompt for the decoder."""
         return prompt
@@ -1862,29 +1837,30 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
     def _get_enc_dec_inputs(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         encoder_inputs: MultiModalInputs,
     ):
         tokenizer = self.info.get_tokenizer()
-        decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_data)
+        decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_items)
         if isinstance(decoder_prompt_raw, str):
+            decoder_prompt_text = decoder_prompt_raw
             decoder_prompt_ids = tokenizer.encode(
                 decoder_prompt_raw, add_special_tokens=False
             )
         else:
+            decoder_prompt_text = None
             decoder_prompt_ids = decoder_prompt_raw
 
-        mm_inputs = MultiModalEncDecInputs(
-            encoder_prompt_token_ids=encoder_inputs["prompt_token_ids"],
-            **encoder_inputs,
+        return mm_enc_dec_inputs(
+            encoder_inputs,
+            decoder_prompt_ids,
+            decoder_prompt=decoder_prompt_text,
         )
-        mm_inputs["prompt_token_ids"] = decoder_prompt_ids
-        return mm_inputs
 
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         *,
@@ -1897,10 +1873,10 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         2. Apply the HF processor on encoder prompt.
         3. Copy the input prompt text as decoder prompt inputs.
         """
-        encoder_prompt = self.create_encoder_prompt(prompt, mm_data)
+        encoder_prompt = self.create_encoder_prompt(prompt, mm_items)
         encoder_inputs = super().apply(
             encoder_prompt,
-            mm_data,
+            mm_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
             mm_uuids=mm_uuids,
@@ -1908,6 +1884,6 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
         return self._get_enc_dec_inputs(
             prompt=prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             encoder_inputs=encoder_inputs,
         )

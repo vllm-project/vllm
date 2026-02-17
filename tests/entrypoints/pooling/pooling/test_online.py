@@ -12,15 +12,13 @@ import torch
 from tests.models.utils import check_embeddings_close
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
-from vllm.tokenizers import get_tokenizer
-from vllm.utils.serial_utils import (
-    EMBED_DTYPE_TO_TORCH_DTYPE,
-    ENDIANNESS,
+from vllm.entrypoints.pooling.utils import (
     MetadataItem,
-    binary2tensor,
     build_metadata_items,
     decode_pooling_output,
 )
+from vllm.tokenizers import get_tokenizer
+from vllm.utils.serial_utils import EMBED_DTYPES, ENDIANNESS, binary2tensor
 
 MODEL_NAME = "internlm/internlm2-1_8b-reward"
 DUMMY_CHAT_TEMPLATE = """{% for message in messages %}{{message['role'] + ': ' + message['content'] + '\\n'}}{% endfor %}"""  # noqa: E501
@@ -342,7 +340,7 @@ async def test_base64_embed_dtype_and_endianness(
     responses_float = PoolingResponse.model_validate(float_response.json())
     float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
 
-    for embed_dtype in EMBED_DTYPE_TO_TORCH_DTYPE:
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_base64 = requests.post(
                 url,
@@ -389,7 +387,7 @@ async def test_bytes_embed_dtype_and_endianness(
     responses_float = PoolingResponse.model_validate(float_response.json())
     float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
 
-    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_bytes = requests.post(
                 url,
@@ -438,7 +436,7 @@ async def test_bytes_only_embed_dtype_and_endianness(
     float_data = [np.array(d.data).squeeze(-1).tolist() for d in responses_float.data]
     n_tokens = responses_float.usage.prompt_tokens // len(input_texts)
 
-    for embed_dtype in list(EMBED_DTYPE_TO_TORCH_DTYPE.keys()):
+    for embed_dtype in EMBED_DTYPES:
         for endianness in ENDIANNESS:
             responses_bytes = requests.post(
                 url,

@@ -18,7 +18,6 @@ from compressed_tensors.quantization import (
 )
 from compressed_tensors.transform import TransformConfig
 
-import vllm.envs as envs
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -63,9 +62,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    cutlass_fp4_supported,
-)
 from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
@@ -211,18 +207,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         # because Attention quantization on its own is not supported by vLLM.
         # It is coupled with KV-cache quantization, and if scales are present in the
         # checkpoint, they will be used properly.
-        grps_without_attn_quant = {}
-        for k, v in config["config_groups"].items():
-            # e.g. LlamaAttention, Qwen3Attention, etc.
-            if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
-                logger.warning(
-                    "Skipping CompressedTensors config group for %s. Attention quant "
-                    "is coupled with KV-cache quantization in vLLM.",
-                    v["targets"][0],
-                )
-                continue
-            grps_without_attn_quant[k] = v
-        config["config_groups"] = grps_without_attn_quant
+        if "config_groups" in config:
+            grps_without_attn_quant = {}
+            for k, v in config["config_groups"].items():
+                # e.g. LlamaAttention, Qwen3Attention, etc.
+                if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
+                    logger.warning(
+                        "Skipping CompressedTensors config group for %s. Attention "
+                        "quant is coupled with KV-cache quantization in vLLM.",
+                        v["targets"][0],
+                    )
+                    continue
+                grps_without_attn_quant[k] = v
+            config["config_groups"] = grps_without_attn_quant
 
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
@@ -627,14 +624,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             if self._is_nvfp4_format(weight_quant) and self._is_nvfp4_format(
                 input_quant
             ):
-                if cutlass_fp4_supported() or envs.VLLM_USE_NVFP4_CT_EMULATIONS:
-                    return CompressedTensorsW4A4Fp4()
-                else:
-                    logger.warning_once(
-                        "Current platform does not support cutlass NVFP4."
-                        " Running CompressedTensorsW4A16Fp4."
-                    )
-                    return CompressedTensorsW4A16Fp4(has_input_global_scale=True)
+                return CompressedTensorsW4A4Fp4()
 
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 is_fp8_w8a8_supported = self._check_scheme_supported(

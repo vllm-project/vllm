@@ -155,6 +155,7 @@ class SiglipDummyInputsBuilder(BaseDummyInputsBuilder[SiglipProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -187,20 +188,29 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
+        mm_items: MultiModalDataItems,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if prompt and mm_data:
-            raise ValueError(
-                "Siglip accepts text-only or image-only inputs, not both! "
-                "Image-only inputs means passing an image with an empty text "
-                "prompt."
-            )
+        if mm_items:
+            if isinstance(prompt, str):
+                if len(prompt) > 0:
+                    raise ValueError(
+                        "SigLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty text prompt."
+                    )
+            else:
+                special_tokens = self.info.get_tokenizer().all_special_ids
+                if all(tok in special_tokens for tok in prompt):
+                    prompt = []
+                else:
+                    raise ValueError(
+                        "SigLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty token prompt."
+                    )
 
-        if mm_data:
             # For multi-modal data, the prompt after processing should
             # only contain the image token
             tokenization_kwargs = {
@@ -210,7 +220,7 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
 
         return super().apply(
             prompt=prompt,
-            mm_data=mm_data,
+            mm_items=mm_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
