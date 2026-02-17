@@ -26,13 +26,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
     FunctionDefinition,
     LegacyStructuralTagResponseFormat,
-    LogitsProcessors,
     OpenAIBaseModel,
     StreamOptions,
     StructuralTagResponseFormat,
     ToolCall,
     UsageInfo,
-    get_logits_processors,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
@@ -293,19 +291,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    logits_processors: LogitsProcessors | None = Field(
-        default=None,
-        description=(
-            "A list of either qualified names of logits processors, or "
-            "constructor objects, to apply when sampling. A constructor is "
-            "a JSON object with a required 'qualname' field specifying the "
-            "qualified name of the processor class/factory, and optional "
-            "'args' and 'kwargs' fields containing positional and keyword "
-            "arguments. For example: {'qualname': "
-            "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."
-        ),
-    )
+
     return_tokens_as_token_ids: bool | None = Field(
         default=None,
         description=(
@@ -324,6 +310,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+
     cache_salt: str | None = Field(
         default=None,
         description=(
@@ -335,6 +322,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "to 256 bit)."
         ),
     )
+
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
@@ -417,7 +405,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def to_sampling_params(
         self,
         max_tokens: int,
-        logits_processor_pattern: str | None,
         default_sampling_params: dict,
     ) -> SamplingParams:
         # Default parameters
@@ -502,9 +489,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_tokens=self.min_tokens,
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
-            logits_processors=get_logits_processors(
-                self.logits_processors, logits_processor_pattern
-            ),
             include_stop_str_in_output=self.include_stop_str_in_output,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
