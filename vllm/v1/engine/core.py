@@ -1052,6 +1052,57 @@ class EngineCoreProc(EngineCore):
             # 3) Run any per-step hooks.
             self._process_per_step_hooks()
 
+        # Handle shutdown before exiting
+        self._handle_shutdown()
+
+        # Now exit cleanly
+        raise SystemExit()
+
+    def _handle_shutdown(self) -> None:
+        """Handle shutdown based on shutdown config."""
+        shutdown_config = self.vllm_config.shutdown_config
+
+        logger.info(
+            "Shutdown initiated (mode=%s, timeout=%d)",
+            shutdown_config.mode,
+            shutdown_config.wait_timeout,
+        )
+
+        # Note: PAUSED_SHUTDOWN already set by signal handler,
+        # rejecting new requests from this point forward
+
+        if shutdown_config.mode == "abort":
+            # Abort all in-flight requests
+            aborted_reqs = self.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            self._send_abort_outputs(aborted_reqs)
+            # Give ZMQ time to send abort outputs before process exits
+            time.sleep(0.5)
+
+        elif shutdown_config.mode == "wait":
+            # Wait for in-flight requests to complete
+            logger.info(
+                "Draining %d in-flight requests",
+                self.scheduler.get_num_unfinished_requests(),
+            )
+
+            # PAUSED_SHUTDOWN already set, which:
+            # - Rejects new ADD requests (not queued)
+            # - Sets token_budget=0 to prevent scheduling new work
+            # - Allows running requests to continue
+
+            # Keep stepping until all requests complete
+            while self.scheduler.has_requests() or (
+                self.batch_queue and len(self.batch_queue) > 0
+            ):
+                self._process_engine_step()
+                time.sleep(0.001)
+
+            logger.info("All in-flight requests completed")
+
+        logger.info("Shutdown complete")
+
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
