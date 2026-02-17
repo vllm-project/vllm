@@ -79,7 +79,7 @@ def _get_priority_backends(
         Fp8MoeBackend.XPU,   
     ]
 
-    def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> list[Fp8MoeBackend]:
+    def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend):
         assert backend in backends
         backends.remove(backend)
         backends.insert(0, backend)
