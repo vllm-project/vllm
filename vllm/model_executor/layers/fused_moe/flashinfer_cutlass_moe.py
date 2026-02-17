@@ -67,6 +67,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         quant_config: FusedMoEQuantConfig,
     ):
         super().__init__(moe_config, quant_config)
+
         assert quant_config.weight_quant_dtype in (
             "mxfp4",
             "nvfp4",
@@ -76,6 +77,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "Only mxfp4, nvfp4, fp8, bfloat16 and"
             " float16 quantization are currently supported."
         )
+        self.device = torch.cuda.current_device()
+        self.num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.ep_size = moe_config.moe_parallel_config.ep_size
         self.tp_rank = moe_config.moe_parallel_config.tp_rank
@@ -89,6 +92,17 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
+
+        if quant_config.weight_quant_dtype == "mxfp4":
+            self.gemm1_alpha = torch.tensor(
+                [1.702] * self.num_experts, dtype=torch.float32, device=self.device
+            )
+            self.gemm1_beta = torch.tensor(
+                [1.0] * self.num_experts, dtype=torch.float32, device=self.device
+            )
+            self.gemm1_clamp_limit = torch.tensor(
+                [7.0] * self.num_experts, dtype=torch.float32, device=self.device
+            )
 
     @property
     def expects_unquantized_inputs(self) -> bool:

@@ -229,10 +229,6 @@ class FusedMoEQuantConfig:
     _w1: FusedMoEQuantDesc
     _w2: FusedMoEQuantDesc
 
-    _gemm1_alpha: torch.Tensor | None = None
-    _gemm1_beta: torch.Tensor | None = None
-    _gemm1_clamp_limit: torch.Tensor | None = None
-
     def __post_init__(self):
         assert not self.per_act_token_quant or self.block_shape is None, (
             "illegal quantization"
@@ -346,23 +342,6 @@ class FusedMoEQuantConfig:
     @property
     def g2_alphas(self) -> torch.Tensor | None:
         return self._w2.alpha_or_gscale
-
-    @property
-    def gemm1_alpha(self) -> torch.Tensor | None:
-        assert self._gemm1_alpha is None or isinstance(self._gemm1_alpha, torch.Tensor)
-        return self._gemm1_alpha
-
-    @property
-    def gemm1_beta(self) -> torch.Tensor | None:
-        assert self._gemm1_beta is None or isinstance(self._gemm1_beta, torch.Tensor)
-        return self._gemm1_beta
-
-    @property
-    def gemm1_clamp_limit(self) -> torch.Tensor | None:
-        assert self._gemm1_clamp_limit is None or isinstance(
-            self._gemm1_clamp_limit, torch.Tensor
-        )
-        return self._gemm1_clamp_limit
 
     @property
     def use_fp8_w8a8(self) -> bool:
@@ -667,9 +646,6 @@ def mxfp4_w4a16_moe_quant_config(
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    gemm1_alpha: torch.Tensor | None = None,
-    gemm1_beta: torch.Tensor | None = None,
-    gemm1_clamp_limit: torch.Tensor | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for unquantized activations and mxfp4 weights.
@@ -679,9 +655,6 @@ def mxfp4_w4a16_moe_quant_config(
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
-        _gemm1_alpha=gemm1_alpha,
-        _gemm1_beta=gemm1_beta,
-        _gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -692,9 +665,6 @@ def mxfp4_mxfp8_moe_quant_config(
     a2_scale: torch.Tensor | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    gemm1_alpha: torch.Tensor | None = None,
-    gemm1_beta: torch.Tensor | None = None,
-    gemm1_clamp_limit: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -705,9 +675,6 @@ def mxfp4_mxfp8_moe_quant_config(
         _a2=FusedMoEQuantDesc("mxfp8"),
         _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
-        _gemm1_alpha=gemm1_alpha,
-        _gemm1_beta=gemm1_beta,
-        _gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -718,9 +685,6 @@ def mxfp4_w4a8_moe_quant_config(
     a2_scale: torch.Tensor | None = None,
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    gemm1_alpha: torch.Tensor | None = None,
-    gemm1_beta: torch.Tensor | None = None,
-    gemm1_clamp_limit: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -731,9 +695,6 @@ def mxfp4_w4a8_moe_quant_config(
         _a2=FusedMoEQuantDesc("fp8", None, a2_scale, None, None, None),
         _w1=FusedMoEQuantDesc("mxfp4", None, w1_scale, None, None, w1_bias),
         _w2=FusedMoEQuantDesc("mxfp4", None, w2_scale, None, None, w2_bias),
-        _gemm1_alpha=gemm1_alpha,
-        _gemm1_beta=gemm1_beta,
-        _gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
