@@ -711,6 +711,60 @@ class Indexer(nn.Module):
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
+class DeepSeekV2FusedQkvAProjWithMqa(ReplicatedLinear):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__(
+            input_size,
+            output_size,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.kv_a_proj_with_mqa",
+        )
+
+        # Check if the DeepSeek V3 fused A GEMM kernel can be used.
+        # This kernel supports PDL and is optimized for low batch size.
+        self._use_min_latency_gemm = (
+            hasattr(self, "weight")
+            and self.weight.dtype == torch.bfloat16
+            and self.weight.shape[0] == 2112
+            and self.weight.shape[1] == 7168
+            and current_platform.is_cuda()
+            and current_platform.has_device_capability(90)
+        )
+
+    def forward(
+        self,
+        input_,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.nn.Parameter | None]:
+        num_tokens = input_.shape[0]
+        if self._use_min_latency_gemm and (0 < num_tokens <= 16):
+            output = torch.empty(
+                num_tokens,
+                2112,
+                dtype=torch.bfloat16,
+                device=input_.device,
+            )
+            torch.ops._C.dsv3_fused_a_gemm(
+                output,
+                input_,
+                self.weight.T,
+            )
+            if not self.return_bias:
+                return output
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
+        else:
+            # Fallback to the standard forward method when
+            # the fused A GEMM kernel cannot be used.
+            return super().forward(input_)
+
+
 class DeepseekV2MLAAttention(nn.Module):
     """
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
@@ -765,7 +819,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 disable_tp=True,
             )
         else:
-            self.kv_a_proj_with_mqa = ReplicatedLinear(
+            self.kv_a_proj_with_mqa = DeepSeekV2FusedQkvAProjWithMqa(
                 self.hidden_size,
                 self.kv_lora_rank + self.qk_rope_head_dim,
                 bias=False,

@@ -110,21 +110,6 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
-        # Check if the DeepSeek V3 fused A GEMM kernel can be used.
-        # This kernel is optimized for the specific dimensions of DeepSeek V2/V3
-        # (hidden_size=7168, qkv_a_output=2112) at small batch sizes (1-16 tokens)
-        # on Hopper+ GPUs. It uses Hopper-specific async copy and mbarrier features.
-        _fused_a_gemm_output_size = (q_lora_rank or 0) + kv_lora_rank + qk_rope_head_dim
-        self._use_fused_a_gemm = (
-            mla_modules.fused_qkv_a_proj is not None
-            and quant_config is None
-            and hidden_size == 7168
-            and _fused_a_gemm_output_size == 2112
-            and hasattr(torch.ops._C, "dsv3_fused_a_gemm")
-            and torch.cuda.is_available()
-            and torch.cuda.get_device_capability()[0] >= 9
-        )
-
     def forward(
         self,
         positions: torch.Tensor,
@@ -144,26 +129,8 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             assert self.q_b_proj is not None, (
                 "q_b_proj is required when q_lora_rank is not None"
             )
-            num_tokens = hidden_states.shape[0]
-            if (
-                self._use_fused_a_gemm
-                and 1 <= num_tokens <= 16
-                and hidden_states.dtype == torch.bfloat16
-                and self.fused_qkv_a_proj.weight.dtype == torch.bfloat16
-            ):
-                qkv_lora = torch.empty(
-                    num_tokens,
-                    2112,
-                    dtype=torch.bfloat16,
-                    device=hidden_states.device,
-                )
-                torch.ops._C.dsv3_fused_a_gemm(
-                    qkv_lora,
-                    hidden_states,
-                    self.fused_qkv_a_proj.weight.T,
-                )
-            else:
-                qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
                 dim=-1,
