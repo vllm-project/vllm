@@ -56,31 +56,6 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
 
-_INT32_MAX = 2**31 - 1
-
-
-def _check_moe_int32_overflow(M: int, topk: int, N: int, K: int) -> None:
-    """Check that the largest element offset in the Triton MoE kernel
-    would not overflow int32.
-
-    The critical offset is ``stride_cm * offs_token`` in the output
-    tensor C of shape ``(M*topk, max(N, K))``, where ``stride_cm =
-    max(N, K)`` and the maximum token index is ``M * topk - 1``.
-    When the product exceeds 2^31-1, Triton's default int32 pointer
-    arithmetic silently wraps around, producing an Illegal Memory
-    Access (IMA).  See https://github.com/vllm-project/vllm/issues/5938
-    """
-    max_offset = M * topk * max(N, K)
-    if max_offset > _INT32_MAX:
-        raise ValueError(
-            f"MoE tensor offset ({max_offset}) exceeds int32 range "
-            f"({_INT32_MAX}). M={M}, topk={topk}, N={N}, K={K}. "
-            f"This would cause an Illegal Memory Access in the Triton "
-            f"MoE kernel. Consider reducing batch size or sequence "
-            f"length. See "
-            f"https://github.com/vllm-project/vllm/issues/5938"
-        )
-
 
 @triton.jit
 def write_zeros_to_output(
@@ -1687,8 +1662,6 @@ def fused_experts_impl(
 
     M = num_tokens
 
-    _check_moe_int32_overflow(M, top_k_num, N, K)
-
     config_dtype = _get_config_dtype_str(
         use_fp8_w8a8=use_fp8_w8a8,
         use_int8_w8a16=use_int8_w8a16,
@@ -2020,8 +1993,6 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
             hidden_states, w1, w2, topk_ids
         )
 
-        _check_moe_int32_overflow(num_tokens, top_k_num, N, K)
-
         if global_num_experts == -1:
             global_num_experts = E
 
@@ -2207,8 +2178,6 @@ class TritonWNA16Experts(TritonExperts):
         E, num_tokens, N, K, top_k_num = self.moe_problem_size(
             hidden_states, w1, w2, topk_ids
         )
-
-        _check_moe_int32_overflow(num_tokens, top_k_num, N, K)
 
         if global_num_experts == -1:
             global_num_experts = E
