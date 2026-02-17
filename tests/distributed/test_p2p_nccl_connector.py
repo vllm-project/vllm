@@ -99,6 +99,9 @@ def test_parse_request_id_fails_on_randomized_id():
     nccl_key_b = internal_id_b + layer
     assert nccl_key_a != nccl_key_b, "Internal IDs produce mismatched NCCL keys"
 
-    # With the fix, both sides use external_id
-    nccl_key_ext = external_id + layer
-    assert nccl_key_ext == nccl_key_ext, "External IDs produce matching NCCL keys"
+    # With the fix, both sides use the same external_id
+    nccl_key_prefill = external_id + layer
+    nccl_key_decode = external_id + layer
+    assert nccl_key_prefill == nccl_key_decode, (
+        "External IDs must produce matching NCCL keys"
+    )
