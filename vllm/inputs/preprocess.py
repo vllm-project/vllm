@@ -19,11 +19,9 @@ from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.renderers.inputs import (
     DecoderDictPrompt,
     DecoderOnlyDictPrompt,
-    DictPrompt,
     EncoderDecoderDictPrompt,
     EncoderDictPrompt,
     SingletonDictPrompt,
-    TokPrompt,
 )
 from vllm.renderers.inputs.preprocess import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
@@ -41,7 +39,6 @@ from .data import (
     TextPrompt,
     TokenInputs,
     TokensPrompt,
-    embeds_inputs,
     token_inputs,
 )
 
@@ -83,7 +80,7 @@ class InputPreprocessor:
             **(tokenization_kwargs or {})
         )
 
-        tok_prompt = renderer.tokenize_prompt(
+        tok_prompt = renderer._tokenize_singleton_prompt(
             TextPrompt(prompt=prompt),
             tok_params,
         )
@@ -103,17 +100,10 @@ class InputPreprocessor:
         Apply the model's multi-modal processor to a multi-modal prompt,
         returning the corresponding token IDs and metadata.
         """
-        mm_processor = self.renderer.get_mm_processor()
-
-        if mm_processor_kwargs is None:
-            mm_processor_kwargs = {}
-
-        mm_items = mm_processor.info.parse_mm_data(mm_data)
-
-        return mm_processor.apply(
+        return self.renderer._process_multimodal(
             prompt,
-            mm_items,
-            hf_processor_mm_kwargs=mm_processor_kwargs,
+            mm_data,
+            mm_processor_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
             mm_uuids=mm_uuids,
         )
@@ -122,31 +112,7 @@ class InputPreprocessor:
         self,
         parsed_content: EmbedsPrompt,
     ) -> EmbedsInputs:
-        if not self.model_config.enable_prompt_embeds:
-            raise ValueError(
-                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
-            )
-
-        prompt_embeds = parsed_content["prompt_embeds"]
-
-        # prompt_embeds must be (seq_len, hidden_size), but if the user
-        # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
-        # we can unambiguously process the intent by squeezing the batch
-        # dimension.
-        if prompt_embeds.ndim == 3:
-            prompt_embeds = prompt_embeds.squeeze(dim=0)
-
-        if prompt_embeds.ndim != 2:
-            raise ValueError("prompt_embeds must be of shape (seq_len, hidden_size).")
-
-        # Tensors must be on CPU for serialization between processes
-        # in the MsgpackEncoder. Casting to CPU here ensures that there is no
-        # hidden device transfer in the critical path of generation.
-        prompt_embeds = prompt_embeds.cpu()
-
-        return embeds_inputs(
-            prompt_embeds=prompt_embeds, cache_salt=parsed_content.get("cache_salt")
-        )
+        return self.renderer._process_embeds(parsed_content)
 
     def _truncate_inputs(
         self, inputs: list[int], tokenization_kwargs: dict[str, Any] | None = None
@@ -157,7 +123,7 @@ class InputPreprocessor:
             **(tokenization_kwargs or {})
         )
 
-        tok_prompt = renderer.tokenize_prompt(
+        tok_prompt = renderer._tokenize_singleton_prompt(
             TokensPrompt(prompt_token_ids=inputs),
             tok_params,
         )
@@ -168,8 +134,6 @@ class InputPreprocessor:
         self,
         parsed_content: TokensPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> TokenInputs | MultiModalInputs:
         prompt_token_ids = self._truncate_inputs(
             parsed_content["prompt_token_ids"], tokenization_kwargs
@@ -182,11 +146,13 @@ class InputPreprocessor:
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
+                mm_uuids=parsed_content.get("multi_modal_uuids"),
             )
         else:
             inputs = token_inputs(prompt_token_ids)
 
+        if prompt_text := parsed_content.get("prompt"):
+            inputs["prompt"] = prompt_text
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
 
@@ -196,8 +162,6 @@ class InputPreprocessor:
         self,
         parsed_content: TextPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> TokenInputs | MultiModalInputs:
         prompt_text = parsed_content["prompt"]
 
@@ -208,7 +172,6 @@ class InputPreprocessor:
                 multi_modal_data,
                 parsed_content.get("mm_processor_kwargs") or {},
                 tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
             )
         else:
             prompt_token_ids = self._tokenize_prompt(
@@ -216,6 +179,8 @@ class InputPreprocessor:
                 tokenization_kwargs=tokenization_kwargs,
             )
             inputs = token_inputs(prompt_token_ids)
+
+        inputs["prompt"] = prompt_text
 
         if cache_salt := parsed_content.get("cache_salt"):
             inputs["cache_salt"] = cache_salt
@@ -227,8 +192,6 @@ class InputPreprocessor:
         self,
         prompt: EncoderDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> EncoderInputs: ...
 
     @overload
@@ -236,8 +199,6 @@ class InputPreprocessor:
         self,
         prompt: DecoderDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> DecoderInputs: ...
 
     @overload
@@ -245,16 +206,12 @@ class InputPreprocessor:
         self,
         prompt: DecoderOnlyDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> DecoderOnlyInputs: ...
 
     def _prompt_to_llm_inputs(
         self,
         prompt: SingletonDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> SingletonInputs:
         """
         Extract the singleton inputs from a prompt.
@@ -271,16 +228,12 @@ class InputPreprocessor:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
         if "prompt_token_ids" in prompt:
-            return self._process_tokens(
-                prompt,  # type: ignore[arg-type]
-                mm_uuids=mm_uuids,
-            )
+            return self._process_tokens(prompt)  # type: ignore[arg-type]
 
         if "prompt" in prompt:
             return self._process_text(
                 prompt,  # type: ignore[arg-type]
                 tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
             )
 
         assert_never(prompt)  # type: ignore[arg-type]
@@ -289,8 +242,6 @@ class InputPreprocessor:
         self,
         prompt: EncoderDecoderDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> EncoderDecoderInputs:
         """
         For encoder/decoder models only:
@@ -314,7 +265,6 @@ class InputPreprocessor:
             encoder_inputs=self._prompt_to_llm_inputs(
                 encoder_prompt,
                 tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
             ),
             decoder_inputs=(
                 None
@@ -331,8 +281,6 @@ class InputPreprocessor:
         self,
         prompt: DecoderOnlyDictPrompt,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> DecoderOnlyInputs:
         """
         For decoder-only models:
@@ -350,41 +298,23 @@ class InputPreprocessor:
         return self._prompt_to_llm_inputs(
             prompt,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
 
-    def _preprocess(
+    def preprocess(
         self,
-        prompt: PromptType | DictPrompt | TokPrompt,
+        prompt: PromptType,
         tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> ProcessorInputs:
+        """Preprocess the input prompt."""
         if self.model_config.is_encoder_decoder:
             # Encoder-decoder model requires special mapping of
             # input prompts to encoder & decoder.
             return self._process_encoder_decoder_prompt(
                 parse_enc_dec_prompt(prompt),
                 tokenization_kwargs,
-                mm_uuids=mm_uuids,
             )
 
         return self._process_decoder_only_prompt(
             parse_dec_only_prompt(prompt),
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
-
-    def preprocess(
-        self,
-        prompt: PromptType | DictPrompt | TokPrompt,
-        tokenization_kwargs: dict[str, Any] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
-    ) -> ProcessorInputs:
-        """Preprocess the input prompt."""
-        res = self._preprocess(prompt, tokenization_kwargs, mm_uuids=mm_uuids)
-
-        self.renderer.update_mm_cache_stats()
-
-        return res
