@@ -4,6 +4,8 @@ import os
 from collections.abc import Generator
 
 import gguf
+import gguf.quants
+import numpy as np
 import regex as re
 import torch
 import torch.nn as nn
@@ -30,6 +32,82 @@ from vllm.utils.torch_utils import set_default_torch_dtype
 logger = init_logger(__name__)
 
 
+def _qwen3next_qkvz_iterator(
+    model_config: "ModelConfig",
+    gguf_file: str,
+) -> Generator[tuple[str, torch.Tensor], None, None]:
+    """Merge attn_qkv + attn_gate → in_proj_qkvz for Qwen3Next GGUF.
+
+    The GGUF file stores the fused QKVZ projection as two separate tensors:
+      attn_qkv = [q_all, k_all, v_all]  (contiguous per component)
+      attn_gate = z_all
+    This function dequantizes both, reconstructs the interleaved layout,
+    and yields the merged tensor as in_proj_qkvz.weight (in model dtype).
+    """
+    config = model_config.hf_config
+    num_layers = config.num_hidden_layers
+    hidden_size = config.hidden_size
+
+    # Linear attention head dimensions
+    head_k_dim = getattr(config, "linear_key_head_dim", 128)
+    head_v_dim = getattr(config, "linear_value_head_dim", None)
+    num_k_heads = getattr(config, "linear_num_key_heads", 16)
+    num_v_heads = getattr(config, "linear_num_value_heads", 32)
+    if head_v_dim is None:
+        ssm_inner = getattr(config, "_ssm_inner_size", 4096)
+        head_v_dim = ssm_inner // num_v_heads
+
+    key_dim = head_k_dim * num_k_heads
+    vk_ratio = num_v_heads // num_k_heads
+
+    reader = gguf.GGUFReader(gguf_file)
+
+    # Collect tensors by layer
+    qkv_tensors: dict[int, gguf.gguf_reader.ReaderTensor] = {}
+    gate_tensors: dict[int, gguf.gguf_reader.ReaderTensor] = {}
+    for tensor in reader.tensors:
+        m = re.match(r"blk\.(\d+)\.(attn_qkv|attn_gate)\.weight", tensor.name)
+        if m:
+            idx = int(m.group(1))
+            if m.group(2) == "attn_qkv":
+                qkv_tensors[idx] = tensor
+            else:
+                gate_tensors[idx] = tensor
+
+    for idx in range(num_layers):
+        if idx not in qkv_tensors or idx not in gate_tensors:
+            continue  # standard attention layer (no attn_qkv/attn_gate)
+
+        # Dequantize to float
+        qkv_data = gguf.quants.dequantize(
+            qkv_tensors[idx].data, qkv_tensors[idx].tensor_type
+        )
+        gate_data = gguf.quants.dequantize(
+            gate_tensors[idx].data, gate_tensors[idx].tensor_type
+        )
+
+        qkv_tensor = torch.from_numpy(np.copy(qkv_data))
+        gate_tensor = torch.from_numpy(np.copy(gate_data))
+
+        # Split attn_qkv [key_dim*2 + value_dim, hidden] into q, k, v
+        q_all = qkv_tensor[:key_dim].T.reshape(hidden_size, num_k_heads, head_k_dim)
+        k_all = qkv_tensor[key_dim : key_dim * 2].T.reshape(
+            hidden_size, num_k_heads, head_k_dim
+        )
+        v_all = qkv_tensor[key_dim * 2 :].T.reshape(
+            hidden_size, num_k_heads, vk_ratio * head_v_dim
+        )
+        z_all = gate_tensor.T.reshape(hidden_size, num_k_heads, vk_ratio * head_v_dim)
+
+        # Reconstruct interleaved [q, k, v, z] per group
+        grouped = torch.cat([q_all, k_all, v_all, z_all], dim=-1)
+        result = grouped.reshape(hidden_size, -1).T.contiguous()
+
+        # Yield in the model's target dtype (bfloat16 for DeltaNet stability)
+        name = f"model.layers.{idx}.linear_attn.in_proj_qkvz.weight"
+        yield name, result.to(model_config.dtype)
+
+
 class GGUFModelLoader(BaseModelLoader):
     """
     Model loader that can load GGUF files. This is useful for loading models
@@ -49,6 +127,11 @@ class GGUFModelLoader(BaseModelLoader):
         model_name_or_path = model_config.model
         if os.path.isfile(model_name_or_path):
             return model_name_or_path
+        # for raw HTTPS link
+        if model_name_or_path.startswith(
+            ("http://", "https://")
+        ) and model_name_or_path.endswith(".gguf"):
+            return hf_hub_download(url=model_name_or_path)
         # repo id/filename.gguf
         if "/" in model_name_or_path and model_name_or_path.endswith(".gguf"):
             repo_id, filename = model_name_or_path.rsplit("/", 1)
@@ -66,7 +149,7 @@ class GGUFModelLoader(BaseModelLoader):
 
         raise ValueError(
             f"Unrecognised GGUF reference: {model_name_or_path} "
-            "(expected local file, <repo_id>/<filename>.gguf, "
+            "(expected local file, raw URL, <repo_id>/<filename>.gguf, "
             "or <repo_id>:<quant_type>)"
         )
 
@@ -119,6 +202,57 @@ class GGUFModelLoader(BaseModelLoader):
                     re.compile(
                         f"model\\.layers\\.{idx}"
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
+        if model_type == "qwen3_next":
+            model_type = "qwen3next"
+            # GGUF layer map assumes that we will have a merged expert weights
+            # so we need to map them manually
+            for idx in range(config.num_hidden_layers):
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
+                    f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
+                    f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                )
+                gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
+                    f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+                )
+                # Sideload: experts use separate gate/up in GGUF but fused
+                # gate_up_proj in the transformers dummy model
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.(gate_up_proj|down_proj)"
+                    )
+                )
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
+                    )
+                )
+                # Map DeltaNet dt_bias: GGUF stores as ssm_dt.bias,
+                # but gguf-py only maps ssm_dt -> dt_proj (not dt_bias)
+                gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                    f"model.layers.{idx}.linear_attn.dt_bias"
+                )
+                # Map A_log: GGUF has "blk.N.ssm_a" (no .weight suffix)
+                # but the auto-mapping appends a trailing dot for
+                # suffix-less params, creating "blk.N.ssm_a." which
+                # never matches. Add explicit correct mapping.
+                gguf_to_hf_name_map[f"blk.{idx}.ssm_a"] = (
+                    f"model.layers.{idx}.linear_attn.A_log"
+                )
+                # Remove ssm_in → in_proj_qkvz mapping (GGUF file stores
+                # QKVZ as attn_qkv + attn_gate, not as ssm_in)
+                ssm_in_key = f"blk.{idx}.ssm_in.weight"
+                gguf_to_hf_name_map.pop(ssm_in_key, None)
+                # in_proj_qkvz is loaded from merged attn_qkv + attn_gate
+                sideload_params.append(
+                    re.compile(
+                        f"model\\.layers\\.{idx}"
+                        r"\.linear_attn\.in_proj_qkvz\.weight"
                     )
                 )
         if model_type in ("qwen2_moe", "qwen3_moe"):
@@ -319,6 +453,10 @@ class GGUFModelLoader(BaseModelLoader):
 
         yield from gguf_quant_weights_iterator(model_name_or_path, gguf_to_hf_name_map)
 
+        # For qwen3_next: merge attn_qkv + attn_gate → in_proj_qkvz
+        if getattr(model_config.hf_config, "model_type", "") == "qwen3_next":
+            yield from _qwen3next_qkvz_iterator(model_config, model_name_or_path)
+
     def download_model(self, model_config: ModelConfig) -> None:
         self._prepare_weights(model_config)
 
@@ -355,6 +493,14 @@ class GGUFModelLoader(BaseModelLoader):
             unquant_names,
         )
         vllm_config.quant_config.unquantized_modules.extend(unquant_names)
+
+        # For qwen3_next, in_proj_qkvz is loaded from merged/dequantized
+        # attn_qkv + attn_gate, so it must be unquantized
+        if getattr(model_config.hf_config, "model_type", "") == "qwen3_next":
+            for idx in range(model_config.hf_config.num_hidden_layers):
+                vllm_config.quant_config.unquantized_modules.append(
+                    f"model.layers.{idx}.linear_attn.in_proj_qkvz"
+                )
 
         target_device = torch.device(device_config.device)
         with set_default_torch_dtype(model_config.dtype):
