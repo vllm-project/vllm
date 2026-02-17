@@ -6,6 +6,7 @@ import os
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
+from typing import Any
 
 import pytest
 
@@ -17,7 +18,7 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core_client import DPAsyncMPClient
+from vllm.v1.engine.core_client import DPAsyncMPClient, DPLBAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
 
@@ -347,3 +348,63 @@ async def test_dp_pause_keep_then_resume(expert_parallel: bool):
             assert pause_gap >= pause_duration * 0.8, (
                 f"Expected gap ~{pause_duration}s after pause, got {pause_gap:.3f}s"
             )
+
+
+@pytest.mark.asyncio
+async def test_dp_pause_keep_race_staggered_engines():
+    """Race: send pause(keep) to engine 0, then add two requests,
+    then pause(keep) to engine 1. Ensures no deadlock when pause
+    requests are staggered and requests arrive in between."""
+    if current_platform.is_rocm():
+        pytest.skip("DP pause tests use mp backend only")
+    if DP_SIZE != 2:
+        pytest.skip("test_dp_pause_keep_race_staggered_engines requires DP_SIZE=2")
+
+    with ExitStack() as after:
+        engine_args = _get_dp_pause_engine_args(expert_parallel=True)
+        engine = AsyncLLM.from_engine_args(engine_args)
+        after.callback(engine.shutdown)
+
+        client = engine.engine_core
+        if not isinstance(client, DPLBAsyncMPClient) or len(client.core_engines) != 2:
+            pytest.skip("need DPLBAsyncMPClient with 2 engines")
+
+        original_call_utility = client.call_utility_async
+        mid_pause_tasks: list[asyncio.Task] = []
+
+        async def staggered_pause_keep(method: str, *args) -> Any:
+            if method != "pause_scheduler" or not args or args[0] != "keep":
+                return await original_call_utility(method, *args)
+            # Send pause(keep) to engine 0 first
+            await client._call_utility_async(
+                method, *args, engine=client.core_engines[0]
+            )
+            # In the middle: send two requests (race window)
+            sp = SamplingParams(max_tokens=5, ignore_eos=True)
+
+            async def consume_gen(req_id: str) -> None:
+                async for _ in engine.generate(
+                    request_id=req_id,
+                    prompt=DP_PAUSE_PROMPT,
+                    sampling_params=sp,
+                ):
+                    pass
+
+            t1 = asyncio.create_task(consume_gen("race-1"))
+            t2 = asyncio.create_task(consume_gen("race-2"))
+            mid_pause_tasks.extend([t1, t2])
+            await asyncio.sleep(3)
+            # Then send pause(keep) to engine 1
+            result = await client._call_utility_async(
+                method, *args, engine=client.core_engines[1]
+            )
+            return result
+
+        client.call_utility_async = staggered_pause_keep
+
+        await engine.pause_generation(mode="keep")
+        assert await engine.is_paused()
+        await engine.resume_generation()
+        assert not await engine.is_paused()
+        # Let the two requests we sent mid-pause complete
+        await asyncio.gather(*mid_pause_tasks)

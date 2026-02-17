@@ -26,14 +26,14 @@ workloads. Residual GPU activity interferes with vLLM memory profiling and
 causes unexpected behavior.
 """
 
+import asyncio
 import os
+import time
 import uuid
 from dataclasses import asdict
 
 import ray
 import torch
-from ray.util.placement_group import placement_group
-from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import vllm
@@ -51,14 +51,21 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
-MODEL_NAME = "facebook/opt-125m"
+MODEL_NAME_V1 = "Qwen/Qwen1.5-MoE-A2.7B"
+MODEL_NAME_V2 = "Qwen/Qwen1.5-MoE-A2.7B-Chat"
 
 
 class MyLLM(vllm.AsyncLLMEngine):
     """Configure the vLLM worker for Ray placement group execution."""
 
     def __init__(self, **kwargs):
-        os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
+        # This actor runs with num_gpus=0, so Ray sets CUDA_VISIBLE_DEVICES=""
+        # to hide all GPUs. Remove it so it doesn't propagate (via runtime_env
+        # inheritance) to the DP engine core actors and their RayWorkerWrapper
+        # children, which need full GPU visibility.
+        if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
+            del os.environ["CUDA_VISIBLE_DEVICES"]
+        os.environ["VLLM_BATCH_INVARIANT"] = "1"
         engine_args = vllm.AsyncEngineArgs(**kwargs)
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
@@ -68,26 +75,40 @@ class MyLLM(vllm.AsyncLLMEngine):
             log_requests=engine_args.enable_log_requests,
             log_stats=not engine_args.disable_log_stats,
         )
+        self._generation_paused = False
 
-    async def generate_with_retry(
+    async def pause_generation(self, **kwargs):
+        await super().pause_generation(**kwargs)
+        # Set after super() completes so the flag is only visible to
+        # do_generate coroutines once the engine is actually paused.
+
+        # ensure that all tokens are flushed
+        await asyncio.sleep(0.2)
+        self._generation_paused = True
+
+    async def do_generate(
         self, prompt_token_ids: list[int], sampling_params: vllm.SamplingParams
-    ) -> vllm.RequestOutput:
-        finish_reason = "abort"
-        while finish_reason == "abort":
-            async for request_output in self.generate(
-                {"prompt_token_ids": prompt_token_ids},
-                sampling_params,
-                request_id=str(uuid.uuid4()),
-            ):
-                output = request_output
-            finish_reason = output.outputs[0].finish_reason
-            if finish_reason == "abort":
-                print(
-                    f"ABORT, prompt_token_ids: {prompt_token_ids}, "
-                    f"generated token_ids: {list(output.outputs[0].token_ids)}"
-                )
-            prompt_token_ids = prompt_token_ids + list(output.outputs[0].token_ids)
-        return output
+    ) -> tuple[vllm.RequestOutput, int]:
+        """Generate and return (output, pause_token_index).
+
+        pause_token_index is the number of tokens generated before the
+        weight change, or -1 if the request completed before any pause.
+        """
+        pause_token_index = -1
+        prev_token_count = 0
+        async for request_output in self.generate(
+            {"prompt_token_ids": prompt_token_ids},
+            sampling_params,
+            request_id=str(uuid.uuid4()),
+        ):
+            output = request_output
+            cur_token_count = len(output.outputs[0].token_ids)
+            if self._generation_paused and pause_token_index == -1:
+                # First yield after resume — the boundary is the previous
+                # token count (last output before the generator blocked).
+                pause_token_index = prev_token_count
+            prev_token_count = cur_token_count
+        return output, pause_token_index
 
 
 @ray.remote(num_gpus=1)
@@ -140,34 +161,24 @@ ray.init()
 
 # Launch the training model actor. Ray's resource scheduler will allocate
 # 1 GPU (via num_gpus=1 in the decorator), ensuring pg_inference gets different GPUs.
-train_model = TrainModel.remote(MODEL_NAME)
-
-# Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
-# Learn more about Ray placement groups:
-# https://docs.ray.io/en/latest/placement-groups.html
-
-pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
-ray.get(pg_inference.ready())
-scheduling_inference = PlacementGroupSchedulingStrategy(
-    placement_group=pg_inference,
-    placement_group_capture_child_tasks=True,
-    placement_group_bundle_index=0,
-)
+train_model = TrainModel.remote(MODEL_NAME_V2)
 
 # Launch the vLLM inference engine. The `enforce_eager` flag reduces
 # start-up latency.
-# Note: Weight transfer APIs (init_weight_transfer_engine, update_weights)
-# are now native to vLLM workers.
+# With data_parallel_backend="ray", vLLM's CoreEngineActorManager creates
+# its own placement groups internally for each DP rank, so we must NOT
+# create an outer placement group (it would reserve GPUs and hide them
+# from the internal DP resource check).
 llm = ray.remote(
     num_cpus=0,
     num_gpus=0,
-    scheduling_strategy=scheduling_inference,
 )(MyLLM).remote(
-    model=MODEL_NAME,
+    model=MODEL_NAME_V1,
     enforce_eager=True,
-    tensor_parallel_size=2,
+    tensor_parallel_size=1,
+    data_parallel_size=2,
     distributed_executor_backend="ray",
-    load_format="dummy",
+    data_parallel_backend="ray",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 
@@ -180,13 +191,13 @@ prompts = [
 ]
 
 # Tokenize prompts to token IDs
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME_V1)
 prompt_token_ids_list = [
     tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts
 ]
 
 sampling_params = [
-    SamplingParams(temperature=0, max_tokens=2),
+    SamplingParams(temperature=0, max_tokens=8),
     SamplingParams(temperature=0, max_tokens=32),
     SamplingParams(temperature=0, max_tokens=32),
     SamplingParams(temperature=0, max_tokens=32),
@@ -216,14 +227,16 @@ ray.get([train_handle, inference_handle])
 
 
 generation_futures = [
-    llm.generate_with_retry.remote(prompt_token_ids, params)
+    llm.do_generate.remote(prompt_token_ids, params)
     for prompt_token_ids, params in zip(prompt_token_ids_list, sampling_params)
 ]
 
 finished, pending = ray.wait(generation_futures, num_returns=1)
 
-# Pause generation in preparation for weight sync
-ray.get(llm.pause_generation.remote(wait_for_inflight_requests=False))
+# Pause generation in preparation for weight sync.
+# mode="keep" preserves inflight requests so they resume after the pause
+# (no need for retry logic).
+ray.get(llm.pause_generation.remote(mode="keep"))
 
 # Synchronize the updated weights to the inference engine using batched API.
 # Collect all weight metadata from the training actor
@@ -251,33 +264,104 @@ ray.get([train_handle, inference_handle])
 # Resume generation since weight sync is complete
 ray.get(llm.resume_generation.remote())
 
-# Get outputs separately - finished completed before pause, pending were paused/resumed
-finished_outputs = ray.get(finished)
-pending_outputs = ray.get(pending)
+# Get all outputs. With mode="keep", paused requests resume and complete normally.
+# Each result is (RequestOutput, pause_token_index).
+finished_results = ray.get(finished)
+pending_results = ray.get(pending)
 
-# Requests that finished before the pause: all generation used original weights
 print("-" * 50)
 print("Requests that completed BEFORE weight change:")
 print("-" * 50)
-for output in finished_outputs:
+for output, pause_idx in finished_results:
     prompt_text = tokenizer.decode(output.prompt_token_ids)
     print(f"Prompt: {prompt_text!r}")
-    print(f"Generated (with original weights): {output.outputs[0].text!r}")
+    print(f"Generated (all old weights): {output.outputs[0].text!r}")
     print("-" * 50)
 
-# Requests that were paused mid-generation: some text before, some after weight change
-print("Requests that were PAUSED and RESUMED after weight change:")
+print("Requests that completed AFTER weight change (kept across pause/resume):")
 print("-" * 50)
-for output in pending_outputs:
-    # Decode the full prompt token IDs (original + generated before pause)
-    full_prompt_text = tokenizer.decode(output.prompt_token_ids)
-    # Find the original prompt by checking which one this output started with
-    original_prompt = next(p for p in prompts if full_prompt_text.startswith(p))
-    # output.prompt_token_ids contains original prompt + tokens generated before pause
-    # output.outputs[0].text is what was generated after resuming with new weights
-    text_before_pause = full_prompt_text[len(original_prompt) :]
-    text_after_pause = output.outputs[0].text
-    print(f"Original prompt: {original_prompt!r}")
-    print(f"Generated before weight change: {text_before_pause!r}")
-    print(f"Generated after weight change: {text_after_pause!r}")
+validation_cases = []
+for output, pause_idx in pending_results:
+    prompt_text = tokenizer.decode(output.prompt_token_ids)
+    all_token_ids = list(output.outputs[0].token_ids)
+    if pause_idx >= 0:
+        before_text = tokenizer.decode(all_token_ids[:pause_idx])
+        after_text = tokenizer.decode(all_token_ids[pause_idx:])
+        print(f"Prompt: {prompt_text!r}")
+        print(f"  Old weights ({pause_idx} tokens): {before_text!r}")
+        n_after = len(all_token_ids) - pause_idx
+        print(f"  New weights ({n_after} tokens): {after_text!r}")
+        validation_cases.append(
+            {
+                "prompt_text": prompt_text,
+                "context": list(output.prompt_token_ids) + all_token_ids[:pause_idx],
+                "expected": all_token_ids[pause_idx:],
+            }
+        )
+    else:
+        print(f"Prompt: {prompt_text!r}")
+        print(f"  Generated (all old weights): {output.outputs[0].text!r}")
     print("-" * 50)
+
+# ── Validation ──────────────────────────────────────────────────────
+# Shut down the weight-synced engine and start a fresh one loaded
+# directly with V2 weights.  This gives a ground-truth comparison
+# using the exact same vLLM engine
+if validation_cases:
+    print()
+    print("=" * 50)
+    print("VALIDATION: restarting vLLM with V2 weights for comparison")
+    print("=" * 50)
+
+    # Graceful shutdown removes the DP placement groups created by
+    # CoreEngineActorManager.  A hard ray.kill() would skip cleanup and
+    # leave stale node:IP_group_* resources that block the next engine.
+    ray.get(llm.shutdown.remote())
+    ray.kill(llm)
+    time.sleep(5)  # allow Ray to reclaim placement group resources
+
+    llm_v2 = ray.remote(
+        num_cpus=0,
+        num_gpus=0,
+    )(MyLLM).remote(
+        model=MODEL_NAME_V2,
+        enforce_eager=True,
+        tensor_parallel_size=1,
+        data_parallel_size=2,
+        distributed_executor_backend="ray",
+        data_parallel_backend="ray",
+    )
+
+    # Send each context to the fresh engine with the same number of
+    # tokens we need to validate.
+    val_futures = []
+    for case in validation_cases:
+        n_tokens = len(case["expected"])
+        val_futures.append(
+            llm_v2.do_generate.remote(
+                case["context"],
+                SamplingParams(temperature=0, max_tokens=n_tokens),
+            )
+        )
+
+    val_results = ray.get(val_futures)
+
+    all_passed = True
+    for case, (val_output, _) in zip(validation_cases, val_results):
+        actual = list(val_output.outputs[0].token_ids)
+        match = actual == case["expected"]
+        status = "PASS" if match else "FAIL"
+        if not match:
+            all_passed = False
+        print(f"  [{status}] {case['prompt_text']!r}")
+        if not match:
+            expected_text = tokenizer.decode(case["expected"])
+            actual_text = tokenizer.decode(actual)
+            print(f"         weight-synced engine: {expected_text!r}")
+            print(f"         fresh V2 engine:      {actual_text!r}")
+    print("-" * 50)
+    print(f"Overall: {'ALL PASSED' if all_passed else 'SOME FAILED'}")
+    print("=" * 50)
+
+    ray.get(llm_v2.shutdown.remote())
+    ray.kill(llm_v2)
