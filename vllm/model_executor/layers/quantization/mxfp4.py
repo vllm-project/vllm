@@ -253,6 +253,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+        self.moe_mk: mk.FusedMoEModularKernel | None = None
 
     def create_weights(
         self,
@@ -932,6 +933,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
+            assert self.moe_mk is not None
+
             return self.moe_mk(
                 hidden_states=x,
                 w1=layer.w13_weight,
