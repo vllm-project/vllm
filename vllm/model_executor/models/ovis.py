@@ -48,11 +48,12 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     PromptReplacement,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis import OvisProcessor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -264,6 +265,9 @@ class OvisProcessingInfo(BaseProcessingInfo):
             **kwargs,
         )
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_image_segment_len(self) -> int:
         visual_tokenizer_config = self.get_hf_config().visual_tokenizer_config
         image_size = visual_tokenizer_config.backbone_config.image_size
@@ -303,6 +307,7 @@ class OvisDummyInputsBuilder(BaseDummyInputsBuilder[OvisProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -414,12 +419,10 @@ class OvisMultiModalProcessor(BaseMultiModalProcessor[OvisProcessingInfo]):
     dummy_inputs=OvisDummyInputsBuilder,
 )
 class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
-    merge_by_field_config = True
-
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         if modality.startswith("image"):
-            return "<image>"
+            return IMAGE_TOKEN
 
         raise ValueError("Only image modality is supported")
 
@@ -429,20 +432,22 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         quant_config = vllm_config.quant_config
 
         self.config: PretrainedConfig = config
-        self.llm = init_vllm_registered_model(
-            vllm_config=vllm_config.with_hf_config(config.get_text_config()),
-            prefix=maybe_prefix(prefix, "llm"),
-        )
 
-        self.visual_tokenizer = VisualTokenizer(
-            config=config.visual_tokenizer_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.visual_tokenizer",
-        )
+        with self._mark_language_model(vllm_config):
+            self.llm = init_vllm_registered_model(
+                vllm_config=vllm_config.with_hf_config(config.get_text_config()),
+                prefix=maybe_prefix(prefix, "llm"),
+            )
 
-        self.vte = VisualEmbedding(
-            self.config.visual_tokenizer_config.vocab_size, self.config.hidden_size
-        )
+        with self._mark_tower_model(vllm_config, "image"):
+            self.visual_tokenizer = VisualTokenizer(
+                config=config.visual_tokenizer_config,
+                quant_config=quant_config,
+                prefix=f"{prefix}.visual_tokenizer",
+            )
+            self.vte = VisualEmbedding(
+                self.config.visual_tokenizer_config.vocab_size, self.config.hidden_size
+            )
 
         text_model_type = self.config.get_text_config().model_type
         self.image_pad_token_id = IMAGE_PAD_TOKEN_ID_MAP[text_model_type]
@@ -525,7 +530,7 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -548,12 +553,8 @@ class Ovis(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.llm.compute_logits(hidden_states)
-        return logits
+        return self.llm.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.llm

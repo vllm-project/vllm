@@ -2,4 +2,4 @@
 
 ## Arguments
 
---8<-- "docs/argparse/chat.inc.md"
+--8<-- "docs/generated/argparse/chat.inc.md"

@@ -26,7 +26,7 @@ logger = init_logger(__name__)
 class UniProcExecutor(Executor):
     def _init_executor(self) -> None:
         """Initialize the worker and load the model."""
-        self.driver_worker = WorkerWrapperBase(vllm_config=self.vllm_config, rpc_rank=0)
+        self.driver_worker = WorkerWrapperBase(rpc_rank=0)
         distributed_init_method, rank, local_rank = self._distributed_args()
         kwargs = dict(
             vllm_config=self.vllm_config,
@@ -67,7 +67,7 @@ class UniProcExecutor(Executor):
         kwargs: dict | None = None,
         non_block: bool = False,
         single_value: bool = False,
-    ) -> Any | list[Any] | Future[Any | list[Any]]:
+    ) -> Any:
         if kwargs is None:
             kwargs = {}
 
@@ -79,10 +79,13 @@ class UniProcExecutor(Executor):
             result = run_method(self.driver_worker, method, args, kwargs)
             if isinstance(result, AsyncModelRunnerOutput):
                 if (async_thread := self.async_output_thread) is not None:
-                    get_output = result.get_output
-                    if not single_value:
-                        get_output = lambda go=result.get_output: [go()]
-                    return async_thread.submit(get_output)
+                    if single_value:
+                        return async_thread.submit(result.get_output)
+
+                    def get_output_list() -> list[Any]:
+                        return [result.get_output()]
+
+                    return async_thread.submit(get_output_list)
                 result = result.get_output()
             future = Future[Any]()
             future.set_result(result if single_value else [result])

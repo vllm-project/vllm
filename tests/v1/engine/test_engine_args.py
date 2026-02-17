@@ -9,6 +9,7 @@ from vllm.config import VllmConfig
 from vllm.engine.arg_utils import EngineArgs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.hashing import _xxhash
 
 
 def test_prefix_caching_from_cli():
@@ -46,6 +47,21 @@ def test_prefix_caching_from_cli():
     parser.exit_on_error = False
     with pytest.raises(ArgumentError):
         args = parser.parse_args(["--prefix-caching-hash-algo", "invalid"])
+
+
+@pytest.mark.skipif(_xxhash is None, reason="xxhash not installed")
+def test_prefix_caching_xxhash_from_cli():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+
+    # set hash algorithm to xxhash (pickle)
+    args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash"
+
+    # set hash algorithm to xxhash_cbor
+    args = parser.parse_args(["--prefix-caching-hash-algo", "xxhash_cbor"])
+    vllm_config = EngineArgs.from_cli_args(args=args).create_engine_config()
+    assert vllm_config.cache_config.prefix_caching_hash_algo == "xxhash_cbor"
 
 
 def test_defaults_with_usage_context():

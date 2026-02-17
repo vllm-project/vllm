@@ -7,8 +7,6 @@ vLLM uses the following environment variables to configure the system:
 
     All environment variables used by vLLM are prefixed with `VLLM_`. **Special care should be taken for Kubernetes users**: please do not name the service as `vllm`, otherwise environment variables set by Kubernetes might conflict with vLLM's environment variables, because [Kubernetes sets environment variables for each service with the capitalized service name as the prefix](https://kubernetes.io/docs/concepts/services-networking/service/#environment-variables).
 
-??? code
-
-    ```python
-    --8<-- "vllm/envs.py:env-vars-definition"
-    ```
+```python
+--8<-- "vllm/envs.py:env-vars-definition"
+```

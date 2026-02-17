@@ -5,7 +5,7 @@ import queue
 import signal
 import threading
 import time
-from collections import deque
+from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
@@ -23,8 +23,8 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import engine_receiver_cache_from_config
 from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.utils.gc_utils import (
     freeze_gc_heap,
@@ -40,12 +40,15 @@ from vllm.v1.core.kv_cache_utils import (
     get_request_block_hasher,
     init_none_hash,
 )
-from vllm.v1.core.sched.interface import SchedulerInterface
+from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.engine import (
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    FinishReason,
+    PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -63,7 +66,7 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
-from vllm.v1.utils import record_function_or_nullcontext
+from vllm.v1.utils import compute_iteration_details
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
@@ -83,6 +86,7 @@ class EngineCore:
         executor_class: type[Executor],
         log_stats: bool,
         executor_fail_callback: Callable | None = None,
+        include_finished_set: bool = False,
     ):
         # plugins need to be loaded at the engine/scheduler level too
         from vllm.plugins import load_general_plugins
@@ -90,7 +94,7 @@ class EngineCore:
         load_general_plugins()
 
         self.vllm_config = vllm_config
-        if vllm_config.parallel_config.data_parallel_rank == 0:
+        if not vllm_config.parallel_config.data_parallel_rank_local:
             logger.info(
                 "Initializing a V1 LLM engine (v%s) with config: %s",
                 VLLM_VERSION,
@@ -120,22 +124,24 @@ class EngineCore:
         # Setup scheduler.
         Scheduler = vllm_config.scheduler_config.get_scheduler_cls()
 
-        if len(kv_cache_config.kv_cache_groups) == 0:
+        if len(kv_cache_config.kv_cache_groups) == 0:  # noqa: SIM102
             # Encoder models without KV cache don't support
             # chunked prefill. But do SSM models?
-            logger.info("Disabling chunked prefill for model without KVCache")
-            vllm_config.scheduler_config.enable_chunked_prefill = False
+            if vllm_config.scheduler_config.enable_chunked_prefill:
+                logger.warning("Disabling chunked prefill for model without KVCache")
+                vllm_config.scheduler_config.enable_chunked_prefill = False
 
         scheduler_block_size = (
             vllm_config.cache_config.block_size
             * vllm_config.parallel_config.decode_context_parallel_size
+            * vllm_config.parallel_config.prefill_context_parallel_size
         )
 
         self.scheduler: SchedulerInterface = Scheduler(
             vllm_config=vllm_config,
             kv_cache_config=kv_cache_config,
             structured_output_manager=self.structured_output_manager,
-            include_finished_set=vllm_config.parallel_config.data_parallel_size > 1,
+            include_finished_set=include_finished_set,
             log_stats=self.log_stats,
             block_size=scheduler_block_size,
         )
@@ -144,8 +150,8 @@ class EngineCore:
             self.model_executor.init_kv_output_aggregator(self.scheduler.connector)  # type: ignore
 
         self.mm_registry = mm_registry = MULTIMODAL_REGISTRY
-        self.mm_receiver_cache = engine_receiver_cache_from_config(
-            vllm_config, mm_registry
+        self.mm_receiver_cache = mm_registry.engine_receiver_cache_from_config(
+            vllm_config
         )
 
         # If a KV connector is initialized for scheduler, we want to collect
@@ -175,17 +181,20 @@ class EngineCore:
         # to eliminate pipeline bubbles.
         self.batch_queue_size = self.model_executor.max_concurrent_batches
         self.batch_queue: (
-            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput]] | None
+            deque[tuple[Future[ModelRunnerOutput], SchedulerOutput, Future[Any]]] | None
         ) = None
         if self.batch_queue_size > 1:
-            logger.info("Batch queue is enabled with size %d", self.batch_queue_size)
+            logger.debug("Batch queue is enabled with size %d", self.batch_queue_size)
             self.batch_queue = deque(maxlen=self.batch_queue_size)
 
+        self.is_ec_producer = (
+            vllm_config.ec_transfer_config is not None
+            and vllm_config.ec_transfer_config.is_ec_producer
+        )
+        self.is_pooling_model = vllm_config.model_config.runner_type == "pooling"
+
         self.request_block_hasher: Callable[[Request], list[BlockHash]] | None = None
-        if (
-            self.vllm_config.cache_config.enable_prefix_caching
-            or kv_connector is not None
-        ):
+        if vllm_config.cache_config.enable_prefix_caching or kv_connector is not None:
             caching_hash_fn = get_hash_fn_by_name(
                 vllm_config.cache_config.prefix_caching_hash_algo
             )
@@ -198,11 +207,22 @@ class EngineCore:
         self.step_fn = (
             self.step if self.batch_queue is None else self.step_with_batch_queue
         )
+        self.async_scheduling = vllm_config.scheduler_config.async_scheduling
+
+        self.aborts_queue = queue.Queue[list[str]]()
+
+        self.per_step_hooks: set[Callable] = set()
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
+        # If enable, attach GC debugger after static variable freeze.
+        maybe_attach_gc_debug_callback()
+        # Enable environment variable cache (e.g. assume no more
+        # environment variable overrides after this point)
+        enable_envs_cache()
 
+    @instrument(span_name="Prepare model")
     def _initialize_kv_caches(
         self, vllm_config: VllmConfig
     ) -> tuple[int, int, KVCacheConfig]:
@@ -233,9 +253,20 @@ class EngineCore:
 
         assert len(kv_cache_specs) == len(available_gpu_memory)
 
+        # Track max_model_len before KV cache config to detect auto-fit changes
+        max_model_len_before = vllm_config.model_config.max_model_len
+
         kv_cache_configs = get_kv_cache_configs(
             vllm_config, kv_cache_specs, available_gpu_memory
         )
+
+        # If auto-fit reduced max_model_len, sync the new value to workers.
+        # This is needed because workers were spawned before memory profiling
+        # and have the original (larger) max_model_len cached.
+        max_model_len_after = vllm_config.model_config.max_model_len
+        if max_model_len_after != max_model_len_before:
+            self.collective_rpc("update_max_model_len", args=(max_model_len_after,))
+
         scheduler_kv_cache_config = generate_scheduler_kv_cache_config(kv_cache_configs)
         num_gpu_blocks = scheduler_kv_cache_config.num_blocks
         num_cpu_blocks = 0
@@ -245,7 +276,7 @@ class EngineCore:
 
         elapsed = time.time() - start
         logger.info_once(
-            ("init engine (profile, create kv cache, warmup model) took %.2f seconds"),
+            "init engine (profile, create kv cache, warmup model) took %.2f seconds",
             elapsed,
             scope="local",
         )
@@ -311,6 +342,36 @@ class EngineCore:
             )
             raise err
 
+    @contextmanager
+    def log_iteration_details(self, scheduler_output: SchedulerOutput):
+        if not self.vllm_config.observability_config.enable_logging_iteration_details:
+            yield
+            return
+        self._iteration_index = getattr(self, "_iteration_index", 0)
+        iteration_details = compute_iteration_details(scheduler_output)
+        before = time.monotonic()
+        yield
+        logger.info(
+            "".join(
+                [
+                    "Iteration(",
+                    str(self._iteration_index),
+                    "): ",
+                    str(iteration_details.num_ctx_requests),
+                    " context requests, ",
+                    str(iteration_details.num_ctx_tokens),
+                    " context tokens, ",
+                    str(iteration_details.num_generation_requests),
+                    " generation requests, ",
+                    str(iteration_details.num_generation_tokens),
+                    " generation tokens, iteration elapsed time: ",
+                    format((time.monotonic() - before) * 1000, ".2f"),
+                    " ms",
+                ]
+            )
+        )
+        self._iteration_index += 1
+
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
         """Schedule, execute, and make output.
 
@@ -322,26 +383,31 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
-        with record_function_or_nullcontext("core step: schedule"):
-            scheduler_output = self.scheduler.schedule()
+        scheduler_output = self.scheduler.schedule()
+        future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+        with (
+            self.log_error_detail(scheduler_output),
+            self.log_iteration_details(scheduler_output),
+        ):
+            model_output = future.result()
+            if model_output is None:
+                model_output = self.model_executor.sample_tokens(grammar_output)
 
-        with record_function_or_nullcontext("core step: execute_model"):
-            future = self.model_executor.execute_model(scheduler_output, non_block=True)
-            grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
-            with self.log_error_detail(scheduler_output):
-                model_output = future.result()
-                if model_output is None:
-                    model_output = self.model_executor.sample_tokens(grammar_output)
-
-        with record_function_or_nullcontext("core step: update_from_output"):
-            engine_core_outputs = self.scheduler.update_from_output(
-                scheduler_output, model_output
-            )
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
     def post_step(self, model_executed: bool) -> None:
-        if self.use_spec_decode and model_executed:
+        # When using async scheduling we can't get draft token ids in advance,
+        # so we update draft token ids in the worker process and don't
+        # need to update draft token ids here.
+        if not self.async_scheduling and self.use_spec_decode and model_executed:
             # Take the draft token ids.
             draft_token_ids = self.model_executor.take_draft_token_ids()
             if draft_token_ids is not None:
@@ -363,6 +429,7 @@ class EngineCore:
         batch in the job queue is finished.
         3. Update the scheduler from the output.
         """
+
         batch_queue = self.batch_queue
         assert batch_queue is not None
 
@@ -374,54 +441,34 @@ class EngineCore:
         model_executed = False
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
-            with record_function_or_nullcontext("core step_with_batch_queue: schedule"):
-                scheduler_output = self.scheduler.schedule()
-            with record_function_or_nullcontext(
-                "core step_with_batch_queue: execute_model"
-            ):
-                exec_future = self.model_executor.execute_model(
-                    scheduler_output, non_block=True
-                )
-            model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            scheduler_output = self.scheduler.schedule()
+            exec_future = self.model_executor.execute_model(
+                scheduler_output, non_block=True
+            )
+            if not self.is_ec_producer:
+                model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-            if scheduler_output.pending_structured_output_tokens:
-                with record_function_or_nullcontext(
-                    "core step_with_batch_queue: pending_structured_output_tokens"
-                ):
-                    # We need to defer sampling until we have processed the model output
-                    # from the prior step.
-                    deferred_scheduler_output = scheduler_output
-                    # Block-wait for execute to return
-                    # (continues running async on the GPU).
-                    with self.log_error_detail(scheduler_output):
-                        exec_result = exec_future.result()
-                        assert exec_result is None
+            if self.is_pooling_model or not model_executed:
+                # No sampling required (no requests scheduled).
+                future = cast(Future[ModelRunnerOutput], exec_future)
             else:
-                with record_function_or_nullcontext(
-                    "core step_with_batch_queue: get_grammar_bitmask"
-                ):
-                    # We aren't waiting for any tokens, get any grammar
-                    # output immediately.
+                if not scheduler_output.pending_structured_output_tokens:
+                    # We aren't waiting for any tokens, get any grammar output
+                    # and sample immediately.
                     grammar_output = self.scheduler.get_grammar_bitmask(
                         scheduler_output
                     )
-                # Block-wait for execute to return (continues running async on the GPU).
-                with self.log_error_detail(scheduler_output):
-                    exec_result = exec_future.result()
-
-                if exec_result is None:
-                    with record_function_or_nullcontext(
-                        "core step_with_batch_queue: sample_tokens"
-                    ):
-                        # Call sample tokens.
-                        future = self.model_executor.sample_tokens(
-                            grammar_output, non_block=True
-                        )
+                    future = self.model_executor.sample_tokens(
+                        grammar_output, non_block=True
+                    )
                 else:
-                    # No sampling required (e.g. all requests finished).
-                    future = cast(Future[ModelRunnerOutput], exec_future)
+                    # We need to defer sampling until we have processed the model output
+                    # from the prior step.
+                    deferred_scheduler_output = scheduler_output
+
+            if not deferred_scheduler_output:
                 # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output))
+                batch_queue.appendleft((future, scheduler_output, exec_future))
                 if (
                     model_executed
                     and len(batch_queue) < self.batch_queue_size
@@ -436,36 +483,62 @@ class EngineCore:
             # only be called when the scheduler contains requests or the queue
             # is non-empty.
             return None, False
-        with record_function_or_nullcontext("core step_with_batch_queue: model_output"):
-            # Block until the next result is available.
-            future, scheduler_output = batch_queue.pop()
-            with self.log_error_detail(scheduler_output):
-                model_output = future.result()
-        with record_function_or_nullcontext(
-            "core step_with_batch_queue: update_from_output"
+
+        # Block until the next result is available.
+        future, scheduler_output, exec_model_fut = batch_queue.pop()
+        with (
+            self.log_error_detail(scheduler_output),
+            self.log_iteration_details(scheduler_output),
         ):
-            engine_core_outputs = self.scheduler.update_from_output(
-                scheduler_output, model_output
-            )
+            model_output = future.result()
+            if model_output is None:
+                # None from sample_tokens() implies that the original execute_model()
+                # call failed - raise that exception.
+                exec_model_fut.result()
+                raise RuntimeError("unexpected error")
+
+        # Before processing the model output, process any aborts that happened
+        # during the model execution.
+        self._process_aborts_queue()
+        engine_core_outputs = self.scheduler.update_from_output(
+            scheduler_output, model_output
+        )
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
-            with record_function_or_nullcontext(
-                "core step_with_batch_queue: deferred_scheduler_output"
-            ):
-                # We now have the tokens needed to compute the bitmask for the
-                # deferred request. Get the bitmask and call sample tokens.
-                grammar_output = self.scheduler.get_grammar_bitmask(
-                    deferred_scheduler_output
+            # If we are doing speculative decoding with structured output,
+            # we need to get the draft token ids from the prior step before
+            # we can compute the grammar bitmask for the deferred request.
+            if self.use_spec_decode:
+                draft_token_ids = self.model_executor.take_draft_token_ids()
+                assert draft_token_ids is not None
+                # Update the draft token ids in the scheduler output to
+                # filter out the invalid spec tokens, which will be padded
+                # with -1 and skipped by the grammar bitmask computation.
+                self.scheduler.update_draft_token_ids_in_output(
+                    draft_token_ids, deferred_scheduler_output
                 )
-                future = self.model_executor.sample_tokens(
-                    grammar_output, non_block=True
-                )
-                batch_queue.appendleft((future, deferred_scheduler_output))
+            # We now have the tokens needed to compute the bitmask for the
+            # deferred request. Get the bitmask and call sample tokens.
+            grammar_output = self.scheduler.get_grammar_bitmask(
+                deferred_scheduler_output
+            )
+            future = self.model_executor.sample_tokens(grammar_output, non_block=True)
+            batch_queue.appendleft((future, deferred_scheduler_output, exec_future))
 
         return engine_core_outputs, model_executed
+
+    def _process_aborts_queue(self):
+        if not self.aborts_queue.empty():
+            request_ids = []
+            while not self.aborts_queue.empty():
+                ids = self.aborts_queue.get_nowait()
+                # Should be a list here, but also handle string just in case.
+                request_ids.extend((ids,) if isinstance(ids, str) else ids)
+            # More efficient to abort all as a single batch.
+            self.abort_requests(request_ids)
 
     def shutdown(self):
         self.structured_output_manager.clear_backend()
@@ -474,8 +547,8 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-    def profile(self, is_start: bool = True):
-        self.model_executor.profile(is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.model_executor.profile(is_start, profile_prefix)
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to
@@ -492,17 +565,85 @@ class EngineCore:
 
         self.model_executor.reset_mm_cache()
 
-    def reset_prefix_cache(self):
-        self.scheduler.reset_prefix_cache()
+    def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return self.scheduler.reset_prefix_cache(
+            reset_running_requests, reset_connector
+        )
+
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings computed with old weights are not reused.
+        Clears both the scheduler's cache manager and the GPU model runner's cache.
+        """
+        # NOTE: Since this is mainly for debugging, we don't attempt to
+        # re-sync the internal caches (P0 sender, P1 receiver)
+        if self.scheduler.has_unfinished_requests():
+            logger.warning(
+                "Resetting the encoder cache when requests are "
+                "in progress may lead to desynced internal caches."
+            )
+
+        # Reset the scheduler's encoder cache manager (logical state)
+        self.scheduler.reset_encoder_cache()
+        # Reset the GPU model runner's encoder cache (physical storage)
+        self.model_executor.reset_encoder_cache()
+
+    def pause_scheduler(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future[Any] | None:
+        """Pause scheduling. No-op in base EngineCore; overridden in EngineCoreProc."""
+        return None
+
+    def resume_scheduler(self) -> None:
+        """Resume scheduling. No-op in base EngineCore; overridden in EngineCoreProc."""
+
+    def is_scheduler_paused(self) -> bool:
+        """Return whether the scheduler is in any pause state. False in base EngineCore
+        and overridden in EngineCoreProc."""
+        return False
 
     def sleep(self, level: int = 1):
-        self.model_executor.sleep(level)
+        """Put the engine to sleep at the specified level.
+
+        Args:
+            level: Sleep level.
+                - Level 0: Pause scheduling only. Requests are still accepted
+                           but not processed. No GPU memory changes.
+                - Level 1: Offload model weights to CPU, discard KV cache.
+                - Level 2: Discard all GPU memory.
+        """
+        if level == 0:
+            # Level 0: Just pause scheduling, don't touch GPU
+            self.pause_scheduler()
+        else:
+            # Level 1+: Delegate to executor for GPU memory management
+            self.model_executor.sleep(level)
 
     def wake_up(self, tags: list[str] | None = None):
-        self.model_executor.wake_up(tags)
+        """Wake up the engine from sleep.
+
+        Args:
+            tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
+        """
+        if tags is not None and "scheduling" in tags:
+            # Level 0 wake up: Resume scheduling
+            self.resume_scheduler()
+            # Remove "scheduling" from tags if there are other tags to process
+            remaining_tags = [t for t in tags if t != "scheduling"]
+            if remaining_tags:
+                self.model_executor.wake_up(remaining_tags)
+        else:
+            # Full wake up
+            self.resume_scheduler()
+            self.model_executor.wake_up(tags)
 
     def is_sleeping(self) -> bool:
-        return self.model_executor.is_sleeping
+        """Check if engine is sleeping at any level."""
+        return self.is_scheduler_paused() or self.model_executor.is_sleeping
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()
@@ -568,6 +709,7 @@ class EngineCoreProc(EngineCore):
 
     ENGINE_CORE_DEAD = b"ENGINE_CORE_DEAD"
 
+    @instrument(span_name="EngineCoreProc init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -576,6 +718,7 @@ class EngineCoreProc(EngineCore):
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        *,
         engine_index: int = 0,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
@@ -607,17 +750,22 @@ class EngineCoreProc(EngineCore):
                 self.has_coordinator,
                 self.frontend_stats_publish_address,
             )
-            # Only publish request queue stats to coordinator for "internal"
-            # and "hybrid" LB modes .
-            self.publish_dp_lb_stats = (
+            internal_dp_balancing = (
                 self.has_coordinator
                 and not vllm_config.parallel_config.data_parallel_external_lb
             )
+            # Only publish request queue stats to coordinator for "internal"
+            # and "hybrid" LB modes.
+            self.publish_dp_lb_stats = internal_dp_balancing
 
             self._init_data_parallel(vllm_config)
 
             super().__init__(
-                vllm_config, executor_class, log_stats, executor_fail_callback
+                vllm_config,
+                executor_class,
+                log_stats,
+                executor_fail_callback,
+                internal_dp_balancing,
             )
 
             # Background Threads and Queues for IO. These enable us to
@@ -656,13 +804,6 @@ class EngineCoreProc(EngineCore):
                     raise RuntimeError("Input socket thread died during startup")
                 assert addresses.coordinator_input is not None
                 logger.info("Waiting for READY message from DP Coordinator...")
-
-        # If enable, attach GC debugger after static variable freeze.
-        maybe_attach_gc_debug_callback()
-
-        # Enable environment variable cache (e.g. assume no more
-        # environment variable overrides after this point)
-        enable_envs_cache()
 
     @contextmanager
     def _perform_handshakes(
@@ -832,19 +973,52 @@ class EngineCoreProc(EngineCore):
 
         engine_core: EngineCoreProc | None = None
         try:
-            parallel_config: ParallelConfig = kwargs["vllm_config"].parallel_config
-            if parallel_config.data_parallel_size > 1 or dp_rank > 0:
+            vllm_config: VllmConfig = kwargs["vllm_config"]
+            parallel_config: ParallelConfig = vllm_config.parallel_config
+            data_parallel = parallel_config.data_parallel_size > 1 or dp_rank > 0
+            if data_parallel:
+                parallel_config.data_parallel_rank_local = local_dp_rank
+                maybe_init_worker_tracer(
+                    instrumenting_module_name="vllm.engine_core",
+                    process_kind="engine_core",
+                    process_name=f"EngineCore_DP{dp_rank}",
+                )
                 set_process_title("EngineCore", f"DP{dp_rank}")
-                decorate_logs()
+            else:
+                maybe_init_worker_tracer(
+                    instrumenting_module_name="vllm.engine_core",
+                    process_kind="engine_core",
+                    process_name="EngineCore",
+                )
+                set_process_title("EngineCore")
+            decorate_logs()
+
+            if data_parallel and vllm_config.kv_transfer_config is not None:
+                # modify the engine_id and append the local_dp_rank to it to ensure
+                # that the kv_transfer_config is unique for each DP rank.
+                vllm_config.kv_transfer_config.engine_id = (
+                    f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
+                )
+                logger.debug(
+                    "Setting kv_transfer_config.engine_id to %s",
+                    vllm_config.kv_transfer_config.engine_id,
+                )
+
+            parallel_config.data_parallel_index = dp_rank
+            if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
-                parallel_config.data_parallel_rank_local = local_dp_rank
                 engine_core = DPEngineCoreProc(*args, **kwargs)
             else:
-                set_process_title("EngineCore")
-                decorate_logs()
-                engine_core = EngineCoreProc(*args, **kwargs)
+                # Non-MoE DP ranks are completely independent, so treat like DP=1.
+                # Note that parallel_config.data_parallel_index will still reflect
+                # the original DP rank.
+                parallel_config.data_parallel_size = 1
+                parallel_config.data_parallel_size_local = 1
+                parallel_config.data_parallel_rank = 0
+                engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
+            assert engine_core is not None
             engine_core.run_busy_loop()
 
         except SystemExit:
@@ -873,6 +1047,8 @@ class EngineCoreProc(EngineCore):
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+            # 3) Run any per-step hooks.
+            self._process_per_step_hooks()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -882,10 +1058,15 @@ class EngineCoreProc(EngineCore):
             not self.engines_running
             and not self.scheduler.has_requests()
             and not self.batch_queue
+            and not self.per_step_hooks
         ):
-            if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
-                logger.debug("EngineCore waiting for work.")
-                waited = True
+            if self.input_queue.empty():
+                # Drain aborts queue; all aborts are also processed via input_queue.
+                with self.aborts_queue.mutex:
+                    self.aborts_queue.queue.clear()
+                if logger.isEnabledFor(DEBUG):
+                    logger.debug("EngineCore waiting for work.")
+                    waited = True
             req = self.input_queue.get()
             self._handle_client_request(*req)
 
@@ -908,7 +1089,21 @@ class EngineCoreProc(EngineCore):
         # Post-step hook.
         self.post_step(model_executed)
 
+        # If no model execution happened but there are waiting requests
+        # (e.g., WAITING_FOR_REMOTE_KVS), yield the GIL briefly to allow
+        # background threads (like NIXL handshake) to make progress.
+        # Without this, the tight polling loop can starve background threads.
+        if not model_executed and self.scheduler.has_unfinished_requests():
+            time.sleep(0.001)
+
         return model_executed
+
+    def _process_per_step_hooks(self) -> None:
+        if self.per_step_hooks:
+            for hook in list(self.per_step_hooks):
+                finished = hook(self)
+                if finished:
+                    self.per_step_hooks.discard(hook)
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
@@ -923,24 +1118,39 @@ class EngineCoreProc(EngineCore):
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
             output = UtilityOutput(call_id)
-            try:
-                method = getattr(self, method_name)
-                result = method(*self._convert_msgspec_args(method, args))
-                output.result = UtilityResult(result)
-            except BaseException as e:
-                logger.exception("Invocation of %s method failed", method_name)
-                output.failure_message = (
-                    f"Call to {method_name} method failed: {str(e)}"
-                )
-            self.output_queue.put_nowait(
-                (client_idx, EngineCoreOutputs(utility_output=output))
+            # Lazily look-up utility method so that failure will be handled/returned.
+            get_result = lambda: (method := getattr(self, method_name)) and method(
+                *self._convert_msgspec_args(method, args)
             )
+            enqueue_output = lambda out: self.output_queue.put_nowait(
+                (client_idx, EngineCoreOutputs(utility_output=out))
+            )
+            self._invoke_utility_method(method_name, get_result, output, enqueue_output)
         elif request_type == EngineCoreRequestType.EXECUTOR_FAILED:
             raise RuntimeError("Executor failed.")
         else:
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
             )
+
+    @staticmethod
+    def _invoke_utility_method(
+        name: str, get_result: Callable, output: UtilityOutput, enqueue_output: Callable
+    ):
+        try:
+            result = get_result()
+            if isinstance(result, Future):
+                # Defer utility output handling until future completion.
+                callback = lambda future: EngineCoreProc._invoke_utility_method(
+                    name, future.result, output, enqueue_output
+                )
+                result.add_done_callback(callback)
+                return
+            output.result = UtilityResult(result)
+        except Exception as e:
+            logger.exception("Invocation of %s method failed", name)
+            output.failure_message = f"Call to {name} method failed: {str(e)}"
+        enqueue_output(output)
 
     @staticmethod
     def _convert_msgspec_args(method, args):
@@ -1033,11 +1243,23 @@ class EngineCoreProc(EngineCore):
                     request_type = EngineCoreRequestType(bytes(type_frame.buffer))
 
                     # Deserialize the request data.
+                    request: Any
                     if request_type == EngineCoreRequestType.ADD:
-                        request = add_request_decoder.decode(data_frames)
-                        request = self.preprocess_add_request(request)
+                        req: EngineCoreRequest = add_request_decoder.decode(data_frames)
+                        try:
+                            request = self.preprocess_add_request(req)
+                        except Exception:
+                            self._handle_request_preproc_error(req)
+                            continue
                     else:
                         request = generic_decoder.decode(data_frames)
+
+                        if request_type == EngineCoreRequestType.ABORT:
+                            # Aborts are added to *both* queues, allows us to eagerly
+                            # process aborts while also ensuring ordering in the input
+                            # queue to avoid leaking requests. This is ok because
+                            # aborting in the scheduler is idempotent.
+                            self.aborts_queue.put_nowait(request)
 
                     # Push to input queue for core busy loop.
                     self.input_queue.put_nowait((request_type, request))
@@ -1112,6 +1334,98 @@ class EngineCoreProc(EngineCore):
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
 
+    def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
+        """Log and return a request-scoped error response for exceptions raised
+        from the add request preprocessing in the input socket processing thread.
+        """
+        logger.exception(
+            "Unexpected error pre-processing request %s", request.request_id
+        )
+        self.output_queue.put_nowait(
+            (
+                request.client_index,
+                EngineCoreOutputs(
+                    engine_index=self.engine_index,
+                    finished_requests={request.request_id},
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ERROR,
+                        )
+                    ],
+                ),
+            )
+        )
+
+    def pause_scheduler(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> Future | None:
+        """Pause generation; behavior depends on mode.
+
+        All pause states queue new adds. PAUSE_ABORT and PAUSE_KEEP skip step();
+        PAUSE_WAIT allows step() so in-flight requests can drain.
+
+        - ``abort``: Set PAUSE_ABORT, abort all requests, wait for abort
+          outputs to be sent (when running with output_queue), clear caches,
+          then complete the returned Future.
+        - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
+          set PAUSE_KEEP, clear caches, complete the returned Future.
+        - ``keep``: Set PAUSE_KEEP; return a Future that completes when the
+          output queue is empty.
+        """
+        if mode not in ("keep", "abort", "wait"):
+            raise ValueError(f"Invalid pause mode: {mode}")
+
+        future: Future[Any] = Future()
+
+        def wait_until_idle(engine: "EngineCoreProc") -> bool:
+            scheduler = engine.scheduler
+            out_queue = engine.output_queue
+            if scheduler.has_requests() or engine.batch_queue or not out_queue.empty():
+                return False
+            if clear_cache:
+                engine.reset_prefix_cache(reset_running_requests=True)
+                engine.reset_mm_cache()
+                engine.reset_encoder_cache()
+            future.set_result(None)
+            return True
+
+        if mode == "abort":
+            aborted_reqs = self.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            self._send_abort_outputs(aborted_reqs)
+
+        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        self.scheduler.set_pause_state(pause_state)
+        if not wait_until_idle(self):
+            self.per_step_hooks.add(wait_until_idle)
+            return future
+        return None
+
+    def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
+        if aborted_reqs:
+            # Map client_index to list of request_ids that belong to that client.
+            by_client = defaultdict[int, set[str]](set)
+            for req_id, client_index in aborted_reqs:
+                by_client[client_index].add(req_id)
+            for client_index, req_ids in by_client.items():
+                outputs = [
+                    EngineCoreOutput(req_id, [], finish_reason=FinishReason.ABORT)
+                    for req_id in req_ids
+                ]
+                eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
+                self.output_queue.put_nowait((client_index, eco))
+
+    def resume_scheduler(self) -> None:
+        """Resume the scheduler and flush any requests queued while paused."""
+        self.scheduler.set_pause_state(PauseState.UNPAUSED)
+
+    def is_scheduler_paused(self) -> bool:
+        """Return whether the scheduler is in any pause state."""
+        return self.scheduler.pause_state != PauseState.UNPAUSED
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
@@ -1126,6 +1440,10 @@ class DPEngineCoreProc(EngineCoreProc):
         log_stats: bool,
         client_handshake_address: str | None = None,
     ):
+        assert vllm_config.model_config.is_moe, (
+            "DPEngineCoreProc should only be used for MoE models"
+        )
+
         # Counts forward-passes of the model so that we can synchronize
         # finished with DP peers every N steps.
         self.step_counter = 0
@@ -1141,7 +1459,7 @@ class DPEngineCoreProc(EngineCoreProc):
             executor_class,
             log_stats,
             client_handshake_address,
-            dp_rank,
+            engine_index=dp_rank,
         )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
@@ -1153,17 +1471,6 @@ class DPEngineCoreProc(EngineCoreProc):
         assert dp_size > 1
         assert local_dp_rank is not None
         assert 0 <= local_dp_rank <= dp_rank < dp_size
-
-        if vllm_config.kv_transfer_config is not None:
-            # modify the engine_id and append the local_dp_rank to it to ensure
-            # that the kv_transfer_config is unique for each DP rank.
-            vllm_config.kv_transfer_config.engine_id = (
-                f"{vllm_config.kv_transfer_config.engine_id}_dp{local_dp_rank}"
-            )
-            logger.debug(
-                "Setting kv_transfer_config.engine_id to %s",
-                vllm_config.kv_transfer_config.engine_id,
-            )
 
         self.dp_rank = dp_rank
         self.dp_group = vllm_config.parallel_config.stateless_init_dp_group()
@@ -1225,8 +1532,8 @@ class DPEngineCoreProc(EngineCoreProc):
             # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
-
             local_unfinished_reqs = self.scheduler.has_unfinished_requests()
+
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
@@ -1322,7 +1629,7 @@ class DPEngineCoreProc(EngineCoreProc):
             )
 
 
-class DPEngineCoreActor(DPEngineCoreProc):
+class EngineCoreActorMixin:
     """
     Ray actor for running EngineCore in a data parallel context
     """
@@ -1330,15 +1637,19 @@ class DPEngineCoreActor(DPEngineCoreProc):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        local_client: bool,
         addresses: EngineZmqAddresses,
-        executor_class: type[Executor],
-        log_stats: bool,
         dp_rank: int = 0,
         local_dp_rank: int = 0,
     ):
+        # Initialize tracer for distributed tracing if configured.
+        maybe_init_worker_tracer(
+            instrumenting_module_name="vllm.engine_core",
+            process_kind="engine_core",
+            process_name=f"DPEngineCoreActor_DP{dp_rank}",
+        )
+
         self.addresses = addresses
-        vllm_config.parallel_config.data_parallel_rank = dp_rank
+        vllm_config.parallel_config.data_parallel_index = dp_rank
         vllm_config.parallel_config.data_parallel_rank_local = local_dp_rank
 
         # Set CUDA_VISIBLE_DEVICES as early as possible in actor life cycle
@@ -1359,8 +1670,6 @@ class DPEngineCoreActor(DPEngineCoreProc):
         # and get_accelerator_ids_for_accelerator_resource() in worker.py
         # of ray.
         self._set_visible_devices(vllm_config, local_dp_rank)
-
-        super().__init__(vllm_config, local_client, "", executor_class, log_stats)
 
     def _set_visible_devices(self, vllm_config: VllmConfig, local_dp_rank: int):
         from vllm.platforms import current_platform
@@ -1422,7 +1731,7 @@ class DPEngineCoreActor(DPEngineCoreProc):
         Run the engine core busy loop.
         """
         try:
-            self.run_busy_loop()
+            self.run_busy_loop()  # type: ignore[attr-defined]
         except SystemExit:
             logger.debug("EngineCore exiting.")
             raise
@@ -1430,4 +1739,58 @@ class DPEngineCoreActor(DPEngineCoreProc):
             logger.exception("EngineCore encountered a fatal error.")
             raise
         finally:
-            self.shutdown()
+            self.shutdown()  # type: ignore[attr-defined]
+
+
+class DPMoEEngineCoreActor(EngineCoreActorMixin, DPEngineCoreProc):
+    """Used for MoE model data parallel cases."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_client: bool,
+        addresses: EngineZmqAddresses,
+        executor_class: type[Executor],
+        log_stats: bool,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+    ):
+        vllm_config.parallel_config.data_parallel_rank = dp_rank
+
+        EngineCoreActorMixin.__init__(
+            self, vllm_config, addresses, dp_rank, local_dp_rank
+        )
+        DPEngineCoreProc.__init__(
+            self, vllm_config, local_client, "", executor_class, log_stats
+        )
+
+
+class EngineCoreActor(EngineCoreActorMixin, EngineCoreProc):
+    """Used for non-MoE and/or non-DP cases."""
+
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        local_client: bool,
+        addresses: EngineZmqAddresses,
+        executor_class: type[Executor],
+        log_stats: bool,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+    ):
+        vllm_config.parallel_config.data_parallel_size = 1
+        vllm_config.parallel_config.data_parallel_size_local = 1
+        vllm_config.parallel_config.data_parallel_rank = 0
+
+        EngineCoreActorMixin.__init__(
+            self, vllm_config, addresses, dp_rank, local_dp_rank
+        )
+        EngineCoreProc.__init__(
+            self,
+            vllm_config,
+            local_client,
+            "",
+            executor_class,
+            log_stats,
+            engine_index=dp_rank,
+        )

@@ -109,7 +109,7 @@ TEXT_GENERATION_MODELS = {
     "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "zai-org/chatglm3-6b": PPTestSettings.fast(),
-    "CohereForAI/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
+    "CohereLabs/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
     "databricks/dbrx-instruct": PPTestSettings.fast(load_format="dummy"),
     "Deci/DeciLM-7B-instruct": PPTestSettings.fast(),
     "deepseek-ai/deepseek-llm-7b-chat": PPTestSettings.fast(),
@@ -130,6 +130,7 @@ TEXT_GENERATION_MODELS = {
     "inceptionai/jais-13b-chat": PPTestSettings.fast(),
     "ai21labs/Jamba-tiny-dev": PPTestSettings.fast(),
     "pfnet/plamo-2-1b": PPTestSettings.fast(),
+    "pfnet/plamo-3-nict-2b-base": PPTestSettings.fast(),
     "meta-llama/Llama-3.2-1B-Instruct": PPTestSettings.detailed(),
     # Tests TransformersForCausalLM
     "hmellor/Ilama-3.2-1B": PPTestSettings.fast(),

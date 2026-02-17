@@ -1,0 +1,23 @@
+group: CUDA
+depends_on: 
+  - image-build
+steps:
+- label: Platform Tests (CUDA)
+  timeout_in_minutes: 15
+  source_file_dependencies:
+  - vllm/
+  - tests/cuda
+  commands:
+    - pytest -v -s cuda/test_cuda_context.py
+    - pytest -v -s cuda/test_platform_no_cuda_init.py
+
+- label: Cudagraph
+  timeout_in_minutes: 20
+  source_file_dependencies:
+  - tests/v1/cudagraph
+  - vllm/v1/cudagraph_dispatcher.py
+  - vllm/config/compilation.py
+  - vllm/compilation
+  commands:
+    - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
+    - pytest -v -s v1/cudagraph/test_cudagraph_mode.py

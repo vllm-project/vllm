@@ -12,7 +12,9 @@ from vllm.config.kv_transfer import KVTransferConfig
 from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBaseType
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    CopyBlocksOp,
     KVConnectorBase_V1,
+    KVConnectorHandshakeMetadata,
     KVConnectorMetadata,
     KVConnectorRole,
 )
@@ -23,11 +25,11 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -85,7 +87,7 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
         vllm_config: "VllmConfig",
         metric_types: dict[type[PromMetric], type[PromMetricT]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
         prom_metrics: dict[str, KVConnectorPromMetrics],
     ):
         super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
@@ -138,6 +140,12 @@ class MultiConnector(KVConnectorBase_V1):
         # Propagated from scheduler to worker side via the connector metadata.
         self._extra_async_saves: dict[str, int] = {}
 
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        if not self._connectors:
+            return False
+        return all(c.prefer_cross_layer_blocks for c in self._connectors)
+
     @classmethod
     def _get_connector_classes_and_configs(
         cls, vllm_config: "VllmConfig"
@@ -163,6 +171,13 @@ class MultiConnector(KVConnectorBase_V1):
                 )
             )
         return ret
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    ):
+        # Register on all connectors
+        for c in self._connectors:
+            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         for c in self._connectors:
@@ -216,7 +231,7 @@ class MultiConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         for c in self._connectors:
@@ -258,6 +273,27 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             agg_block_ids |= c.get_block_ids_with_load_errors()
         return agg_block_ids
+
+    def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
+        """Set xPU-specific copy ops for all sub-connectors."""
+        for c in self._connectors:
+            c.set_host_xfer_buffer_ops(copy_operation)
+
+    def handle_preemptions(self, preempted_req_ids: set[str]):
+        """Handle preempted requests for all sub-connectors."""
+        for c in self._connectors:
+            c.handle_preemptions(preempted_req_ids)
+
+    def get_finished_count(self) -> int | None:
+        # TODO(https://github.com/vllm-project/vllm/issues/33400)
+        # Currently no connectors return non-None
+        return None
+
+    # TODO: Add a generic implementation of 'get_kv_connector_kv_cache_events'
+    # method for the MultiConnector. It should be able to get events from
+    # multiple connectors, handling the case where only a subset of the
+    # requested connectors implements the 'get_kv_connector_kv_cache_events'
+    # WIP: https://github.com/vllm-project/vllm/pull/31811
 
     # ==============================
     # Scheduler-side methods
@@ -312,6 +348,27 @@ class MultiConnector(KVConnectorBase_V1):
     def update_connector_output(self, connector_output: KVConnectorOutput):
         for c in self._connectors:
             c.update_connector_output(connector_output)
+
+    def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
+        """
+        Get the KVConnector handshake metadata from sub-connectors.
+        Returns the first non-None metadata from sub-connectors.
+        """
+        for c in self._connectors:
+            metadata = c.get_handshake_metadata()
+            if metadata is not None:
+                return metadata
+        return None
+
+    def set_xfer_handshake_metadata(
+        self, metadata: dict[int, KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set the KV connector handshake metadata for all sub-connectors.
+        This is needed to start the NIXL listener thread for NixlConnector.
+        """
+        for c in self._connectors:
+            c.set_xfer_handshake_metadata(metadata)
 
     def request_finished(
         self,
@@ -434,7 +491,7 @@ class MultiConnector(KVConnectorBase_V1):
         vllm_config: "VllmConfig",
         metric_types: dict[type["PromMetric"], type["PromMetricT"]],
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[str]],
+        per_engine_labelvalues: dict[int, list[object]],
     ) -> KVConnectorPromMetrics:
         prom_metrics: dict[str, KVConnectorPromMetrics] = {}
         for connector_cls, temp_config in cls._get_connector_classes_and_configs(
@@ -452,3 +509,7 @@ class MultiConnector(KVConnectorBase_V1):
             per_engine_labelvalues,
             prom_metrics,
         )
+
+    def reset_cache(self) -> bool:
+        results = [c.reset_cache() is not False for c in self._connectors]
+        return all(results)

@@ -9,11 +9,11 @@ from openai import OpenAI
 from vllm.assets.audio import AudioAsset
 
 
-def sync_openai(audio_path: str, client: OpenAI):
+def sync_openai(audio_path: str, client: OpenAI, model: str):
     with open(audio_path, "rb") as f:
         translation = client.audio.translations.create(
             file=f,
-            model="openai/whisper-large-v3",
+            model=model,
             response_format="json",
             temperature=0.0,
             # Additional params not provided by OpenAI API.
@@ -26,11 +26,13 @@ def sync_openai(audio_path: str, client: OpenAI):
         print("translation result:", translation.text)
 
 
-async def stream_openai_response(audio_path: str, base_url: str, api_key: str):
+async def stream_openai_response(
+    audio_path: str, base_url: str, api_key: str, model: str
+):
     data = {
         "language": "it",
         "stream": True,
-        "model": "openai/whisper-large-v3",
+        "model": model,
     }
     url = base_url + "/audio/translations"
     headers = {"Authorization": f"Bearer {api_key}"}
@@ -66,9 +68,13 @@ def main():
         api_key=openai_api_key,
         base_url=openai_api_base,
     )
-    sync_openai(foscolo, client)
+
+    model = client.models.list().data[0].id
+    print(f"Using model: {model}")
+
+    sync_openai(foscolo, client, model)
     # Run the asynchronous function
-    asyncio.run(stream_openai_response(foscolo, openai_api_base, openai_api_key))
+    asyncio.run(stream_openai_response(foscolo, openai_api_base, openai_api_key, model))
 
 
 if __name__ == "__main__":

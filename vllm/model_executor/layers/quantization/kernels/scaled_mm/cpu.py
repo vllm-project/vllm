@@ -14,23 +14,28 @@ from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
-from .ScaledMMLinearKernel import ScaledMMLinearKernel, ScaledMMLinearLayerConfig
+from .ScaledMMLinearKernel import (
+    Int8ScaledMMLinearKernel,
+    Int8ScaledMMLinearLayerConfig,
+)
 
 
-class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
+class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
     @classmethod
-    def get_min_capability(cls) -> int:
-        return 75
-
-    @classmethod
-    def can_implement(cls, c: ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
         if not current_platform.is_cpu():
-            return False, "CPUScaledMM requires running on CPU."
+            return False, "requires CPU."
+        return True, None
 
+    @classmethod
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        weight = getattr(layer, self.w_q_name)
+        w_q_name, _, _, _, _ = self.layer_param_names
+        weight = getattr(layer, w_q_name)
         dtype = weight.dtype
         N, K = weight.size()
         if (
@@ -48,10 +53,11 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
     def process_weights_for_onednn(self, layer: torch.nn.Module) -> None:
         # WEIGHT
         # Transpose to [K, N] for convenience
-        weight = getattr(layer, self.w_q_name)
+        w_q_name, w_s_name, i_s_name, i_zp_name, azp_adj_name = self.layer_param_names
+        weight = getattr(layer, w_q_name)
         replace_parameter(
             layer,
-            self.w_q_name,
+            w_q_name,
             torch.nn.Parameter(weight.t().data, requires_grad=False),
         )
 
@@ -60,28 +66,27 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         # If we have a fused module (QKV, MLP) with per tensor scales (thus N
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
-        weight_scale = getattr(layer, self.w_s_name)
+        weight_scale = getattr(layer, w_s_name)
         if is_fused_module and not self.config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
-            self.w_s_name,
+            w_s_name,
             torch.nn.Parameter(weight_scale.data, requires_grad=False),
         )
 
         # INPUT SCALE
         if self.config.is_static_input_scheme:
-            input_scale = getattr(layer, self.i_s_name)
+            input_scale = getattr(layer, i_s_name)
 
             if self.config.input_symmetric:
                 replace_parameter(
                     layer,
-                    self.i_s_name,
+                    i_s_name,
                     torch.nn.Parameter(input_scale.max(), requires_grad=False),
                 )
-                setattr(layer, self.i_zp_name, None)
             else:
-                input_zero_point = getattr(layer, self.i_zp_name)
+                input_zero_point = getattr(layer, i_zp_name)
 
                 # reconstruct the ranges
                 int8_traits = torch.iinfo(torch.int8)
@@ -91,19 +96,15 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
 
                 scale = (range_max - range_min) / (int8_traits.max - int8_traits.min)
                 replace_parameter(
-                    layer, self.i_s_name, torch.nn.Parameter(scale, requires_grad=False)
+                    layer, i_s_name, torch.nn.Parameter(scale, requires_grad=False)
                 )
 
                 azp = (
                     (int8_traits.min - range_min / scale).round().to(dtype=torch.int32)
                 )
                 replace_parameter(
-                    layer, self.i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
+                    layer, i_zp_name, torch.nn.Parameter(azp, requires_grad=False)
                 )
-
-        else:
-            setattr(layer, self.i_s_name, None)
-            setattr(layer, self.i_zp_name, None)
 
         # Different from cutlass, oneDNN kernels only need the AZP adjustment
         # term for dynamic quantization. And s_b should be folded into the
@@ -112,38 +113,37 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         # s_a * (s_b * AB) - s_a * s_b * zp_a * B + bias =
         # s_a * GEMM_output - s_a * zp_a * adj + bias
         if not (self.config.input_symmetric and self.config.is_static_input_scheme):
-            weight = getattr(layer, self.w_q_name)
-            weight_scale = getattr(layer, self.w_s_name)
+            weight = getattr(layer, w_q_name)
+            weight_scale = getattr(layer, w_s_name)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.float32)
             azp_adj = azp_adj * weight_scale.squeeze()
             setattr(
                 layer,
-                self.azp_adj_name,
+                azp_adj_name,
                 torch.nn.Parameter(azp_adj, requires_grad=False),
             )
-        else:
-            setattr(layer, self.azp_adj_name, None)
 
-        weight = getattr(layer, self.w_q_name)
+        weight = getattr(layer, w_q_name)
         self.dnnl_handler = ops.create_onednn_scaled_mm(
             weight,
-            getattr(layer, self.w_s_name),
+            getattr(layer, w_s_name),
             torch.get_default_dtype(),
-            getattr(layer, self.i_s_name) is None,
+            getattr(layer, i_s_name) is None,
             not self.config.input_symmetric,
             32,
         )
         # weight is prepacked and maintained by the dnnl_handler,
         # release the original weight
-        setattr(layer, self.w_q_name, None)
+        setattr(layer, w_q_name, None)
         del weight
 
     def process_weights_for_sgl(self, layer: torch.nn.Module) -> None:
+        w_q_name, w_s_name, _, _, _ = self.layer_param_names
         # WEIGHT
-        weight = getattr(layer, self.w_q_name)
+        weight = getattr(layer, w_q_name)
         packed_weight = torch.ops._C.convert_weight_packed(weight)
         replace_parameter(
-            layer, self.w_q_name, torch.nn.Parameter(packed_weight, requires_grad=False)
+            layer, w_q_name, torch.nn.Parameter(packed_weight, requires_grad=False)
         )
 
         if layer.bias is not None:
@@ -155,18 +155,14 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         # WEIGHT SCALE
         # CPU SGL kernels only support per-channel.
         # For per-tensor quant, convert to the per-channel case.
-        weight_scale = getattr(layer, self.w_s_name)
+        weight_scale = getattr(layer, w_s_name)
         if not self.config.is_channelwise:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
-            self.w_s_name,
+            w_s_name,
             torch.nn.Parameter(weight_scale.data, requires_grad=False),
         )
-
-        setattr(layer, self.i_s_name, None)
-        setattr(layer, self.i_zp_name, None)
-        setattr(layer, self.azp_adj_name, None)
 
     def apply_weights(
         self,
@@ -186,7 +182,9 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        w_q, w_s, i_s, i_zp, azp_adj = self._get_weight_params(layer)
+        x_shape = x.shape
+        x = x.reshape(-1, x_shape[-1]) if len(x_shape) > 2 else x
+        w_q, w_s, i_s, i_zp, azp_adj = self._get_layer_params(layer)
 
         # ops.scaled_int8_quant supports both dynamic and static quant:
         # * dynamic, i_s is None and x_s computed from x.
@@ -199,7 +197,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         n = self.dnnl_handler.n
         out = torch.empty((m, n), dtype=x.dtype)
         ops.onednn_scaled_mm(self.dnnl_handler, x_q, out, x_s, x_zp, azp_adj, bias)
-
+        out = out.reshape(x_shape[:-1] + (n,)) if len(x_shape) > 2 else out
         return out
 
     def _apply_weights_sgl(
@@ -208,7 +206,7 @@ class CPUScaledMMLinearKernel(ScaledMMLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        w_q, w_s, _, _, _ = self._get_weight_params(layer)
+        w_q, w_s, _, _, _ = self._get_layer_params(layer)
         return torch.ops._C.int8_scaled_mm_with_quant(
             x,
             w_q,

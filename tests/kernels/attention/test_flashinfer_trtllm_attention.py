@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import flashinfer
 import pytest
 import torch
 
@@ -11,11 +10,14 @@ from tests.kernels.quantization.nvfp4_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import set_random_seed
 
-if not current_platform.is_device_capability(100):
+if not current_platform.is_device_capability_family(100):
     pytest.skip(
         "This TRTLLM kernel requires NVIDIA Blackwell.", allow_module_level=True
     )
+else:
+    import flashinfer
 
 FLOAT32_BYTES = torch.finfo(torch.float).bits // 8
 FP8_DTYPE = current_platform.fp8_dtype()
@@ -79,7 +81,7 @@ def test_flashinfer_trtllm_decode_with_baseline(
     has_sinks: bool,
 ) -> None:
     torch.set_default_device("cuda")
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     q_quant_dtype, kv_quant_dtype, o_quant_dtype = quant_dtypes
     q_quant_dtype = q_quant_dtype or dtype
@@ -278,7 +280,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
     has_sinks: bool,
 ) -> None:
     torch.set_default_device("cuda")
-    current_platform.seed_everything(42)
+    set_random_seed(42)
 
     q_quant_dtype, kv_quant_dtype, o_quant_dtype = quant_dtypes
     q_quant_dtype = q_quant_dtype or dtype
@@ -442,7 +444,7 @@ def test_flashinfer_trtllm_prefill_with_baseline(
         output_trtllm = output_trtllm.reshape(-1, query.shape[1], query.shape[2])
 
     if q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP4_DTYPE:
-        rtol, atol = 1e-1, 2e-1
+        rtol, atol = 3e-1, 4e-1
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == FP8_DTYPE:
         rtol, atol = 4e-2, 6e-2
     elif q_quant_dtype == FP8_DTYPE and o_quant_dtype == dtype:

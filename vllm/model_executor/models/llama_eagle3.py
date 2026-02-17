@@ -11,19 +11,26 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.linear import QKVParallelLinear
+from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization.base_config import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
+from vllm.model_executor.model_loader.weight_utils import (
+    default_weight_loader,
+    maybe_remap_kv_scale_name,
+)
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
-from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import NestedTensors
 
-from .utils import AutoWeightsLoader, maybe_prefix, process_eagle_weight
+from .utils import (
+    AutoWeightsLoader,
+    get_draft_quant_config,
+    maybe_prefix,
+    process_eagle_weight,
+)
 
 logger = init_logger(__name__)
 
@@ -45,13 +52,16 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         # Subsequent layers use hidden_size (only hidden_states, no embeds)
         qkv_input_size = 2 * self.hidden_size if layer_idx == 0 else self.hidden_size
 
-        # override qkv
+        # Parallel drafting checkpoints may have attention bias enabled
+        qkv_bias = getattr(config, "attention_bias", False)
+
+        # Override qkv_proj with correct input size and bias setting
         self.self_attn.qkv_proj = QKVParallelLinear(
             qkv_input_size,
             self.self_attn.head_dim,
             self.self_attn.total_num_heads,
             self.self_attn.total_num_kv_heads,
-            bias=False,
+            bias=qkv_bias,
             quant_config=quant_config,
             prefix=maybe_prefix(prefix, "qkv_proj"),
         )
@@ -66,14 +76,7 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""
-        draft_model_config = vllm_config.speculative_config.draft_model_config
-        draft_load_config = vllm_config.load_config
-
-        return (
-            VllmConfig.get_quantization_config(draft_model_config, draft_load_config)
-            if draft_model_config
-            else None
-        )
+        return get_draft_quant_config(vllm_config)
 
     def _norm_before_residual(
         self, hidden_states: torch.Tensor
@@ -120,13 +123,12 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
 
 
 @support_torch_compile(
-    # torch.compile is disabled for multimodal EAGLE3 models due to constraint
-    # violations with dynamic shapes during tensor concatenation operations.
-    # See: https://github.com/vllm-project/vllm/pull/22872/files#r2362028132
-    # Non-multimodal EAGLE3 models can still use torch.compile safely.
-    enable_if=lambda vllm_config: not MULTIMODAL_REGISTRY.supports_multimodal_inputs(
-        vllm_config.model_config
-    ),
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "hidden_states": 0,
+        "input_embeds": 0,
+    }
 )
 class LlamaModel(nn.Module):
     def __init__(
@@ -139,6 +141,15 @@ class LlamaModel(nn.Module):
         super().__init__()
         self.config = vllm_config.speculative_config.draft_model_config.hf_config
         self.vocab_size = self.config.vocab_size
+
+        # Get drafter's quantization config
+        self.quant_config = get_draft_quant_config(vllm_config)
+
+        eagle_config = getattr(self.config, "eagle_config", None)
+        if eagle_config is not None and "use_aux_hidden_state" in eagle_config:
+            self.use_aux_hidden_state = eagle_config["use_aux_hidden_state"]
+        else:
+            self.use_aux_hidden_state = True
 
         current_vllm_config = get_current_vllm_config()
 
@@ -159,13 +170,19 @@ class LlamaModel(nn.Module):
                 for layer_idx in range(self.config.num_hidden_layers)
             ]
         )
-        if hasattr(self.config, "target_hidden_size"):
-            self.fc = torch.nn.Linear(
-                self.config.target_hidden_size * 3, self.config.hidden_size, bias=False
-            )
-        else:
-            self.fc = torch.nn.Linear(
-                self.config.hidden_size * 3, self.config.hidden_size, bias=False
+        if self.use_aux_hidden_state:
+            if hasattr(self.config, "target_hidden_size"):
+                fc_input_size = self.config.target_hidden_size * 3
+            else:
+                fc_input_size = self.config.hidden_size * 3
+            self.fc = ReplicatedLinear(
+                input_size=fc_input_size,
+                output_size=self.config.hidden_size,
+                bias=False,
+                params_dtype=vllm_config.model_config.dtype,
+                quant_config=self.quant_config,
+                prefix=maybe_prefix(prefix, "fc"),
+                return_bias=False,
             )
         self.norm = RMSNorm(
             self.config.hidden_size,
@@ -211,6 +228,24 @@ class LlamaModel(nn.Module):
         for name, loaded_weight in weights:
             if "midlayer." in name:
                 name = name.replace("midlayer.", "layers.0.")
+            # Handle kv cache quantization scales
+            if self.quant_config is not None and (
+                scale_name := self.quant_config.get_cache_scale(name)
+            ):
+                # Loading kv cache quantization scales
+                param = params_dict[scale_name]
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                loaded_weight = (
+                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
+                )
+                weight_loader(param, loaded_weight)
+                loaded_params.add(scale_name)
+                continue
+            # Remapping the name FP8 kv-scale or zero point.
+            if "scale" in name or "zero_point" in name:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
@@ -261,6 +296,19 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             requires_grad=False,
         )
 
+        self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
+
+        if self.use_parallel_drafting:
+            self.register_buffer(
+                "mask_hidden",
+                torch.zeros(
+                    1,
+                    (3 if self.model.use_aux_hidden_state else 1)
+                    * self.config.hidden_size,
+                ),
+                persistent=False,
+            )
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -306,6 +354,8 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
+        if not self.model.use_aux_hidden_state:
+            return hidden_states
         # combine multiple auxiliary hidden states returned by eagle3
         return self.model.fc(hidden_states)
 
@@ -313,12 +363,25 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         model_weights = {}
         includes_draft_id_mapping = False
         includes_embed_tokens = False
+        includes_mask_hidden = False
         for name, loaded_weight in weights:
             if "t2d" in name:
                 continue
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
+            elif "mask_hidden" in name:
+                # Load mask_hidden directly into buffer
+                if not self.use_parallel_drafting:
+                    logger.warning(
+                        "mask_hidden found in weights but "
+                        "model is not configured for parallel drafting. "
+                        "Skipping loading mask_hidden."
+                    )
+                    continue
+                self.mask_hidden.copy_(loaded_weight.view(1, -1))
+                includes_mask_hidden = True
+                continue
             elif "lm_head" not in name:
                 name = "model." + name
             if "embed_tokens" in name:
@@ -326,11 +389,20 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             model_weights[name] = loaded_weight
             process_eagle_weight(self, name)
 
-        skip_substrs = []
+        if not includes_mask_hidden and self.use_parallel_drafting:
+            raise ValueError(
+                "mask_hidden not found in weights but "
+                "model is configured for parallel drafting. "
+                "Please provide mask_hidden in the weights."
+            )
+
+        skip_substrs = ["mask_hidden"]
         if not includes_draft_id_mapping:
             skip_substrs.append("draft_id_to_target_id")
         if not includes_embed_tokens:
             skip_substrs.append("embed_tokens")
+        if not self.model.use_aux_hidden_state:
+            skip_substrs.append("fc.")
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=None,

@@ -12,6 +12,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 PRIME_RL_REPO="https://github.com/PrimeIntellect-ai/prime-rl.git"
 PRIME_RL_DIR="${REPO_ROOT}/prime-rl"
 
+if command -v rocm-smi &> /dev/null || command -v rocminfo &> /dev/null; then
+    echo "AMD GPU detected. Prime-RL currently only supports NVIDIA. Skipping..."
+    exit 0
+fi
+
 echo "Setting up Prime-RL integration test environment..."
 
 # Clean up any existing Prime-RL directory

@@ -61,6 +61,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
         norm_init: float = 0.4,
         projector_act: str = "swiglu",
         projector_ln_mid: bool = False,
+        num_projector_layers: int = 0,
         **kwargs,
     ):
         self.ignore_index = ignore_index
@@ -71,6 +72,7 @@ class UltravoxConfig(transformers.PretrainedConfig):
         self.norm_init = norm_init
         self.projector_act = projector_act
         self.projector_ln_mid = projector_ln_mid
+        self.num_projector_layers = num_projector_layers
 
         # N.B. May set the wrapped_model_config below.
         self.text_model_id = text_model_id
