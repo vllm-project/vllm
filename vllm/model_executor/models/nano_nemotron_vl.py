@@ -76,6 +76,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
     _seq2tokens,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.transformers_utils.configs.radio import RadioConfig
@@ -1093,6 +1094,9 @@ class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
     ) -> BaseNanoNemotronVLProcessor:
         raise NotImplementedError
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
@@ -1385,6 +1389,7 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         processor = self.info.get_hf_processor()
@@ -1457,6 +1462,7 @@ class NanoNemotronVLDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(
             seq_len=seq_len, mm_counts=mm_counts, mm_options=mm_options
