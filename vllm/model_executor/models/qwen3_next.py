@@ -135,7 +135,7 @@ def fi_chunk_gated_delta_rule(
     fi_state = initial_state.to(torch.float32)
     fi_g = g.to(torch.float32)
     fi_beta = beta.to(torch.float32)
-    return chunk_gated_delta_rule_fi(
+    output, final_state = chunk_gated_delta_rule_fi(
         q=q,
         k=k,
         v=v,
@@ -145,6 +145,8 @@ def fi_chunk_gated_delta_rule(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
     )
+    # Unsqueeze back to 4D (1, L, H, D) to match fla output format
+    return output.unsqueeze(0), final_state
 
 
 @CustomOp.register("chunk_gated_delta_rule")
@@ -339,7 +341,9 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
@@ -1370,7 +1374,9 @@ class Qwen3NextForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod
