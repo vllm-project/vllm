@@ -176,7 +176,11 @@ class CudaPlatformBase(Platform):
 
         # Ensure block_size is compatible with the attention backend.
         # Note: model_config may be None during testing.
-        if model_config is not None:
+        # Skip hybrid models — their block_size is managed by
+        # HybridAttentionMambaModelConfig.verify_and_update_config,
+        # which runs before check_and_update_config and may set
+        # block_size to non-standard values for mamba alignment.
+        if model_config is not None and not model_config.is_hybrid:
             cls._update_block_size_for_backend(
                 vllm_config,
                 user_specified_block_size,
@@ -265,75 +269,80 @@ class CudaPlatformBase(Platform):
                 if optimal is not None and optimal != chosen_backend:
                     logger.warning(
                         "--block-size %d is not supported by the preferred "
-                        "%s backend. Using %s instead, which may result in reduced "
-                        "performance. Consider removing --block-size to auto-select "
-                        "the optimal block size.",
+                        "%s backend. Using %s instead, which may result "
+                        "in reduced performance. Consider removing "
+                        "--block-size to auto-select the optimal "
+                        "block size.",
                         cache_config.block_size,
                         optimal.name,
                         chosen_backend.name,
                     )
 
-        if chosen_backend is not None:
-            if user_specified_block_size:
-                # User's block_size is compatible with the chosen backend.
-                return
-            # User didn't specify --block-size, so auto-select the
-            # preferred block size for the chosen backend.
-            try:
-                backend_class = chosen_backend.get_class()
-            except ImportError:
-                return  # Will fail later with a better error
-            preferred = backend_class.get_preferred_block_size(
-                cache_config.block_size,
-            )
-            if cache_config.block_size != preferred:
-                logger.info(
-                    "Setting kv cache block size to %d for %s backend.",
-                    preferred,
-                    chosen_backend.name,
+            if chosen_backend is not None:
+                if user_specified_block_size:
+                    # User's block_size is compatible with the chosen
+                    # backend.
+                    return
+                # User didn't specify --block-size, so auto-select the
+                # preferred block size for the chosen backend.
+                try:
+                    backend_class = chosen_backend.get_class()
+                except ImportError:
+                    return  # Will fail later with a better error
+                preferred = backend_class.get_preferred_block_size(
+                    cache_config.block_size,
                 )
-                cache_config.block_size = preferred  # type: ignore[assignment]
-            return
+                if cache_config.block_size != preferred:
+                    logger.info(
+                        "Setting kv cache block size to %d for %s backend.",
+                        preferred,
+                        chosen_backend.name,
+                    )
+                    cache_config.block_size = preferred  # type: ignore[assignment]
+                return
 
-        # No valid backend found. If the user didn't constrain the
-        # selection, defer the error to get_attn_backend_cls where
-        # the full config (including per-layer settings) is available.
-        if not user_specified_block_size:
-            return
+            # No valid backend found. If the user didn't constrain the
+            # selection, defer the error to get_attn_backend_cls where
+            # the full config (including per-layer settings) is
+            # available.
+            if not user_specified_block_size:
+                return
 
-        if user_specified_backend is not None:
-            # User specified --block-size and --attention-backend and
-            # they are incompatible.
-            try:
-                backend_class = user_specified_backend.get_class()
-                supported = backend_class.get_supported_kernel_block_sizes()
-            except ImportError:
-                supported = None
-            raise ValueError(
-                f"User-specified --block-size {cache_config.block_size} "
-                f"is incompatible with the specified "
-                f"--attention-backend {user_specified_backend.name} "
-                f"(supported kernel block sizes: {supported}). "
-                f"Either remove --block-size to auto-select, "
-                f"or choose a compatible value."
-            )
-        else:
-            # User specified --block-size but no backend supports it.
-            _, invalid_reasons = cls.get_valid_backends(
-                device_capability=device_capability,
-                attn_selector_config=attn_selector_config,
-                num_heads=num_heads,
-            )
-            reasons_str = ", ".join(
-                f"{b.name}: [{', '.join(r)}]" for b, r in invalid_reasons.items()
-            )
-            raise ValueError(
-                f"No valid attention backend found for --block-size "
-                f"{cache_config.block_size}. "
-                f"Reasons: {{{reasons_str}}}. "
-                f"Either remove --block-size to auto-select, "
-                f"or choose a compatible value."
-            )
+            if user_specified_backend is not None:
+                # User specified --block-size and --attention-backend
+                # and they are incompatible.
+                try:
+                    backend_class = user_specified_backend.get_class()
+                    supported = backend_class.get_supported_kernel_block_sizes()
+                except ImportError:
+                    supported = None
+                raise ValueError(
+                    f"User-specified --block-size "
+                    f"{cache_config.block_size} is incompatible with "
+                    f"the specified --attention-backend "
+                    f"{user_specified_backend.name} (supported kernel "
+                    f"block sizes: {supported}). Either remove "
+                    f"--block-size to auto-select, or choose a "
+                    f"compatible value."
+                )
+            else:
+                # User specified --block-size but no backend supports
+                # it.
+                _, invalid_reasons = cls.get_valid_backends(
+                    device_capability=device_capability,
+                    attn_selector_config=attn_selector_config,
+                    num_heads=num_heads,
+                )
+                reasons_str = ", ".join(
+                    f"{b.name}: [{', '.join(r)}]" for b, r in invalid_reasons.items()
+                )
+                raise ValueError(
+                    f"No valid attention backend found for "
+                    f"--block-size {cache_config.block_size}. "
+                    f"Reasons: {{{reasons_str}}}. Either remove "
+                    f"--block-size to auto-select, or choose a "
+                    f"compatible value."
+                )
 
     @classmethod
     def get_current_memory_usage(
