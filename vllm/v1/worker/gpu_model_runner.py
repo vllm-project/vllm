@@ -5877,11 +5877,8 @@ class GPUModelRunner(
                         cache_dtype_str=self.cache_config.cache_dtype,
                     )
                     dtype = kv_cache_spec.dtype
-                    try:
-                        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
-                        assert len(kv_cache_stride_order) == len(kv_cache_shape)
-                    except (AttributeError, NotImplementedError):
-                        kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+                    kv_cache_stride_order = attn_backend.get_kv_cache_stride_order()
+                    assert len(kv_cache_stride_order) == len(kv_cache_shape)
                     # The allocation respects the backend-defined stride order
                     # to ensure the semantic remains consistent for each
                     # backend. We first obtain the generic kv cache shape and

@@ -342,12 +342,9 @@ class TpKVTopology:
             # prepend layers dimension
             _MOCK_NUM_LAYERS = 80
             kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
-            try:
-                kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=self._cross_layers_blocks
-                )
-            except (AttributeError, NotImplementedError):
-                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
+            kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+                include_num_layers_dimension=self._cross_layers_blocks
+            )
 
             # In case of cross layers permute kv_cache_shape according to
             # stride_order to retrieve physical position of block_size
