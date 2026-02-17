@@ -14,37 +14,33 @@ MAX_NUM_BAD_WORDS = 128  # Max number of bad words per request
 class BadWordsState:
     def __init__(
         self,
-        max_num_reqs: int,
-        device: torch.device,
         all_token_ids: torch.Tensor,
         prompt_len: torch.Tensor,
-        prefill_len: torch.Tensor,
-        output_len: torch.Tensor,
+        total_len: torch.Tensor,
     ):
-        self.max_num_reqs = max_num_reqs
-        self.device = device
-
         self.all_token_ids = all_token_ids
         self.prompt_len = prompt_len
-        self.prefill_len = prefill_len
-        self.output_len = output_len
+        self.total_len = total_len
+
+        self.max_num_reqs = prompt_len.shape[0]
+        self.device = prompt_len.device
 
         # flattened bad word tokens: [max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS]
         self.bad_word_token_ids = StagedWriteTensor(
-            (max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS),
+            (self.max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS),
             dtype=torch.int32,
-            device=device,
+            device=self.device,
         )
         # cumulative offsets of bad words: [max_num_reqs, MAX_NUM_BAD_WORDS + 1]
         self.bad_word_offsets = StagedWriteTensor(
-            (max_num_reqs, MAX_NUM_BAD_WORDS + 1),
+            (self.max_num_reqs, MAX_NUM_BAD_WORDS + 1),
             dtype=torch.int32,
-            device=device,
+            device=self.device,
         )
         # number of bad words per request
-        self.num_bad_words = UvaBackedTensor(max_num_reqs, dtype=torch.int32)
+        self.num_bad_words = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         # whether request uses bad words
-        self.use_bad_words = np.zeros(max_num_reqs, dtype=bool)
+        self.use_bad_words = np.zeros(self.max_num_reqs, dtype=bool)
 
     def add_request(
         self,
@@ -109,8 +105,7 @@ class BadWordsState:
             self.num_bad_words.gpu,
             self.all_token_ids,
             self.prompt_len,
-            self.prefill_len,
-            self.output_len,
+            self.total_len,
             input_ids,
             expanded_local_pos,
             actual_max_num_bad_words,
@@ -130,8 +125,7 @@ def _bad_words_kernel(
     all_token_ids_ptr,
     all_token_ids_stride,
     prompt_len_ptr,
-    prefill_len_ptr,
-    output_len_ptr,
+    total_len_ptr,
     input_ids_ptr,
     expanded_local_pos_ptr,
 ):
@@ -148,10 +142,9 @@ def _bad_words_kernel(
     cur_req_first_pos = logit_idx - pos
 
     prompt_len = tl.load(prompt_len_ptr + req_state_idx)
-    prefill_len = tl.load(prefill_len_ptr + req_state_idx)
-    output_len = tl.load(output_len_ptr + req_state_idx)
-    num_output = (prefill_len - prompt_len) + output_len
-    effective_len = num_output + pos
+    total_len = tl.load(total_len_ptr + req_state_idx)
+    output_len = total_len - prompt_len
+    effective_len = output_len + pos
 
     bd_offsets_base = bad_word_offsets_ptr + req_state_idx * bad_word_offsets_stride
     bd_tokens_base = bad_word_token_ids_ptr + req_state_idx * bad_word_token_ids_stride
@@ -171,9 +164,9 @@ def _bad_words_kernel(
         expected = tl.load(bd_tokens_base + start + i)
         actual_pos = effective_len - prefix_len + i
 
-        from_spec_input = actual_pos >= num_output
+        from_spec_input = actual_pos >= output_len
         if from_spec_input:
-            spec_offset = actual_pos - num_output
+            spec_offset = actual_pos - output_len
             actual = tl.load(input_ids_ptr + cur_req_first_pos + spec_offset)
         else:
             actual = tl.load(output_base + actual_pos)
@@ -192,8 +185,7 @@ def apply_bad_words(
     num_bad_words: torch.Tensor,
     all_token_ids: torch.Tensor,
     prompt_len: torch.Tensor,
-    prefill_len: torch.Tensor,
-    output_len: torch.Tensor,
+    total_len: torch.Tensor,
     input_ids: torch.Tensor,
     expanded_local_pos: torch.Tensor,
     max_num_bad_words: int,
@@ -211,8 +203,7 @@ def apply_bad_words(
         all_token_ids,
         all_token_ids.stride(0),
         prompt_len,
-        prefill_len,
-        output_len,
+        total_len,
         input_ids,
         expanded_local_pos,
     )

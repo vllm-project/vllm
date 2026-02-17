@@ -425,23 +425,20 @@ def _post_update_kernel(
     query_start_loc_ptr,
     all_token_ids_ptr,
     all_token_ids_stride,
-    prefill_len_ptr,
-    output_len_ptr,
+    total_len_ptr,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
 
+    total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
-    current_output_len = tl.load(output_len_ptr + req_state_idx)
     if num_sampled > 0:
         token_id = tl.load(
             sampled_tokens_ptr + req_id * sampled_tokens_stride + num_sampled - 1
         )
         tl.store(last_sampled_tokens_ptr + req_state_idx, token_id)
-        tl.store(output_len_ptr + req_state_idx, current_output_len + num_sampled)
+        tl.store(total_len_ptr + req_state_idx, total_len + num_sampled)
 
-    prefill_len = tl.load(prefill_len_ptr + req_state_idx)
-    request_base = all_token_ids_ptr + req_state_idx * all_token_ids_stride
     for i in range(num_sampled):
         token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
         token_ptr = (
@@ -450,7 +447,10 @@ def _post_update_kernel(
         count = tl.load(token_ptr)
         count += 1
         tl.store(token_ptr, count)
-        tl.store(request_base + prefill_len + current_output_len + i, token_id)
+        tl.store(
+            all_token_ids_ptr + req_state_idx * all_token_ids_stride + total_len + i,
+            token_id,
+        )
 
     query_start = tl.load(query_start_loc_ptr + req_id)
     query_end = tl.load(query_start_loc_ptr + req_id + 1)
@@ -482,9 +482,7 @@ def post_update(
     # [max_num_reqs, max_model_len]
     all_token_ids: torch.Tensor,
     # [max_num_reqs]
-    prefill_len: torch.Tensor,
-    # [max_num_reqs]
-    output_len: torch.Tensor,
+    total_len: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_kernel[(num_reqs,)](
@@ -500,8 +498,7 @@ def post_update(
         query_start_loc,
         all_token_ids,
         all_token_ids.stride(0),
-        prefill_len,
-        output_len,
+        total_len,
         num_warps=1,
     )
 

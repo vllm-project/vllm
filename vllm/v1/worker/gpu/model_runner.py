@@ -152,9 +152,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             device=self.device,
             all_token_ids=self.req_states.all_token_ids.gpu,
-            request_prompt_len=self.req_states.prompt_len.gpu,
-            prefill_len=self.req_states.prefill_len.gpu,
-            output_len=self.req_states.output_len.gpu,
+            prompt_len=self.req_states.prompt_len.gpu,
+            total_len=self.req_states.total_len.gpu,
             logprobs_mode=self.model_config.logprobs_mode,
             num_speculative_tokens=self.num_speculative_steps + 1,
         )
@@ -764,8 +763,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_rejected,
             input_batch.query_start_loc,
             self.req_states.all_token_ids.gpu,
-            self.req_states.prefill_len.gpu,
-            self.req_states.output_len.gpu,
+            self.req_states.total_len.gpu,
         )
 
         # Update the number of computed prefill tokens.

@@ -27,7 +27,6 @@ class RequestState:
         self.index_to_req_id: dict[int, str] = {}
         self.free_indices = list(range(max_num_reqs))
 
-        self.prompt_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         # NOTE(woosuk): This tensor can be extremely large (e.g., several GBs)
         # depending on the configured max_num_reqs and max_model_len.
         # To save GPU memory, we use UVA instead of GPU for this tensor.
@@ -37,10 +36,21 @@ class RequestState:
             device=device,
             uva_instead_of_gpu=True,
         )
+        # NOTE(woosuk): Distinguish clearly between prompt_len and prefill_len:
+        # - prompt_len: Number of tokens in the user-provided prompt.
+        # - prefill_len: Number of tokens passed into the model runner.
+        #   This can include the prompt and additional partial output tokens,
+        #   so prefill_len >= prompt_len.
+        # Usually, prefill_len equals prompt_len, but in cases such as resumption after
+        # preemption, prefill_len may be greater. Differentiating between these values
+        # is crucial, as certain features such as prompt logprobs or frequency penalties
+        # must treat prompt and output tokens separately.
+        self.prompt_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
         self.prefill_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        # Number of output tokens generated after prefill.
-        # actual output len = (prefill_len - prompt_len) + output_len
-        self.output_len = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
+        # total_len = prompt_len + output_len. It grows as the request progresses.
+        self.total_len = StagedWriteTensor(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
 
         # Number of computed tokens.
         self.num_computed_prefill_tokens = np.zeros(self.max_num_reqs, dtype=np.int32)
@@ -89,7 +99,7 @@ class RequestState:
             f"prefill_len {prefill_len} < prompt_len {prompt_len}"
         )
         self.prefill_len.np[req_idx] = prefill_len
-        self.output_len.np[req_idx] = 0
+        self.total_len.stage_write_elem(req_idx, prefill_len)
         self.all_token_ids.stage_write(req_idx, 0, all_token_ids)
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
@@ -97,7 +107,7 @@ class RequestState:
     def apply_staged_writes(self) -> None:
         self.prompt_len.copy_to_uva()
         self.prefill_len.copy_to_uva()
-        self.output_len.copy_to_uva()
+        self.total_len.apply_write()
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
 

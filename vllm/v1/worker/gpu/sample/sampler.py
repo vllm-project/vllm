@@ -24,9 +24,8 @@ class Sampler:
         vocab_size: int,
         device: torch.device,
         all_token_ids: torch.Tensor,
-        request_prompt_len: torch.Tensor,
-        prefill_len: torch.Tensor,
-        output_len: torch.Tensor,
+        prompt_len: torch.Tensor,
+        total_len: torch.Tensor,
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
     ):
@@ -38,15 +37,8 @@ class Sampler:
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
+        self.bad_words_state = BadWordsState(all_token_ids, prompt_len, total_len)
         self.num_speculative_tokens = num_speculative_tokens
-        self.bad_words_state = BadWordsState(
-            max_num_reqs,
-            device,
-            all_token_ids=all_token_ids,
-            prompt_len=request_prompt_len,
-            prefill_len=prefill_len,
-            output_len=output_len,
-        )
 
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
