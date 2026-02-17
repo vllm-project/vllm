@@ -1063,19 +1063,23 @@ class GPUModelRunner(
                 if req_index is None:
                     req_state.prev_num_draft_len = 0
                 else:
-                    # Async spec decode: assume all draft tokens accepted.
-                    # Actual accepted tokens will be added in
-                    # update_async_output_token_ids.
                     num_accepted = req_state.prev_num_draft_len
                     num_rejected = 0
 
                     if not self.use_async_spec_decode:
-                        # Non-async: wait for acceptance count, add placeholders.
+                        # Non-async: wait for acceptance count.
                         assert self.input_batch.prev_req_id_to_index is not None
                         prev_req_index = self.input_batch.prev_req_id_to_index[req_id]
                         num_accepted = valid_sampled_token_count[prev_req_index] - 1
                         num_rejected = req_state.prev_num_draft_len - num_accepted
                         num_computed_tokens -= num_rejected
+
+                    # Add draft token placeholders. For non-async,
+                    # num_accepted is the actual count; for async,
+                    # it's optimistic (assumes all accepted).
+                    # update_async_output_token_ids will replace
+                    # placeholders with actual tokens and trim excess.
+                    if num_accepted > 0:
                         req_state.output_token_ids.extend([-1] * num_accepted)
 
             # Update the cached states.
@@ -1687,39 +1691,6 @@ class GPUModelRunner(
         current_indices = batch_index_mapping.current_indices
         prev_indices = batch_index_mapping.prev_indices
         new_indices = batch_index_mapping.new_indices
-
-        # For async spec decode, bound the error in optimistic_seq_lens_cpu.
-        # The CPU num_computed_tokens drifts because the scheduler
-        # optimistically assumes all draft tokens are accepted. Correct
-        # using the actual valid counts from the previous iteration.
-        # drift = (num_draft_tokens + 1) - valid_counts per request.
-        # Prefill requests have num_draft_tokens=0 and valid_counts=1,
-        # so their correction is 0.
-        # The event query is non-blocking: if the async GPU→CPU copy of
-        # valid counts hasn't finished yet, we skip the correction this
-        # iteration. The error stays bounded since the copy will be ready
-        # by the next iteration.
-        if (
-            current_indices
-            and self.has_prev_draft_tokens
-            and self.valid_sampled_token_count_gpu is not None
-            and self.valid_sampled_token_count_event is not None
-            and self.valid_sampled_token_count_event.query()
-        ):
-            assert self.valid_sampled_token_count_cpu is not None
-            valid_counts_cpu = self.valid_sampled_token_count_cpu.numpy()
-            if batch_index_mapping.indices_match:
-                self.optimistic_seq_lens_cpu.numpy()[:num_reqs] -= (
-                    self.prev_num_draft_tokens.np[:num_reqs]
-                    + 1
-                    - valid_counts_cpu[:num_reqs]
-                )
-            else:
-                prev_draft = self.prev_num_draft_tokens.np[prev_indices]
-                prev_valid = valid_counts_cpu[prev_indices]
-                self.optimistic_seq_lens_cpu.numpy()[current_indices] -= (
-                    prev_draft + 1 - prev_valid
-                )
 
         num_tokens = [self.requests[r].num_tokens for r in self.input_batch.req_ids]
         num_tokens_np = np.array(num_tokens, dtype=np.int32)
