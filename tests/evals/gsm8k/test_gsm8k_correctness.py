@@ -55,15 +55,6 @@ def test_gsm8k_correctness(config_filename):
     """Test GSM8K correctness for a given model configuration."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
 
-    if (
-        not current_platform.is_cuda()
-        and "Qwen3-30B-A3B-MXFP4A16" in eval_config["model_name"]
-    ):
-        pytest.skip(
-            "Skipping Qwen3-30B-A3B-MXFP4A16 on non-CUDA platforms. "
-            "Marlin kernels are not supported."
-        )
-
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")
     server_args = shlex.split(server_args_str) if server_args_str else []
