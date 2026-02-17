@@ -480,25 +480,26 @@ def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
         routing_logits = torch.randn((m, e), device="cuda", dtype=torch.float32)
         routing_bias = torch.randn(e, device="cuda", dtype=torch.float32)
 
-        # This should NOT crash with num_expert_group=None
-        output = torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+        # This should NOT crash with n_group=None
+        import flashinfer
+
+        output = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
             routing_logits=routing_logits,
             routing_bias=routing_bias,
-            x=x,
-            w13_weight=w13_fp8,
-            w13_weight_scale_inv=w13_scale,
-            w2_weight=w2_fp8,
-            w2_weight_scale_inv=w2_scale,
-            global_num_experts=e,
+            hidden_states=x,
+            gemm1_weights=w13_fp8,
+            gemm1_weights_scale=w13_scale,
+            gemm2_weights=w2_fp8,
+            gemm2_weights_scale=w2_scale,
+            num_experts=e,
             top_k=topk,
-            num_expert_group=None,
+            n_group=None,
             topk_group=None,
             intermediate_size=n,
             expert_offset=0,
             local_num_experts=e,
-            block_shape=block_shape,
+            routed_scaling_factor=1.0,
             routing_method_type=RoutingMethodType.DeepSeekV3,
-            routed_scaling=1.0,
         )
 
         assert output is not None
