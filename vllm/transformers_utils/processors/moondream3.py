@@ -173,11 +173,39 @@ class Moondream3Processor(ProcessorMixin):
         """
         from transformers import AutoTokenizer
 
-        # Load tokenizer from the separate tokenizer repo
-        tokenizer = AutoTokenizer.from_pretrained(
-            cls._tokenizer_repo,
-            trust_remote_code=kwargs.get("trust_remote_code", False),
-        )
+        tokenizer = kwargs.pop("tokenizer", None)
+
+        tokenizer_kwargs = {
+            "trust_remote_code": kwargs.get("trust_remote_code", False),
+        }
+        for key in (
+            "cache_dir",
+            "force_download",
+            "local_files_only",
+            "revision",
+            "subfolder",
+            "token",
+            "use_fast",
+        ):
+            if key in kwargs:
+                tokenizer_kwargs[key] = kwargs[key]
+
+        if isinstance(tokenizer, str):
+            tokenizer = AutoTokenizer.from_pretrained(
+                tokenizer, **tokenizer_kwargs
+            )
+
+        if tokenizer is None:
+            # Prefer model-local tokenizer files first. If unavailable, fall
+            # back to moondream's dedicated tokenizer repository.
+            try:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    pretrained_model_name_or_path, **tokenizer_kwargs
+                )
+            except Exception:
+                tokenizer = AutoTokenizer.from_pretrained(
+                    cls._tokenizer_repo, **tokenizer_kwargs
+                )
 
         # Configure special tokens for Moondream3
         # BOS and EOS are both token 0 (<|endoftext|>), matching the native
@@ -260,9 +288,10 @@ class Moondream3Processor(ProcessorMixin):
             if not isinstance(text, list):
                 text = [text]
 
-            # Get text kwargs, remove return_tensors if present (we set it)
+            # Get text kwargs, remove keys we set ourselves
             text_kwargs = output_kwargs.get("text_kwargs", {}).copy()
             text_kwargs.pop("return_tensors", None)
+            text_kwargs.pop("add_special_tokens", None)
 
             # Tokenize text
             tokenized = self.tokenizer(

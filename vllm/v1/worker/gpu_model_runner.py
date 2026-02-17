@@ -1883,6 +1883,17 @@ class GPUModelRunner(
                     _build_attn_group_metadata(kv_cache_gid, attn_gid, cm)
 
         if self.is_mm_prefix_lm:
+            # Some models (e.g., moondream3) define a prefix-LM region
+            # that is wider than the multimodal embed range.  The HF
+            # config can specify how many extra positions before the
+            # first embed token should be included in the bidirectional
+            # prefix (e.g., a BOS token).  Default is 0.
+            prefix_lm_left_padding = getattr(
+                self.model_config.hf_text_config,
+                "prefix_lm_left_padding",
+                0,
+            )
+
             req_doc_ranges = {}
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
@@ -1890,7 +1901,9 @@ class GPUModelRunner(
                 for mm_feature in req_state.mm_features:
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
-                    image_doc_ranges.extend(img_doc_range)
+                    for start, end in img_doc_range:
+                        padded_start = max(0, start - prefix_lm_left_padding)
+                        image_doc_ranges.append((padded_start, end))
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
 

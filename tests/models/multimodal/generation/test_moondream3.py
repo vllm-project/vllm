@@ -24,15 +24,18 @@ MOONDREAM3_TOKENIZER = "moondream/starmie-v1"
 # Prompts for each image asset
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
     {
-        "stop_sign": "<|endoftext|><image> \n\nQuestion: What is shown in this image?\n\nAnswer:",  # noqa: E501
-        "cherry_blossom": "<|endoftext|><image> \n\nQuestion: Describe this image.\n\nAnswer:",  # noqa: E501
+        "stop_sign": "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is shown in this image?<|md_reserved_2|>",  # noqa: E501
+        "cherry_blossom": "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this image.<|md_reserved_2|>",  # noqa: E501
     }
 )
 
 
 def make_query_prompt(question: str) -> str:
     """Create a query prompt for Moondream3."""
-    return f"<|endoftext|><image> \n\nQuestion: {question}\n\nAnswer:"
+    return (
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
+        f"{question}<|md_reserved_2|>"
+    )
 
 
 def make_caption_prompt() -> str:
@@ -44,7 +47,7 @@ def make_caption_prompt() -> str:
     <|md_reserved_2|> = skill delimiter end
     """
     return (  # noqa: E501
-        "<|endoftext|><image><|md_reserved_0|>caption<|md_reserved_1|>normal<|md_reserved_2|>"
+        "<|endoftext|><image><|md_reserved_0|>describe<|md_reserved_1|>normal<|md_reserved_2|>"
     )
 
 

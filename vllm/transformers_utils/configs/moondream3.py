@@ -58,6 +58,7 @@ class Moondream3TextConfig(PretrainedConfig):
         n_heads: int = 32,
         n_kv_heads: int = 32,
         prefix_attn: int = 730,
+        prefix_lm_left_padding: int = 1,
         rope_theta: float = 1500000.0,
         moe: dict | None = None,
         **kwargs,
@@ -71,6 +72,9 @@ class Moondream3TextConfig(PretrainedConfig):
         self.n_heads = n_heads
         self.n_kv_heads = n_kv_heads
         self.prefix_attn = prefix_attn
+        # Include the BOS token in the bidirectional prefix-LM region:
+        # prefix range = [BOS] + [729 image tokens].
+        self.prefix_lm_left_padding = prefix_lm_left_padding
         self.max_context = max_context
         self.rope_theta = rope_theta
 
@@ -89,6 +93,14 @@ class Moondream3TextConfig(PretrainedConfig):
         self.intermediate_size = ff_dim
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_context
+
+        # Moondream3 uses token 0 (<|endoftext|>) as both BOS and EOS.
+        # Token 3 (<|md_reserved_2|>) is the answer delimiter (answer_id).
+        # The HF reference suppresses token 3 during generation so that the
+        # model emits token 0 instead, but the practical effect is the same
+        # as treating token 3 as an additional stop token.
+        self.bos_token_id = 0
+        self.eos_token_id = [0, 3]
 
         # MoE standard attributes
         self.num_local_experts = self.moe_num_experts
@@ -154,6 +166,14 @@ class Moondream3Config(PretrainedConfig):
         self.num_hidden_layers = self.text_config.num_hidden_layers
         self.vocab_size = self.text_config.vocab_size
         self.intermediate_size = self.text_config.intermediate_size
+        self.prefix_lm_left_padding = self.text_config.prefix_lm_left_padding
+
+        # Moondream3 uses token 0 (<|endoftext|>) as both BOS and EOS.
+        # Token 3 (<|md_reserved_2|>) is the answer delimiter (answer_id)
+        # that the HF reference suppresses during generation; treating it
+        # as an additional stop token achieves the same stopping behaviour.
+        self.bos_token_id = 0
+        self.eos_token_id = [0, 3]
 
     def get_text_config(self, decoder: bool = False) -> "Moondream3TextConfig":
         """Return the text config for vLLM's text_config detection.
