@@ -148,7 +148,7 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         global_num_experts=num_experts,
         activation=MoEActivation.SILU,
         apply_router_weight_on_input=False,
-        expert_map=False,
+        expert_map=None,
     )
     diff = calc_diff(out_deepgemm, out_triton)
     assert diff < 0.001, f"Diff exceeded 1%: {diff}"
