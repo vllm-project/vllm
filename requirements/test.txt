@@ -1221,7 +1221,7 @@ tqdm==4.67.3
     #   tacoreader
     #   terratorch
     #   transformers
-transformers @ git+https://github.com/huggingface/transformers.git@53f8a08290bf835c9891094352f9efd7da0ccece
+transformers @ git+https://github.com/huggingface/transformers.git@4355bc790e473e9a158f0b33001b192fd8b63a34
     # via
     #   -r requirements/test.in
     #   genai-perf
@@ -1243,10 +1243,9 @@ typer==0.15.2
     # via
     #   fastsafetensors
     #   perceptron
-typer-slim==0.20.0
-    # via
-    #   huggingface-hub
     #   transformers
+typer-slim==0.20.0
+    # via huggingface-hub
 types-python-dateutil==2.9.0.20241206
     # via arrow
 typeshed-client==2.8.2
