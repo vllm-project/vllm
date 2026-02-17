@@ -1499,6 +1499,10 @@ class EngineCoreProc(EngineCore):
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        # Cannot resume from shutdown state
+        if self.scheduler.pause_state == PauseState.PAUSED_SHUTDOWN:
+            logger.warning("Cannot resume scheduler from PAUSED_SHUTDOWN state")
+            return
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
