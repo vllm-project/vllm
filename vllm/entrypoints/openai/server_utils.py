@@ -22,7 +22,7 @@ from vllm import envs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.utils import sanitize_message
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMContentTooLargeError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils.gc_utils import freeze_gc_heap
 
@@ -322,10 +322,15 @@ async def http_exception_handler(_: Request, exc: HTTPException):
 
 async def validation_exception_handler(_: Request, exc: RequestValidationError):
     param = None
+    status_code = HTTPStatus.BAD_REQUEST
     errors = exc.errors()
     for error in errors:
         if "ctx" in error and "error" in error["ctx"]:
             ctx_error = error["ctx"]["error"]
+            if isinstance(ctx_error, VLLMContentTooLargeError):
+                param = ctx_error.parameter
+                status_code = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                break
             if isinstance(ctx_error, VLLMValidationError):
                 param = ctx_error.parameter
                 break
@@ -341,12 +346,12 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError):
     err = ErrorResponse(
         error=ErrorInfo(
             message=sanitize_message(message),
-            type=HTTPStatus.BAD_REQUEST.phrase,
-            code=HTTPStatus.BAD_REQUEST,
+            type=status_code.phrase,
+            code=status_code,
             param=param,
         )
     )
-    return JSONResponse(err.model_dump(), status_code=HTTPStatus.BAD_REQUEST)
+    return JSONResponse(err.model_dump(), status_code=status_code)
 
 
 _running_tasks: set[asyncio.Task] = set()

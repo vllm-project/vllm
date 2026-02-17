@@ -34,3 +34,13 @@ class VLLMValidationError(ValueError):
         if self.value is not None:
             extras.append(f"value={self.value}")
         return f"{base} ({', '.join(extras)})" if extras else base
+
+
+class VLLMContentTooLargeError(VLLMValidationError):
+    """Raised when the request content exceeds model limits.
+
+    This results in an HTTP 413 Content Too Large response, which is
+    more semantically correct than 400 Bad Request for size-related
+    validation failures (e.g., input tokens exceeding the model's
+    maximum context length).
+    """
