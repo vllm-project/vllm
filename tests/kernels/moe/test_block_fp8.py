@@ -21,9 +21,7 @@ from vllm.model_executor.layers.fused_moe import (
     fused_experts,
     fused_topk,
 )
-from vllm.model_executor.layers.fused_moe.activation import (
-    MoEActivation,
-)
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -196,7 +194,17 @@ def test_w8a8_block_fp8_fused_moe(
             a, w1, w2, topk_weights, topk_ids, quant_config=quant_config
         )
 
-        m_out = m_fused_moe(a, w1, w2, topk_weights, topk_ids)
+        m_out = m_fused_moe.apply(
+            a,
+            w1,
+            w2,
+            topk_weights,
+            topk_ids,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
+            global_num_experts=w1.shape[0],
+        )
 
     # 0.039 only needed for M >= 8192
     tol = 0.035 if M < 8192 else 0.039
@@ -278,6 +286,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
             w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            global_num_experts=E,
             activation=MoEActivation.SILU,
             apply_router_weight_on_input=False,
             expert_map=False,

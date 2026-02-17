@@ -258,6 +258,10 @@ def run_8_bit(
         "w2": moe_tensors.w2_q,  # type: ignore[union-attr]
         "topk_weights": topk_weights,
         "topk_ids": topk_ids,
+        "global_num_experts": moe_tensors.w1_q.shape[0],  # type: ignore[union-attr]
+        "activation": MoEActivation.SILU,
+        "expert_map": None,
+        "apply_router_weight_on_input": False,
     }
 
     num_experts = moe_tensors.w1.size(0)  # type: ignore[attr-defined]
@@ -282,7 +286,7 @@ def run_8_bit(
             ),
             inplace=False,
         )
-        return kernel(**kwargs)
+        return kernel.apply(**kwargs)
 
     assert num_local_experts is not None
     return run_with_expert_maps(
