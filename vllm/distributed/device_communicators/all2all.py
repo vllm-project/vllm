@@ -471,25 +471,20 @@ class DeepEPLLAll2AllManager(DeepEPAll2AllManagerBase):
         )
 
         assert num_rdma_bytes is not None
-        if current_platform.is_rocm():
-            # TODO: remove this if else statement, once ROCm DeepEP is updated with latest APIs.
-            return dict(
-                group=self.cpu_group,
-                num_nvl_bytes=num_nvl_bytes,
-                num_rdma_bytes=num_rdma_bytes,
-                low_latency_mode=True,
-                num_qps_per_rank=num_qps_per_rank,
-            )
-        else:
-            return dict(
-                group=self.cpu_group,
-                num_nvl_bytes=num_nvl_bytes,
-                num_rdma_bytes=num_rdma_bytes,
-                low_latency_mode=True,
-                num_qps_per_rank=num_qps_per_rank,
+        # TODO: remove platform-specific logic once ROCm DeepEP is updated with latest APIs.
+        kwargs = dict(
+            group=self.cpu_group,
+            num_nvl_bytes=num_nvl_bytes,
+            num_rdma_bytes=num_rdma_bytes,
+            low_latency_mode=True,
+            num_qps_per_rank=num_qps_per_rank,
+        )
+        if not current_platform.is_rocm():
+            kwargs.update(
                 allow_nvlink_for_low_latency_mode=True,
                 allow_mnnvl=envs.VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL,
             )
+        return kwargs
 
     def get_handle(self, kwargs):
         """
