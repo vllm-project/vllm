@@ -18,6 +18,11 @@ else:
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
 
+    # Whether this method creates weights on meta device for online quantization.
+    # When True, weights are created on meta device and quantized layer-wise
+    # in process_weights_after_loading, reducing peak memory during loading.
+    uses_meta_device: bool = False
+
     @abstractmethod
     def create_weights(
         self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
@@ -63,11 +68,6 @@ def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> 
 
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
-
-    # Whether this quant method supports online quantization with meta device.
-    # When True, weights can be created on meta device and quantized layer-wise
-    # in process_weights_after_loading, reducing peak memory during loading.
-    supports_online_meta_device: bool = False
 
     def __init__(self):
         super().__init__()

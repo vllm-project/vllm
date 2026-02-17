@@ -109,8 +109,6 @@ logger = init_logger(__name__)
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
 
-    supports_online_meta_device: bool = True
-
     def __init__(
         self,
         is_checkpoint_fp8_serialized: bool = False,
@@ -528,6 +526,8 @@ class Fp8LinearMethod(LinearMethodBase):
 class Fp8OnlineLinearMethod(Fp8LinearMethod):
     """Online version of Fp8LinearMethod, loads the fp16/bf16 checkpoint
     and quantized the weights during loading."""
+
+    uses_meta_device: bool = True
 
     def create_weights(
         self,
@@ -1040,6 +1040,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
     Args:
         quant_config: The quantization config.
     """
+
+    uses_meta_device: bool = True
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         super().__init__(quant_config, layer)
