@@ -271,6 +271,7 @@ def benchmark_config(
                     moe_config=moe_config,
                     quant_config=quant_config,
                 ),
+                inplace=not disable_inplace(),
             )
 
         with override_config(config):
@@ -280,8 +281,16 @@ def benchmark_config(
 
             inplace = not disable_inplace()
             if use_deep_gemm:
-                return deep_gemm_experts(
-                    x, w1, w2, topk_weights, topk_ids, inplace=inplace
+                return deep_gemm_experts.apply(
+                    x,
+                    w1,
+                    w2,
+                    topk_weights,
+                    topk_ids,
+                    activation=MoEActivation.SILU,
+                    global_num_experts=num_experts,
+                    apply_router_weight_on_input=False,
+                    expert_map=False,
                 )
             return fused_experts(
                 x,

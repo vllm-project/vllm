@@ -14,6 +14,9 @@ import torch
 # vLLM fused-expert reference (Triton fallback + DeepGEMM option)
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -136,12 +139,16 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
     )
 
     # DeepGemm
-    out_deepgemm = deep_gemm_experts(
+    out_deepgemm = deep_gemm_experts.apply(
         hidden_states=tokens_bf16,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
+        global_num_experts=num_experts,
+        activation=MoEActivation.SILU,
+        apply_router_weight_on_input=False,
+        expert_map=False,
     )
     diff = calc_diff(out_deepgemm, out_triton)
     assert diff < 0.001, f"Diff exceeded 1%: {diff}"
