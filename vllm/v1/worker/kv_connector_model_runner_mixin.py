@@ -53,7 +53,6 @@ class CrossLayerGroup:
     tensor: torch.Tensor
     layer_names: list[str]
     page_size_bytes: int
-    dtype: torch.dtype
     spec: KVCacheSpec
     backend: type[AttentionBackend]
 
@@ -424,7 +423,6 @@ class KVConnectorModelRunnerMixin:
                     tensor=cross_layer_tensor,
                     layer_names=group_layer_names,
                     page_size_bytes=page_size,
-                    dtype=torch.int8,
                     spec=rep_spec,
                     backend=rep_backend,
                 )

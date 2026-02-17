@@ -185,7 +185,7 @@ def test_mamba_allocation():
         kernel_block_sizes=[BLOCK_SIZE],
     )
 
-    assert len(groups) == 1 and groups[0].dtype == torch.int8
+    assert len(groups) == 1
     for n in ["m.0", "m.1"]:
         assert isinstance(kv[n], list) and len(kv[n]) == 2
         assert kv[n][0].shape == (nb, 4, 2)
