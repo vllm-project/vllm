@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Final, Union
 
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -182,7 +182,6 @@ class SimpleContext(ConversationContext):
         self.all_turn_metrics = []
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
-        self.output_messages: list[ResponseRawMessageAndToken] = []
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -208,12 +207,22 @@ class SimpleContext(ConversationContext):
                     tokens=output_prompt_token_ids,
                 )
             )
-        self.output_messages.append(
+
+    @property
+    def output_messages(self) -> list[ResponseRawMessageAndToken]:
+        """Return consolidated output as a single message.
+
+        In streaming mode, text and tokens are accumulated across many deltas.
+        This property returns them as a single entry rather than one per delta.
+        """
+        if not self._accumulated_text and not self._accumulated_token_ids:
+            return []
+        return [
             ResponseRawMessageAndToken(
-                message=delta_output.text,
-                tokens=delta_output.token_ids,
+                message=self._accumulated_text,
+                tokens=list(self._accumulated_token_ids),
             )
-        )
+        ]
 
     @property
     def final_output(self) -> RequestOutput | None:
@@ -295,7 +304,7 @@ class ParsableContext(ConversationContext):
 
         self.tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         self.chat_template = chat_template
-        self.chat_template_content_format = chat_template_content_format
+        self.chat_template_content_format: Final = chat_template_content_format
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
