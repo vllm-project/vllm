@@ -303,6 +303,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
                 num_expert_group=num_expert_group,
                 e_score_correction_bias=e_score_correction_bias,
                 routed_scaling_factor=routed_scaling_factor,
+                topk_group=topk_group,
             )
         elif self.quant_config.is_per_tensor:
             return self._apply_per_tensor(
