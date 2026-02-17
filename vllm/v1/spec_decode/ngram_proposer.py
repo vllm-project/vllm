@@ -55,6 +55,7 @@ class NgramProposer:
         # Trigger Numba JIT compilation for N-gram proposer.
         # This usually takes less than 1 second.
         self.propose(
+            None,
             [[]] * 1024,
             np.zeros(1024, dtype=np.int32),
             np.zeros((1024, self.max_model_len), dtype=np.int32),
@@ -140,7 +141,7 @@ class NgramProposer:
     ) -> list[list[int]]:
         # Use optimal num speculative tokens if provided
         if optimal_num_speculative_tokens is not None:
-            self.num_speculative_tokens = optimal_num_speculative_tokens
+            self.k = optimal_num_speculative_tokens
 
         # find which requests need ngram proposals
         valid_ngram_requests = []
