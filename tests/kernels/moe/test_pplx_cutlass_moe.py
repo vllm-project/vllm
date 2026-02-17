@@ -183,14 +183,16 @@ def pplx_cutlass_moe(
         chunk_by_rank(topk_ids, rank, world_size).to(torch.uint32).to(device)
     )
 
-    out = fused_cutlass_experts(
+    out = fused_cutlass_experts.apply(
         a_chunk,
         chunk_by_rank(w1, rank, world_size),
         chunk_by_rank(w2, rank, world_size),
         chunk_topk_weight,
         chunk_topk_ids,
+        activation=MoEActivation.SILU,
         global_num_experts=num_experts,
         expert_map=None,  # TODO
+        apply_router_weight_on_input=False,
     )
 
     torch.cuda.synchronize()
