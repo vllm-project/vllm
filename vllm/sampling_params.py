@@ -4,13 +4,12 @@
 
 import copy
 import json
-from dataclasses import field
+from dataclasses import dataclass, field
 from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Annotated, Any
 
 import msgspec
-from pydantic.dataclasses import dataclass
 
 from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
