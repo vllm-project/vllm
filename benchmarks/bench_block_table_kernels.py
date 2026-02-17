@@ -8,15 +8,15 @@ Measures:
 5. fused gather+slot_mappings (1 kernel launch)
 6. Total scheduling overhead per step
 """
+
 import argparse
 import json
 import os
 import sys
-import time
 
 import torch
 
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from vllm.v1.worker.gpu.block_table import BlockTables
 
@@ -60,9 +60,12 @@ def benchmark_block_table_ops(
     # Create query_start_loc (uniform distribution)
     tokens_per_req = num_tokens // num_reqs
     query_start_loc = torch.arange(
-        0, num_reqs * tokens_per_req + 1, tokens_per_req,
-        dtype=torch.int32, device=device
-    )[:num_reqs + 1]
+        0,
+        num_reqs * tokens_per_req + 1,
+        tokens_per_req,
+        dtype=torch.int32,
+        device=device,
+    )[: num_reqs + 1]
     query_start_loc[-1] = num_tokens
 
     # Create positions (ensure non-negative)
@@ -80,8 +83,7 @@ def benchmark_block_table_ops(
     # First stage some writes
     for req_idx in range(min(num_reqs, 32)):
         new_blocks = tuple(
-            [req_idx * max_blocks + max_blocks - 1]
-            for _ in range(num_kv_cache_groups)
+            [req_idx * max_blocks + max_blocks - 1] for _ in range(num_kv_cache_groups)
         )
         bt.append_block_ids(req_idx, new_blocks, overwrite=False)
 
@@ -114,7 +116,7 @@ def benchmark_block_table_ops(
 
     torch.cuda.synchronize()
     times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
-    results['apply_staged_writes_ms'] = sum(times) / len(times)
+    results["apply_staged_writes_ms"] = sum(times) / len(times)
 
     # Ensure writes are applied before gather/slot tests
     bt.apply_staged_writes()
@@ -134,7 +136,7 @@ def benchmark_block_table_ops(
 
     torch.cuda.synchronize()
     times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
-    results['gather_block_tables_ms'] = sum(times) / len(times)
+    results["gather_block_tables_ms"] = sum(times) / len(times)
 
     # Benchmark compute_slot_mappings
     for _ in range(num_warmup):
@@ -151,7 +153,7 @@ def benchmark_block_table_ops(
 
     torch.cuda.synchronize()
     times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
-    results['compute_slot_mappings_ms'] = sum(times) / len(times)
+    results["compute_slot_mappings_ms"] = sum(times) / len(times)
 
     # Benchmark gather + compute_slot_mappings combined (separate kernels)
     for _ in range(num_warmup):
@@ -170,12 +172,11 @@ def benchmark_block_table_ops(
 
     torch.cuda.synchronize()
     times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
-    results['gather_plus_slots_ms'] = sum(times) / len(times)
+    results["gather_plus_slots_ms"] = sum(times) / len(times)
 
     # Benchmark fused gather+slot_mappings (single kernel)
     for _ in range(num_warmup):
-        bt.gather_and_compute_slot_mappings(idx_mapping, query_start_loc,
-                                            positions)
+        bt.gather_and_compute_slot_mappings(idx_mapping, query_start_loc, positions)
 
     torch.cuda.synchronize()
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_iters)]
@@ -183,48 +184,73 @@ def benchmark_block_table_ops(
 
     for i in range(num_iters):
         start_events[i].record()
-        bt.gather_and_compute_slot_mappings(idx_mapping, query_start_loc,
-                                            positions)
+        bt.gather_and_compute_slot_mappings(idx_mapping, query_start_loc, positions)
         end_events[i].record()
 
     torch.cuda.synchronize()
     times = [s.elapsed_time(e) for s, e in zip(start_events, end_events)]
-    results['fused_gather_slots_ms'] = sum(times) / len(times)
+    results["fused_gather_slots_ms"] = sum(times) / len(times)
 
-    results['savings_ms'] = (results['gather_plus_slots_ms']
-                             - results['fused_gather_slots_ms'])
-    results['savings_pct'] = (results['savings_ms']
-                              / results['gather_plus_slots_ms'] * 100
-                              if results['gather_plus_slots_ms'] > 0 else 0)
+    results["savings_ms"] = (
+        results["gather_plus_slots_ms"] - results["fused_gather_slots_ms"]
+    )
+    results["savings_pct"] = (
+        results["savings_ms"] / results["gather_plus_slots_ms"] * 100
+        if results["gather_plus_slots_ms"] > 0
+        else 0
+    )
 
-    results['total_separate_ms'] = (results['apply_staged_writes_ms']
-                                    + results['gather_plus_slots_ms'])
-    results['total_fused_ms'] = (results['apply_staged_writes_ms']
-                                 + results['fused_gather_slots_ms'])
+    results["total_separate_ms"] = (
+        results["apply_staged_writes_ms"] + results["gather_plus_slots_ms"]
+    )
+    results["total_fused_ms"] = (
+        results["apply_staged_writes_ms"] + results["fused_gather_slots_ms"]
+    )
 
     return results
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Benchmark block table kernels")
-    parser.add_argument("--output", type=str, default=None,
-                        help="Path to save JSON results")
+    parser.add_argument(
+        "--output", type=str, default=None, help="Path to save JSON results"
+    )
     args = parser.parse_args()
 
     print("Block Table Kernel Benchmark")
     print("=" * 60)
 
     configs = [
-        {"num_kv_cache_groups": 1, "num_reqs": 32, "num_tokens": 512,
-         "label": "small_batch_1grp"},
-        {"num_kv_cache_groups": 1, "num_reqs": 128, "num_tokens": 2048,
-         "label": "medium_batch_1grp"},
-        {"num_kv_cache_groups": 1, "num_reqs": 256, "num_tokens": 8192,
-         "label": "large_batch_1grp"},
-        {"num_kv_cache_groups": 2, "num_reqs": 128, "num_tokens": 2048,
-         "label": "medium_batch_2grp"},
-        {"num_kv_cache_groups": 4, "num_reqs": 128, "num_tokens": 2048,
-         "label": "medium_batch_4grp"},
+        {
+            "num_kv_cache_groups": 1,
+            "num_reqs": 32,
+            "num_tokens": 512,
+            "label": "small_batch_1grp",
+        },
+        {
+            "num_kv_cache_groups": 1,
+            "num_reqs": 128,
+            "num_tokens": 2048,
+            "label": "medium_batch_1grp",
+        },
+        {
+            "num_kv_cache_groups": 1,
+            "num_reqs": 256,
+            "num_tokens": 8192,
+            "label": "large_batch_1grp",
+        },
+        {
+            "num_kv_cache_groups": 2,
+            "num_reqs": 128,
+            "num_tokens": 2048,
+            "label": "medium_batch_2grp",
+        },
+        {
+            "num_kv_cache_groups": 4,
+            "num_reqs": 128,
+            "num_tokens": 2048,
+            "label": "medium_batch_4grp",
+        },
     ]
 
     all_results = {}
@@ -236,12 +262,11 @@ if __name__ == "__main__":
         results = benchmark_block_table_ops(**cfg)
         all_results[label] = {**results, **cfg}
         for k, v in results.items():
-            print(f"  {k}: {v:.4f} ms" if isinstance(v, float) else
-                  f"  {k}: {v}")
+            print(f"  {k}: {v:.4f} ms" if isinstance(v, float) else f"  {k}: {v}")
 
     if args.output:
         os.makedirs(os.path.dirname(args.output), exist_ok=True)
-        with open(args.output, 'w') as f:
+        with open(args.output, "w") as f:
             json.dump(all_results, f, indent=2)
         print(f"\nResults saved to {args.output}")
 
@@ -251,9 +276,11 @@ if __name__ == "__main__":
     print("|--------|--------------|------------|-------------|-------------|")
     for key in sorted(all_results.keys()):
         r = all_results[key]
-        sep = r['gather_plus_slots_ms']
-        fused = r['fused_gather_slots_ms']
-        savings_us = r['savings_ms'] * 1000
-        savings_pct = r['savings_pct']
-        print(f"| {key:25s} | {sep:.4f} | {fused:.4f} "
-              f"| {savings_us:>8.1f} | {savings_pct:>8.1f}% |")
+        sep = r["gather_plus_slots_ms"]
+        fused = r["fused_gather_slots_ms"]
+        savings_us = r["savings_ms"] * 1000
+        savings_pct = r["savings_pct"]
+        print(
+            f"| {key:25s} | {sep:.4f} | {fused:.4f} "
+            f"| {savings_us:>8.1f} | {savings_pct:>8.1f}% |"
+        )

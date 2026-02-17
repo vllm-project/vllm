@@ -164,9 +164,7 @@ class BlockTables:
             GATHER_BLOCK_SIZE=1024,  # type: ignore
             SLOT_BLOCK_SIZE=1024,  # type: ignore
         )
-        block_tables = tuple(
-            bt[:num_reqs] for bt in self.input_block_tables
-        )
+        block_tables = tuple(bt[:num_reqs] for bt in self.input_block_tables)
         slot_mappings = self.slot_mappings[:, :num_tokens]
         return block_tables, slot_mappings
 
@@ -178,19 +176,19 @@ class BlockTables:
 @triton.jit
 def _fused_gather_and_slot_mappings_kernel(
     # Gather parameters
-    batch_idx_to_req_idx,     # [batch_size]
-    src_block_table_ptrs,     # [num_kv_cache_groups]
-    dst_block_table_ptrs,     # [num_kv_cache_groups]
-    block_table_strides,      # [num_kv_cache_groups]
-    num_blocks_ptr,           # [num_kv_cache_groups, max_num_reqs]
+    batch_idx_to_req_idx,  # [batch_size]
+    src_block_table_ptrs,  # [num_kv_cache_groups]
+    dst_block_table_ptrs,  # [num_kv_cache_groups]
+    block_table_strides,  # [num_kv_cache_groups]
+    num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
     num_blocks_stride,
     # Slot mapping parameters
     num_tokens,
     max_num_tokens,
-    query_start_loc,          # [num_reqs + 1]
-    pos,                      # [num_tokens]
-    block_sizes,              # [num_kv_cache_groups]
-    slot_mappings_ptr,        # [num_kv_cache_groups, max_num_tokens]
+    query_start_loc,  # [num_reqs + 1]
+    pos,  # [num_tokens]
+    block_sizes,  # [num_kv_cache_groups]
+    slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
     # Constants
     PAD_ID: tl.constexpr,
@@ -206,8 +204,7 @@ def _fused_gather_and_slot_mappings_kernel(
     if batch_idx == tl.num_programs(1) - 1:
         for i in range(num_tokens, max_num_tokens, SLOT_BLOCK_SIZE):
             offset = i + tl.arange(0, SLOT_BLOCK_SIZE)
-            tl.store(slot_mapping_ptr + offset, PAD_ID,
-                     mask=offset < max_num_tokens)
+            tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < max_num_tokens)
         return
 
     req_idx = tl.load(batch_idx_to_req_idx + batch_idx)
@@ -238,9 +235,7 @@ def _fused_gather_and_slot_mappings_kernel(
         offset = i + tl.arange(0, SLOT_BLOCK_SIZE)
         positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
         block_indices = positions // block_size
-        block_numbers = tl.load(
-            src_block_table_ptr + req_idx * stride + block_indices
-        )
+        block_numbers = tl.load(src_block_table_ptr + req_idx * stride + block_indices)
         slot_ids = block_numbers * block_size + positions % block_size
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)
 
