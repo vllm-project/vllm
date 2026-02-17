@@ -43,7 +43,7 @@ TEXT_DOCUMENTS = [
 ]
 
 DTYPE = "half"
-GPU_MEMORY_UTILIZATION = 0.5
+GPU_MEMORY_UTILIZATION = 0.7
 
 
 def _make_base64_image(
