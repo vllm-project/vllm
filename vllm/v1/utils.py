@@ -290,13 +290,6 @@ def wait_for_completion_or_failure(
     except Exception as e:
         logger.exception("Exception occurred while running API servers: %s", str(e))
         raise
-    finally:
-        logger.info("Terminating remaining processes ...")
-        api_server_manager.shutdown()
-        if coordinator:
-            coordinator.shutdown()
-        if engine_manager:
-            engine_manager.shutdown()
 
 
 # Note(rob): shutdown function cannot be a bound method,

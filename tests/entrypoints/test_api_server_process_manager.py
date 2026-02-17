@@ -111,6 +111,8 @@ def test_wait_for_completion_or_failure(api_server_args):
                 wait_for_completion_or_failure(api_server_manager=manager)
             except Exception as e:
                 result["exception"] = e
+            finally:
+                manager.shutdown()
 
         # Start a thread to run wait_for_completion_or_failure
         wait_thread = threading.Thread(target=run_with_exception_capture, daemon=True)
@@ -174,7 +176,10 @@ def test_normal_completion(api_server_args):
         # since all processes have already
         # terminated, it should return immediately
         # with no error
-        wait_for_completion_or_failure(api_server_manager=manager)
+        try:
+            wait_for_completion_or_failure(api_server_manager=manager)
+        finally:
+            manager.shutdown()
 
     finally:
         # Clean up just in case
@@ -226,6 +231,9 @@ def test_external_process_monitoring(api_server_args):
                 )
             except Exception as e:
                 result["exception"] = e
+            finally:
+                manager.shutdown()
+                mock_coordinator.shutdown()
 
         # Start a thread to run wait_for_completion_or_failure
         wait_thread = threading.Thread(target=run_with_exception_capture, daemon=True)
