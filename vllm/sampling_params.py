@@ -48,8 +48,10 @@ class StructuredOutputsParams:
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         # CAUTION: Should only be set by Processor._validate_structured_output
-        self._backend: str | None = None
-        self._backend_was_auto: bool = False
+        if not hasattr(self, "_backend"):
+            self._backend: str | None = None
+        if not hasattr(self, "_backend_was_auto"):
+            self._backend_was_auto: bool = False
 
         count = sum(
             [
