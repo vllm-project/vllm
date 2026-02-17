@@ -648,19 +648,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
             or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
         ):
-            layer.gemm1_alpha = Parameter(
-                torch.tensor([1.702] * self.num_experts, dtype=torch.float32).cuda(),
-                requires_grad=False,
-            )
-            layer.gemm1_beta = Parameter(
-                torch.tensor([1.0] * self.num_experts, dtype=torch.float32).cuda(),
-                requires_grad=False,
-            )
-            layer.gemm1_clamp_limit = Parameter(
-                torch.tensor([7.0] * self.num_experts, dtype=torch.float32).cuda(),
-                requires_grad=False,
-            )
-
             sf_block_size = 32  # mxfp4 block size
 
             # Common shape assertions
@@ -870,9 +857,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=layer.w2_bias,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                gemm1_alpha=layer.gemm1_alpha,
-                gemm1_beta=layer.gemm1_beta,
-                gemm1_clamp_limit=layer.gemm1_clamp_limit,
             )
         elif self.mxfp4_backend in [
             Mxfp4Backend.SM100_FI_MXFP4_BF16,
@@ -883,9 +867,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_bias=layer.w2_bias,
                 w1_scale=layer.w13_weight_scale,
                 w2_scale=layer.w2_weight_scale,
-                gemm1_alpha=layer.gemm1_alpha,
-                gemm1_beta=layer.gemm1_beta,
-                gemm1_clamp_limit=layer.gemm1_clamp_limit,
             )
         else:
             w1_scale = layer.w13_weight_scale
