@@ -218,11 +218,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 )
                 moe_state_dict["token_lora_mapping"] = token_lora_mapping
 
-                # Calculate w13 output shape and allocate buffer
+                # Calculate w13 output shape - must match intermediate tensor shape
                 top_k_num = curr_topk_ids.size(1)
-                N = 2 * layer.intermediate_size_per_partition
+                N = sum(b.shape[-2] for b in self.w13_lora_b_stacked)
                 lora_delta_w13 = torch.zeros(
-                    (num_tokens, top_k_num, N),  # Keep 3D shape for LoRA kernel!
+                    (num_tokens, top_k_num, N),
                     device=hidden_states.device,
                     dtype=hidden_states.dtype,
                 )
@@ -233,30 +233,29 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 lora_stream.wait_stream(current_stream())
                 # hidden_states.record_stream(self.lora_stream)
                 with torch.cuda.stream(lora_stream):
-                    result = func(*args, **kwargs)
+                    self.punica_wrapper.add_lora_fused_moe(
+                        lora_delta_w13,
+                        hidden_states,
+                        self.w13_lora_a_stacked,
+                        self.w13_lora_b_stacked,
+                        topk_weights,
+                        sorted_token_ids_lora.view(self.max_loras, -1)
+                        if sorted_token_ids_lora is not None
+                        else None,
+                        expert_ids_lora.view(self.max_loras, -1)
+                        if expert_ids_lora is not None
+                        else None,
+                        num_tokens_post_padded_lora,
+                        max_lora_rank,
+                        top_k,
+                        shrink_config,
+                        expand_config,
+                        self.adapter_enabled,
+                        fully_sharded=self.fully_sharded,
+                        token_lora_mapping=token_lora_mapping,
+                    )
 
-                self.punica_wrapper.add_lora_fused_moe(
-                    lora_delta_w13,
-                    hidden_states,
-                    self.w13_lora_a_stacked,
-                    self.w13_lora_b_stacked,
-                    topk_weights,
-                    sorted_token_ids_lora.view(self.max_loras, -1)
-                    if sorted_token_ids_lora is not None
-                    else None,
-                    expert_ids_lora.view(self.max_loras, -1)
-                    if expert_ids_lora is not None
-                    else None,
-                    num_tokens_post_padded_lora,
-                    max_lora_rank,
-                    top_k,
-                    shrink_config,
-                    expand_config,
-                    self.adapter_enabled,
-                    fully_sharded=True,
-                    token_lora_mapping=token_lora_mapping,
-                )
-
+                result = func(*args, **kwargs)
                 # Launch base MoE (runs in parallel with LoRA!)
                 # result = func(*args, **kwargs)
                 current_stream().wait_stream(lora_stream)
