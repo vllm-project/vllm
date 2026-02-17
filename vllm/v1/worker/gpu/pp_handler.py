@@ -15,6 +15,9 @@ class PPHandler:
     Only instantiated when PP is enabled (pp_size > 1).
     """
 
+    def __init__(self, device: torch.device):
+        self.device = device
+
     def maybe_broadcast_sampled_tokens(
         self,
         sampler_output: SamplerOutput,
@@ -59,7 +62,6 @@ class PPHandler:
     def maybe_receive_sampled_tokens(
         self,
         num_reqs: int,
-        device: torch.device,
         max_sample_len: int = 1,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
         """Receive sampled tokens broadcast by the last PP rank.
@@ -84,7 +86,7 @@ class PPHandler:
             return None
 
         sampled_tokens = torch.empty(
-            num_reqs, max_sample_len, dtype=torch.int64, device=device
+            num_reqs, max_sample_len, dtype=torch.int64, device=self.device
         )
         torch.distributed.broadcast(
             sampled_tokens,
@@ -93,27 +95,16 @@ class PPHandler:
         )
         # NOTE: num_sampled/num_rejected are only needed
         # for speculative decoding.
-        num_sampled = torch.empty(num_reqs, dtype=torch.int32, device=device)
+        num_sampled = torch.empty(num_reqs, dtype=torch.int32, device=self.device)
         torch.distributed.broadcast(
             num_sampled,
             src=pp.last_rank,
             group=pp.device_group,
         )
-        num_rejected = torch.empty(num_reqs, dtype=torch.int32, device=device)
+        num_rejected = torch.empty(num_reqs, dtype=torch.int32, device=self.device)
         torch.distributed.broadcast(
             num_rejected,
             src=pp.last_rank,
             group=pp.device_group,
         )
         return sampled_tokens, num_sampled, num_rejected
-
-
-def get_pp_handler(parallel_config) -> PPHandler:
-    """Factory function to create PPHandler.
-
-    Must only be called when PP is enabled (pp_size > 1).
-    """
-    assert parallel_config.pipeline_parallel_size > 1, (
-        "PPHandler should not be created when pipeline parallelism is disabled."
-    )
-    return PPHandler()
