@@ -227,7 +227,7 @@ class LLMEngine:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         prompt_text: str | None = None,
-    ) -> None:
+    ) -> str:
         # Validate the request_id type.
         if not isinstance(request_id, str):
             raise TypeError(f"request_id must be a string, got {type(request_id)}")
@@ -257,6 +257,8 @@ class LLMEngine:
 
         self.input_processor.assign_request_id(request)
 
+        req_id = request.request_id
+
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
@@ -267,7 +269,7 @@ class LLMEngine:
             self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
-            return
+            return req_id
 
         # Fan out child requests (for n>1).
         parent_req = ParentRequest(request)
@@ -283,6 +285,8 @@ class LLMEngine:
             )
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
+
+        return req_id
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:

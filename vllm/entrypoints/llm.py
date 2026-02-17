@@ -1962,7 +1962,7 @@ class LLM:
                 dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
             )
 
-        self.llm_engine.add_request(
+        return self.llm_engine.add_request(
             request_id,
             prompt,
             params,
@@ -1970,8 +1970,6 @@ class LLM:
             tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
-
-        return request_id
 
     def _run_engine(
         self,
