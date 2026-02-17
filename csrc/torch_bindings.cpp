@@ -580,6 +580,16 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "-> Tensor");
   ops.impl("gptq_gemm", torch::kCUDA, &gptq_gemm);
 
+  // Fused MoE GPTQ GEMM using exllama 4-bit kernel with expert routing.
+  ops.def(
+      "fused_moe_exllama_gemm(Tensor a, Tensor b_q_weight, "
+      "Tensor b_gptq_qzeros, Tensor b_gptq_scales, Tensor! c, "
+      "Tensor sorted_token_ids, Tensor expert_ids, "
+      "Tensor topk_weights, "
+      "int top_k, bool mul_routed_weight, "
+      "int block_size_m) -> ()");
+  ops.impl("fused_moe_exllama_gemm", torch::kCUDA, &fused_moe_exllama_gemm);
+
   // Post processing for GPTQ.
   ops.def("gptq_shuffle(Tensor! q_weight, Tensor q_perm, int bit) -> ()");
   ops.impl("gptq_shuffle", torch::kCUDA, &gptq_shuffle);
