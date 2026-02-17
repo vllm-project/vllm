@@ -20,7 +20,7 @@ import zmq
 import zmq.asyncio
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import MultiModalTensorIpc
+from vllm.config.multimodal import MMTensorIPC
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -540,7 +540,7 @@ class MPClient(EngineCoreClient):
 
             # Serialization setup with tensor queues for multimodal tensor IPC.
             # Get IPC config from multimodal_config, falling back to default
-            multimodal_tensor_ipc: MultiModalTensorIpc = "direct_rpc"  # Default
+            multimodal_tensor_ipc: MMTensorIPC = "direct_rpc"  # Default
             if vllm_config.model_config.multimodal_config is not None:
                 multimodal_tensor_ipc = (
                     vllm_config.model_config.multimodal_config.multimodal_tensor_ipc
