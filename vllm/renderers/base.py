@@ -51,7 +51,7 @@ if TYPE_CHECKING:
         MultiModalInputs,
         MultiModalUUIDDict,
     )
-    from vllm.multimodal.parse import ModalityDataItems, MultiModalDataItems
+    from vllm.multimodal.parse import MultiModalDataItems
     from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
@@ -473,14 +473,9 @@ class BaseRenderer(ABC, Generic[_T]):
         modalities = mm_data.keys() | mm_uuids.keys()
 
         for modality in modalities:
-            data_items: ModalityDataItems | list[Any] = mm_items.get(modality) or []
+            data_items = mm_items.get(modality) or list[Any]()
 
-            uuid_items_raw: MultiModalUUIDDict | list[str] | str = (
-                mm_uuids.get(modality) or []
-            )
-            uuid_items = (
-                [uuid_items_raw] if isinstance(uuid_items_raw, str) else uuid_items_raw
-            )
+            uuid_items = mm_uuids.get(modality) or list[str | None]()
             if isinstance(uuid_items, str):
                 uuid_items = [uuid_items]
 
