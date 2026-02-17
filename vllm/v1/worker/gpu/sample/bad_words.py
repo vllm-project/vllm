@@ -6,24 +6,17 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.states import RequestState
 
 MAX_BAD_WORDS_TOTAL_TOKENS = 1024  # Max total tokens for all bad words per request
 MAX_NUM_BAD_WORDS = 128  # Max number of bad words per request
 
 
 class BadWordsState:
-    def __init__(
-        self,
-        all_token_ids: torch.Tensor,
-        prompt_len: torch.Tensor,
-        total_len: torch.Tensor,
-    ):
-        self.all_token_ids = all_token_ids
-        self.prompt_len = prompt_len
-        self.total_len = total_len
-
-        self.max_num_reqs = prompt_len.shape[0]
-        self.device = prompt_len.device
+    def __init__(self, req_states: RequestState):
+        self.req_states = req_states
+        self.max_num_reqs = req_states.max_num_reqs
+        self.device = req_states.device
 
         # flattened bad word tokens: [max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS]
         self.bad_word_token_ids = StagedWriteTensor(
@@ -95,9 +88,9 @@ class BadWordsState:
             self.bad_word_token_ids.gpu,
             self.bad_word_offsets.gpu,
             self.num_bad_words.gpu,
-            self.all_token_ids,
-            self.prompt_len,
-            self.total_len,
+            self.req_states.all_token_ids.gpu,
+            self.req_states.prompt_len.gpu,
+            self.req_states.total_len.gpu,
             input_ids,
             expanded_local_pos,
             max_num_bad_words,
