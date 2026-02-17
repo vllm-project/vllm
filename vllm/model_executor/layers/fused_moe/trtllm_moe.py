@@ -29,6 +29,16 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
     ):
         super().__init__(moe_config, quant_config)
         self.max_capture_size = max_capture_size
+        self.num_experts = moe_config.num_local_experts
+        self.gemm1_alpha = torch.tensor(
+            [1.702] * self.num_experts, dtype=torch.float32, device=self.device
+        )
+        self.gemm1_beta = torch.tensor(
+            [1.0] * self.num_experts, dtype=torch.float32, device=self.device
+        )
+        self.gemm1_clamp_limit = torch.tensor(
+            [7.0] * self.num_experts, dtype=torch.float32, device=self.device
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
