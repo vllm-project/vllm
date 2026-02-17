@@ -568,7 +568,7 @@ class DefaultMoERunner(MoERunner):
 
         use_chunked_impl = self.use_dp_chunking
 
-        use_shared_experts_stream, hidden_states_clone = (
+        use_shared_experts_stream, shared_experts_input = (
             self._maybe_setup_shared_experts_stream(
                 hidden_states,
                 shared_input,
@@ -710,7 +710,7 @@ class DefaultMoERunner(MoERunner):
                     with torch.cuda.stream(self.shared_experts_stream):
                         # Note that hidden_states clone() is necessary here to avoid
                         # conflict with the main stream
-                        shared_output = self.shared_experts(hidden_states_clone)
+                        shared_output = self.shared_experts(shared_experts_input)
                     current_stream().wait_stream(self.shared_experts_stream)
 
                 final_hidden_states = (
