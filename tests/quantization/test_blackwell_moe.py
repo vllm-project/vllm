@@ -210,6 +210,13 @@ def test_nemotron_fp8_moe_flashinfer_throughput(monkeypatch: pytest.MonkeyPatch)
     )
 
 
+@pytest.mark.skip(
+    reason=(
+        "FP8 MoE backend FLASHINFER_TRTLLM does not support the "
+        "deployment configuration since kernel does not support "
+        "no act_and_mul MLP layer."
+    )
+)
 def test_nemotron_fp8_moe_flashinfer_latency(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", "latency")
