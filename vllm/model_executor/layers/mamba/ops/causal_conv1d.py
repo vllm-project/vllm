@@ -78,7 +78,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     # BLOCK_N elements along the feature-dimension (channel)
     idx_feats = tl.program_id(1) * BLOCK_N + tl.arange(0, BLOCK_N)
 
-    if idx_seq == pad_slot_id:
+    if idx_seq < 0:
         return
 
     sequence_start_index = tl.load(query_start_loc_ptr + idx_seq)
@@ -134,7 +134,7 @@ def _causal_conv1d_fwd_kernel(  # continuous batching
     ).to(tl.int64)
 
     if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
+        if conv_states_input_coord < 0:
             # not processing as this is not the actual sequence
             return
     conv_states_base = (
@@ -812,7 +812,7 @@ def _causal_conv1d_update_kernel(
     ).to(tl.int64)
 
     if USE_PAD_SLOT:  # noqa
-        if conv_states_input_coord == pad_slot_id:
+        if conv_states_input_coord < 0:
             # not processing as this is not the actual sequence
             return
 
