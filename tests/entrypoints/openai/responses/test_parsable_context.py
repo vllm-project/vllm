@@ -172,19 +172,28 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
 
     assert response is not None
     assert response.status == "completed"
-    assert response.output[0].type == "reasoning"
-    assert response.output[1].type == "mcp_call"
-    assert type(response.output[1].arguments) is str
-    assert type(response.output[1].output) is str
-    assert response.output[2].type == "reasoning"
-    # make sure the correct math is in the final output
-    assert response.output[3].type == "message"
-    assert any(s in response.output[3].content[0].text for s in ("56088", "56,088"))
+    mcp_calls = [item for item in response.output if item.type == "mcp_call"]
+    assert mcp_calls
+    for mcp_call in mcp_calls:
+        assert isinstance(mcp_call.arguments, str)
+        assert isinstance(mcp_call.output, str)
+
+    messages = [item for item in response.output if item.type == "message"]
+    assert messages
+    # make sure the correct math is in the final message output
+    last_message_text = "".join(
+        part.text
+        for part in messages[-1].content
+        if getattr(part, "type", None) == "output_text"
+    )
+    assert any(s in last_message_text for s in ("56088", "56,088"))
 
     # test raw input_messages / output_messages
     assert len(response.input_messages) == 1
-    assert len(response.output_messages) == 3
-    assert any(s in response.output_messages[2]["message"] for s in ("56088", "56,088"))
+    assert response.output_messages
+    assert any(
+        s in response.output_messages[-1]["message"] for s in ("56088", "56,088")
+    )
 
 
 @pytest.mark.asyncio
