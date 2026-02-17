@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     mxfp4_mxfp8_moe_quant_config,
@@ -757,25 +760,23 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     w2_scales_interleaved, requires_grad=False
                 )
 
-            assert self.moe.dp_size == 1 or not self.moe.use_ep, (
-                "SM100_FI_MXFP4_MXFP8_CUTLASS"
-                "and SM90_FI_MXFP4_BF16 doesn't support DP/EP yet"
-            )
             # theses two kernels go through the `flashinfer_cutlass_fused_moe` path
             from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
                 FlashInferExperts,
             )
-            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                MoEPrepareAndFinalizeNoEP,
-            )
 
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.moe_quant_config is not None
+            prepare_finalize = maybe_make_prepare_finalize(
+                moe=self.moe,
+                quant_config=self.moe_quant_config,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                allow_new_interface=True,
+            )
+            assert prepare_finalize is not None
 
-            # Use moe_mk so supports_internal_mk returns True,
-            # preventing double dispatch in forward_impl
             self.moe_mk = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
+                prepare_finalize,
                 FlashInferExperts(
                     moe_config=self.moe,
                     quant_config=self.moe_quant_config,
