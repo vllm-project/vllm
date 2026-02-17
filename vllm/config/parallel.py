@@ -201,9 +201,9 @@ class ParallelConfig:
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None
-    """Backend to use for distributed model workers, either "uni"," ray" or "mp"
+    """Backend to use for distributed model workers, either "uni", "ray" or "mp"
     (multiprocessing), defaults to "mp". "uni" may be used for single-GPU deployment,
-     i.e. when the world size (pipeline parallel size * tensor parallel size) is 1.
+    i.e. when the world size (pipeline parallel size * tensor parallel size) is 1.
 
     Note that tpu only supports Ray for distributed inference."""
 
