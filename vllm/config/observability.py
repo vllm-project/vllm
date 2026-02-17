@@ -95,11 +95,17 @@ class ObservabilityConfig:
     def get_histogram_buckets(
         self, metric_name: str, default: list[float | int]
     ) -> list[float | int]:
-        """Return custom buckets for a metric if configured, else default."""
+        """Return custom buckets for a metric if configured, else default.
+
+        When multiple patterns match, the longest (most specific) pattern wins.
+        """
+        best_match: list[float | int] | None = None
+        best_len = -1
         for pattern, buckets in self.parsed_histogram_buckets.items():
-            if pattern in metric_name:
-                return buckets
-        return default
+            if pattern in metric_name and len(pattern) > best_len:
+                best_len = len(pattern)
+                best_match = buckets
+        return best_match if best_match is not None else default
 
     @cached_property
     def collect_model_forward_time(self) -> bool:

@@ -76,3 +76,13 @@ class TestHistogramBuckets:
         assert parsed["ttft"] == [0.01, 0.1]
         assert parsed["e2e"] == [1.0, 10.0]
         assert parsed["latency"] == [0.5, 5.0]
+
+    def test_longest_pattern_wins(self):
+        buckets = {
+            "latency": [0.5, 5.0],
+            "request_latency": [0.1, 1.0, 10.0],
+        }
+        config = ObservabilityConfig(histogram_buckets=json.dumps(buckets))
+        # "request_latency" is longer and more specific
+        result = config.get_histogram_buckets("e2e_request_latency_seconds", [1.0])
+        assert result == [0.1, 1.0, 10.0]
