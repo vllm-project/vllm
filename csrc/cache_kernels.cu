@@ -993,9 +993,8 @@ void launch_token_major_gather_cache(
     const int32_t num_tokens, const int32_t block_size,
     const int64_t block_table_stride, const int64_t cache_block_stride,
     const int64_t cache_entry_stride, const int64_t dst_entry_stride,
-    const float* scale, const int32_t* seq_starts,
-    const int32_t batch_dim, const int32_t block_table_width,
-    const int32_t cache_num_blocks) {
+    const float* scale, const int32_t* seq_starts, const int32_t batch_dim,
+    const int32_t block_table_width, const int32_t cache_num_blocks) {
   constexpr bool do_dequant = kv_dt != Fp8KVCacheDataType::kAuto;
   gather_cache<scalar_t, cache_t, kv_dt, true, do_dequant, ENTRY_SIZE, CTA_SIZE>
       <<<grid, block, 0, stream>>>(
@@ -1055,9 +1054,9 @@ static void gather_cache_token_major(
     TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
                 "seq_starts must be int32");
     int64_t batch_dim = block_table.size(0);
-    TORCH_CHECK(seq_starts.value().numel() >= batch_dim,
-                "seq_starts length (", seq_starts.value().numel(),
-                ") must be >= batch dimension (", batch_dim, ")");
+    TORCH_CHECK(seq_starts.value().numel() >= batch_dim, "seq_starts length (",
+                seq_starts.value().numel(), ") must be >= batch dimension (",
+                batch_dim, ")");
 #ifndef NDEBUG
     TORCH_CHECK(
         seq_starts.value().slice(0, 0, batch_dim).min().item<int32_t>() >= 0,
@@ -1078,10 +1077,8 @@ static void gather_cache_token_major(
               "src_cache and token_to_seq must be on the same device");
   TORCH_CHECK(src_cache.device() == scale.device(),
               "src_cache and scale must be on the same device");
-  TORCH_CHECK(scale.scalar_type() == torch::kFloat32,
-              "scale must be float32");
-  TORCH_CHECK(scale.numel() > 0,
-              "scale must have at least 1 element");
+  TORCH_CHECK(scale.scalar_type() == torch::kFloat32, "scale must be float32");
+  TORCH_CHECK(scale.numel() > 0, "scale must have at least 1 element");
   if (seq_starts.has_value()) {
     TORCH_CHECK(src_cache.device() == seq_starts.value().device(),
                 "src_cache and seq_starts must be on the same device");
@@ -1095,9 +1092,9 @@ static void gather_cache_token_major(
   // Validate token_to_seq values are in [0, batch_dim)
   {
     auto t2s = token_to_seq.narrow(0, 0, num_tokens);
-    TORCH_CHECK(t2s.min().item<int32_t>() >= 0 &&
-                t2s.max().item<int32_t>() < batch_dim,
-                "token_to_seq contains out-of-range batch ids");
+    TORCH_CHECK(
+        t2s.min().item<int32_t>() >= 0 && t2s.max().item<int32_t>() < batch_dim,
+        "token_to_seq contains out-of-range batch ids");
   }
 
   // Validate block_table width is sufficient for seq metadata
@@ -1105,8 +1102,8 @@ static void gather_cache_token_major(
     auto seq_lens = cu_seq_lens.slice(0, 1, batch_dim + 1) -
                     cu_seq_lens.slice(0, 0, batch_dim);
     auto starts = seq_starts.has_value()
-                    ? seq_starts.value().slice(0, 0, batch_dim)
-                    : torch::zeros_like(seq_lens);
+                      ? seq_starts.value().slice(0, 0, batch_dim)
+                      : torch::zeros_like(seq_lens);
     auto need_blocks = (starts + seq_lens + block_size - 1) / block_size;
     TORCH_CHECK(need_blocks.max().item<int32_t>() <= block_table.size(1),
                 "gather_cache metadata exceeds block_table width");
@@ -1249,9 +1246,9 @@ static void gather_cache_batch_major(
   if (seq_starts.has_value()) {
     TORCH_CHECK(seq_starts.value().dtype() == torch::kInt32,
                 "seq_starts must be int32");
-    TORCH_CHECK(seq_starts.value().numel() >= batch_size,
-                "seq_starts length (", seq_starts.value().numel(),
-                ") must be >= batch_size (", batch_size, ")");
+    TORCH_CHECK(seq_starts.value().numel() >= batch_size, "seq_starts length (",
+                seq_starts.value().numel(), ") must be >= batch_size (",
+                batch_size, ")");
 #ifndef NDEBUG
     TORCH_CHECK(
         seq_starts.value().slice(0, 0, batch_size).min().item<int32_t>() >= 0,
@@ -1291,8 +1288,8 @@ static void gather_cache_batch_major(
     auto seq_lens = cu_seq_lens.slice(0, 1, batch_size + 1) -
                     cu_seq_lens.slice(0, 0, batch_size);
     auto starts = seq_starts.has_value()
-                    ? seq_starts.value().slice(0, 0, batch_size)
-                    : torch::zeros_like(seq_lens);
+                      ? seq_starts.value().slice(0, 0, batch_size)
+                      : torch::zeros_like(seq_lens);
     auto need_blocks = (starts + seq_lens + block_size - 1) / block_size;
     TORCH_CHECK(need_blocks.max().item<int32_t>() <= block_table.size(1),
                 "gather_cache metadata exceeds block_table width");
@@ -1341,9 +1338,8 @@ void gather_cache(
                 "gather_cache expects token_to_seq to be int32");
     TORCH_CHECK(num_tokens <= token_to_seq.value().numel(),
                 "gather_cache expects num_tokens <= token_to_seq.numel()");
-    TORCH_CHECK(num_tokens <= dst.size(0),
-                "gather_cache: num_tokens (", num_tokens,
-                ") exceeds dst.size(0) (", dst.size(0), ")");
+    TORCH_CHECK(num_tokens <= dst.size(0), "gather_cache: num_tokens (",
+                num_tokens, ") exceeds dst.size(0) (", dst.size(0), ")");
     if (num_tokens == 0) {
       return;
     }

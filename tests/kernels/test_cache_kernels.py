@@ -32,7 +32,9 @@ def _is_debug_build() -> bool:
             torch.zeros((1, 4), dtype=torch.int32, device="cuda"),
             torch.tensor([0, 1], dtype=torch.int32, device="cuda"),
             torch.zeros((1,), dtype=torch.int32, device="cuda"),
-            1, -1, "auto",
+            1,
+            -1,
+            "auto",
             torch.tensor([1.0], dtype=torch.float32, device="cuda"),
             torch.tensor([-1], dtype=torch.int32, device="cuda"),
         )
@@ -166,7 +168,10 @@ def test_gather_cache_batch_major_zero_batches_noop():
 
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
 def test_gather_cache_batch_major_rejects_dtype_mismatch():
-    """Batch-major must reject src/dst with different dtypes (even same element_size)."""
+    """Batch-major must reject src/dst with different dtypes.
+
+    This must hold even when element_size matches.
+    """
     src = torch.randn((4, 16, 576), dtype=torch.float16, device="cuda")
     dst = torch.empty((2, 576), dtype=torch.bfloat16, device="cuda")
     bt = torch.zeros((1, 4), dtype=torch.int32, device="cuda")
@@ -206,9 +211,7 @@ def test_gather_cache_rejects_bad_seq_starts_length():
     bad_seq_starts = torch.tensor([0], dtype=torch.int32, device="cuda")
 
     with pytest.raises(RuntimeError, match="seq_starts length"):
-        ops.gather_cache(
-            src, dst, bt, cu, t2s, 3, -1, "auto", scale, bad_seq_starts
-        )
+        ops.gather_cache(src, dst, bt, cu, t2s, 3, -1, "auto", scale, bad_seq_starts)
 
 
 @requires_debug_build
@@ -357,9 +360,7 @@ def test_gather_cache_token_major_rejects_negative_seq_starts():
     bad_starts = torch.tensor([-1], dtype=torch.int32, device="cuda")
 
     with pytest.raises(RuntimeError, match="non-negative"):
-        ops.gather_cache(
-            src, dst, bt, cu, t2s, 2, -1, "auto", scale, bad_starts
-        )
+        ops.gather_cache(src, dst, bt, cu, t2s, 2, -1, "auto", scale, bad_starts)
 
 
 @requires_debug_build
@@ -389,9 +390,7 @@ def test_gather_cache_token_major_rejects_empty_scale():
     empty_scale = torch.empty(0, dtype=torch.float32, device="cuda")
 
     with pytest.raises(RuntimeError, match="at least 1 element"):
-        ops.gather_cache(
-            src, dst, bt, cu, t2s, 1, -1, "auto", empty_scale, None
-        )
+        ops.gather_cache(src, dst, bt, cu, t2s, 1, -1, "auto", empty_scale, None)
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 1, reason="Need CUDA device")
@@ -437,9 +436,7 @@ def test_gather_cache_token_major_kernel_guard_negative_seq_starts():
     bad_starts = torch.tensor([-1], dtype=torch.int32, device="cuda")
 
     try:
-        ops.gather_cache(
-            src, dst, bt, cu, t2s, 2, -1, "auto", scale, bad_starts
-        )
+        ops.gather_cache(src, dst, bt, cu, t2s, 2, -1, "auto", scale, bad_starts)
         torch.cuda.synchronize()
         # In release: kernel skips tokens with negative seq_starts.
     except RuntimeError:
