@@ -259,6 +259,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
+        assert routed_scaling_factor is None
+        assert not apply_router_weight_on_input
 
         # Prepare routing bias into kernel format.
         routing_bias = e_score_correction_bias
