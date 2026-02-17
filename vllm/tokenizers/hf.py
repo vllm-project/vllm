@@ -14,12 +14,51 @@ from .protocol import TokenizerLike
 HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
 
 
+def _ensure_tokenizer_compat(tokenizer: HfTokenizer) -> None:
+    # Limit the fallback to remote/custom tokenizers; avoid patching
+    # stock transformers tokenizer behavior.
+    if type(tokenizer).__module__.startswith("transformers."):
+        return
+
+    decoder = tokenizer.__dict__.get("_added_tokens_decoder")
+    if decoder is None:
+        with contextlib.suppress(Exception):
+            public_decoder = tokenizer.added_tokens_decoder
+            if isinstance(public_decoder, dict):
+                decoder = dict(public_decoder)
+    if decoder is None:
+        decoder = {}
+    tokenizer.__dict__["_added_tokens_decoder"] = decoder
+
+    if tokenizer.__dict__.get("_added_tokens_encoder") is None:
+        tokenizer.__dict__["_added_tokens_encoder"] = {
+            str(token): token_id for token_id, token in decoder.items()
+        }
+
+    tokenizer.__dict__.setdefault("_extra_special_tokens", [])
+
+    def _noop(*args, **kwargs):
+        return None
+
+    if (
+        getattr(type(tokenizer), "_update_trie", None) is None
+        and "_update_trie" not in tokenizer.__dict__
+    ):
+        tokenizer._update_trie = _noop
+    if (
+        getattr(type(tokenizer), "_update_total_vocab_size", None) is None
+        and "_update_total_vocab_size" not in tokenizer.__dict__
+    ):
+        tokenizer._update_total_vocab_size = _noop
+
+
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     """
     By default, transformers will recompute multiple tokenizer properties
     each time they are called, leading to a significant slowdown.
     This proxy caches these properties for faster access.
     """
+    _ensure_tokenizer_compat(tokenizer)
     cached_tokenizer = copy.copy(tokenizer)
 
     tokenizer_all_special_ids = tokenizer.all_special_ids
@@ -108,6 +147,8 @@ class CachedHfTokenizer(TokenizerLike):
                 raise RuntimeError(err_msg) from e
             else:
                 raise e
+
+        _ensure_tokenizer_compat(tokenizer)
 
         # The special_tokens in tokenizer should also be
         # controlled by do_lower_case in encoder_config

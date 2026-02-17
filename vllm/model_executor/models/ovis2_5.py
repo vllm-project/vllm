@@ -37,7 +37,10 @@ from vllm.multimodal.processing import (
 )
 from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
-from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
+from vllm.transformers_utils.processors.ovis2_5 import (
+    Ovis2_5Processor,
+    ensure_ovis2_5_special_tokens,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
@@ -407,11 +410,20 @@ class Ovis2_5MultiModalProcessor(BaseMultiModalProcessor[Ovis2_5ProcessingInfo])
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> list[PromptReplacement]:
         tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
+        missing_tokens = ensure_ovis2_5_special_tokens(tokenizer)
+        if missing_tokens:
+            raise ValueError(
+                "Missing Ovis2.5 special tokens in tokenizer vocab: "
+                f"{', '.join(sorted(missing_tokens))}"
+            )
+        image_placeholder_id = tokenizer.convert_tokens_to_ids(IMAGE_TOKEN)
+        video_placeholder_id = tokenizer.convert_tokens_to_ids(VIDEO_TOKEN)
+        if image_placeholder_id is None or video_placeholder_id is None:
+            raise ValueError("Failed to resolve Ovis2.5 image/video placeholder IDs")
 
         placeholder = {
-            "image": vocab[IMAGE_TOKEN],
-            "video": vocab[VIDEO_TOKEN],
+            "image": image_placeholder_id,
+            "video": video_placeholder_id,
         }
 
         def get_replacement_ovis(item_idx, modality: str):
