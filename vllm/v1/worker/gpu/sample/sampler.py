@@ -25,6 +25,7 @@ class Sampler:
         device: torch.device,
         all_token_ids: torch.Tensor,
         prompt_len: torch.Tensor,
+        prefill_len: torch.Tensor,
         total_len: torch.Tensor,
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
@@ -35,7 +36,9 @@ class Sampler:
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
 
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
-        self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
+        self.penalties_state = PenaltiesState(
+            all_token_ids, prompt_len, prefill_len, vocab_size
+        )
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(all_token_ids, prompt_len, total_len)
         self.num_speculative_tokens = num_speculative_tokens
@@ -48,16 +51,9 @@ class Sampler:
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
 
-    def apply_staged_writes(
-        self,
-        all_token_ids: torch.Tensor,
-        prefill_lens: np.ndarray,
-        prompt_lens: np.ndarray,
-    ) -> None:
+    def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
-        self.penalties_state.apply_staged_writes(
-            all_token_ids, prefill_lens, prompt_lens
-        )
+        self.penalties_state.apply_staged_writes()
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
 
