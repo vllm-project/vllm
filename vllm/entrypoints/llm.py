@@ -453,6 +453,9 @@ class LLM:
         ):
             return lora_request
 
+        # Track if the input was a single prompt to preserve return type
+        single_input = not isinstance(prompts, Sequence) or isinstance(prompts, str)
+
         if not isinstance(prompts, Sequence) or isinstance(prompts, str):
             prompts = [prompts]
 
@@ -462,7 +465,7 @@ class LLM:
             else lora_request
         )
 
-        return [
+        resolved_loras = [
             self._resolve_single_prompt_mm_lora(
                 prompt,
                 opt_lora_req,
@@ -470,6 +473,11 @@ class LLM:
             )
             for prompt, opt_lora_req in zip(prompts, optional_loras)
         ]
+
+        # If input was single, return single; otherwise return list
+        if single_input:
+            return resolved_loras[0]
+        return resolved_loras
 
     def _resolve_single_prompt_mm_lora(
         self,
