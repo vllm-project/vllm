@@ -152,6 +152,9 @@ kFp8Static128BlockSym = QuantKey(FP8_DTYPE, kStatic128BlockScale, symmetric=True
 kDynamic64Scale = ScaleDesc(torch.float32, False, GroupShape(1, 64))
 kFp8Dynamic64Sym = QuantKey(FP8_DTYPE, kDynamic64Scale, symmetric=True)
 
+# TODO (zyongye): Convert all the torch.dtype to scale_dtype
+# Changing that requires changing torch compile fused AR+Quant Quant key
+# to avoid assertion error
 kMxfp4DynamicGroupScale = ScaleDesc(MXFP_SCALE_DTYPE, False, GroupShape(1, 32))
 kMxfp4Dynamic = QuantKey(FP4_DTYPE, scale=kMxfp4DynamicGroupScale, symmetric=True)
 
