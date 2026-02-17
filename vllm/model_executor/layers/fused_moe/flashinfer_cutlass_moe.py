@@ -94,6 +94,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
         if quant_config.weight_quant_dtype == "mxfp4":
+            # This value is used specifically for gpt-oss,
+            # Need to revisit this for other models
             self.gemm1_alpha = torch.tensor(
                 [1.702] * self.num_experts, dtype=torch.float32, device=self.device
             )
