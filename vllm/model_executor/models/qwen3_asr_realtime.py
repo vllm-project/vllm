@@ -174,9 +174,7 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
     dummy_inputs=Qwen3ASRDummyInputsBuilder,
 )
 @support_torch_compile
-class Qwen3ASRRealtimeGeneration(
-    Qwen3ASRForConditionalGeneration, SupportsRealtime
-):
+class Qwen3ASRRealtimeGeneration(Qwen3ASRForConditionalGeneration, SupportsRealtime):
     realtime_max_tokens = 64
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -203,8 +201,7 @@ class Qwen3ASRRealtimeGeneration(
 
         audio_placeholder = cls.get_placeholder_str("audio", 0)
         prompt_template = (
-            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n"
-            f"<|im_start|>assistant\n"
+            f"<|im_start|>user\n{audio_placeholder}<|im_end|>\n<|im_start|>assistant\n"
         )
 
         prompt_token_ids = tokenizer.encode(prompt_template)
