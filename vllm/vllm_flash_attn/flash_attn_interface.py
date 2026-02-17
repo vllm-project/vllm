@@ -50,7 +50,7 @@ DEFAULT_FA_VERSION = 2
 
 def _is_fa2_supported(device=None) -> tuple[bool, str | None]:
     if not FA2_AVAILABLE:
-        return False, f"FA2 is unavaible due to: {FA2_UNAVAILABLE_REASON}"
+        return False, f"FA2 is unavailable due to: {FA2_UNAVAILABLE_REASON}"
     if torch.cuda.get_device_capability(device)[0] < 8:
         return False, "FA2 is only supported on devices with compute capability >= 8"
     return True, None
