@@ -146,8 +146,7 @@ __forceinline__ __device__ void reduceTopK(
   RedType topK{value, idx};
   typename RedType::TypeCmp packedMax{};
 #pragma unroll
-  for (int kk = 0; kk < actualK; ++kk)  //@todo: check if actualK is correct
-  {
+  for (int kk = 0; kk < actualK; ++kk) {
     topK =
         kk > 0 && packedMax == topK.compValIdx ? RedType{minValue, idx} : topK;
     // get the next largest value
@@ -221,8 +220,7 @@ __forceinline__ __device__ void reduceTopK(
 
     for (int ii = 0; ii < numResults; ++ii) {
       topKBufferValue[ii] = minValue;
-      topKBufferIdx[ii] =
-          ii * kWARP_SIZE - 1;  //@todo: check if this is correct
+      topKBufferIdx[ii] = ii * kWARP_SIZE - 1;
     }
     for (int loop = 0; loop < numLoops; ++loop) {
       int start = loop * 4;
