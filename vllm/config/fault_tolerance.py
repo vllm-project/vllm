@@ -4,13 +4,10 @@
 import hashlib
 from typing import Any
 
-from pydantic.dataclasses import dataclass
-
 from vllm.config.utils import config
 
 
 @config
-@dataclass
 class FaultToleranceConfig:
     """Configuration for fault tolerance."""
 
