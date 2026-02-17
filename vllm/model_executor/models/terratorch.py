@@ -48,6 +48,7 @@ from vllm.multimodal.inputs import (
     MultiModalKwargsItems,
     MultiModalUUIDDict,
     PlaceholderRange,
+    mm_inputs,
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
@@ -208,7 +209,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
 
         _, passthrough_data = self._get_hf_mm_data(mm_items)
         mm_processed_data = BatchFeature(
-            {k: torch.tensor(v).unsqueeze(0) for k, v in passthrough_data.items()},
+            {k: torch.as_tensor(v).unsqueeze(0) for k, v in passthrough_data.items()},
             tensor_type="pt",
         )
         mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
@@ -222,8 +223,7 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
             ),
         )
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=[1],
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,

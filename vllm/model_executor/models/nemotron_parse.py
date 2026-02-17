@@ -58,6 +58,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.configs.radio import RadioConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -607,6 +608,9 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     @property
     def skip_prompt_length_check(self) -> bool:

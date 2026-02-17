@@ -66,7 +66,7 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     try:
         generator = await handler.create_responses(request, raw_request)
     except Exception as e:
-        return handler.create_error_response(e)
+        generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -102,7 +102,7 @@ async def retrieve_responses(
             stream=stream,
         )
     except Exception as e:
-        return handler.create_error_response(e)
+        response = handler.create_error_response(e)
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(
@@ -128,7 +128,7 @@ async def cancel_responses(response_id: str, raw_request: Request):
     try:
         response = await handler.cancel_responses(response_id)
     except Exception as e:
-        return handler.create_error_response(e)
+        response = handler.create_error_response(e)
 
     if isinstance(response, ErrorResponse):
         return JSONResponse(

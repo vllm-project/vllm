@@ -108,7 +108,7 @@ def get_vit_attn_backend(
         multimodal_config: MultiModalConfig | None = (
             model_config.multimodal_config if model_config is not None else None
         )
-    except AssertionError:
+    except (AssertionError, AttributeError):
         multimodal_config = None
 
     attn_backend_override = (
@@ -134,7 +134,7 @@ def is_vit_use_data_parallel():
         multimodal_config: MultiModalConfig | None = (
             model_config.multimodal_config if model_config is not None else None
         )
-    except AssertionError:
+    except (AssertionError, AttributeError):
         multimodal_config = None
 
     mm_encoder_tp_mode = (

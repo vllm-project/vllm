@@ -67,7 +67,6 @@ def _run_incremental_decode(
         mm_features=None,
         sampling_params=params,
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=0.0,
         lora_request=None,
         cache_salt=None,

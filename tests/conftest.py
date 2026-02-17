@@ -419,7 +419,6 @@ class HfRunner:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
                     model_name,
-                    dtype=dtype,
                     trust_remote_code=trust_remote_code,
                 )
             )
@@ -430,7 +429,6 @@ class HfRunner:
 
         self.processor = AutoProcessor.from_pretrained(
             model_name,
-            dtype=dtype,
             trust_remote_code=trust_remote_code,
         )
         if skip_tokenizer_init:

@@ -357,6 +357,12 @@ class ModelConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
+
+        # NOTE: For some models (e.g, Qwen3-VL), whether the MM code path is enabled
+        # affects the computation graph of the language model, therefore we add it
+        # here early.
+        if self.multimodal_config:
+            factors["language_model_only"] = self.multimodal_config.language_model_only
         return hash_factors(factors)
 
     def _update_nested(
@@ -1680,6 +1686,20 @@ class ModelConfig:
     @property
     def is_quantized(self) -> bool:
         return getattr(self.hf_config, "quantization_config", None) is not None
+
+    def is_nvfp4_quantized(self) -> bool:
+        # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
+        if self.quantization in ("modelopt_fp4",):
+            return True
+
+        # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
+        # in the quantization config
+        quant_config = self.model_arch_config.quantization_config
+        return (
+            self.quantization == "compressed-tensors"
+            and quant_config is not None
+            and "nvfp4" in quant_config.get("format", "").lower()
+        )
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):

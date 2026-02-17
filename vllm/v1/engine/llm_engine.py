@@ -90,7 +90,7 @@ class LLMEngine:
             self.dp_group = None
         self.should_execute_dummy_batch = False
 
-        self.renderer = renderer = renderer_from_config(self.model_config)
+        self.renderer = renderer = renderer_from_config(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
@@ -312,24 +312,28 @@ class LLMEngine:
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
-            if self.logger_manager is not None and outputs.scheduler_stats is not None:
+            if (
+                self.logger_manager is not None
+                and outputs.scheduler_stats is not None
+                and len(outputs.outputs) > 0
+            ):
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
-                    mm_cache_stats=self.input_processor.stat_mm_cache(),
+                    mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
                 self.do_log_stats_with_interval()
 
         return processed_outputs.request_outputs
 
-    def start_profile(self):
-        self.engine_core.profile(True)
+    def start_profile(self, profile_prefix: str | None = None):
+        self.engine_core.profile(True, profile_prefix)
 
     def stop_profile(self):
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.input_processor.clear_mm_cache()
+        self.renderer.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(

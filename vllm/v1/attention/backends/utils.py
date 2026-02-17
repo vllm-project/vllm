@@ -775,10 +775,10 @@ def compute_causal_conv1d_metadata(
                     MAX_NUM_PROGRAMS
                 ).fill_(PAD_SLOT_ID)
 
-        batch_ptr[0:mlist_len].copy_(mlist)
+        batch_ptr[0:mlist_len].copy_(mlist, non_blocking=True)
         token_chunk_offset_ptr[  # type: ignore
             0:mlist_len
-        ].copy_(offsetlist)
+        ].copy_(offsetlist, non_blocking=True)
         nums_dict[BLOCK_M]["batch_ptr"] = batch_ptr
         nums_dict[BLOCK_M]["token_chunk_offset_ptr"] = token_chunk_offset_ptr  # type: ignore
 
