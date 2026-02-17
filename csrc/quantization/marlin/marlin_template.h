@@ -321,6 +321,9 @@ __global__ void Marlin(
   if constexpr (b_type == vllm::kFE2M1f) {
     static_assert(s_type == vllm::kFE4M3fn && group_blocks == 1 ||
                   s_type == vllm::kFE8M0fnu && group_blocks == 2);
+  } else if constexpr (s_type == vllm::kFE8M0fnu) {
+    // MXFP8: FP8 weights with e8m0 microscaling block scales
+    static_assert(b_type == vllm::kFE4M3fn && group_blocks == 2);
   } else if constexpr (std::is_same<scalar_t, nv_bfloat16>::value) {
     static_assert(s_type == vllm::kBFloat16);
   } else if constexpr (std::is_same<scalar_t, half>::value) {
@@ -337,7 +340,7 @@ __global__ void Marlin(
                                b_type == vllm::kU4B8 || b_type == vllm::kU8B128;
   // see comments of dequant.h for more details
   constexpr bool dequant_skip_flop =
-      is_a_8bit || b_type == vllm::kFE4M3fn ||
+      is_a_8bit || (b_type == vllm::kFE4M3fn && !(s_type == vllm::kFE8M0fnu)) ||
       b_type == vllm::kFE2M1f && s_type == vllm::kFE4M3fn ||
       has_zp && !is_zp_float && !std::is_same<scalar_t, nv_bfloat16>::value ||
       has_zp && !is_zp_float && !(b_type == vllm::kU8);
