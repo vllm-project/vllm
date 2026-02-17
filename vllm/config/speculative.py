@@ -723,12 +723,24 @@ class SpeculativeConfig:
                 f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
                 f"Got {self.target_model_config.hf_text_config.model_type=}"
             )
-        self.verify_equal_vocab_size_if_draft_model()
+        self.verify_equal_vocab_size()
         return self
 
-    def verify_equal_vocab_size_if_draft_model(self):
+    def verify_equal_vocab_size(self):
+        """Verify that the target and draft models have the same vocabulary size.
+
+        This check applies to all speculative methods that use a draft model
+        (draft_model, eagle, eagle3, and MTP variants). A vocabulary mismatch
+        can cause out-of-bounds memory access on the GPU during inference.
+        """
+        methods_requiring_vocab_check = (
+            "draft_model",
+            "eagle",
+            "eagle3",
+            *get_args(MTPModelTypes),
+        )
         if (
-            self.method == "draft_model"
+            self.method in methods_requiring_vocab_check
             and self.target_model_config is not None
             and self.draft_model_config is not None
         ):
@@ -742,6 +754,10 @@ class SpeculativeConfig:
                     f"Using models with different tokenizers can cause out-of-bounds "
                     f"errors during speculative decoding."
                 )
+
+    def verify_equal_vocab_size_if_draft_model(self):
+        """Deprecated: Use verify_equal_vocab_size() instead."""
+        self.verify_equal_vocab_size()
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
