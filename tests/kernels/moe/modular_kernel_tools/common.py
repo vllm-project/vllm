@@ -666,7 +666,7 @@ def run_modular_kernel(
     # impls might update the tensor in place
     hidden_states = rank_tensors.hidden_states.clone()
 
-    topk_ids = rank_tensors.topk_ids.to(mk.impl.prepare_finalize.topk_indices_dtype())
+    topk_ids = rank_tensors.topk_ids.to(mk.prepare_finalize.topk_indices_dtype())
 
     mk_kwargs = {
         "hidden_states": hidden_states,

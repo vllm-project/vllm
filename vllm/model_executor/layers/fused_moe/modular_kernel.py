@@ -1645,29 +1645,37 @@ class FusedMoEKernel:
     def is_monolithic(self) -> bool:
         return isinstance(self.impl, FusedMoEKernelMonolithicImpl)
 
+    @property
+    def prepare_finalize(self) -> FusedMoEPrepareAndFinalize:
+        return self.impl.prepare_finalize
+
+    @property
+    def fused_experts(self) -> FusedMoEExperts:
+        return self.impl.fused_experts
+
     def _post_init_setup(self):
         """
         Resolve any leftover setup dependencies between self.prepare_finalize
         and self.fused_experts here.
         """
-        self.impl.prepare_finalize.post_init_setup(self.impl.fused_experts)
+        self.prepare_finalize.post_init_setup(self.impl.fused_experts)
         assert (
-            self.impl.prepare_finalize.activation_format
-            == self.impl.fused_experts.activation_format()
+            self.prepare_finalize.activation_format
+            == self.fused_experts.activation_format()
         )
 
     def supports_expert_map(self) -> bool:
         """
         A flag indicating whether or not this class supports expert maps.
         """
-        return self.impl.fused_experts.supports_expert_map()
+        return self.fused_experts.supports_expert_map()
 
     def output_is_reduced(self) -> bool:
         """
         Indicates whether or not the output of fused MoE kernel
         is reduced across all ranks.
         """
-        return self.impl.prepare_finalize.output_is_reduced()
+        return self.prepare_finalize.output_is_reduced()
 
     def apply_monolithic(
         self,

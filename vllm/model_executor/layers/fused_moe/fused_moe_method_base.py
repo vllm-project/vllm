@@ -98,7 +98,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     @property
     def topk_indices_dtype(self) -> torch.dtype | None:
         if self.moe_kernel is not None:
-            return self.moe_kernel.impl.prepare_finalize.topk_indices_dtype()
+            return self.moe_kernel.prepare_finalize.topk_indices_dtype()
         return None
 
     @property
