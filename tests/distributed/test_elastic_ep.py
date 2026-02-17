@@ -71,6 +71,8 @@ def test_elastic_ep_scaling():
         "ray",
         "--data-parallel-size",
         "2",
+        "--api-server-count",
+        "1",
     ]
 
     leader_address = os.environ.get("LEADER_ADDRESS")
@@ -142,6 +144,8 @@ def test_elastic_ep_scaling_uneven():
         "ray",
         "--data-parallel-size",
         "2",
+        "--api-server-count",
+        "1",
     ]
 
     leader_address = os.environ.get("LEADER_ADDRESS")
