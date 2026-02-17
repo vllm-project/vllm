@@ -488,12 +488,14 @@ class SpeculativeConfig:
             and self.num_speculative_tokens is not None
             and self.enable_adaptive_draft_length
         ):
-            # Adaptive draft length enabled: compute draft length options
+            # Adaptive draft length enabled: compute draft length options.
+            # All options must be <= n since propose() caps at
+            # num_speculative_tokens. Use thirds for even spacing.
             n = self.num_speculative_tokens
             self.draft_length_options = [
-                max(2, n // 2),  # Half
-                n,  # Target
-                min(8, n * 2),  # Double (capped at 8)
+                max(1, n // 3),      # Conservative
+                max(1, 2 * n // 3),  # Moderate
+                n,                   # Full
             ]
             # Remove duplicates and sort
             self.draft_length_options = sorted(set(self.draft_length_options))
