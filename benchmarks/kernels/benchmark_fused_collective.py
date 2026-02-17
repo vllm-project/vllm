@@ -408,18 +408,18 @@ def run_benchmarks(
 
     rms_eps = 1e-6
     results = {}
-    vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
     use_oneshot_options = [False] if no_oneshot else [True, False]
-
-    # Create RMSNorm and QuantFP8 layers once for native benchmarks
 
     if "none" in quant_modes:
         # Standard AllReduce + RMSNorm
+        # Re-create VllmFusedAllreduce per config so CustomOp binds the
+        # correct forward method (native vs custom kernel).
         for custom_op in ["-rms_norm", "+rms_norm"]:
             with set_current_vllm_config(
                 VllmConfig(compilation_config=CompilationConfig(custom_ops=[custom_op]))
             ):
                 try:
+                    vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                     suffix = (
                         "_custom_rms_norm" if "+" in custom_op else "_native_rms_norm"
                     )
@@ -438,6 +438,7 @@ def run_benchmarks(
             VllmConfig(compilation_config=CompilationConfig(custom_ops=["-rms_norm"]))
         ):
             try:
+                vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                 standard_allreduce_rmsnorm_native_compiled = torch.compile(
                     vllm_fused_allreduce.allreduce_rmsnorm,
                     fullgraph=True,
@@ -495,6 +496,7 @@ def run_benchmarks(
                     )
                 ):
                     try:
+                        vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                         time_ms = benchmark_operation(
                             vllm_fused_allreduce.allreduce_rmsnorm_fp8_quant,
                             input_tensor,
@@ -515,6 +517,7 @@ def run_benchmarks(
             )
         ):
             try:
+                vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                 standard_allreduce_rmsnorm_fp8_quant_native_compiled = torch.compile(
                     vllm_fused_allreduce.allreduce_rmsnorm_fp8_quant,
                     fullgraph=True,
@@ -580,6 +583,7 @@ def run_benchmarks(
                 )
             ):
                 try:
+                    vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                     time_ms = benchmark_operation(
                         vllm_fused_allreduce.allreduce_rmsnorm_fp4_quant,
                         input_tensor,
@@ -598,6 +602,7 @@ def run_benchmarks(
             VllmConfig(compilation_config=CompilationConfig(custom_ops=["-rms_norm"]))
         ):
             try:
+                vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                 standard_allreduce_rmsnorm_fp4_quant_native_compiled = torch.compile(
                     vllm_fused_allreduce.allreduce_rmsnorm_fp4_quant,
                     fullgraph=True,
