@@ -442,8 +442,6 @@ class GPUModelRunner(
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
-        self.prev_skipped_drafting = False
-
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
