@@ -183,18 +183,19 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: BitsAndBytesConfig):
+        min_version = "0.49.2" if current_platform.is_rocm() else "0.46.1"
         try:
             import bitsandbytes
 
-            if version.parse(bitsandbytes.__version__) < version.parse("0.46.1"):
+            if version.parse(bitsandbytes.__version__) < version.parse(min_version):
                 raise ImportError(
                     "bitsandbytes version is wrong. Please "
-                    "install bitsandbytes>=0.46.1."
+                    f"install bitsandbytes>={min_version}."
                 )
         except ImportError as err:
             raise ImportError(
-                "Please install bitsandbytes>=0.46.1 via "
-                "`pip install bitsandbytes>=0.46.1` to use "
+                f"Please install bitsandbytes>={min_version} via "
+                f"`pip install bitsandbytes>={min_version}` to use "
                 "bitsandbytes quantizer."
             ) from err
 
@@ -442,18 +443,19 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
+        min_version = "0.49.2" if current_platform.is_rocm() else "0.46.1"
         try:
             import bitsandbytes
 
-            if version.parse(bitsandbytes.__version__) < version.parse("0.46.1"):
+            if version.parse(bitsandbytes.__version__) < version.parse(min_version):
                 raise ImportError(
                     "bitsandbytes version is wrong. Please "
-                    "install bitsandbytes>=0.46.1."
+                    f"install bitsandbytes>={min_version}."
                 )
         except ImportError as err:
             raise ImportError(
-                "Please install bitsandbytes>=0.46.1 via "
-                "`pip install bitsandbytes>=0.46.1` to use "
+                f"Please install bitsandbytes>={min_version} via "
+                f"`pip install bitsandbytes>={min_version}` to use "
                 "bitsandbytes quantizer."
             ) from err
         self.quant_config = quant_config
