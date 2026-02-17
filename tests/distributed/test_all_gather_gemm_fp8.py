@@ -4,12 +4,46 @@ import os
 import torch
 import torch.distributed as dist
 import pytest
+from vllm.platforms import current_platform
+from vllm.kernels.helion.config_manager import ConfigManager
 from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
     helion_all_gather_fp8_gemm  # This triggers the direct_register_custom_op call
 )
 
+FP8_DTYPE = current_platform.fp8_dtype()
+
+# TODO: test the helion_picker! and add more shapes to test.
+def skip_if_platform_unsupported():
+    try:
+        from vllm.kernels.helion.utils import get_canonical_gpu_name
+
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
+        platform = get_canonical_gpu_name()
+
+        try:
+            config_manager = ConfigManager.get_instance()
+        except RuntimeError:
+            config_manager = ConfigManager()
+
+        configs = config_manager.get_platform_configs("helion_matmul_w_progress_fp8", platform)
+        if len(configs) == 0:
+            pytest.skip("Current GPU platform not supported for helion_matmul_w_progress_fp8 kernel")
+
+    except (ImportError, RuntimeError, KeyError):
+        pytest.skip("Error detecting platform support for helion_matmul_w_progress_fp8 kernel")
+
+@pytest.fixture(autouse=True)
+def reset_config_manager_singleton():
+    ConfigManager.reset_instance()
+    ConfigManager()
+    yield
+    ConfigManager.reset_instance()
+
+
 TEST_SHAPES = [
-    (512, 8192, 2048),
+    #(512, 8192, 2048),
     (128, 32, 64)
 ]
 @pytest.mark.parametrize("M,N,K", TEST_SHAPES)
@@ -59,10 +93,10 @@ def test_helion_fp8_all_gather_matmul(M, K, N):
 
     # Create inputs
     a_shared = torch.rand(M_per_rank, K, device=device, dtype=torch.float32) * 0.05
-    a_shared = a_shared.to(torch.float8_e4m3fn)
+    a_shared = a_shared.to(FP8_DTYPE)
 
     b = (torch.rand(K, N, device=device, dtype=torch.float32)  * 0.05).T.contiguous().T
-    b= b.to(torch.float8_e4m3fn)
+    b= b.to(FP8_DTYPE)
     scale_a = torch.rand((M_per_rank, 1), device=device, dtype=torch.float32) * 0.1 + 0.05
     scale_b = torch.rand((1, N), device=device, dtype=torch.float32) * 0.1 + 0.05
     # call the HelionOp

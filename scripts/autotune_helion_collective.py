@@ -12,8 +12,11 @@ from vllm.kernels.helion.distributed.all_gather_gemm_fp8 import (
     helion_all_gather_fp8_gemm  # This triggers the direct_register_custom_op call
 )
 
+from vllm.kernels.helion.utils import get_canonical_gpu_name
+platform = get_canonical_gpu_name()
+
 def _helion_all_gather_fp8_gemm_runtime(
-    a_shared: torch.Tensor,
+    a_shared: torch.Tensor, 
     b: torch.Tensor,
     scale_a: torch.Tensor,
     scale_b: torch.Tensor,
@@ -103,7 +106,7 @@ def autotune(fn=helion_matmul_w_progress_fp8, force=False):
     assert dist_group is not None
     # Store a weak reference to the GroupCoordinator in _groups so the kernel can access it without preventing garbage collection.
     _groups[dist_group.group_name] = weakref.ref(world_group)
-    config_manager = ConfigManager(base_dir="helion_matmul_w_progress_fp8")
+    config_manager = ConfigManager()
     for num_tokens, hidden_size in product(num_tokens_list, hidden_size_list):
         try:
             print(f"Start autotuning with num_tokens={num_tokens} and hidden_size={hidden_size}")
@@ -130,7 +133,7 @@ def autotune(fn=helion_matmul_w_progress_fp8, force=False):
 
             config_manager.save_configs(
                 kernel_name="helion_matmul_w_progress_fp8",
-                platform="h100",
+                platform=platform,
                 configs={config_key: best_config},
             )
             print(f"Successfully saved config file {config_key}")
