@@ -691,6 +691,6 @@ def run_modular_kernel(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        out = mk.forward(**mk_kwargs)
+        out = mk.apply(**mk_kwargs)
 
     return out

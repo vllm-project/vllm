@@ -104,12 +104,16 @@ def test_cutlass_fp4_moe_no_graph(
             inplace=False,
         )
 
-        cutlass_output = kernel(
+        cutlass_output = kernel.apply(
             hidden_states=a,
             w1=w1_q,
             w2=w2_q,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            global_num_experts=e,
+            activation=mk.MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=None,
         )
 
         # Reference check:

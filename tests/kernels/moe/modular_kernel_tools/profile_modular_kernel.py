@@ -72,7 +72,7 @@ def profile_modular_kernel(
         "apply_router_weight_on_input": config.topk == 1,
     }
 
-    do_profile(mk.forward, mk_kwargs, pgi, config)
+    do_profile(mk.apply, mk_kwargs, pgi, config)
 
 
 def rank_worker(

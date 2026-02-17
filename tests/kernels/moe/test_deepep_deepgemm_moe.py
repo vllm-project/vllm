@@ -319,7 +319,7 @@ def deepep_deepgemm_moe_impl(
     with with_dp_metadata(
         M=test_tensors.rank_tokens.size(0), world_size=pgi.world_size
     ):
-        out = mk.forward(
+        out = mk.apply(
             hidden_states=test_tensors.rank_tokens,
             w1=w1,
             w2=w2,

@@ -193,7 +193,7 @@ def oai_triton_moe_impl(
         inplace=False,
     )
 
-    return mk.forward(
+    return mk.apply(
         hidden_states=x,
         w1=w1,
         w2=w2,
