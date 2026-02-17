@@ -187,13 +187,20 @@ typedef void (*fp_gemm_half_q_half_gptq_kernel)(const half*, const uint32_t*,
                                                 const int, const int,
                                                 const bool, const int*);
 
+// Core 4-bit GPTQ GEMM logic extracted as a __device__ function.
+// Called by both the original non-MoE kernel and the MoE wrapper kernel.
+// Uses gridDim.z tiling over K with atomicAdd accumulation (original design).
+// Parameters:
+//   offset_m: row offset into A and C (was blockIdx.y * m_count in original)
+//   router_weight: multiply output by this before writing (1.0f for non-MoE)
 template <bool first_block, int m_count>
-__global__ void gemm_half_q_half_gptq_4bit_kernel(
+__device__ __forceinline__ void gemm_half_q_half_gptq_4bit_device(
     const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
     const uint32_t* __restrict__ b_gptq_qzeros,
     const half* __restrict__ b_gptq_scales, half* __restrict__ c,
-    const int size_m, const int size_n, const int size_k, const int groups,
-    const bool use_v2_format, const int* __restrict__ b_q_perm) {
+    const int offset_m, const int size_m, const int size_n, const int size_k,
+    const int groups, const bool use_v2_format,
+    const int* __restrict__ b_q_perm, const float router_weight) {
   MatrixView_half a_(a, size_m, size_k);
   MatrixView_half_rw c_(c, size_m, size_n);
   MatrixView_q4_row b_gptq_qzeros_(b_gptq_qzeros, groups, size_n);
@@ -206,7 +213,6 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
 
   // Block
   auto offset_n = blockIdx.x * BLOCK_KN_SIZE * 4;
-  auto offset_m = blockIdx.y * m_count;
   auto offset_k = blockIdx.z * BLOCK_KN_SIZE;
 
   int end_k = min(offset_k + BLOCK_KN_SIZE, size_k);
@@ -230,7 +236,6 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
     }
   }
 
-  // Zero output
   if (n >= size_n) return;
 
   __syncthreads();
@@ -311,6 +316,10 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
   }
 
   for (int m = 0; m < m_count; m++) {
+    block_c[m][0] *= router_weight;
+    block_c[m][1] *= router_weight;
+    block_c[m][2] *= router_weight;
+    block_c[m][3] *= router_weight;
     half2* out = (half2*)c_.item_ptr(offset_m + m, n);
     half2 result01 = __halves2half2(__float2half_rn(block_c[m][0]),
                                     __float2half_rn(block_c[m][1]));
@@ -319,6 +328,95 @@ __global__ void gemm_half_q_half_gptq_4bit_kernel(
     atomicAdd(out, result01);
     atomicAdd(out + 1, result23);
   }
+}
+
+// Non-MoE kernel: thin wrapper around the shared __device__ function.
+template <bool first_block, int m_count>
+__global__ void gemm_half_q_half_gptq_4bit_kernel(
+    const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_gptq_qzeros,
+    const half* __restrict__ b_gptq_scales, half* __restrict__ c,
+    const int size_m, const int size_n, const int size_k, const int groups,
+    const bool use_v2_format, const int* __restrict__ b_q_perm) {
+  gemm_half_q_half_gptq_4bit_device<first_block, m_count>(
+      a, b_q_weight, b_gptq_qzeros, b_gptq_scales, c,
+      blockIdx.y * m_count,  // offset_m
+      size_m, size_n, size_k, groups, use_v2_format, b_q_perm,
+      1.0f);  // router_weight: no-op for non-MoE
+}
+
+// MoE wrapper kernel: thin routing layer that offsets pointers per expert,
+// then calls the shared __device__ function.
+// blockIdx.y indexes individual token slots in sorted_token_ids.
+// expert_ids has one entry per block_size_m tokens (from moe_align_block_size).
+template <int m_count>
+__global__ void moe_gptq_4bit_kernel(
+    const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_gptq_qzeros,
+    const half* __restrict__ b_gptq_scales, half* __restrict__ c,
+    const int size_n, const int size_k, const int groups,
+    const int* __restrict__ sorted_token_ids,
+    const int* __restrict__ expert_ids, const float* __restrict__ topk_weights,
+    const int top_k, const int num_valid_tokens, const long expert_stride_w,
+    const long expert_stride_z, const long expert_stride_s,
+    const bool mul_routed_weight, const int block_size_m) {
+  int token_slot = blockIdx.y;
+  int token_id = sorted_token_ids[token_slot];
+
+  // Padding entries have token_id >= num_valid_tokens; skip them
+  if (token_id >= num_valid_tokens) return;
+
+  // expert_ids is indexed by block, not by individual token
+  int block_idx = token_slot / block_size_m;
+  int expert_id = expert_ids[block_idx];
+  if (expert_id == -1) return;
+
+  // Offset weight/scale/zeros pointers to this expert's subtensor
+  const uint32_t* my_b = b_q_weight + expert_id * expert_stride_w;
+  const uint32_t* my_z = b_gptq_qzeros + expert_id * expert_stride_z;
+  const half* my_s = b_gptq_scales + expert_id * expert_stride_s;
+
+  // Point activation to this token's row
+  const half* my_a = a + (token_id / top_k) * size_k;
+
+  // Output goes to C[token_id, :] (sorted_token_ids already encodes topk)
+  half* my_c = c + token_id * size_n;
+
+  float rw = mul_routed_weight ? topk_weights[token_id] : 1.0f;
+
+  gemm_half_q_half_gptq_4bit_device<true, m_count>(
+      my_a, my_b, my_z, my_s, my_c,
+      0,  // offset_m: single row at index 0 of my_a/my_c
+      1,  // size_m: one token per pair
+      size_n, size_k, groups, false,  // use_v2_format: GPTQv1 only
+      nullptr,  // b_q_perm: not used for MoE (group-sequential)
+      rw);
+}
+
+// MoE contiguous kernel: activations are pre-permuted so that rows for each
+// expert are contiguous. Each blockIdx.y handles one block of m_count rows.
+// This reuses the existing device function with no GEMM code duplication.
+// Router weights are NOT applied here (router_weight=1.0); the caller handles
+// weight application during the reduce step.
+template <int m_count>
+__global__ void moe_gptq_4bit_contiguous_kernel(
+    const half* __restrict__ a, const uint32_t* __restrict__ b_q_weight,
+    const uint32_t* __restrict__ b_gptq_qzeros,
+    const half* __restrict__ b_gptq_scales, half* __restrict__ c,
+    const int size_n, const int size_k, const int groups,
+    const int* __restrict__ expert_ids, const long expert_stride_w,
+    const long expert_stride_z, const long expert_stride_s) {
+  int block_idx = blockIdx.y;
+  int expert_id = expert_ids[block_idx];
+  if (expert_id == -1) return;
+
+  int base_row = block_idx * m_count;
+
+  gemm_half_q_half_gptq_4bit_device<true, m_count>(
+      a + (long)base_row * size_k, b_q_weight + expert_id * expert_stride_w,
+      b_gptq_qzeros + expert_id * expert_stride_z,
+      b_gptq_scales + expert_id * expert_stride_s, c + (long)base_row * size_n,
+      0, m_count, size_n, size_k, groups, false, nullptr, 1.0f);
 }
 
 template <bool first_block, int m_count>
@@ -1848,6 +1946,91 @@ torch::Tensor gptq_gemm(torch::Tensor a, torch::Tensor b_q_weight,
       b_gptq_qzeros.size(0),  // group number
       use_exllama, use_v2_format, bit);
   return c;
+}
+
+// Fused MoE GPTQ GEMM: launches moe_gptq_4bit_kernel for all expert-token
+// pairs in a single kernel launch.
+// Weights must be in exllama format: [E, K/8, N] int32.
+//
+// sorted_token_ids: [max_num_tokens_padded] int32
+//   - Flat list of token IDs sorted by expert.
+//   - Padding entries have token_id >= num_valid_tokens.
+// expert_ids: [num_blocks] int32
+//   - One entry per block_size_m block of sorted_token_ids.
+//   - -1 for invalid/padded blocks.
+void fused_moe_exllama_gemm(
+    torch::Tensor a,                 // [num_tokens, K] fp16 activations
+    torch::Tensor b_q_weight,        // [E, K/8, N] int32 packed weights
+    torch::Tensor b_gptq_qzeros,     // [E, groups, N/8] int32 packed zeros
+    torch::Tensor b_gptq_scales,     // [E, groups, N] fp16 scales
+    torch::Tensor c,                 // [M*topk, N] fp16 output (pre-allocated)
+    torch::Tensor sorted_token_ids,  // [max_num_tokens_padded] int32
+    torch::Tensor expert_ids,        // [num_blocks] int32
+    torch::Tensor topk_weights,      // [M*topk] float32
+    int64_t top_k, bool mul_routed_weight, int64_t block_size_m) {
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(a));
+
+  int num_token_slots = sorted_token_ids.size(0);
+  int size_k = a.size(1);
+  int size_n = b_q_weight.size(2);
+  int groups = b_gptq_qzeros.size(1);
+  int num_valid_tokens = a.size(0) * top_k;
+
+  // Expert strides (in elements, not bytes)
+  long expert_stride_w = b_q_weight.stride(0);  // stride along E dim (uint32)
+  long expert_stride_z = b_gptq_qzeros.stride(0);
+  long expert_stride_s = b_gptq_scales.stride(0);
+
+  dim3 blockDim(BLOCK_KN_SIZE, 1, 1);  // 128 threads
+  dim3 gridDim;
+  gridDim.x = DIVIDE(size_n, BLOCK_KN_SIZE * 4);
+
+  // K-dimension is tiled via gridDim.z; z-blocks accumulate via atomicAdd,
+  // so the output must be zero-initialized.
+  gridDim.z = DIVIDE(size_k, BLOCK_KN_SIZE);
+  c.zero_();
+
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  if (block_size_m <= 1) {
+    // Scattered path: each blockIdx.y handles one token slot.
+    // The kernel gathers activation rows via sorted_token_ids.
+    gridDim.y = num_token_slots;
+    vllm::gptq::moe_gptq_4bit_kernel<1><<<gridDim, blockDim, 0, stream>>>(
+        (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),
+        (const uint32_t*)b_gptq_qzeros.data_ptr(),
+        (const half*)b_gptq_scales.data_ptr(), (half*)c.data_ptr(), size_n,
+        size_k, groups, (const int*)sorted_token_ids.data_ptr(),
+        (const int*)expert_ids.data_ptr(),
+        (const float*)topk_weights.data_ptr(), static_cast<int>(top_k),
+        num_valid_tokens, expert_stride_w, expert_stride_z, expert_stride_s,
+        mul_routed_weight, static_cast<int>(block_size_m));
+  } else {
+    // Contiguous path: activations are pre-permuted so rows for each expert
+    // are contiguous.  Each blockIdx.y handles one block of block_size_m rows.
+    // Router weights are applied by the caller during the reduce step.
+    int num_blocks = DIVIDE(num_token_slots, block_size_m);
+    gridDim.y = num_blocks;
+
+#define LAUNCH_CONTIGUOUS(M_COUNT)                                            \
+  vllm::gptq::moe_gptq_4bit_contiguous_kernel<M_COUNT>                        \
+      <<<gridDim, blockDim, 0, stream>>>(                                     \
+          (const half*)a.data_ptr(), (const uint32_t*)b_q_weight.data_ptr(),  \
+          (const uint32_t*)b_gptq_qzeros.data_ptr(),                          \
+          (const half*)b_gptq_scales.data_ptr(), (half*)c.data_ptr(), size_n, \
+          size_k, groups, (const int*)expert_ids.data_ptr(), expert_stride_w, \
+          expert_stride_z, expert_stride_s)
+
+    if (block_size_m == 2)
+      LAUNCH_CONTIGUOUS(2);
+    else if (block_size_m == 4)
+      LAUNCH_CONTIGUOUS(4);
+    else
+      TORCH_CHECK(false, "Unsupported block_size_m for contiguous MoE kernel: ",
+                  block_size_m);
+
+#undef LAUNCH_CONTIGUOUS
+  }
 }
 
 void gptq_shuffle(torch::Tensor q_weight, torch::Tensor q_perm, int64_t bit) {
