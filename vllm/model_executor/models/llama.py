@@ -31,6 +31,7 @@ import torch
 from torch import nn
 from transformers import LlamaConfig
 
+import vllm.model_executor.layers.fused_ffn  # noqa: F401 (registers custom op)
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
@@ -56,6 +57,7 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionType
 
@@ -113,11 +115,19 @@ class LlamaMLP(nn.Module):
             )
         self.act_fn = SiluAndMul()
 
+        # Defaults for eager execution. Overridden by LlamaDecoderLayer
+        # when the FFN should be a CUDA-graph split point.
+        self.use_direct_call = True
+        self.layer_name = ""
+
     def forward(self, x):
-        x, _ = self.gate_up_proj(x)
-        x = self.act_fn(x)
-        x, _ = self.down_proj(x)
-        return x
+        if self.use_direct_call:
+            x, _ = self.gate_up_proj(x)
+            x = self.act_fn(x)
+            x, _ = self.down_proj(x)
+            return x
+        else:
+            return torch.ops.vllm.fused_silu_ffn(x, self.layer_name)
 
 
 class LlamaAttention(nn.Module):
@@ -307,6 +317,16 @@ class LlamaDecoderLayer(nn.Module):
             bias=getattr(config, "mlp_bias", False),
             prefix=f"{prefix}.mlp",
         )
+        # Optionally register MLP as a CUDA-graph split point so it runs
+        # eagerly with the actual (unpadded) batch size.
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.split_ffn:
+            mlp_prefix = f"{prefix}.mlp"
+            self.mlp.use_direct_call = not current_platform.opaque_attention_op()
+            self.mlp.layer_name = mlp_prefix
+            if mlp_prefix in compilation_config.static_forward_context:
+                raise ValueError(f"Duplicate layer name: {mlp_prefix}")
+            compilation_config.static_forward_context[mlp_prefix] = self.mlp
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps

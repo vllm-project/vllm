@@ -567,6 +567,13 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
+    split_ffn: bool = False
+    """When enabled, FFN (MLP) layers become CUDA-graph split points and run
+    eagerly with the actual (unpadded) batch size. This saves activation memory
+    from batch padding at the cost of losing CUDA-graph capture for FFN ops.
+    Only affects Llama-style SiLU MLPs for now. Default is False (FFN stays
+    inside CUDA graph pieces)."""
+
     max_cudagraph_capture_size: int = field(default=None)
     """The maximum cudagraph capture size.
 
@@ -651,6 +658,7 @@ class CompilationConfig:
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
+        "vllm::fused_silu_ffn",
     ]
 
     def compute_hash(self) -> str:
