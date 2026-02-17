@@ -69,7 +69,7 @@ def _is_fa3_supported(device=None) -> tuple[bool, str | None]:
 
 def _is_fa4_supported(device=None) -> tuple[bool, str | None]:
     if not FA4_AVAILABLE:
-        return False, f"FA4 is unavaible due to: {FA4_UNAVAILABLE_REASON}"
+        return False, f"FA4 is unavailable due to: {FA4_UNAVAILABLE_REASON}"
     cc = torch.cuda.get_device_capability(device)[0]
     if cc not in [9, 10, 11]:
         return (
