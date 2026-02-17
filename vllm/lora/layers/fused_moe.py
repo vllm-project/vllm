@@ -146,10 +146,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
-                m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
+                m_fused_moe_fn.impl.fused_experts,
+                (MarlinExperts, UnfusedOAITritonExperts),
             )
         else:
-            assert isinstance(m_fused_moe_fn.fused_experts, TritonExperts)
+            assert isinstance(m_fused_moe_fn.impl.fused_experts, TritonExperts)
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):
@@ -329,9 +330,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
             return wrapper
 
-        fused_experts = m_fused_moe_fn.fused_experts
+        fused_experts = m_fused_moe_fn.impl.fused_experts
 
-        m_fused_moe_fn.forward = fwd_decorator(self.base_layer, m_fused_moe_fn.forward)
+        m_fused_moe_fn.apply = fwd_decorator(self.base_layer, m_fused_moe_fn.apply)
         fused_experts.activation = act_decorator(
             self.base_layer, fused_experts.activation
         )

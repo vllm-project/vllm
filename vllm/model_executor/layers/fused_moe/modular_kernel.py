@@ -1636,7 +1636,7 @@ class FusedMoEKernel:
             raise ValueError(
                 "prepare_finalize and fused_experts must both be either monolithic "
                 f"or non-monolithic but got {prepare_finalize.__class__.__name__} "
-                "and {fused_experts.__class__.__name__}"
+                f"and {fused_experts.__class__.__name__}"
             )
 
         self._post_init_setup()
