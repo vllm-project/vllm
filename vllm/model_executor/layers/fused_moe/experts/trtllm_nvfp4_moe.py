@@ -15,6 +15,9 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kNvfp4Dynamic,
@@ -153,6 +156,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             torch.bfloat16
         ).view(torch.int16)
 
+        # Determine activation type
+        activation_type = activation_to_flashinfer_int(activation)
+
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
             topk_ids=packed_tensor,
@@ -181,6 +187,7 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             routed_scaling_factor=None,
             routing_method_type=1,
             do_finalize=True,
+            activation_type=activation_type,
             output=output,
         )
 

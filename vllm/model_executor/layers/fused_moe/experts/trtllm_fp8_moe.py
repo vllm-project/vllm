@@ -12,6 +12,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -218,7 +221,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         w1: torch.Tensor,
         w2: torch.Tensor,
         router_logits: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -229,6 +232,9 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
+        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        activation_type = activation_to_flashinfer_int(activation)
+
         assert self.routing_method_type == RoutingMethodType.Llama4
         assert apply_router_weight_on_input
 
@@ -256,6 +262,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             routed_scaling_factor=routed_scaling_factor,
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
+            activation_type=activation_type,
         )
         return out
 
@@ -265,7 +272,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         w1: torch.Tensor,
         w2: torch.Tensor,
         router_logits: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
