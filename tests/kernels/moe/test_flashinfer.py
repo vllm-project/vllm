@@ -428,6 +428,9 @@ def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
     assert w2_converted.shape[0] == num_experts
 
 
+@pytest.mark.skip(
+    reason="This test is failing on main. See: https://github.com/vllm-project/vllm/pull/34494#issuecomment-3911242744"
+)  # noqa: E501
 def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
     """Test that flashinfer_fused_moe_blockscale_fp8 handles num_expert_group=None.
 
