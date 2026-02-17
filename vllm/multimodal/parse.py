@@ -564,9 +564,8 @@ class MultiModalDataParser:
 
         data_items: list[AudioItem]
         if (
-            is_list_of(data, float)
-            or isinstance(data, (np.ndarray, torch.Tensor))
-            and data.ndim == 1
+            (is_list_of(data, float) and len(data) > 0)
+            or (isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 1)
             or isinstance(data, tuple)
         ):
             data_items = [data]
@@ -602,10 +601,8 @@ class MultiModalDataParser:
         if self.is_embeddings(data):
             return ImageEmbeddingItems(data, self.expected_hidden_size)
 
-        if (
-            isinstance(data, (PILImage.Image, MediaWithBytes))
-            or isinstance(data, (np.ndarray, torch.Tensor))
-            and data.ndim == 3
+        if isinstance(data, (PILImage.Image, MediaWithBytes)) or (
+            isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 3
         ):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
@@ -626,10 +623,8 @@ class MultiModalDataParser:
             return VideoEmbeddingItems(data, self.expected_hidden_size)
 
         data_items: list[VideoItem]
-        if (
-            is_list_of(data, PILImage.Image)
-            or isinstance(data, (np.ndarray, torch.Tensor))
-            and data.ndim == 4
+        if (is_list_of(data, PILImage.Image) and len(data) > 0) or (
+            isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 4
         ):
             data_items = [data]
         elif isinstance(data, (np.ndarray, torch.Tensor)):
