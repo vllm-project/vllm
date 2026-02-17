@@ -33,10 +33,9 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
-from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
@@ -93,7 +92,7 @@ class OpenAIServingPooling(OpenAIServing):
                     "dimensions is currently not supported"
                 )
 
-            engine_prompts: Sequence[PromptType | TokPrompt]
+            engine_prompts: Sequence[ProcessorInputs]
             if use_io_processor := isinstance(request, IOProcessorRequest):
                 if self.io_processor is None:
                     raise ValueError(
@@ -152,9 +151,6 @@ class OpenAIServingPooling(OpenAIServing):
             else:
                 pooling_params = request.to_pooling_params()  # type: ignore
 
-            tok_params = request.build_tok_params(self.model_config)
-            tokenization_kwargs = tok_params.get_encode_kwargs()
-
             for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}-{i}"
 
@@ -176,7 +172,6 @@ class OpenAIServingPooling(OpenAIServing):
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
-                    tokenization_kwargs=tokenization_kwargs,
                     trace_headers=trace_headers,
                     priority=request.priority,
                 )

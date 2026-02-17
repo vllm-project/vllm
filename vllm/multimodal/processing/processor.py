@@ -1843,15 +1843,18 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         tokenizer = self.info.get_tokenizer()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_items)
         if isinstance(decoder_prompt_raw, str):
+            decoder_prompt_text = decoder_prompt_raw
             decoder_prompt_ids = tokenizer.encode(
                 decoder_prompt_raw, add_special_tokens=False
             )
         else:
+            decoder_prompt_text = None
             decoder_prompt_ids = decoder_prompt_raw
 
         return mm_enc_dec_inputs(
             encoder_inputs,
             decoder_prompt_ids,
+            decoder_prompt=decoder_prompt_text,
         )
 
     def apply(
