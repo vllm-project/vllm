@@ -85,13 +85,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         # Enable speculative decoding support
         self.speculative_config = vllm_config.speculative_config
         self.compilation_config = vllm_config.compilation_config
-        self.num_spec_tokens: int = (
-            self.speculative_config.num_speculative_tokens
-            if self.speculative_config is not None
-            else 0
-        )
-        if self.num_spec_tokens is None:
-            self.num_spec_tokens = 0
+        self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
 
         assert isinstance(kv_cache_spec, MambaSpec)

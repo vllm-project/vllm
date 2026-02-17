@@ -489,13 +489,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
         self.cache_config = cache_config
         self.prefix = prefix
 
-        speculative_config = vllm_config.speculative_config
-        self.num_spec = (
-            speculative_config.num_speculative_tokens
-            if speculative_config is not None
-            and speculative_config.num_speculative_tokens is not None
-            else 0
-        )
+        self.num_spec = vllm_config.num_speculative_tokens
 
         # Pre-compute sizes for forward pass
         self.tped_intermediate_size = self.intermediate_size // self.tp_size
@@ -595,7 +589,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
             state_indices_tensor_p = attn_metadata.state_indices_tensor_p
             state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             num_accepted_tokens = attn_metadata.num_accepted_tokens
-            decode_query_start_loc = attn_metadata.query_start_loc_d
+            query_start_loc_d = attn_metadata.query_start_loc_d
             num_decodes = attn_metadata.num_decodes
             num_decode_tokens = attn_metadata.num_decode_tokens
 
@@ -848,7 +842,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
                 num_accepted_tokens=num_accepted_tokens,
-                query_start_loc=decode_query_start_loc,
+                query_start_loc=query_start_loc_d,
                 max_query_len=state_indices_tensor_d.size(-1),
             )
 
@@ -892,7 +886,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=preallocated_ssm_out_d.view(num_decode_tokens, -1, self.head_dim),
                 num_accepted_tokens=num_accepted_tokens,
-                cu_seqlens=decode_query_start_loc,
+                cu_seqlens=query_start_loc_d,
                 is_blackwell=self.is_blackwell,
             )
 
