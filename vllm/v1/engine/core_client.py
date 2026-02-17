@@ -72,13 +72,17 @@ def encoder_request_context(
 ):
     """Context manager for setting encoder state during request encoding.
 
-    Sets the target engine and request context (for ADD requests) on entry,
-    and clears the request context on exit.
+    When tensor IPC is in use, sets the target engine and request context
+    (for ADD requests) on entry and clears the request context on exit.
+    When tensor IPC is not in use, does nothing so the hot path has no extra ops.
     """
+    if encoder.tensor_ipc_sender is None:
+        yield encoder
+        return
+
     # Set target engine index for tensor routing
     engine_index = int.from_bytes(engine, "little")
-    if encoder.tensor_ipc_sender is not None:
-        encoder.tensor_ipc_sender.set_target_engine(engine_index)
+    encoder.tensor_ipc_sender.set_target_engine(engine_index)
 
     # Set request context if this is an ADD request with a request_id
     if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
@@ -87,7 +91,6 @@ def encoder_request_context(
     try:
         yield encoder
     finally:
-        # Clear request context after encoding
         encoder.set_request_context(None)
 
 
