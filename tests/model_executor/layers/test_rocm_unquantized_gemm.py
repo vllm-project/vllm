@@ -67,9 +67,7 @@ def test_rocm_unquantized_gemm_gfx950_wvsplitkrc_path(monkeypatch):
     monkeypatch.setattr("vllm.platforms.rocm.on_gfx950", lambda: True)
     monkeypatch.setattr(utils, "get_cu_count", lambda: 120)
 
-    wvsplitkrc_mock = MagicMock(
-        side_effect=lambda w, x_view, _, __: x_view @ w.t()
-    )
+    wvsplitkrc_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
     monkeypatch.setattr(utils.ops, "wvSplitKrc", wvsplitkrc_mock)
     wvsplitk_mock = MagicMock(side_effect=lambda w, x_view, _, __: x_view @ w.t())
     monkeypatch.setattr(utils.ops, "wvSplitK", wvsplitk_mock)
