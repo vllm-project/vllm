@@ -969,7 +969,10 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                             if seq_idx == 0
                             else int(last_chunk_indices[seq_idx - 1].item()) + 1
                         )
-                        first_aligned_chunk = first_chunk + chunks_per_block - 1
+                        # h[i] = state BEFORE chunk i = state AFTER chunks 0..i-1
+                        # State after a full block of chunks_per_block chunks
+                        # = h[first_chunk + chunks_per_block]
+                        first_aligned_chunk = first_chunk + chunks_per_block
                         num_unaligned_tokens = int(
                             num_computed_tokens_p[seq_idx].item() % block_size
                         )
