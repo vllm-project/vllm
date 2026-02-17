@@ -427,6 +427,33 @@ class LoRAModelManager:
                         "cpu",
                     )
                     model.loras[module_name] = lora
+            elif module.__class__.__name__ in (
+                    "FusedMoEWithLoRA",
+                    "FusedMoEWithSharedOuterLoRA",
+                ):
+                # MoE LoRA: build PackedLoRALayerWeights directly from
+                # stacked tensor shapes.  Use global_num_experts because
+                # set_lora() slices to local experts via _slice_ep_experts.
+                num_experts = module.base_layer.global_num_experts
+                hidden = module.w13_lora_a_stacked[0].shape[-1]
+                intermediate = module.w13_lora_b_stacked[0].shape[-2]
+                dtype = module.w13_lora_a_stacked[0].dtype
+                # w1/w3 (gate/up):  A (E, rank, hidden)  B (E, inter, rank)
+                # w2    (down):     A (E, rank, inter)   B (E, hidden, rank)
+                z = torch.zeros
+                lora = PackedLoRALayerWeights(
+                    module_name,
+                    rank,
+                    [1, 1, 1],
+                    [z(num_experts, rank, hidden, dtype=dtype, device="cpu"),
+                     z(num_experts, rank, intermediate, dtype=dtype, device="cpu"),
+                     z(num_experts, rank, hidden, dtype=dtype, device="cpu")],
+                    [z(num_experts, intermediate, rank, dtype=dtype, device="cpu"),
+                     z(num_experts, hidden, rank, dtype=dtype, device="cpu"),
+                     z(num_experts, intermediate, rank, dtype=dtype, device="cpu")],
+                    scaling=[1, 1, 1],
+                )
+                model.loras[module_name] = lora
             else:
                 parts = module_name.split(".")
                 replacements = self.packed_modules_mapping[parts[-1]]
@@ -441,13 +468,7 @@ class LoRAModelManager:
                         "cpu",
                     )
                     subloras.append(lora)
-                if module.__class__.__name__ in (
-                    "FusedMoEWithLoRA",
-                    "FusedMoEWithSharedOuterLoRA",
-                ):
-                    lora = PackedLoRALayerWeights.pack_moe(subloras, module_name)
-                else:
-                    lora = PackedLoRALayerWeights.pack(subloras)
+                lora = PackedLoRALayerWeights.pack(subloras)
                 model.loras[module_name] = lora
         return model
 
