@@ -16,7 +16,6 @@
 # limitations under the License.
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
-import math
 from collections.abc import Iterable, Mapping, Sequence
 from typing import Annotated, Literal, TypeAlias
 
@@ -42,7 +41,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -168,54 +167,35 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Idefics3Processor | None,
-    ) -> tuple[int, int]:
-        if processor is None:
-            processor = self.get_hf_processor()
-
+        processor: Idefics3Processor,
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[int, int, int]:
         image_processor: Idefics3ImageProcessor = processor.image_processor
 
-        max_image_size = image_processor.max_image_size["longest_edge"]
-        size = image_processor.size["longest_edge"]
-        assert size % max_image_size == 0, (
-            "`longest_edge` in image_processor's `size` must be divisible by "
-            "`longest_edge` in `max_image_size`, this may be caused by "
-            "incorrect mm_kwargs override."
+        return image_processor.get_number_of_image_patches(
+            image_height,
+            image_width,
+            self.ctx.get_merged_mm_kwargs(mm_kwargs),
         )
-
-        resized_height, resized_width = self._get_resize_output_image_size(
-            image_width=image_width,
-            image_height=image_height,
-            resolution_max_side=size,
-        )
-        if resized_height > max_image_size or resized_width > max_image_size:
-            grid_h = math.ceil(resized_height / max_image_size)
-            grid_w = math.ceil(resized_width / max_image_size)
-        else:
-            grid_h = grid_w = 0
-        return grid_w, grid_h
 
     def get_num_patches(
         self,
         *,
         image_width: int,
         image_height: int,
-        processor: Idefics3Processor | None,
+        processor: Idefics3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        grid_w, grid_h = self._get_image_feature_grid_size(
+        num_patches, _, _ = self._get_image_feature_grid_size(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
 
-        return grid_w * grid_h + 1
+        return num_patches
 
-    def _get_image_token(
-        self, processor: Idefics3Processor | None
-    ) -> tuple[str, str, str]:
-        if processor is None:
-            processor = self.get_hf_processor()
-
+    def _get_image_token(self, processor: Idefics3Processor) -> tuple[str, str, str]:
         image_token = processor.image_token
         fake_image_token = processor.fake_image_token
         global_image_token = processor.global_image_tag
@@ -226,11 +206,9 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Idefics3Processor | None,
+        processor: Idefics3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> str:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         image_token, fake_image_token, global_img_token = self._get_image_token(
             processor
         )
@@ -241,10 +219,11 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         global_img_placeholder = fake_image_token + global_img_token + p_img
         tile_img_placeholder = fake_image_token + grid_placeholder + p_img
 
-        grid_w, grid_h = self._get_image_feature_grid_size(
+        _, grid_h, grid_w = self._get_image_feature_grid_size(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
         if grid_w == 0 and grid_h == 0:
             return global_img_placeholder + fake_image_token
@@ -272,27 +251,17 @@ class Idefics3ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Idefics3Processor | None,
+        processor: Idefics3Processor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         num_patches = self.get_num_patches(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
 
         return num_patches * processor.image_seq_len
-
-    def get_image_size_with_most_features(self) -> ImageSize:
-        processor = self.get_hf_processor()
-        image_processor: Idefics3ImageProcessor = processor.image_processor
-
-        return ImageSize(
-            width=image_processor.size["longest_edge"],
-            height=image_processor.size["longest_edge"],
-        )
 
 
 class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo]):
@@ -309,9 +278,10 @@ class Idefics3DummyInputsBuilder(BaseDummyInputsBuilder[Idefics3ProcessingInfo])
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
-        hf_processor = self.info.get_hf_processor()
+        hf_processor = self.info.get_hf_processor(**(mm_processor_kwargs or {}))
         image_processor: Idefics3ImageProcessor = hf_processor.image_processor
         longest_edge = image_processor.max_image_size["longest_edge"]
 
@@ -361,6 +331,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
                 image_width=size.width,
                 image_height=size.height,
                 processor=hf_processor,
+                mm_kwargs=mm_kwargs,
             )
             for size in image_sizes
         ]
@@ -406,6 +377,7 @@ class Idefics3MultiModalProcessor(BaseMultiModalProcessor[Idefics3ProcessingInfo
                 image_width=image_size.width,
                 image_height=image_size.height,
                 processor=hf_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
 
             return PromptUpdateDetails.select_text(
