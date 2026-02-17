@@ -38,12 +38,11 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: int | None = None
+    block_size: int = None  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
 
-    This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_config()` based on the current
-    platform."""
+    This is None until `Platform.check_and_update_config()` sets it based on
+    the current platform. Always an int by the time the engine starts."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
