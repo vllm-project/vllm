@@ -773,6 +773,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 routing_tables=layer._maybe_init_expert_routing_tables(),
                 allow_new_interface=True,
             )
+            assert prepare_finalize is not None
 
             self.kernel = mk.FusedMoEModularKernel(
                 prepare_finalize,
