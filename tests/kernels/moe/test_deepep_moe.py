@@ -255,7 +255,7 @@ def deep_ep_moe_impl(
             quant_config,
         )
 
-        out = mk.forward(
+        out = mk.apply(
             hidden_states=rank_tokens_chunk,
             w1=w1,
             w2=w2,

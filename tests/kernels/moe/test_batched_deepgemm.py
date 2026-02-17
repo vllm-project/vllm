@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
@@ -80,13 +81,16 @@ def test_batched_deepgemm_vs_triton(
         inplace=False,
     )
 
-    out_triton = mk_triton(
+    out_triton = mk_triton.apply(
         hidden_states=a,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
         global_num_experts=E,
+        expert_map=None,
+        apply_router_weight_on_input=False,
     )
 
     # deepgemm
@@ -102,13 +106,16 @@ def test_batched_deepgemm_vs_triton(
         inplace=False,
     )
 
-    out_deepgemm = mk_deepgemm(
+    out_deepgemm = mk_deepgemm.apply(
         hidden_states=a,
         w1=w1,
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
+        activation=MoEActivation.SILU,
         global_num_experts=E,
+        expert_map=None,
+        apply_router_weight_on_input=False,
     )
 
     diff = calc_diff(out_deepgemm, out_triton)
