@@ -32,6 +32,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -101,6 +102,9 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
 
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
