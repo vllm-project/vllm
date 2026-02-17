@@ -13,6 +13,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonImpl,
+)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
@@ -23,7 +26,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -146,6 +148,16 @@ class FlashMLASparseMetadata(AttentionMetadata):
     req_id_per_token: torch.Tensor
     block_size: int = 64
     topk_tokens: int = 2048
+
+    # Prefill/decode split (required by dispatch logic in mla_attention.py)
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
+
+    # MHA prefill metadata (used by SparseMLACommonImpl.forward_mha)
+    prefill_query_start_loc: torch.Tensor | None = None
+    prefill_max_query_len: int = 0
+    has_context: bool = False
 
     @dataclass
     class FP8KernelMetadata:
@@ -510,6 +522,41 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             else:
                 fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
 
+        # Compute prefill/decode split for the dispatch logic in
+        # mla_attention.py and SparseMLACommonImpl.forward_mha().
+        (num_decodes, num_prefills, num_decode_tokens, _num_prefill_tokens) = (
+            split_decodes_and_prefills(
+                cm,
+                decode_threshold=self.reorder_batch_threshold or 1,
+            )
+        )
+
+        # Build prefill-specific metadata for forward_mha
+        prefill_query_start_loc = None
+        prefill_max_query_len = 0
+        has_context = False
+        if num_prefills > 0:
+            # Derive prefill cu_seqlens from the full query_start_loc.
+            # Decodes come first in the batch, prefills follow.
+            offset = cm.query_start_loc[num_decodes]
+            prefill_query_start_loc = cm.query_start_loc[num_decodes:] - offset
+
+            query_start_loc_cpu = cm.query_start_loc_cpu
+            prefill_qlens = (
+                query_start_loc_cpu[num_decodes + 1 :]
+                - query_start_loc_cpu[num_decodes:-1]
+            )
+            prefill_max_query_len = int(prefill_qlens.max().item())
+
+            # has_context: any prefill request has cached tokens (seq_len > query_len)
+            seq_lens_cpu = cm.seq_lens.cpu()
+            for i in range(num_prefills):
+                req_idx = num_decodes + i
+                qlen = query_start_loc_cpu[req_idx + 1] - query_start_loc_cpu[req_idx]
+                if seq_lens_cpu[req_idx] > qlen:
+                    has_context = True
+                    break
+
         metadata = FlashMLASparseMetadata(
             num_reqs=cm.num_reqs,
             max_query_len=cm.max_query_len,
@@ -521,6 +568,12 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             req_id_per_token=req_id_per_token,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            num_decodes=num_decodes,
+            num_prefills=num_prefills,
+            num_decode_tokens=num_decode_tokens,
+            prefill_query_start_loc=prefill_query_start_loc,
+            prefill_max_query_len=prefill_max_query_len,
+            has_context=has_context,
             fp8_extra_metadata=fp8_extra_metadata,
             fp8_use_mixed_batch=fp8_use_mixed_batch,
         )
@@ -528,7 +581,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         return metadata
 
 
-class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
+class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     @staticmethod
     def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
         # FP8 decode kernel only supports h_q = 64 or 128
@@ -552,15 +605,20 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
-        self.softmax_scale = scale
-        assert indexer is not None
-        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            indexer=indexer,
+            **mla_args,
+        )
         # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
         self.prefill_padding = (
             128 if current_platform.is_device_capability_family(100) else 64
@@ -770,7 +828,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             tile_scheduler_metadata=kernel_metadata.scheduler_metadata,
             is_fp8_kvcache=True,
             indices=topk_indices,
-            softmax_scale=self.softmax_scale,
+            softmax_scale=self.scale,
         )
 
         # Slice output back to actual head count if we padded
@@ -803,9 +861,9 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             q = q_padded
 
         topk_indices = topk_indices.view(num_tokens, 1, -1)
-        output = flash_mla_sparse_fwd(
-            q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale
-        )[0]
+        output = flash_mla_sparse_fwd(q, kv_c_and_k_pe_cache, topk_indices, self.scale)[
+            0
+        ]
         output = output[:, : self.num_heads, :]
         return output
 

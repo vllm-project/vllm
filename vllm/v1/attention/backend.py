@@ -780,10 +780,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
 
 
 class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
-    """Sparse MLA attention implementation with only forward_mqa method.
+    """Sparse MLA attention implementation with forward_mqa and forward_mha.
 
-    Sparse MLA implementations only support decode (MQA-style) attention.
-    They do not support prefill (MHA-style) attention.
+    Has the same interface as MLAAttentionImpl. Sparse impls should inherit
+    from SparseMLACommonImpl (in sparse_mla_attention.py) which provides a
+    concrete forward_mha() implementation.
     """
 
     @abstractmethod
@@ -810,6 +811,25 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         indexer: object | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
+        raise NotImplementedError
+
+    def forward_mha(
+        self,
+        q: torch.Tensor,
+        kv_c_normed: torch.Tensor,
+        k_pe: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: T,
+        k_scale: torch.Tensor,
+        output: torch.Tensor,
+    ) -> None:
+        """MHA-style prefill forward pass.
+
+        Default raises NotImplementedError. Sparse impls that inherit from
+        SparseMLACommonImpl get a concrete implementation automatically.
+        Impls without MHA support (e.g. ROCm) can leave this as-is; the
+        dispatch will never call it when num_decode_tokens == num_actual_tokens.
+        """
         raise NotImplementedError
 
     @abstractmethod

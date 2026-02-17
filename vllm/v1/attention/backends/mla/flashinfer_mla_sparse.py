@@ -25,6 +25,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
     get_mla_dims,
 )
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLACommonImpl,
+)
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -32,10 +35,8 @@ from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionMetadata,
     AttentionMetadataBuilder,
-    AttentionType,
     CommonAttentionMetadata,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -247,11 +248,12 @@ def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
     return _fi_sparse_workspace
 
 
-class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata]):
+class FlashInferMLASparseImpl(SparseMLACommonImpl[FlashInferMLASparseMetadata]):
     """FlashInfer MLA Sparse implementation.
 
     Uses the TRT-LLM MLA kernel with sparse_mla_top_k parameter for
-    sparse attention computation.
+    sparse attention decode, and inherits FA-based forward_mha for prefill
+    from SparseMLACommonImpl.
     """
 
     def __init__(
@@ -271,34 +273,20 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
-        unsupported_features = [alibi_slopes, sliding_window, logits_soft_cap]
-        if any(unsupported_features):
-            raise NotImplementedError(
-                "FlashInferMLASparseImpl does not support one of the following: "
-                "alibi_slopes, sliding_window, logits_soft_cap"
-            )
-
-        if attn_type != AttentionType.DECODER:
-            raise NotImplementedError(
-                "Encoder self-attention and "
-                "encoder/decoder cross-attention "
-                "are not implemented for "
-                "FlashInferMLASparseImpl"
-            )
-
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-
-        # MLA-specific dimensions
-        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
-        self.qk_nope_head_dim: int = mla_args["qk_nope_head_dim"]
-        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
-
-        assert indexer is not None, "Indexer required for sparse MLA"
-        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            indexer=indexer,
+            **mla_args,
+        )
 
         self._workspace_buffer: torch.Tensor | None = None
         self.bmm1_scale: float | None = None
