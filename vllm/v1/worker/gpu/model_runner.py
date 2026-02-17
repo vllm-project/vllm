@@ -155,9 +155,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             vocab_size=self.vocab_size,
             device=self.device,
-            all_token_ids=self.req_states.all_token_ids.gpu,
-            prompt_len=self.req_states.prompt_len.gpu,
-            total_len=self.req_states.total_len.gpu,
+            req_states=self.req_states,
             logprobs_mode=self.model_config.logprobs_mode,
             num_speculative_tokens=self.num_speculative_steps + 1,
         )
@@ -528,11 +526,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
-            self.sampler.apply_staged_writes(
-                self.req_states.all_token_ids.gpu,
-                self.req_states.prefill_len.np,
-                self.req_states.prompt_len.np,
-            )
+            self.sampler.apply_staged_writes()
             if self.uses_mrope:
                 self.mrope_states.apply_staged_writes()
 
