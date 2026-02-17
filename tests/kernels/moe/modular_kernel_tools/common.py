@@ -666,7 +666,7 @@ def run_modular_kernel(
     # impls might update the tensor in place
     hidden_states = rank_tensors.hidden_states.clone()
 
-    topk_ids = rank_tensors.topk_ids.to(mk.prepare_finalize.topk_indices_dtype())
+    topk_ids = rank_tensors.topk_ids.to(mk.impl.prepare_finalize.topk_indices_dtype())
 
     mk_kwargs = {
         "hidden_states": hidden_states,
@@ -674,6 +674,7 @@ def run_modular_kernel(
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
         "topk_ids": topk_ids,
+        "activation": MoEActivation.SILU,
         "expert_map": rank_tensors.expert_map,
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1
