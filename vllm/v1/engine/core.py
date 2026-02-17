@@ -1334,6 +1334,30 @@ class EngineCoreProc(EngineCore):
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
 
+    def _send_error_output(
+        self,
+        request_id: str,
+        client_index: int,
+        finish_reason: FinishReason = FinishReason.ERROR,
+    ) -> None:
+        """Send error output for a request."""
+        self.output_queue.put_nowait(
+            (
+                client_index,
+                EngineCoreOutputs(
+                    engine_index=self.engine_index,
+                    finished_requests={request_id},
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=request_id,
+                            new_token_ids=[],
+                            finish_reason=finish_reason,
+                        )
+                    ],
+                ),
+            )
+        )
+
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
         from the add request preprocessing in the input socket processing thread.
@@ -1341,21 +1365,10 @@ class EngineCoreProc(EngineCore):
         logger.exception(
             "Unexpected error pre-processing request %s", request.request_id
         )
-        self.output_queue.put_nowait(
-            (
-                request.client_index,
-                EngineCoreOutputs(
-                    engine_index=self.engine_index,
-                    finished_requests={request.request_id},
-                    outputs=[
-                        EngineCoreOutput(
-                            request_id=request.request_id,
-                            new_token_ids=[],
-                            finish_reason=FinishReason.ERROR,
-                        )
-                    ],
-                ),
-            )
+        self._send_error_output(
+            request.request_id,
+            request.client_index,
+            FinishReason.ERROR,
         )
 
     def pause_scheduler(
