@@ -146,22 +146,24 @@ def _get_tile_config(M: int, N: int) -> tuple[int, int, int]:
     if on_gfx11():
         if next_power_of_2_M <= 32:
             return (32, 64, 128) if is_small_N else (16, 256, 64)
-        if next_power_of_2_M <= 64:
+        elif next_power_of_2_M <= 64:
             return (64, 128, 128) if is_small_N else (64, 128, 64)
-        if next_power_of_2_M <= 128:
+        elif next_power_of_2_M <= 128:
             return (128, 64, 128)
-        if next_power_of_2_M <= 512:
+        elif next_power_of_2_M <= 512:
             return (128, 64, 128) if is_small_N else (256, 64, 32)
-        return (256, 64, 32)
+        else:
+            return (256, 64, 32)
 
     # Default
     if next_power_of_2_M <= 32:
         return (64, 64, 256) if is_small_N else (64, 128, 256)
-    if next_power_of_2_M <= 64:
+    elif next_power_of_2_M <= 64:
         return (64, 64, 256)
-    if next_power_of_2_M <= 128:
+    elif next_power_of_2_M <= 128:
         return (64, 128, 128)
-    return (128, 128, 128)
+    else:
+        return (128, 128, 128)
 
 
 # input   - [M, K]
