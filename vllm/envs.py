@@ -243,6 +243,10 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
+    VLLM_SKIP_MODEL_VALIDATION: bool = False
+    """If set, vLLM will skip model name validation in API requests.
+    This allows any model name to be accepted in the 'model' field of requests,
+    making the server model-name agnostic. Useful for proxy/gateway scenarios."""
 
 
 def get_default_cache_root():
@@ -1616,6 +1620,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Path to the CUDA compatibility libraries when CUDA compatibility is enabled.
     "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
         "VLLM_CUDA_COMPATIBILITY_PATH", None
+    ),
+    # Skip model name validation in OpenAI API requests.
+    # When set to 1, any model name will be accepted in the 'model' field
+    # of API requests. This is useful for proxy/gateway scenarios where
+    # the actual model is served but different names may be used in requests.
+    "VLLM_SKIP_MODEL_VALIDATION": lambda: (
+        os.getenv("VLLM_SKIP_MODEL_VALIDATION", "0").strip().lower()
+        in ("1", "true")
     ),
 }
 
