@@ -167,19 +167,14 @@ def moondream3_skill_inputs():
     stop_sign = IMAGE_ASSETS[0].pil_image
     cherry_blossom = IMAGE_ASSETS[1].pil_image
 
-    # Moondream3 prompt format: <|endoftext|><image>{task}
-    # Note: space after <image> is needed before regular text to prevent
-    # BPE merges with '>'. Not needed before special tokens like
-    # <|md_reserved_0|> which the tokenizer extracts before BPE.
-
     # Test different skills with appropriate prompts
     prompts = [
         # Query skill - question answering
-        "<|endoftext|><image> \n\nQuestion: What is shown in this image?\n\nAnswer:",
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What is shown in this image?<|md_reserved_2|>",  # noqa: E501
         # Caption skill - uses dedicated caption template format
-        "<|endoftext|><image><|md_reserved_0|>caption<|md_reserved_1|>normal<|md_reserved_2|>",
+        "<|endoftext|><image><|md_reserved_0|>describe<|md_reserved_1|>normal<|md_reserved_2|>",  # noqa: E501
         # Query skill - specific question
-        "<|endoftext|><image> \n\nQuestion: What colors do you see?\n\nAnswer:",
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What colors do you see?<|md_reserved_2|>",  # noqa: E501
     ]
 
     images = [
@@ -214,15 +209,15 @@ def moondream3_multi_size_inputs():
 
     prompts = [
         # Small image (should use 1x1 tiling)
-        "<|endoftext|><image> \n\nQuestion: Describe this small image.\n\nAnswer:",
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this small image.<|md_reserved_2|>",  # noqa: E501
         # Medium image
-        "<|endoftext|><image> \n\nQuestion: What do you see?\n\nAnswer:",
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>What do you see?<|md_reserved_2|>",  # noqa: E501
         # Large image (should use multi-crop)
-        "<|endoftext|><image> \n\nQuestion: Describe this large image.\n\nAnswer:",
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this large image.<|md_reserved_2|>",  # noqa: E501
         # Tall image (different aspect ratio)
-        "<|endoftext|><image> \n\nQuestion: Describe this tall image.\n\nAnswer:",
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this tall image.<|md_reserved_2|>",  # noqa: E501
         # Wide image (different aspect ratio)
-        "<|endoftext|><image> \n\nQuestion: Describe this wide image.\n\nAnswer:",
+        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>Describe this wide image.<|md_reserved_2|>",  # noqa: E501
     ]
 
     images = [

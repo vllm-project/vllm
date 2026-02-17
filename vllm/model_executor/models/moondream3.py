@@ -77,6 +77,7 @@ class Moondream3TextConfig:
     n_heads: int = 32
     n_kv_heads: int = 32
     prefix_attn: int = 730  # BOS + 729 vision tokens
+    prefix_lm_left_padding: int = 1  # include BOS in prefix-lm span
     rope_theta: float = 1500000.0
     # MoE configuration
     moe_start_layer: int = 4
@@ -96,6 +97,7 @@ class Moondream3TextConfig:
             n_heads=text_cfg.get("n_heads", 32),
             n_kv_heads=text_cfg.get("n_kv_heads", 32),
             prefix_attn=text_cfg.get("prefix_attn", 730),
+            prefix_lm_left_padding=text_cfg.get("prefix_lm_left_padding", 1),
             rope_theta=text_cfg.get("rope_theta", 1500000.0),
             moe_start_layer=text_cfg.get("moe", {}).get("start_layer", 4),
             moe_num_experts=text_cfg.get("moe", {}).get("n_experts", 64),
@@ -648,8 +650,9 @@ class Moondream3TextMoE(nn.Module):
             h_full = F.linear(x_tok, self.fc1_weight[local_expert_idx])
 
             # GeGLU with (g + 1): h, g = split; output = gelu(h) * (g + 1)
+            # HF MoE uses exact GELU (not tanh approximation).
             h, g = h_full.chunk(2, dim=-1)  # Each [n_tokens, expert_inner_dim]
-            h = F.gelu(h, approximate="tanh") * (g + 1.0)
+            h = F.gelu(h) * (g + 1.0)
 
             # fc2: [hidden_size, expert_inner_dim]
             # y: [n_tokens, hidden_size]
@@ -745,6 +748,9 @@ class Moondream3Attention(nn.Module):
         self.tau_wv = nn.Parameter(torch.zeros(self.num_heads_per_partition, qkv_dim))
         self.tp_size = tp_size
 
+        # Prefix-LM attention length: BOS (1) + vision patches (729) = 730
+        self._prefix_attn_len = config.prefix_attn  # 730
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -824,7 +830,46 @@ class Moondream3Attention(nn.Module):
         v = v.view(num_tokens, -1)
 
         q, k = self.rotary_emb(positions, q, k)
-        attn_output = self.attn(q, k, v)
+
+        # ---- SDPA prefill override ----
+        # During prefill (num_tokens >= prefix_attn_len), use PyTorch SDPA
+        # with an explicit bidirectional mask for the prefix-LM region.
+        # This produces hidden states that closely match the HF reference
+        # (which also uses SDPA for prefill).  Decode tokens and short
+        # sequences fall through to the configured attention backend (e.g.
+        # FLEX_ATTENTION) for KV-cache-aware decoding.
+        H = self.num_heads_per_partition
+        Hkv = self.num_kv_heads_per_partition
+        D = self.head_dim
+        P = self._prefix_attn_len  # 730
+
+        if num_tokens > 1 and num_tokens >= P:
+            q_4d = q.view(num_tokens, H, D).transpose(0, 1).unsqueeze(0)
+            k_4d = k.view(num_tokens, Hkv, D).transpose(0, 1).unsqueeze(0)
+            v_4d = v.view(num_tokens, Hkv, D).transpose(0, 1).unsqueeze(0)
+
+            # Causal mask with bidirectional prefix region
+            bool_mask = torch.tril(
+                torch.ones(1, 1, num_tokens, num_tokens,
+                           dtype=torch.bool, device=q.device)
+            )
+            bool_mask[:, :, :P, :P] = True  # Positions 0-729 bidir
+
+            attn_output = F.scaled_dot_product_attention(
+                q_4d, k_4d, v_4d,
+                attn_mask=bool_mask,
+                scale=self.scaling,
+            )
+            attn_output = (
+                attn_output.squeeze(0).transpose(0, 1).contiguous()
+                .view(num_tokens, H * D)
+            )
+
+            # Still call self.attn to populate the KV cache
+            _ = self.attn(q, k, v)
+        else:
+            attn_output = self.attn(q, k, v)
+
         output, _ = self.out_proj(attn_output)
         return output
 
@@ -1000,15 +1045,17 @@ class Moondream3DummyInputsBuilder(BaseDummyInputsBuilder[Moondream3ProcessingIn
     """Dummy inputs builder for profiling."""
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
-        # Use space after <image> to ensure tokenization preserves the
-        # placeholder pattern [<, image, >] separately from following tokens
-        return "<|endoftext|><image> \n\nQuestion: What is this?\n\nAnswer:"
+        return (
+            "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
+            "What is this image?<|md_reserved_2|>"
+        )
 
     def get_dummy_mm_data(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         return {
@@ -1098,17 +1145,20 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     **Supported (via standard autoregressive generation):**
 
     - **query** (visual question answering):
-      ``<|endoftext|><image>\\n\\nQuestion: {question}\\n\\nAnswer:``
+      ``<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>{q}<|md_reserved_2|>``
     - **caption** (image description):
-      ``<|endoftext|><image><|md_reserved_0|>caption<|md_reserved_1|>``
-      ``normal<|md_reserved_2|>``
+      ``<|endoftext|><image><|md_reserved_0|>describe<|md_reserved_1|>normal<|md_reserved_2|>``
 
     **Not supported (requires custom generation loop):**
 
     - **point**: Locates objects by decoding (x, y) coordinates from hidden
       states and encoding them back as embeddings for the next step.
+      Prompt format:
+      ``<|endoftext|><image><|md_reserved_0|>point<|md_reserved_1|>{object}<|md_reserved_2|>``
     - **detect**: Locates objects by iteratively decoding bounding boxes
       (x1, y1, x2, y2) from hidden states.
+      Prompt format:
+      ``<|endoftext|><image><|md_reserved_0|>detect<|md_reserved_1|>{object}<|md_reserved_2|>``
 
     Point and detect are architecturally incompatible with vLLM's standard
     ``embed_input_ids -> forward -> compute_logits -> sample`` pipeline
@@ -1329,7 +1379,8 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             reconstructed = global_features.view(grid_size, grid_size, enc_dim)
 
         recon = reconstructed.permute(2, 0, 1).contiguous()
-        recon = F.adaptive_avg_pool2d(recon, output_size=(grid_size, grid_size))
+        pooled_size = self.config.vision.enc_n_layers
+        recon = F.adaptive_avg_pool2d(recon, output_size=(pooled_size, pooled_size))
         recon = recon.permute(1, 2, 0).contiguous().view(-1, enc_dim)
 
         combined = torch.cat([global_features, recon], dim=-1).unsqueeze(0)
@@ -1372,8 +1423,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        logits = self.logits_processor(self.lm_head, hidden_states)
-        return logits
+        return self.logits_processor(self.lm_head, hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights with remapping from HuggingFace format."""
