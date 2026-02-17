@@ -491,9 +491,7 @@ class GPUModelRunner(
                 self.effective_drafter_max_model_len = self.max_model_len
 
             # setup Dynamic Speculative Decoding
-            self.dynamic_sd_manager: (
-                DynamicSpeculativeDecodingManager | None
-            ) = None
+            self.dynamic_sd_manager: DynamicSpeculativeDecodingManager | None = None
             if self.speculative_config.dynamic_config:
                 self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
                     self.speculative_config.dynamic_config,
