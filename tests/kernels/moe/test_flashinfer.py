@@ -412,7 +412,7 @@ def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
         pytest.skip("Test requires SM >= 100 (Blackwell)")
 
     import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
-    from tests.kernels.quant_utils import native_per_token_group_quant_fp8
+    from vllm.utils.deep_gemm import per_block_cast_to_fp8
 
     set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
@@ -421,7 +421,6 @@ def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
     topk = 6  # top_k > 1 triggers DeepSeekV3 routing with sigmoid
     m, n, k = 10, 4096, 5120
     block_shape = [128, 128]
-    block_k = block_shape[1]
 
     with set_current_vllm_config(vllm_config):
         # Create BF16 hidden states
@@ -431,15 +430,15 @@ def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
         w13_bf16 = torch.randn((e, 2 * n, k), device="cuda", dtype=torch.bfloat16) / 10
         w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16) / 10
 
-        # Quantize weights per-block to FP8
+        # Quantize weights per-block to FP8 (2D block quantization)
         w13_fp8_list, w13_scale_list = [], []
         w2_fp8_list, w2_scale_list = [], []
         for i in range(e):
-            wq, ws = native_per_token_group_quant_fp8(w13_bf16[i], block_k)
+            wq, ws = per_block_cast_to_fp8(w13_bf16[i], block_size=block_shape)
             w13_fp8_list.append(wq)
             w13_scale_list.append(ws)
 
-            wq, ws = native_per_token_group_quant_fp8(w2_bf16[i], block_k)
+            wq, ws = per_block_cast_to_fp8(w2_bf16[i], block_size=block_shape)
             w2_fp8_list.append(wq)
             w2_scale_list.append(ws)
 
