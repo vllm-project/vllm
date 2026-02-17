@@ -70,7 +70,6 @@ class PPHandler:
 
         Args:
             num_reqs: Number of requests in the batch.
-            device: Device to create tensors on.
             max_sample_len: Maximum number of tokens sampled per request
                 (1 for regular decode, >1 for speculative decoding).
 

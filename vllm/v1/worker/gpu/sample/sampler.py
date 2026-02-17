@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+from vllm.v1.worker.gpu.states import RequestState
 
 
 class Sampler:
@@ -23,9 +24,7 @@ class Sampler:
         max_num_reqs: int,
         vocab_size: int,
         device: torch.device,
-        all_token_ids: torch.Tensor,
-        prompt_len: torch.Tensor,
-        total_len: torch.Tensor,
+        req_states: RequestState,
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
     ):
@@ -35,9 +34,9 @@ class Sampler:
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
 
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
-        self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
+        self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
-        self.bad_words_state = BadWordsState(all_token_ids, prompt_len, total_len)
+        self.bad_words_state = BadWordsState(req_states)
         self.num_speculative_tokens = num_speculative_tokens
 
     def add_request(
@@ -48,16 +47,9 @@ class Sampler:
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
         self.bad_words_state.add_request(req_idx, sampling_params)
 
-    def apply_staged_writes(
-        self,
-        all_token_ids: torch.Tensor,
-        prefill_lens: np.ndarray,
-        prompt_lens: np.ndarray,
-    ) -> None:
+    def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
-        self.penalties_state.apply_staged_writes(
-            all_token_ids, prefill_lens, prompt_lens
-        )
+        self.penalties_state.apply_staged_writes()
         self.logit_bias_state.apply_staged_writes()
         self.bad_words_state.apply_staged_writes()
 
