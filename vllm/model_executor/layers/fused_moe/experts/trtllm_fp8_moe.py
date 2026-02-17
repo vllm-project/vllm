@@ -21,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
 )
-from vllm.v1.engine.utils import current_platform
+from vllm.platforms import current_platform
 
 
 class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
@@ -83,7 +83,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        """Does not support non-gated MoE (i.e. Nanotron-Mini)."""
+        """Does not support non-gated MoE (i.e. Nanotron-3-Nano)."""
         return False
 
     @staticmethod
@@ -181,7 +181,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         assert activation == MoEActivation.SILU
 
         if e_score_correction_bias is not None:
-            e_score_correction_bias.to(hidden_states.dtype)
+            e_score_correction_bias = e_score_correction_bias.to(hidden_states.dtype)
 
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
