@@ -8,7 +8,7 @@
 #
 # See: https://github.com/vllm-project/vllm/issues/33599
 
-set -o pipefail
+set -eo pipefail
 
 RAY_LOCK_BASE_URL="https://raw.githubusercontent.com/ray-project/ray/master/python/deplocks/llm"
 RAY_LOCK_FILES=(
@@ -110,22 +110,35 @@ See [issue #33599](https://github.com/vllm-project/vllm/issues/33599) for contex
 EOF
 fi
 
-# Notify Slack if webhook is configured
+# Notify Slack if webhook is configured.
 if [ -n "$RAY_COMPAT_SLACK_WEBHOOK_URL" ]; then
+    PAYLOAD=$(python3 -c '
+import json, os, sys
+failed = sys.argv[1]
+pr = os.getenv("BUILDKITE_PULL_REQUEST", "N/A")
+branch = os.getenv("BUILDKITE_BRANCH", "unknown")
+url = os.getenv("BUILDKITE_BUILD_URL", "#")
+data = {
+    "text": ":warning: Ray Dependency Compatibility Check Failed",
+    "blocks": [{
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": (
+                "*:warning: Ray Dependency Compatibility Check Failed*\n"
+                f"PR #{pr} on branch `{branch}` introduces dependencies "
+                f"that conflict with Ray'\''s lock file(s): {failed}\n"
+                f"<{url}|View Build>"
+            ),
+        },
+    }],
+}
+print(json.dumps(data))
+' "${FAILED_LOCKS[*]}")
+
     curl -s -X POST "$RAY_COMPAT_SLACK_WEBHOOK_URL" \
         -H 'Content-type: application/json' \
-        -d "{
-            \"text\": \":warning: Ray Dependency Compatibility Check Failed\",
-            \"blocks\": [
-                {
-                    \"type\": \"section\",
-                    \"text\": {
-                        \"type\": \"mrkdwn\",
-                        \"text\": \"*:warning: Ray Dependency Compatibility Check Failed*\nPR #${BUILDKITE_PULL_REQUEST:-N/A} on branch \`${BUILDKITE_BRANCH:-unknown}\` introduces dependencies that conflict with Ray's lock file(s): ${FAILED_LOCKS[*]}\n<${BUILDKITE_BUILD_URL:-#}|View Build>\"
-                    }
-                }
-            ]
-        }"
+        -d "$PAYLOAD"
 fi
 
 exit $OVERALL_EXIT
