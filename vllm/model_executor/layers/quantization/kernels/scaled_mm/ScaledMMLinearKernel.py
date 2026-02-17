@@ -9,10 +9,7 @@ from typing import Generic, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    GroupShape,
-    QuantKey,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 
 
@@ -26,18 +23,6 @@ class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     out_dtype: torch.dtype | None = None
-
-    @property
-    def is_static_input_scheme(self) -> bool:
-        return self.activation_quant_key.scale.static
-
-    @property
-    def is_channelwise(self) -> bool:
-        return self.weight_quant_key.scale.group_shape != GroupShape.PER_TENSOR
-
-    @property
-    def input_symmetric(self) -> bool:
-        return self.activation_quant_key.symmetric
 
 
 @dataclass
