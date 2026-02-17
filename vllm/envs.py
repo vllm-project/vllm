@@ -98,6 +98,7 @@ if TYPE_CHECKING:
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
+    VLLM_MOE_EXLLAMA: bool = False
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -907,6 +908,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disabled by default.
     "VLLM_USE_OINK_OPS": lambda: (
         os.getenv("VLLM_USE_OINK_OPS", "False").lower() in ("true", "1")
+    ),
+    # Use exllama 4-bit kernel for MoE GPTQ instead of Triton.
+    # Requires exllama-native weight format [E, K/8, N] int32.
+    "VLLM_MOE_EXLLAMA": lambda: (
+        os.getenv("VLLM_MOE_EXLLAMA", "false").lower() in ("true", "1")
     ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
