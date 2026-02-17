@@ -162,8 +162,7 @@ class TopKTopPSampler(nn.Module):
             probs = logits.softmax(dim=-1, dtype=torch.float32)
             q = torch.empty_like(probs)
             q.exponential_()
-            for i, generator in generators.items():
-                q[i].exponential_(generator=generator)
+            _apply_exponential_by_generators(q, generators)
 
             return probs.div_(q).argmax(dim=-1).view(-1), logits_to_return
 
@@ -325,11 +324,37 @@ def random_sample(
     if len(generators) != probs.shape[0]:
         q.exponential_()
     if generators:
-        # TODO(woosuk): This can be slow because we handle each request
-        # one by one. Optimize this.
-        for i, generator in generators.items():
-            q[i].exponential_(generator=generator)
+        _apply_exponential_by_generators(q, generators)
     return probs.div_(q).argmax(dim=-1).view(-1)
+
+
+def _apply_exponential_by_generators(
+    q: torch.Tensor,
+    generators: dict[int, torch.Generator],
+) -> None:
+    """
+    Fill rows in `q` with exponential noise using per-request generators.
+    Groups contiguous row indices per generator to reduce kernel launches.
+    """
+    if not generators:
+        return
+    # Group row indices by generator to reduce per-row kernel launches.
+    generators_by_id: dict[torch.Generator, list[int]] = {}
+    for idx, generator in generators.items():
+        generators_by_id.setdefault(generator, []).append(idx)
+    for generator, indices in generators_by_id.items():
+        indices.sort()
+        start = prev = indices[0]
+        for idx in indices[1:]:
+            if idx == prev + 1:
+                prev = idx
+                continue
+            else:
+                # Fill the previous contiguous segment in one call.
+                q[start : prev + 1].exponential_(generator=generator)
+                start = prev = idx
+        # Fill the final segment for this generator.
+        q[start : prev + 1].exponential_(generator=generator)
 
 
 def flashinfer_sample(
