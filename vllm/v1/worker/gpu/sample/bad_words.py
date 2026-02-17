@@ -6,24 +6,17 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.states import RequestState
 
 MAX_BAD_WORDS_TOTAL_TOKENS = 1024  # Max total tokens for all bad words per request
 MAX_NUM_BAD_WORDS = 128  # Max number of bad words per request
 
 
 class BadWordsState:
-    def __init__(
-        self,
-        all_token_ids: torch.Tensor,
-        prompt_len: torch.Tensor,
-        total_len: torch.Tensor,
-    ):
-        self.all_token_ids = all_token_ids
-        self.prompt_len = prompt_len
-        self.total_len = total_len
-
-        self.max_num_reqs = prompt_len.shape[0]
-        self.device = prompt_len.device
+    def __init__(self, req_states: RequestState):
+        self.req_states = req_states
+        self.max_num_reqs = req_states.max_num_reqs
+        self.device = req_states.device
 
         # flattened bad word tokens: [max_num_reqs, MAX_BAD_WORDS_TOTAL_TOKENS]
         self.bad_word_token_ids = StagedWriteTensor(
@@ -39,18 +32,11 @@ class BadWordsState:
         )
         # number of bad words per request
         self.num_bad_words = UvaBackedTensor(self.max_num_reqs, dtype=torch.int32)
-        # whether request uses bad words
-        self.use_bad_words = np.zeros(self.max_num_reqs, dtype=bool)
 
-    def add_request(
-        self,
-        req_idx: int,
-        sampling_params: SamplingParams,
-    ) -> None:
+    def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         bad_words_token_ids = sampling_params.bad_words_token_ids
         if not bad_words_token_ids:
             self.num_bad_words.np[req_idx] = 0
-            self.use_bad_words[req_idx] = False
             return
 
         num_bad_words = len(bad_words_token_ids)
@@ -77,7 +63,6 @@ class BadWordsState:
         self.bad_word_token_ids.stage_write(req_idx, 0, flattened_tokens)
         self.bad_word_offsets.stage_write(req_idx, 0, offsets)
         self.num_bad_words.np[req_idx] = num_bad_words
-        self.use_bad_words[req_idx] = True
 
     def apply_staged_writes(self) -> None:
         self.num_bad_words.copy_to_uva()
@@ -92,23 +77,23 @@ class BadWordsState:
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> None:
-        if not np.any(self.use_bad_words[idx_mapping_np]):
+        max_num_bad_words = int(self.num_bad_words.np[idx_mapping_np].max())
+        if max_num_bad_words == 0:
             # No request uses bad words. Skip the kernel launch.
             return
 
-        actual_max_num_bad_words = int(np.max(self.num_bad_words.np[idx_mapping_np]))
         apply_bad_words(
             logits,
             idx_mapping,
             self.bad_word_token_ids.gpu,
             self.bad_word_offsets.gpu,
             self.num_bad_words.gpu,
-            self.all_token_ids,
-            self.prompt_len,
-            self.total_len,
+            self.req_states.all_token_ids.gpu,
+            self.req_states.prompt_len.gpu,
+            self.req_states.total_len.gpu,
             input_ids,
             expanded_local_pos,
-            actual_max_num_bad_words,
+            max_num_bad_words,
         )
 
 

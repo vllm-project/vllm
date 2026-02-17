@@ -30,8 +30,6 @@ SEPARATE_GROUPS = [
     # v0 related
     "vllm/lora",
     "vllm/model_executor",
-    # v1 related
-    "vllm/v1/kv_offload",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
