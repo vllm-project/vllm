@@ -439,7 +439,6 @@ def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
     if not current_platform.has_device_capability(100):
         pytest.skip("Test requires SM >= 100 (Blackwell)")
 
-    import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
     from tests.kernels.quant_utils import native_per_token_group_quant_fp8
 
     set_random_seed(7)
@@ -483,10 +482,20 @@ def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
         # This should NOT crash with n_group=None
         import flashinfer
 
+        from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+
+        a1q, a1q_scale = moe_kernel_quantize_input(
+            A=x,
+            A_scale=None,
+            quant_dtype=torch.float8_e4m3fn,
+            per_act_token_quant=False,
+            block_shape=block_shape,
+        )
         output = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
             routing_logits=routing_logits,
             routing_bias=routing_bias,
-            hidden_states=x,
+            hidden_states=a1q,
+            hidden_states_scale=a1q_scale,
             gemm1_weights=w13_fp8,
             gemm1_weights_scale=w13_scale,
             gemm2_weights=w2_fp8,
@@ -496,7 +505,7 @@ def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
             n_group=None,
             topk_group=None,
             intermediate_size=n,
-            expert_offset=0,
+            local_expert_offset=0,
             local_num_experts=e,
             routed_scaling_factor=1.0,
             routing_method_type=RoutingMethodType.DeepSeekV3,
