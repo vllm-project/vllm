@@ -145,10 +145,10 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
                 model=MODEL_NAME,
                 max_tokens=10000,
                 extra_body={"min_tokens": 10000},
+                temperature=0.0,
             )
         )
         tasks.append(task)
-        await asyncio.sleep(0.001)
 
     done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
 
@@ -164,7 +164,7 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
     # be able to respond to this one within the timeout
     client = server.get_async_client(timeout=5)
     response = await client.chat.completions.create(
-        messages=chat_input, model=MODEL_NAME, max_tokens=10
+        messages=chat_input, model=MODEL_NAME, max_tokens=10, temperature=0.0
     )
 
     assert len(response.choices) == 1
