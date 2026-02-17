@@ -64,6 +64,11 @@ def method_has_implemented_embedding(method_class: type[QuantizeMethodBase]) -> 
 class QuantizationConfig(ABC):
     """Base class for quantization configs."""
 
+    # Whether this quant method supports online quantization with meta device.
+    # When True, weights can be created on meta device and quantized layer-wise
+    # in process_weights_after_loading, reducing peak memory during loading.
+    supports_online_meta_device: bool = False
+
     def __init__(self):
         super().__init__()
         # mapping is updated by models as they initialize
@@ -182,14 +187,5 @@ class QuantizationConfig(ABC):
 
         Returns:
             True if this config uses MXFP4 quantization, False otherwise
-        """
-        return False
-
-    @classmethod
-    def uses_meta_device_weights(cls) -> bool:
-        """Whether this method creates weights on meta device for online quant.
-
-        Using meta device allows post-processing weights layer-wise instead of
-        after all weights are loaded, reducing peak memory usage during loading.
         """
         return False

@@ -109,6 +109,8 @@ logger = init_logger(__name__)
 class Fp8Config(QuantizationConfig):
     """Config class for FP8."""
 
+    supports_online_meta_device: bool = True
+
     def __init__(
         self,
         is_checkpoint_fp8_serialized: bool = False,
@@ -234,10 +236,6 @@ class Fp8Config(QuantizationConfig):
             return name.replace(".prob_output_scale", ".attn.prob_scale")
         # If no matches, return None
         return None
-
-    @classmethod
-    def uses_meta_device_weights(cls) -> bool:
-        return True
 
 
 class CopyNumelCounter(TorchDispatchMode):
