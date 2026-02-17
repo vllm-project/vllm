@@ -118,13 +118,21 @@ class DynamicSpeculativeDecodingManager:
             # find the nearest batch size smaller and bigger than the given batch size
             # and return the weighted avg of their stats
 
-            smaller_bs = [bs for bs in self.available_batch_sizes if bs < batch_size]
+            smaller_bs_list = [
+                bs for bs in self.available_batch_sizes if bs < batch_size
+            ]
             smaller_bs = (
-                max(smaller_bs) if len(smaller_bs) else self.available_batch_sizes[0]
+                max(smaller_bs_list)
+                if len(smaller_bs_list)
+                else self.available_batch_sizes[0]
             )
-            larger_bs = [bs for bs in self.available_batch_sizes if bs > batch_size]
+            larger_bs_list = [
+                bs for bs in self.available_batch_sizes if bs > batch_size
+            ]
             larger_bs = (
-                min(larger_bs) if len(larger_bs) else self.available_batch_sizes[-1]
+                min(larger_bs_list)
+                if len(larger_bs_list)
+                else self.available_batch_sizes[-1]
             )
 
             smaller_bs_stat = self.batch_stats[smaller_bs]
@@ -160,7 +168,7 @@ class DynamicSpeculativeDecodingManager:
     def _compute_optimal_num_speculative_tokens(self, batch_size: int) -> int:
         batch_stats = self._get_batch_stats(batch_size)
 
-        max_goodput = -1
+        max_goodput = -1.0
         for num_drafts in range(self.dynamic_config.max_num_speculative_tokens + 1):
             curr_al = 1 + sum(self.dynamic_config.acceptance_rate_per_pos[:num_drafts])
             curr_itl = self._get_itl(batch_stats, num_drafts)

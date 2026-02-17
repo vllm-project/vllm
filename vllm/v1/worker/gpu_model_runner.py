@@ -491,14 +491,15 @@ class GPUModelRunner(
                 self.effective_drafter_max_model_len = self.max_model_len
 
             # setup Dynamic Speculative Decoding
+            self.dynamic_sd_manager: (
+                DynamicSpeculativeDecodingManager | None
+            ) = None
             if self.speculative_config.dynamic_config:
                 self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
                     self.speculative_config.dynamic_config,
                     self.vllm_config.scheduler_config.max_num_seqs,
-                    self.vllm_config.speculative_config.num_speculative_tokens,
+                    self.speculative_config.num_speculative_tokens,
                 )
-            else:
-                self.dynamic_sd_manager = None
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}

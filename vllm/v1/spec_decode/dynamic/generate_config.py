@@ -27,7 +27,7 @@ def build_serve_params(
     Each entry becomes a separate server configuration in the sweep.
     The sweep framework starts/stops the server for each serve config.
     """
-    records = []
+    records: list[dict[str, object]] = []
 
     # Vanilla config (no speculative decoding)
     records.append({"_benchmark_name": "vanilla"})
@@ -99,7 +99,7 @@ def parse_itl_from_dataframe(result_df):
         batch_stats: dict of {batch_size: {num_drafts: median_itl_ms}}
         where num_drafts=0 corresponds to vanilla (no speculation).
     """
-    batch_stats = {}
+    batch_stats: dict[int, dict[int, float]] = {}
     for _, row in result_df.iterrows():
         bs = int(row["max_concurrency"])
 
