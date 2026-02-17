@@ -342,9 +342,15 @@ class TTPlatform(Platform):
 
     @staticmethod
     def compat_sampling_required(sampling_params, num_devices) -> bool:
-        # device logprobs currently only supported on multi-device setups
+        # Device logprobs only supported on multi-device setups and only
+        # the sampled token's logprob is returned (not top-k alternatives).
+        # Single device: any logprobs require host sampling.
+        # Multi-device: logprobs > 1 requires host sampling because device
+        # can only return the sampled token's logprob.
         # https://github.com/tenstorrent/tt-metal/issues/34077
-        if sampling_params.logprobs is not None and num_devices == 1:
+        if sampling_params.logprobs is not None \
+        and sampling_params.logprobs > 0 \
+        and (num_devices == 1 or sampling_params.logprobs > 1):
             return True
 
         # all of the following sampling params require compat sampling
