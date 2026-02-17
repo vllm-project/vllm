@@ -4,6 +4,7 @@
 import asyncio
 import signal
 import socket
+from functools import partial
 from http import HTTPStatus
 from typing import Any
 
@@ -93,18 +94,34 @@ async def serve_http(
         )
     )
 
+    shutdown_event = asyncio.Event()
+
     def signal_handler() -> None:
-        # prevents the uvicorn signal handler to exit early
-        server_task.cancel()
-        watchdog_task.cancel()
-        if ssl_cert_refresher:
-            ssl_cert_refresher.stop()
+        shutdown_event.set()
 
     async def dummy_shutdown() -> None:
         pass
 
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
+
+    async def handle_shutdown() -> None:
+        await shutdown_event.wait()
+
+        engine_client = app.state.engine_client
+        timeout = engine_client.vllm_config.shutdown_timeout
+
+        await loop.run_in_executor(
+            None, partial(engine_client.shutdown, timeout=timeout)
+        )
+
+        server.should_exit = True
+        server_task.cancel()
+        watchdog_task.cancel()
+        if ssl_cert_refresher:
+            ssl_cert_refresher.stop()
+
+    shutdown_task = loop.create_task(handle_shutdown())
 
     try:
         await server_task
@@ -122,6 +139,7 @@ async def serve_http(
         logger.info("Shutting down FastAPI HTTP server.")
         return server.shutdown()
     finally:
+        shutdown_task.cancel()
         watchdog_task.cancel()
 
 
