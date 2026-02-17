@@ -25,6 +25,12 @@
   #define __HIP__GFX9__
 #endif
 
+#if defined(__HIPCC__) &&                                             \
+    (defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1150__) || \
+     defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__))
+  #define __HIP__GFX1X__
+#endif
+
 #if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
   #define __HIP__MI3XX__
 #endif
@@ -43,6 +49,20 @@ int get_lds_size() {
     std::string device_arch = dprops->gcnArchName;
     size_t substring = device_arch.find("gfx95");
     result = (substring == std::string::npos ? 64 * 1024 : 160 * 1024);
+    is_cached = true;
+  }
+  return result;
+}
+
+bool on_gfx1x() {
+  static bool is_cached = false;
+  static bool result = false;
+  if (!is_cached) {
+    auto dprops = at::cuda::getCurrentDeviceProperties();
+    std::string device_arch = dprops->gcnArchName;
+    result =
+        device_arch.find("gfx11") != std::string::npos ||
+        device_arch.find("gfx12") != std::string::npos;
     is_cached = true;
   }
   return result;
@@ -285,21 +305,34 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
   return out_c;
 }
 
-#define DOT2C(V0, V2, V3)                                                     \
-  if constexpr (std::is_same_v<scalar_t, half>) {                             \
-    asm("v_dot2c_f32_f16 %0, %2, %3" : "=v"(V0) : "0"(V0), "v"(V2), "v"(V3)); \
-  } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {            \
-    float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *             \
-               __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));              \
-    V0 += (s.x + s.y);                                                        \
-  }
+#if defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
+  #define DOT2C(V0, V2, V3)                                                     \
+    if constexpr (std::is_same_v<scalar_t, half>) {                             \
+      asm("v_dot2c_f32_f16 %0, %2, %3" : "=v"(V0) : "0"(V0), "v"(V2), "v"(V3)); \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {            \
+      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *             \
+                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));              \
+      V0 += (s.x + s.y);                                                        \
+    }
+#elif defined(__HIP__GFX1X__)
+  // gfx1x: v_dot2_f32_f16 (VOP3-P, dot10-insts, available on gfx11+gfx12)
+  #define DOT2C(V0, V2, V3)                                                     \
+    if constexpr (std::is_same_v<scalar_t, half>) {                             \
+      asm("v_dot2_f32_f16 %0, %1, %2, %0"                                      \
+          : "+v"(V0) : "v"(V2), "v"(V3));                                       \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {            \
+      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *             \
+                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));              \
+      V0 += (s.x + s.y);                                                        \
+    }
+#endif
 
 // To avoid LLVM silently upcasting to double
 __device__ inline unsigned int min__(uint32_t a, uint32_t b) {
   return min(a, b);
 }
 
-#if defined(__HIP__GFX9__)  // TODO: Add NAVI support
+#if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 // This version targets cases where A[] fits LDS capacity
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
@@ -482,6 +515,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+#if defined(__HIP__GFX9__)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
@@ -491,10 +525,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+#else
+          // RDNA wave32: complete within-row reduction, then cross-row.
+          asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+          sum[n][y] += __shfl_xor(sum[n][y], 16);
+#endif
         }
       }
 
-      if (threadIdx.x == 63) {
+      if (threadIdx.x == (THRDS - 1)) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if constexpr (std::is_same_v<scalar_t, half>) {
@@ -510,6 +551,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
     } else {
+#ifdef __HIP__GFX9__
   #pragma unroll
       for (int n = 0; n < N; n++) {
   #pragma unroll
@@ -546,7 +588,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           sum4[n][y][0] = accm;
         }
       }
-      if (threadIdx.x == 63) {
+      if (threadIdx.x == (THRDS - 1)) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (BIAS)
@@ -556,11 +598,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
+#endif  // __HIP__GFX9__ (MFMA path)
     }
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
+#else
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 __global__ void wvSplitK_hf_sml_(const int K, const int M, const int Bx,
@@ -570,9 +613,9 @@ __global__ void wvSplitK_hf_sml_(const int K, const int M, const int Bx,
                                  const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+#endif
 
-#if defined(__HIP__GFX9__)  // TODO: Add NAVI support
+#if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 // This version targets cases where A[] marginally exceeds LDS capacity
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
@@ -782,6 +825,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+#if defined(__HIP__GFX9__)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
@@ -791,10 +835,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+#else
+          // RDNA wave32: complete within-row reduction, then cross-row.
+          asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+          sum[n][y] += __shfl_xor(sum[n][y], 16);
+#endif
         }
       }
 
-      if (threadIdx.x == 63) {
+      if (threadIdx.x == (THRDS - 1)) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
@@ -812,6 +863,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
     } else {
+#ifdef __HIP__GFX9__
   #pragma unroll
       for (int n = 0; n < N; n++) {
   #pragma unroll
@@ -849,7 +901,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           sum4[n][y][0] = accm;
         }
       }
-      if (threadIdx.x == 63) {
+      if (threadIdx.x == (THRDS - 1)) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
@@ -861,6 +913,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
+#endif  // __HIP__GFX9__ (MFMA path)
     }
 
     m += CuCount * _WvPrGrp * YTILE;
@@ -877,7 +930,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   }
 }
 
-#else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
+#else
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 __global__ void wvSplitK_hf_(const int K, const int M, const int Bx,
@@ -887,9 +940,9 @@ __global__ void wvSplitK_hf_(const int K, const int M, const int Bx,
                              const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+#endif
 
-#if defined(__HIP__GFX9__)  // TODO: Add NAVI support
+#if defined(__HIP__GFX9__) || defined(__HIP__GFX1X__)
 // This version targets big A[] cases, where it is much larger than LDS capacity
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
@@ -1150,6 +1203,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+#if defined(__HIP__GFX9__)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
@@ -1159,10 +1213,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+#else
+          // RDNA wave32: complete within-row reduction, then cross-row.
+          asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
+              : "=v"(sum[n][y])
+              : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+          sum[n][y] += __shfl_xor(sum[n][y], 16);
+#endif
         }
       }
 
-      if (threadIdx.x == 63) {
+      if (threadIdx.x == (THRDS - 1)) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
@@ -1180,6 +1241,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
     } else {
+#ifdef __HIP__GFX9__
   #pragma unroll
       for (int n = 0; n < N; n++) {
   #pragma unroll
@@ -1213,7 +1275,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           sum4[n][y][0] = accm;
         }
       }
-      if (threadIdx.x == 63) {
+      if (threadIdx.x == (THRDS - 1)) {
         for (int n = 0; n < N; n++) {
           for (int i = 0; i < YTILE; i++) {
             if (commitColumn[i]) {
@@ -1225,6 +1287,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
+#endif  // __HIP__GFX9__ (MFMA path)
     }
 
     m += CuCount * _WvPrGrp * YTILE;
@@ -1241,7 +1304,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     }
   }
 }
-#else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
+#else
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N>
 __global__ void wvSplitK_hf_big_(const int K, const int M, const int Bx,
@@ -1251,7 +1314,7 @@ __global__ void wvSplitK_hf_big_(const int K, const int M, const int Bx,
                                  const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+#endif
 
 // Find the min val of div2 that doesn't increase N/(div1*div2)
 int mindiv(int N, int div1, int div2) {
@@ -1296,37 +1359,37 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITK(_YTILE, _UNRL, _N)                                        \
+#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N)                 \
   {                                                                        \
-    dim3 block(64, 16);                                                    \
-    int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, 16);                    \
+    dim3 block(_THRDS, _WVPRGRP);                                          \
+    int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);              \
     if ((K_in * N_in <= max_lds_len) && (M_in % _YTILE == 0))              \
-      wvSplitK_hf_sml_<fptype, 64, _YTILE, 16, 8, _UNRL, _N>               \
+      wvSplitK_hf_sml_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>     \
           <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4, \
                                        biasf4, c, __wvPrGrp, CuCount);     \
     else if (K_in * N_in <= max_lds_len * 1.2)                             \
-      wvSplitK_hf_<fptype, 64, _YTILE, 16, 8, _UNRL, _N>                   \
+      wvSplitK_hf_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>         \
           <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4, \
                                        biasf4, c, __wvPrGrp, CuCount);     \
     else                                                                   \
-      wvSplitK_hf_big_<fptype, 64, _YTILE, 16, 8, _UNRL, _N>               \
+      wvSplitK_hf_big_<fptype, _THRDS, _YTILE, _WVPRGRP, 8, _UNRL, _N>     \
           <<<grid, block, 0, stream>>>(K_in, M_in, Bx_in, By_in, af4, bf4, \
                                        biasf4, c, __wvPrGrp, CuCount);     \
   }
 
-#define WVSPLIT_TILE(_sYT, __N)                           \
+#define WVSPLIT_TILE_CFG(_THRDS, _WVPRGRP, _sYT, __N)     \
   {                                                       \
     bool fit_lds = (K_in * N_in <= max_lds_len);          \
     if (_sYT <= 1)                                        \
-      WVSPLITK(1, 4, __N)                                 \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 1, 4, __N)           \
     else if ((__N == 1) || (!fit_lds) || (_sYT <= 4 * 2)) \
-      WVSPLITK(2, 2, __N)                                 \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 2, 2, __N)           \
     else if (_sYT <= 4 * 3)                               \
-      WVSPLITK(3, 2, __N)                                 \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 3, 2, __N)           \
     else if (__N == 4)                                    \
-      WVSPLITK(4, 1, __N)                                 \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 1, __N)           \
     else                                                  \
-      WVSPLITK(4, 2, __N)                                 \
+      WVSPLITK_CFG(_THRDS, _WVPRGRP, 4, 2, __N)           \
   }
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(in_b.scalar_type(), "wvSplitK", [&] {
@@ -1343,18 +1406,31 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
     // then cut the active waves to balance their distribution...
     int sYT = (M_in + CuCount * 4 - 1) / (CuCount * 4);
 
+    const bool use_wave32 = on_gfx1x();
     switch (N_in) {
       case 1:
-        WVSPLIT_TILE(sYT, 1)
+        if (use_wave32)
+          WVSPLIT_TILE_CFG(32, 16, sYT, 1)
+        else
+          WVSPLIT_TILE_CFG(64, 16, sYT, 1)
         break;
       case 2:
-        WVSPLIT_TILE(sYT, 2)
+        if (use_wave32)
+          WVSPLIT_TILE_CFG(32, 16, sYT, 2)
+        else
+          WVSPLIT_TILE_CFG(64, 16, sYT, 2)
         break;
       case 3:
-        WVSPLIT_TILE(sYT, 3)
+        if (use_wave32)
+          WVSPLIT_TILE_CFG(32, 16, sYT, 3)
+        else
+          WVSPLIT_TILE_CFG(64, 16, sYT, 3)
         break;
       case 4:
-        WVSPLIT_TILE(sYT, 4)
+        if (use_wave32)
+          WVSPLIT_TILE_CFG(32, 16, sYT, 4)
+        else
+          WVSPLIT_TILE_CFG(64, 16, sYT, 4)
         break;
       default:
         throw std::runtime_error(
@@ -1757,7 +1833,7 @@ __global__ void wvSplitKrc_(const int actlN, const int K, const int M,
                             const scalar_t* __restrict__ BIAS, float* glbl,
                             // int* cntr,
                             scalar_t* C, const int CuCount){UNREACHABLE_CODE}
-#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+#endif
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
@@ -1779,6 +1855,8 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   TORCH_CHECK(in_a.dtype() == torch::kFloat16 ||
               in_a.dtype() == torch::kBFloat16);
 
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
+
   auto out_c = torch::empty(
       {N_in, M_in},
       torch::TensorOptions().dtype(in_b.dtype()).device(in_b.device()));
@@ -1791,7 +1869,6 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
 
   dim3 grid(CuCount);
 
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(in_a));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   // const int max_lds_len = get_lds_size() / 2;
 

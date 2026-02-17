@@ -188,28 +188,13 @@ def rocm_unquantized_gemm_impl(
 
     use_skinny = (
         envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and on_gfx9()
+        and (on_gfx9() or on_gfx1x())
         and x.dtype in [torch.float16, torch.bfloat16]
         and k % 8 == 0
         and x.is_contiguous()
     )
 
-    # gfx1x (e.g. RDNA4/gfx12) does not have full wvSplitK support yet.
-    # Enable the LLMM1 skinny kernel for n==1 decode GEMMs only.
-    use_skinny_llmm1_gfx1x = (
-        envs.VLLM_ROCM_USE_SKINNY_GEMM
-        and on_gfx1x()
-        and not on_gfx9()
-        and x.dtype in [torch.float16, torch.bfloat16]
-        and n == 1
-        and m % 4 == 0
-        and k <= 8192
-        and k % 8 == 0
-        and bias is None
-        and x.is_contiguous()
-    )
-
-    if not use_skinny and not use_skinny_llmm1_gfx1x:
+    if not use_skinny:
         return torch.nn.functional.linear(x, weight, bias)
 
     x_view = x.reshape(-1, x.size(-1))
@@ -218,7 +203,7 @@ def rocm_unquantized_gemm_impl(
         out = ops.wvSplitK(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
     elif (
-        (use_skinny or use_skinny_llmm1_gfx1x)
+        use_skinny
         and m % 4 == 0
         and n == 1
         and k <= 8192
