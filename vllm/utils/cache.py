@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import UserDict
 from collections.abc import Callable, Hashable, Iterator, KeysView, Mapping
+from contextlib import suppress
 from types import MappingProxyType
 from typing import NamedTuple, TypeVar, cast, overload
 
@@ -118,10 +119,12 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         return info
 
     def touch(self, key: _K) -> None:
-        try:
+        # Key may not be in the cache when items are evicted between
+        # the sender-side cache check and the receiver-side touch.
+        # Silently ignore instead of creating a phantom key in the
+        # order dict without backing data.
+        with suppress(KeyError):
             self._LRUCache__order.move_to_end(key)  # type: ignore
-        except KeyError:
-            self._LRUCache__order[key] = None  # type: ignore
 
     @overload
     def get(self, key: _K, /) -> _V | None: ...

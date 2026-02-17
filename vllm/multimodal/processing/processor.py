@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
+from ..cache import MultiModalCacheMissError
 from ..hasher import MultiModalHasher
 from ..inputs import (
     MultiModalEncDecInputs,
@@ -1449,7 +1450,18 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
                 else:
                     item = None
 
-                kwargs, updates = cache.get_and_update_item(item, item_hash)
+                try:
+                    kwargs, updates = cache.get_and_update_item(item, item_hash)
+                except MultiModalCacheMissError:
+                    logger.warning(
+                        "Multimodal processor cache miss for hash=%s "
+                        "(modality=%s). The item was evicted between "
+                        "is_cached() and get_and_update_item(). "
+                        "Consider increasing --mm-processor-cache-gb.",
+                        item_hash,
+                        modality,
+                    )
+                    raise
 
                 merged_kwargs[modality].append(kwargs)
                 merged_prompt_updates[modality].append(
