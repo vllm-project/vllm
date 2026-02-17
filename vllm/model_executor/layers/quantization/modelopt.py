@@ -1496,8 +1496,8 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # MXFP8 hardware acceleration requires Blackwell (SM100) or newer
-        return 100
+        # Marlin kernel supports MXFP8 on SM80+
+        return 80
 
     @classmethod
     def override_quantization_method(
@@ -1543,6 +1543,28 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
 class ModelOptMxFp8LinearMethod(LinearMethodBase):
     """Linear method for ModelOpt MXFP8 quantization."""
 
+    @staticmethod
+    def _select_mxfp8_linear_backend() -> Mxfp8LinearBackend:
+        """Select the best MXFP8 linear backend for the current device.
+
+        - SM100+ (Blackwell): FLASHINFER_CUTLASS (native CUTLASS MXFP8 GEMM)
+        - SM80+ (Ampere/Ada): MARLIN (weight-only FP8 with e8m0 scales)
+        - Otherwise: EMULATION (dequant to BF16 fallback)
+        """
+        from vllm.platforms import current_platform
+
+        if current_platform.has_device_capability(100):
+            return Mxfp8LinearBackend.FLASHINFER_CUTLASS
+
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+            is_fp8_marlin_supported,
+        )
+
+        if is_fp8_marlin_supported():
+            return Mxfp8LinearBackend.MARLIN
+
+        return Mxfp8LinearBackend.EMULATION
+
     def __init__(self, quant_config: ModelOptMxFp8Config) -> None:
         self.quant_config = quant_config
 
@@ -1552,8 +1574,9 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        self.backend: Mxfp8LinearBackend = Mxfp8LinearBackend.FLASHINFER_CUTLASS
-        self.mxfp8_linear_op = Mxfp8LinearOp(backend=self.backend)
+        self.backend = self._select_mxfp8_linear_backend()
+        if self.backend != Mxfp8LinearBackend.MARLIN:
+            self.mxfp8_linear_op = Mxfp8LinearOp(backend=self.backend)
         logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
 
     def create_weights(
@@ -1666,13 +1689,22 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
             f" got {layer.weight_scale.dtype}"
         )
 
+        if self.backend == Mxfp8LinearBackend.MARLIN:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+                prepare_mxfp8_layer_for_marlin,
+            )
+
+            layer.orig_dtype = torch.get_default_dtype()
+            layer.marlin_size_n = layer.output_size_per_partition
+            layer.marlin_size_k = layer.input_size_per_partition
+            prepare_mxfp8_layer_for_marlin(layer)
+            return
+
         if self.backend == Mxfp8LinearBackend.EMULATION:
-            # Swizzled layout is not used
             self._process_weights_after_loading_scale_2d(layer)
             return
 
         assert self.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS
-        # Swizzled layout is required for Flashinfer CUTLASS
         self._process_weights_after_loading_scale_1d(layer)
 
     def apply(
@@ -1681,6 +1713,21 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.backend == Mxfp8LinearBackend.MARLIN:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+                apply_mxfp8_marlin_linear,
+            )
+
+            return apply_mxfp8_marlin_linear(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                workspace=layer.workspace,
+                size_n=layer.marlin_size_n,
+                size_k=layer.marlin_size_k,
+                bias=bias,
+            )
+
         if layer.weight.dtype != MXFP8_VALUE_DTYPE:
             raise ValueError(
                 f"Weight dtype {layer.weight.dtype} != expected {MXFP8_VALUE_DTYPE}"

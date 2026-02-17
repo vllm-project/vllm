@@ -15,6 +15,7 @@ logger = init_logger(__name__)
 class Mxfp8LinearBackend(Enum):
     EMULATION = "emulation"
     FLASHINFER_CUTLASS = "flashinfer-cutlass"
+    MARLIN = "marlin"
 
 
 # MXFP8 constants
