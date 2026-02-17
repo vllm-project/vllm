@@ -176,10 +176,8 @@ class CudaPlatformBase(Platform):
 
         # Ensure block_size is compatible with the attention backend.
         # Note: model_config may be None during testing.
-        # Skip hybrid models — their block_size is managed by
-        # HybridAttentionMambaModelConfig.verify_and_update_config,
-        # which runs before check_and_update_config and may set
-        # block_size to non-standard values for mamba alignment.
+        # Skip hybrid (attention+mamba) models — their block_size is
+        # managed by HybridAttentionMambaModelConfig
         if model_config is not None and not model_config.is_hybrid:
             cls._update_block_size_for_backend(
                 vllm_config,
@@ -298,7 +296,7 @@ class CudaPlatformBase(Platform):
                         preferred,
                         chosen_backend.name,
                     )
-                    cache_config.block_size = preferred  # type: ignore[assignment]
+                    cache_config.block_size = preferred
                 return
 
             # No valid backend found. If the user didn't constrain the

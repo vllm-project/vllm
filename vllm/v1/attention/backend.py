@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
 import torch
@@ -144,14 +144,8 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
-        from vllm.config.cache import BlockSize
-
         if block_size is None:
             return True
-
-        valid_sizes = get_args(BlockSize)
-        if block_size not in valid_sizes:
-            return False
 
         supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_kernel_block_sizes:
@@ -169,58 +163,14 @@ class AttentionBackend(ABC):
 
     @classmethod
     def get_preferred_block_size(cls, default_block_size: int = 16) -> int:
-        """Get the preferred block size for this backend.
-
-        Returns the smallest valid block size that satisfies this backend's
-        requirements. Backends with specific requirements should override this.
-
-        Args:
-            default_block_size: Default block size to use if backend accepts any
-
-        Returns:
-            The preferred block size for this backend
-        """
-        from vllm.config.cache import BlockSize
-
         supported_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_sizes:
             return default_block_size
 
-        # Check if backend accepts any block size (MultipleOf(1))
-        for size in supported_sizes:
-            if isinstance(size, MultipleOf) and size.base == 1:
-                return default_block_size
+        if cls.supports_block_size(default_block_size):
+            return default_block_size
 
-        valid_block_sizes: tuple[int, ...] = get_args(BlockSize)
-
-        # Prefer smaller fixed sizes, but use default if it's valid
-        fixed_sizes: list[int] = [s for s in supported_sizes if isinstance(s, int)]
-        if fixed_sizes:
-            if (
-                default_block_size in fixed_sizes
-                and default_block_size in valid_block_sizes
-            ):
-                return default_block_size
-            for size in sorted(fixed_sizes):
-                if size in valid_block_sizes:
-                    return size
-
-        # Fall back to MultipleOf requirements
-        multiple_sizes = [s for s in supported_sizes if isinstance(s, MultipleOf)]
-        if multiple_sizes:
-            max_base = max(s.base for s in multiple_sizes)
-            # Prefer the default if it satisfies the requirement
-            if (
-                default_block_size in valid_block_sizes
-                and default_block_size % max_base == 0
-            ):
-                return default_block_size
-            # Otherwise find smallest valid multiple
-            for size in sorted(valid_block_sizes):
-                if size % max_base == 0:
-                    return size
-
-        return default_block_size
+        return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
     def is_mla(cls) -> bool:
