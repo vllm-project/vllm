@@ -409,6 +409,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.kv_cache_metrics_enabled = (
             vllm_config.observability_config.kv_cache_metrics
         )
+        obs_config = vllm_config.observability_config
+
+        def _buckets(metric_name: str, default: list) -> list:
+            return obs_config.get_histogram_buckets(metric_name, default)
 
         labelnames = ["model_name", "engine"]
         model_name = vllm_config.model_config.served_model_name
@@ -656,7 +660,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_num_prompt_tokens_request = self._histogram_cls(
             name="vllm:request_prompt_tokens",
             documentation="Number of prefill tokens processed.",
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=_buckets(
+                "request_prompt_tokens", build_1_2_5_buckets(max_model_len)
+            ),
             labelnames=labelnames,
         )
         self.histogram_num_prompt_tokens_request = make_per_engine(
@@ -666,7 +672,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_generation_tokens",
             documentation="Number of generation tokens processed.",
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=_buckets(
+                "request_generation_tokens", build_1_2_5_buckets(max_model_len)
+            ),
             labelnames=labelnames,
         )
         self.histogram_num_generation_tokens_request = make_per_engine(
@@ -679,7 +687,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_iteration_tokens = self._histogram_cls(
             name="vllm:iteration_tokens_total",
             documentation="Histogram of number of tokens per engine_step.",
-            buckets=[1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+            buckets=_buckets(
+                "iteration_tokens_total",
+                [1, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192, 16384],
+            ),
             labelnames=labelnames,
         )
         self.histogram_iteration_tokens = make_per_engine(
@@ -689,7 +700,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_max_num_generation_tokens_request = self._histogram_cls(
             name="vllm:request_max_num_generation_tokens",
             documentation="Histogram of maximum number of requested generation tokens.",
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=_buckets(
+                "request_max_num_generation_tokens", build_1_2_5_buckets(max_model_len)
+            ),
             labelnames=labelnames,
         )
         self.histogram_max_num_generation_tokens_request = make_per_engine(
@@ -699,7 +712,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_n_request = self._histogram_cls(
             name="vllm:request_params_n",
             documentation="Histogram of the n request parameter.",
-            buckets=[1, 2, 5, 10, 20],
+            buckets=_buckets("request_params_n", [1, 2, 5, 10, 20]),
             labelnames=labelnames,
         )
         self.histogram_n_request = make_per_engine(
@@ -709,7 +722,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_max_tokens_request = self._histogram_cls(
             name="vllm:request_params_max_tokens",
             documentation="Histogram of the max_tokens request parameter.",
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=_buckets(
+                "request_params_max_tokens", build_1_2_5_buckets(max_model_len)
+            ),
             labelnames=labelnames,
         )
         self.histogram_max_tokens_request = make_per_engine(
@@ -719,63 +734,65 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         #
         # Histogram of timing intervals
         #
+        _default_ttft_buckets = [
+            0.001,
+            0.005,
+            0.01,
+            0.02,
+            0.04,
+            0.06,
+            0.08,
+            0.1,
+            0.25,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
+            20.0,
+            40.0,
+            80.0,
+            160.0,
+            640.0,
+            2560.0,
+        ]
         histogram_time_to_first_token = self._histogram_cls(
             name="vllm:time_to_first_token_seconds",
             documentation="Histogram of time to first token in seconds.",
-            buckets=[
-                0.001,
-                0.005,
-                0.01,
-                0.02,
-                0.04,
-                0.06,
-                0.08,
-                0.1,
-                0.25,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-                160.0,
-                640.0,
-                2560.0,
-            ],
+            buckets=_buckets("time_to_first_token_seconds", _default_ttft_buckets),
             labelnames=labelnames,
         )
         self.histogram_time_to_first_token = make_per_engine(
             histogram_time_to_first_token, engine_indexes, model_name
         )
 
+        _default_itl_buckets = [
+            0.01,
+            0.025,
+            0.05,
+            0.075,
+            0.1,
+            0.15,
+            0.2,
+            0.3,
+            0.4,
+            0.5,
+            0.75,
+            1.0,
+            2.5,
+            5.0,
+            7.5,
+            10.0,
+            20.0,
+            40.0,
+            80.0,
+        ]
         histogram_inter_token_latency = self._histogram_cls(
             name="vllm:inter_token_latency_seconds",
             documentation="Histogram of inter-token latency in seconds.",
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
+            buckets=_buckets("inter_token_latency_seconds", _default_itl_buckets),
             labelnames=labelnames,
         )
         self.histogram_inter_token_latency = make_per_engine(
@@ -785,27 +802,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_request_time_per_output_token = self._histogram_cls(
             name="vllm:request_time_per_output_token_seconds",
             documentation="Histogram of time_per_output_token_seconds per request.",
-            buckets=[
-                0.01,
-                0.025,
-                0.05,
-                0.075,
-                0.1,
-                0.15,
-                0.2,
-                0.3,
-                0.4,
-                0.5,
-                0.75,
-                1.0,
-                2.5,
-                5.0,
-                7.5,
-                10.0,
-                20.0,
-                40.0,
-                80.0,
-            ],
+            buckets=_buckets(
+                "request_time_per_output_token_seconds", _default_itl_buckets
+            ),
             labelnames=labelnames,
         )
         self.histogram_request_time_per_output_token = make_per_engine(
@@ -838,7 +837,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_e2e_time_request = self._histogram_cls(
             name="vllm:e2e_request_latency_seconds",
             documentation="Histogram of e2e request latency in seconds.",
-            buckets=request_latency_buckets,
+            buckets=_buckets("e2e_request_latency_seconds", request_latency_buckets),
             labelnames=labelnames,
         )
         self.histogram_e2e_time_request = make_per_engine(
@@ -848,7 +847,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_queue_time_request = self._histogram_cls(
             name="vllm:request_queue_time_seconds",
             documentation="Histogram of time spent in WAITING phase for request.",
-            buckets=request_latency_buckets,
+            buckets=_buckets("request_queue_time_seconds", request_latency_buckets),
             labelnames=labelnames,
         )
         self.histogram_queue_time_request = make_per_engine(
@@ -858,7 +857,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_inference_time_request = self._histogram_cls(
             name="vllm:request_inference_time_seconds",
             documentation="Histogram of time spent in RUNNING phase for request.",
-            buckets=request_latency_buckets,
+            buckets=_buckets("request_inference_time_seconds", request_latency_buckets),
             labelnames=labelnames,
         )
         self.histogram_inference_time_request = make_per_engine(
@@ -868,7 +867,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_prefill_time_request = self._histogram_cls(
             name="vllm:request_prefill_time_seconds",
             documentation="Histogram of time spent in PREFILL phase for request.",
-            buckets=request_latency_buckets,
+            buckets=_buckets("request_prefill_time_seconds", request_latency_buckets),
             labelnames=labelnames,
         )
         self.histogram_prefill_time_request = make_per_engine(
@@ -878,7 +877,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         histogram_decode_time_request = self._histogram_cls(
             name="vllm:request_decode_time_seconds",
             documentation="Histogram of time spent in DECODE phase for request.",
-            buckets=request_latency_buckets,
+            buckets=_buckets("request_decode_time_seconds", request_latency_buckets),
             labelnames=labelnames,
         )
         self.histogram_decode_time_request = make_per_engine(
@@ -891,7 +890,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 "Histogram of new KV tokens computed during prefill "
                 "(excluding cached tokens)."
             ),
-            buckets=build_1_2_5_buckets(max_model_len),
+            buckets=_buckets(
+                "request_prefill_kv_computed_tokens", build_1_2_5_buckets(max_model_len)
+            ),
             labelnames=labelnames,
         )
         self.histogram_prefill_kv_computed_request = make_per_engine(
@@ -932,7 +933,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     "Histogram of KV cache block lifetime from allocation to eviction. "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
-                buckets=kv_cache_residency_buckets,
+                buckets=_buckets(
+                    "kv_block_lifetime_seconds", kv_cache_residency_buckets
+                ),
                 labelnames=labelnames,
             )
             self.histogram_kv_block_lifetime = make_per_engine(
@@ -945,7 +948,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     "Histogram of idle time before KV cache block eviction. "
                     "Sampled metrics (controlled by --kv-cache-metrics-sample)."
                 ),
-                buckets=kv_cache_residency_buckets,
+                buckets=_buckets(
+                    "kv_block_idle_before_evict_seconds", kv_cache_residency_buckets
+                ),
                 labelnames=labelnames,
             )
             self.histogram_kv_block_idle_before_evict = make_per_engine(
@@ -960,7 +965,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     "(ring buffer). Sampled metrics (controlled by "
                     "--kv-cache-metrics-sample)."
                 ),
-                buckets=kv_cache_residency_buckets,
+                buckets=_buckets(
+                    "kv_block_reuse_gap_seconds", kv_cache_residency_buckets
+                ),
                 labelnames=labelnames,
             )
             self.histogram_kv_block_reuse_gap = make_per_engine(

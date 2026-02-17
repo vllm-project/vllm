@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 from functools import cached_property
 from typing import Any, Literal, cast
 
@@ -76,6 +77,30 @@ class ObservabilityConfig:
     This includes number of context/generation requests and tokens
     and the elapsed cpu time for the iteration."""
 
+    histogram_buckets: str | None = None
+    """JSON mapping of Prometheus histogram metric name patterns to custom
+    bucket boundaries. Keys are metric name substrings (matched against the
+    full metric name), and values are lists of numeric bucket boundaries.
+    Example: '{"ttft": [0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
+    "e2e_request_latency": [0.5, 1.0, 5.0, 10.0, 30.0]}'.
+    Unmatched metrics use the built-in default buckets."""
+
+    @cached_property
+    def parsed_histogram_buckets(self) -> dict[str, list[float]]:
+        """Parse the histogram_buckets JSON string into a dict."""
+        if self.histogram_buckets is None:
+            return {}
+        return json.loads(self.histogram_buckets)
+
+    def get_histogram_buckets(
+        self, metric_name: str, default: list[float | int]
+    ) -> list[float | int]:
+        """Return custom buckets for a metric if configured, else default."""
+        for pattern, buckets in self.parsed_histogram_buckets.items():
+            if pattern in metric_name:
+                return buckets
+        return default
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
@@ -141,6 +166,39 @@ class ObservabilityConfig:
         string instead of a list of strings."""
         if value is not None and len(value) == 1 and "," in value[0]:
             value = cast(list[DetailedTraceModules], value[0].split(","))
+        return value
+
+    @field_validator("histogram_buckets")
+    @classmethod
+    def _validate_histogram_buckets(cls, value: str | None) -> str | None:
+        if value is not None:
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError as e:
+                raise ValueError(
+                    f"histogram_buckets must be valid JSON. Error: {e}"
+                ) from e
+            if not isinstance(parsed, dict):
+                raise ValueError(
+                    "histogram_buckets must be a JSON object mapping metric "
+                    "name patterns to lists of numeric bucket boundaries."
+                )
+            for key, buckets in parsed.items():
+                if not isinstance(key, str):
+                    raise ValueError(
+                        f"histogram_buckets keys must be strings, got {type(key)}"
+                    )
+                if not isinstance(buckets, list) or not all(
+                    isinstance(b, int | float) for b in buckets
+                ):
+                    raise ValueError(
+                        f"histogram_buckets['{key}'] must be a list of numbers, "
+                        f"got {buckets}"
+                    )
+                if buckets != sorted(buckets):
+                    raise ValueError(
+                        f"histogram_buckets['{key}'] must be sorted in ascending order."
+                    )
         return value
 
     @model_validator(mode="after")

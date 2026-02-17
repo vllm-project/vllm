@@ -1106,6 +1106,10 @@ class EngineArgs:
             "--enable-logging-iteration-details",
             **observability_kwargs["enable_logging_iteration_details"],
         )
+        observability_group.add_argument(
+            "--histogram-buckets",
+            **observability_kwargs["histogram_buckets"],
+        )
 
         # Scheduler arguments
         scheduler_kwargs = get_kwargs(SchedulerConfig)
@@ -1805,6 +1809,7 @@ class EngineArgs:
             enable_mfu_metrics=self.enable_mfu_metrics,
             enable_mm_processor_stats=self.enable_mm_processor_stats,
             enable_logging_iteration_details=self.enable_logging_iteration_details,
+            histogram_buckets=self.histogram_buckets,
         )
 
         # Compilation config overrides
