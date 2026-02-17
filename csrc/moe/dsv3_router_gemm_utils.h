@@ -20,19 +20,14 @@
 
 #pragma once
 
-#include <cuda_runtime.h>
+#include <ATen/cuda/CUDAContext.h>
 
 #include <cstdlib>
 #include <mutex>
 
 inline int getSMVersion() {
-  int device{-1};
-  cudaGetDevice(&device);
-  int sm_major = 0;
-  int sm_minor = 0;
-  cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, device);
-  cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, device);
-  return sm_major * 10 + sm_minor;
+  auto* props = at::cuda::getCurrentDeviceProperties();
+  return props->major * 10 + props->minor;
 }
 
 inline bool getEnvEnablePDL() {
