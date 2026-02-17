@@ -776,6 +776,11 @@ class GPUModelRunner(
         # then use it to update actual num_computed_tokens of each request.
         valid_sampled_token_count = self._get_valid_sampled_token_count()
 
+        # Accumulators for async spec decode EWMA update.
+        batch_total_drafts = 0
+        batch_total_accepted = 0
+        batch_count = 0
+
         for i, req_id in enumerate(req_data.req_ids):
             req_state = self.requests[req_id]
             num_computed_tokens = req_data.num_computed_tokens[i]
@@ -807,6 +812,13 @@ class GPUModelRunner(
                     num_rejected = req_state.prev_num_draft_len - num_accepted
                     num_computed_tokens -= num_rejected
                     req_state.output_token_ids.extend([-1] * num_accepted)
+                    # Accumulate stats for adaptive draft length EWMA.
+                    if hasattr(self, "spec_decoding_stats"):
+                        self.spec_decoding_stats.observe_draft(
+                            req_state.prev_num_draft_len, num_accepted)
+                        batch_total_drafts += req_state.prev_num_draft_len
+                        batch_total_accepted += num_accepted
+                        batch_count += 1
 
             # Update the cached states.
             req_state.num_computed_tokens = num_computed_tokens
@@ -916,6 +928,11 @@ class GPUModelRunner(
                     scheduler_output.total_num_scheduled_tokens -= num_spec_tokens
                     scheduler_output.num_scheduled_tokens[req_id] -= num_spec_tokens
                     scheduler_output.scheduled_spec_decode_tokens.pop(req_id, None)
+        # Update EWMA with batch-level acceptance rate (async path).
+        if (hasattr(self, "spec_decoding_stats")
+                and batch_count > 0 and batch_total_drafts > 0):
+            self.spec_decoding_stats.update_acceptance_ewma(
+                batch_total_accepted / batch_total_drafts, batch_count)
         # Add the new or resumed requests to the persistent batch.
         # The smaller empty indices are filled first.
         for request in reqs_to_add:
