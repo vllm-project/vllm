@@ -2919,6 +2919,7 @@ class CompressedTensorsW4A16CutlassMoEMethod(CompressedTensorsMoEMethod):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ):
         if layer.enable_eplb:
             raise NotImplementedError(
