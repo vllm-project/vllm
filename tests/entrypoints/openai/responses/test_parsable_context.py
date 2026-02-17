@@ -184,14 +184,14 @@ async def test_mcp_tool_call(client: OpenAI, model_name: str):
 
     # The final output should be a message containing the correct answer
     assert response.output[-1].type == "message"
-    assert any(s in response.output[-1].content[0].text
-               for s in ("56088", "56,088"))
+    assert any(s in response.output[-1].content[0].text for s in ("56088", "56,088"))
 
     # Test raw input_messages / output_messages
     assert len(response.input_messages) == 1
     assert len(response.output_messages) >= 3
-    assert any(s in response.output_messages[-1]["message"]
-               for s in ("56088", "56,088"))
+    assert any(
+        s in response.output_messages[-1]["message"] for s in ("56088", "56,088")
+    )
 
 
 @pytest.mark.asyncio
