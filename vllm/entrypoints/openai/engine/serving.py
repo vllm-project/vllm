@@ -95,7 +95,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
-from vllm.exceptions import VLLMContentTooLargeError
+from vllm.exceptions import VLLMContentTooLargeError, VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
@@ -618,11 +618,6 @@ class OpenAIServing:
 
         if isinstance(message, Exception):
             exc = message
-
-            from vllm.exceptions import (
-                VLLMContentTooLargeError,
-                VLLMValidationError,
-            )
 
             if isinstance(exc, VLLMContentTooLargeError):
                 err_type = "ContentTooLargeError"
