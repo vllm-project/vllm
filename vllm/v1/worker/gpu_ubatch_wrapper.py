@@ -68,8 +68,8 @@ class SMControlContextManager:
                 A function that sets the number of SMs for computation.
         """
 
-        assert current_platform.is_cuda(), (
-            "SM control is currently only supported on CUDA"
+        assert current_platform.is_cuda() or current_platform.is_rocm(), (
+            "SM/CU control is supported on CUDA and ROCm platforms"
         )
 
         props = torch.cuda.get_device_properties(torch.cuda.current_device())
