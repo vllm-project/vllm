@@ -3,7 +3,7 @@
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, NamedTuple, TypeAlias
+from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias
 
 import numpy as np
 import torch
@@ -194,6 +194,10 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Model-specific extra outputs (e.g. detect/point JSON results).
+    # Keyed by model-defined names; forwarded to the output processor.
+    model_extra_output: dict[str, Any] | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

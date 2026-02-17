@@ -159,10 +159,9 @@ def video_with_metadata_glm4_1v():
 def moondream3_skill_inputs():
     """Builds inputs for Moondream3 testing query and caption skills.
 
-    Only query and caption are supported via standard autoregressive
-    generation. Point and detect require a custom decoding loop
-    (coordinate encoding/decoding) that is incompatible with vLLM's
-    standard pipeline.
+    Point and detect are also supported via extra_args={"moondream3_task":
+    "detect"} but require separate test infrastructure (see
+    test_moondream3.py).
     """
     stop_sign = IMAGE_ASSETS[0].pil_image
     cherry_blossom = IMAGE_ASSETS[1].pil_image

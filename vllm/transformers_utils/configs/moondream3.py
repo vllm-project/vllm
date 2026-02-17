@@ -156,6 +156,12 @@ class Moondream3Config(PretrainedConfig):
         region_config = config.get("region", {})
         self.region_config = Moondream3RegionConfig(**region_config)
 
+        # Token IDs used by the detect/point state machine.
+        tokenizer_config = config.get("tokenizer", {})
+        self.coord_token_id = tokenizer_config.get("coord_id", 5)
+        self.size_token_id = tokenizer_config.get("size_id", 6)
+        self.region_eos_token_id = tokenizer_config.get("eos_id", 0)
+
         # Store the original config dict for model access
         self.config = config
 

@@ -655,6 +655,21 @@ class OutputProcessor:
                 kv_transfer_params,
                 routed_experts,
             ):
+                # Override output text for detect/point results (Moondream3).
+                _extra = engine_core_output.model_extra_output
+                dp_text = (
+                    _extra.get("detect_point_text") if _extra else None
+                )
+                if (
+                    dp_text is not None
+                    and finish_reason is not None
+                    and hasattr(request_output, "outputs")
+                    and request_output.outputs
+                ):
+                    for comp_output in request_output.outputs:
+                            if isinstance(comp_output, CompletionOutput):
+                                comp_output.text = dp_text
+
                 if req_state.streaming_input:
                     request_output.finished = False
 

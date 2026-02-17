@@ -2,17 +2,19 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Moondream3 model implementation."""
 
+import json
+import math
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import islice
+from typing import Literal
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
 
-from vllm.model_executor.layers.attention import Attention
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import (
@@ -22,6 +24,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.model_executor.layers.activation import get_act_fn
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -504,6 +507,7 @@ class Moondream3RegionModule(nn.Module):
 
     def __init__(self, config: Moondream3RegionConfig, prefix: str = ""):
         super().__init__()
+        self._config = config
         # Fourier frequency matrices for coordinate/size encoding
         self.coord_features = nn.Parameter(torch.empty(1, config.coord_feat_dim // 2))
         self.size_features = nn.Parameter(torch.empty(2, config.size_feat_dim // 2))
@@ -518,6 +522,208 @@ class Moondream3RegionModule(nn.Module):
 
         # Layer norm
         self.ln = nn.LayerNorm(config.dim)
+
+    def _fourier_features(
+        self, x: torch.Tensor, w: torch.Tensor
+    ) -> torch.Tensor:
+        """Fourier feature mapping: x @ w -> cat(cos, sin)."""
+        f = 2 * math.pi * x @ w
+        return torch.cat([f.cos(), f.sin()], dim=-1)
+
+    def encode_coordinate(self, coord_value: torch.Tensor) -> torch.Tensor:
+        """Encode a coordinate value into an embedding.
+
+        Args:
+            coord_value: Scalar or tensor of shape [..., 1] with float
+                coordinate values in [0, 1].
+
+        Returns:
+            Embedding of shape [..., dim].
+        """
+        if coord_value.dim() == 0:
+            coord_value = coord_value.reshape(1, 1)
+        elif coord_value.dim() == 1:
+            coord_value = coord_value.unsqueeze(-1)
+        feat = self._fourier_features(coord_value, self.coord_features)
+        return self.coord_encoder(feat)
+
+    def decode_coordinate(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Decode coordinate logits from hidden states.
+
+        Args:
+            hidden_states: Tensor of shape [..., dim].
+
+        Returns:
+            Logits of shape [..., coord_out_dim] (1024 bins).
+        """
+        return self.coord_decoder(self.ln(hidden_states))
+
+    def encode_size(self, w: float, h: float,
+                    device: torch.device,
+                    dtype: torch.dtype) -> torch.Tensor:
+        """Encode width and height into an embedding.
+
+        Args:
+            w: Width value (float).
+            h: Height value (float).
+            device: Target device.
+            dtype: Target dtype.
+
+        Returns:
+            Embedding of shape [1, dim].
+        """
+        size = torch.tensor([w, h], device=device, dtype=dtype)
+        feat = self._fourier_features(size, self.size_features)
+        return self.size_encoder(feat.unsqueeze(0))
+
+    def decode_size(
+        self, hidden_states: torch.Tensor
+    ) -> tuple[float, float]:
+        """Decode size (width, height) from hidden states.
+
+        Applies ln + size_decoder, argmax on 2x1024 bins, then converts
+        from log-scale bins to float values.
+
+        Args:
+            hidden_states: Tensor of shape [..., dim].
+
+        Returns:
+            Tuple (w_float, h_float).
+        """
+        logits = self.size_decoder(self.ln(hidden_states)).view(2, -1)
+        w_bin = torch.argmax(logits[0], dim=-1)
+        h_bin = torch.argmax(logits[1], dim=-1)
+        w = torch.pow(2.0, (w_bin.float() / 1023.0) * 10.0 - 10.0)
+        h = torch.pow(2.0, (h_bin.float() / 1023.0) * 10.0 - 10.0)
+        return w.item(), h.item()
+
+
+# ============================================================================
+# Detect/Point State Machine
+# ============================================================================
+
+# Maximum number of objects per detect/point request.
+_DEFAULT_MAX_OBJECTS = 150
+
+
+@dataclass
+class DetectPointState:
+    """Per-request state for detect/point generation.
+
+    Tracks the current step in the state machine, pending embedding
+    information for the next decode step, the object currently being
+    constructed, and the accumulated results.
+    """
+
+    mode: Literal["detect", "point"]
+    step: Literal["decode_x_or_stop", "decode_y", "decode_size"] = (
+        "decode_x_or_stop"
+    )
+
+    # Embedding info for the *next* decode step (set in compute_logits,
+    # consumed in forward to replace the token embedding).
+    pending_embed_type: str | None = None  # "coord" or "size"
+    pending_embed_coord: float | None = None
+    pending_embed_w: float | None = None
+    pending_embed_h: float | None = None
+
+    # Current object being constructed.
+    current_x: float | None = None
+    current_y: float | None = None
+
+    # Accumulated results.
+    objects: list[dict] = field(default_factory=list)
+    finished: bool = False
+    max_objects: int = _DEFAULT_MAX_OBJECTS
+
+
+class DetectPointStateManager:
+    """Manages per-request detect/point state for the model."""
+
+    def __init__(
+        self,
+        coord_id: int = 5,
+        size_id: int = 6,
+        eos_id: int = 0,
+    ) -> None:
+        self._states: dict[str, DetectPointState] = {}
+        self.coord_id = coord_id
+        self.size_id = size_id
+        self.eos_id = eos_id
+
+    def register_request(
+        self,
+        req_id: str,
+        mode: Literal["detect", "point"],
+        max_objects: int = _DEFAULT_MAX_OBJECTS,
+    ) -> None:
+        self._states[req_id] = DetectPointState(
+            mode=mode, max_objects=max_objects
+        )
+
+    def get_state(self, req_id: str) -> DetectPointState | None:
+        return self._states.get(req_id)
+
+    def has_active_requests(self) -> bool:
+        return bool(self._states)
+
+    def remove_request(self, req_id: str) -> None:
+        self._states.pop(req_id, None)
+
+    def get_json_result(self, req_id: str) -> str | None:
+        """Serialize the accumulated objects for a finished request."""
+        state = self._states.get(req_id)
+        if state is None:
+            return None
+        if state.mode == "detect":
+            return json.dumps({"objects": state.objects})
+        return json.dumps({"points": state.objects})
+
+    def update_after_sample(
+        self, req_id: str, sampled_token_id: int
+    ) -> None:
+        """Transition state after a token is sampled."""
+        state = self._states.get(req_id)
+        if state is None:
+            return
+
+        tok = sampled_token_id
+
+        if state.step == "decode_x_or_stop":
+            if tok == self.eos_id:
+                state.finished = True
+            else:
+                # coord token sampled → move to decode_y
+                state.step = "decode_y"
+
+        elif state.step == "decode_y":
+            if state.mode == "point":
+                # For point: y was decoded, object is complete.
+                state.objects.append(
+                    {"x": state.current_x, "y": state.current_y}
+                )
+                state.step = "decode_x_or_stop"
+            else:
+                # For detect: y decoded, need size next.
+                state.step = "decode_size"
+
+        elif state.step == "decode_size":
+            # Size decoded, compute bbox from center + size.
+            x, y = state.current_x, state.current_y
+            w, h = state.pending_embed_w, state.pending_embed_h
+            state.objects.append(
+                {
+                    "x_min": x - w / 2,
+                    "y_min": y - h / 2,
+                    "x_max": x + w / 2,
+                    "y_max": y + h / 2,
+                }
+            )
+            state.step = "decode_x_or_stop"
+
+        # Check max objects limit.
+        if len(state.objects) >= state.max_objects:
+            state.finished = True
 
 
 # ============================================================================
@@ -1142,30 +1348,20 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     Moondream3 has four capabilities:
 
-    **Supported (via standard autoregressive generation):**
+    - **query**: Visual QA.
+    - **caption**: Image description.
+    - **detect**: Object detection (bounding boxes).
+    - **point**: Object pointing (x, y coordinates).
 
-    - **query** (visual question answering):
-      ``<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>{q}<|md_reserved_2|>``
-    - **caption** (image description):
-      ``<|endoftext|><image><|md_reserved_0|>describe<|md_reserved_1|>normal<|md_reserved_2|>``
+    All four capabilities are supported. Query and caption use standard
+    autoregressive generation. Detect and point use a custom state machine
+    that intercepts ``compute_logits`` and ``forward`` to decode
+    coordinates from hidden states and feed Fourier-encoded coordinate
+    embeddings back as the next input.
 
-    **Not supported (requires custom generation loop):**
-
-    - **point**: Locates objects by decoding (x, y) coordinates from hidden
-      states and encoding them back as embeddings for the next step.
-      Prompt format:
-      ``<|endoftext|><image><|md_reserved_0|>point<|md_reserved_1|>{object}<|md_reserved_2|>``
-    - **detect**: Locates objects by iteratively decoding bounding boxes
-      (x1, y1, x2, y2) from hidden states.
-      Prompt format:
-      ``<|endoftext|><image><|md_reserved_0|>detect<|md_reserved_1|>{object}<|md_reserved_2|>``
-
-    Point and detect are architecturally incompatible with vLLM's standard
-    ``embed_input_ids -> forward -> compute_logits -> sample`` pipeline
-    because they require decoding coordinates from hidden states and feeding
-    encoded coordinate embeddings back as the next input, rather than
-    sampling from the vocabulary. The region module weights are loaded for
-    completeness and potential future extensions.
+    Detect/point mode is activated by setting
+    ``SamplingParams(extra_args={"moondream3_task": "detect"})``
+    (or ``"point"``).
     """
 
     supports_multimodal = True
@@ -1226,8 +1422,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             )
 
         # Region module for point/detect coordinate encoding/decoding.
-        # Weights are loaded but the generation loop for point/detect
-        # is not implemented (see class docstring).
         self.region = Moondream3RegionModule(
             config=self.config.region,
             prefix=maybe_prefix(prefix, "region"),
@@ -1235,6 +1429,23 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         self.logits_processor = LogitsProcessor(self.config.text.vocab_size)
         self.make_empty_intermediate_tensors = self.text.make_empty_intermediate_tensors
+
+        # Detect/point token IDs (from config, with defaults).
+        self._coord_id = getattr(hf_config, "coord_token_id", 5)
+        self._size_id = getattr(hf_config, "size_token_id", 6)
+        self._eos_id = getattr(hf_config, "region_eos_token_id", 0)
+
+        # Detect/point state management.  The model runner sets
+        # ``_dp_row_states`` (list mapping logits row → DetectPointState)
+        # before calling ``compute_logits``, and ``_dp_embed_data``
+        # (dict mapping input position → embed info) before ``forward``.
+        self.detect_point_manager = DetectPointStateManager(
+            coord_id=self._coord_id,
+            size_id=self._size_id,
+            eos_id=self._eos_id,
+        )
+        self._dp_row_states: list[DetectPointState | None] | None = None
+        self._dp_embed_data: dict[int, dict] | None = None
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1411,6 +1622,32 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
+        # Replace embeddings for detect/point decode positions with
+        # Fourier-encoded coordinate/size embeddings from the region module.
+        dp_embed_data = self._dp_embed_data
+        if dp_embed_data and inputs_embeds is not None:
+            for pos, info in dp_embed_data.items():
+                if pos >= inputs_embeds.shape[0]:
+                    continue
+                if info["type"] == "coord":
+                    coord_t = torch.tensor(
+                        [[info["value"]]],
+                        device=inputs_embeds.device,
+                        dtype=inputs_embeds.dtype,
+                    )
+                    emb = self.region.encode_coordinate(coord_t)  # [1, dim]
+                    inputs_embeds[pos] = emb.squeeze(0)
+                elif info["type"] == "size":
+                    emb = self.region.encode_size(
+                        info["w"],
+                        info["h"],
+                        device=inputs_embeds.device,
+                        dtype=inputs_embeds.dtype,
+                    )  # [1, dim]
+                    inputs_embeds[pos] = emb.squeeze(0)
+            # Clear after use.
+            self._dp_embed_data = None
+
         hidden_states = self.text(
             input_ids=input_ids,
             positions=positions,
@@ -1423,7 +1660,66 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        return self.logits_processor(self.lm_head, hidden_states)
+        row_states = self._dp_row_states
+        if row_states is None or not any(
+            s is not None for s in row_states
+        ):
+            # No detect/point requests — standard path.
+            return self.logits_processor(self.lm_head, hidden_states)
+
+        # Compute standard logits for ALL rows (needed for text requests
+        # and for the continue/stop sparse check in decode_x_or_stop).
+        logits = self.logits_processor(self.lm_head, hidden_states)
+        if logits is None:
+            return logits
+
+        for i, state in enumerate(row_states):
+            if state is None:
+                continue
+            h = hidden_states[i: i + 1]  # [1, dim]
+
+            if state.step == "decode_x_or_stop":
+                # Check continue/stop via sparse lm_head logits.
+                coord_score = logits[i, self._coord_id].item()
+                eos_score = logits[i, self._eos_id].item()
+
+                if state.finished or eos_score > coord_score:
+                    # Model wants to stop — force EOS.
+                    logits[i] = float("-inf")
+                    logits[i, self._eos_id] = 0.0
+                else:
+                    # Decode x coordinate from the *same* hidden state.
+                    coord_logits = self.region.decode_coordinate(h)
+                    x_bin = torch.argmax(coord_logits, dim=-1)
+                    x_val = (
+                        x_bin.float().item() / coord_logits.shape[-1]
+                    )
+                    state.current_x = x_val
+                    state.pending_embed_type = "coord"
+                    state.pending_embed_coord = x_val
+                    # Force COORD_ID token.
+                    logits[i] = float("-inf")
+                    logits[i, self._coord_id] = 0.0
+
+            elif state.step == "decode_y":
+                coord_logits = self.region.decode_coordinate(h)
+                y_bin = torch.argmax(coord_logits, dim=-1)
+                y_val = y_bin.float().item() / coord_logits.shape[-1]
+                state.current_y = y_val
+                state.pending_embed_type = "coord"
+                state.pending_embed_coord = y_val
+                logits[i] = float("-inf")
+                logits[i, self._coord_id] = 0.0
+
+            elif state.step == "decode_size":
+                w, h_val = self.region.decode_size(h)
+                state.pending_embed_type = "size"
+                state.pending_embed_w = w
+                state.pending_embed_h = h_val
+                logits[i] = float("-inf")
+                logits[i, self._size_id] = 0.0
+
+        return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights with remapping from HuggingFace format."""

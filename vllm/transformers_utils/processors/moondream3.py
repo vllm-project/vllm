@@ -99,24 +99,29 @@ class Moondream3Processor(ProcessorMixin):
     # - Token 1 (<|md_reserved_0|>): Start of instruction
     # - Token 2 (<|md_reserved_1|>): Separator before question
     # - Token 3 (<|md_reserved_2|>): End of question / start of answer
-    # - Token 15381 (query): Task type indicator
     #
-    # IMPORTANT: BOS token must ALWAYS come first, even with images!
-    # HF implementation: BOS + image_embeds + prompt
-    # prefix_attn=730 means first 730 tokens (1 BOS + 729 vision) have
-    # bidirectional attention
+    # Task routing based on text prefix:
+    #   "detect <obj>"  → detect<|md_reserved_1|> <obj><|md_reserved_2|>
+    #   "point <obj>"   → point<|md_reserved_1|> <obj><|md_reserved_2|>
+    #   otherwise        → query<|md_reserved_1|><text><|md_reserved_2|>
     #
     # Format with image:
-    #   <|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>{q}<|md_reserved_2|>
+    #   <|endoftext|><image><|md_reserved_0|>{task}<|md_reserved_1|>{q}<|md_reserved_2|>
     # Format without image:
-    #   <|endoftext|><|md_reserved_0|>query<|md_reserved_1|>{q}<|md_reserved_2|>
+    #   <|endoftext|><|md_reserved_0|>{task}<|md_reserved_1|>{q}<|md_reserved_2|>
     _default_chat_template = (
         "{% for message in messages %}"
         "{% if message['role'] == 'user' %}"
         "{% if message['content'] is string %}"
-        # Simple string content (with image assumed) - BOS + image + prompt
-        "<|endoftext|><image><|md_reserved_0|>query<|md_reserved_1|>"
-        "{{ message['content'] }}<|md_reserved_2|>"
+        # Simple string content (with image assumed) - route by prefix
+        "<|endoftext|><image><|md_reserved_0|>"
+        "{% if message['content'].startswith('detect ') %}"
+        "detect<|md_reserved_1|> {{ message['content'][7:] }}<|md_reserved_2|>"
+        "{% elif message['content'].startswith('point ') %}"
+        "point<|md_reserved_1|> {{ message['content'][6:] }}<|md_reserved_2|>"
+        "{% else %}"
+        "query<|md_reserved_1|>{{ message['content'] }}<|md_reserved_2|>"
+        "{% endif %}"
         "{% else %}"
         # List content - always start with BOS
         "<|endoftext|>"
@@ -124,7 +129,14 @@ class Moondream3Processor(ProcessorMixin):
         "{% if content['type'] == 'image' or content['type'] == 'image_url' %}"
         "<image>"
         "{% elif content['type'] == 'text' %}"
-        "<|md_reserved_0|>query<|md_reserved_1|>{{ content['text'] }}<|md_reserved_2|>"
+        "<|md_reserved_0|>"
+        "{% if content['text'].startswith('detect ') %}"
+        "detect<|md_reserved_1|> {{ content['text'][7:] }}<|md_reserved_2|>"
+        "{% elif content['text'].startswith('point ') %}"
+        "point<|md_reserved_1|> {{ content['text'][6:] }}<|md_reserved_2|>"
+        "{% else %}"
+        "query<|md_reserved_1|>{{ content['text'] }}<|md_reserved_2|>"
+        "{% endif %}"
         "{% endif %}"
         "{% endfor %}"
         "{% endif %}"
