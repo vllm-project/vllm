@@ -79,8 +79,6 @@ class MyLLM(vllm.AsyncLLMEngine):
 
     async def pause_generation(self, **kwargs):
         await super().pause_generation(**kwargs)
-        # Set after super() completes so the flag is only visible to
-        # do_generate coroutines once the engine is actually paused.
 
         # ensure that all tokens are flushed
         await asyncio.sleep(0.2)
