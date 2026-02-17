@@ -231,13 +231,13 @@ class CudaPlatformBase(Platform):
             use_mm_prefix=model_config.is_mm_prefix_lm,
         )
 
-        selected_backend = vllm_config.attention_config.backend
+        user_specified_backend = vllm_config.attention_config.backend
         num_heads = model_config.get_num_attention_heads(
             vllm_config.parallel_config,
         )
         with set_current_vllm_config(vllm_config):
             chosen_backend = cls.select_attention_backend(
-                selected_backend=selected_backend,
+                selected_backend=user_specified_backend,
                 attn_selector_config=attn_selector_config,
                 device_capability=device_capability,
                 # Don't raise here — we produce better errors below.
@@ -251,7 +251,7 @@ class CudaPlatformBase(Platform):
             if (
                 chosen_backend is not None
                 and user_specified_block_size
-                and selected_backend is None
+                and user_specified_backend is None
             ):
                 optimal = cls.select_attention_backend(
                     selected_backend=None,
@@ -301,23 +301,24 @@ class CudaPlatformBase(Platform):
         if not user_specified_block_size:
             return
 
-        # User specified --block-size (and possibly --attention-backend)
-        # but no backend supports it. Build a helpful error message.
-        if selected_backend is not None:
+        if user_specified_backend is not None:
+            # User specified --block-size and --attention-backend and
+            # they are incompatible.
             try:
-                backend_class = selected_backend.get_class()
+                backend_class = user_specified_backend.get_class()
                 supported = backend_class.get_supported_kernel_block_sizes()
             except ImportError:
                 supported = None
             raise ValueError(
                 f"User-specified --block-size "
                 f"{cache_config.block_size} is incompatible with "
-                f"--attention-backend {selected_backend.name}"
+                f"--attention-backend {user_specified_backend.name}"
                 f" (supported kernel block sizes: {supported})."
                 f" Either remove --block-size to auto-select,"
                 f" or choose a compatible value."
             )
         else:
+            # User specified --block-size but no backend supports it.
             _, invalid_reasons = cls.get_valid_backends(
                 device_capability=device_capability,
                 attn_selector_config=attn_selector_config,
