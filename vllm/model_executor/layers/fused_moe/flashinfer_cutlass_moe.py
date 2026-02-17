@@ -28,6 +28,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
     has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_nvfp4,
 )
 
 logger = init_logger(__name__)
@@ -169,6 +170,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
                     (kNvfp4Static, kNvfp4Dynamic),
                 ]
                 and p.has_device_capability(100)
+                and (scheme != (kNvfp4Static, kNvfp4Dynamic) or has_flashinfer_nvfp4())
             )
         )
 
