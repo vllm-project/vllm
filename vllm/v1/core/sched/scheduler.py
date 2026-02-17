@@ -213,6 +213,13 @@ class Scheduler(SchedulerInterface):
             if speculative_config.uses_draft_model():
                 self.num_lookahead_tokens = self.num_spec_tokens
 
+        # Tracks whether the *previous* step's drafter was skipped (e.g.
+        # because sequences exceeded the drafter's max model length).  When
+        # True the spec-decode tokens verified in the *current* step are
+        # dummy/placeholder values, so acceptance-rate stats should be
+        # excluded.
+        self._prev_step_drafting_was_skipped: bool = False
+
         # Create the KV cache manager.
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
@@ -1269,6 +1276,12 @@ class Scheduler(SchedulerInterface):
         if self.perf_metrics and self.perf_metrics.is_enabled():
             perf_stats = self.perf_metrics.get_step_perf_stats_per_gpu(scheduler_output)
 
+        # If the *previous* step's drafter was skipped, the spec tokens being
+        # verified in this step are dummy/placeholder values – exclude them
+        # from acceptance-rate statistics.
+        skip_spec_decode_stats = self._prev_step_drafting_was_skipped
+        self._prev_step_drafting_was_skipped = model_runner_output.drafting_was_skipped
+
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
         kv_connector_stats: KVConnectorStats | None = (
@@ -1332,13 +1345,18 @@ class Scheduler(SchedulerInterface):
                 # the scheduled spec tokens count and so is similarly adjusted.
                 if request.num_output_placeholders > 0:
                     request.num_output_placeholders -= num_rejected
-                spec_decoding_stats = self.make_spec_decoding_stats(
-                    spec_decoding_stats,
-                    num_draft_tokens=num_draft_tokens,
-                    num_accepted_tokens=num_accepted,
-                    num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
-                    request_id=req_id,
-                )
+                # Only collect stats when the previous step actually ran the
+                # drafter.  When drafting was skipped (e.g. sequences too
+                # long), the spec tokens are dummy/placeholder values and
+                # would incorrectly deflate the acceptance rate.
+                if not skip_spec_decode_stats:
+                    spec_decoding_stats = self.make_spec_decoding_stats(
+                        spec_decoding_stats,
+                        num_draft_tokens=num_draft_tokens,
+                        num_accepted_tokens=num_accepted,
+                        num_invalid_spec_tokens=scheduler_output.num_invalid_spec_tokens,
+                        request_id=req_id,
+                    )
 
             stopped = False
             new_logprobs = None

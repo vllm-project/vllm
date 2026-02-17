@@ -442,6 +442,8 @@ class GPUModelRunner(
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
+        self.prev_skipped_drafting = False
+
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
@@ -3704,11 +3706,19 @@ class GPUModelRunner(
 
         spec_config = self.speculative_config
         propose_drafts_after_bookkeeping = False
+        drafting_was_skipped = False
         if spec_config is not None:
             input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
                 spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
                 <= self.effective_drafter_max_model_len
             )
+            if (
+                not input_fits_in_drafter
+                and spec_decode_common_attn_metadata is not None
+            ):
+                # Input doesn't fit but otherwise would have run drafting,
+                # so we tell the scheduler so it can adjust stats accordingly.
+                drafting_was_skipped = True
             use_gpu_toks = (
                 spec_config.use_eagle() or spec_config.uses_draft_model()
             ) and not spec_config.disable_padded_drafter_batch
@@ -3788,6 +3798,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                drafting_was_skipped=drafting_was_skipped,
             )
 
         if not self.use_async_scheduling:

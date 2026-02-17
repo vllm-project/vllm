@@ -169,6 +169,12 @@ class ModelRunnerOutput:
     # each request due to speculative/jump decoding.
     sampled_token_ids: list[list[int]] = field(default_factory=list)
 
+    # Indicates whether the scheduled draft tokens were ignored.
+    # Used when the model runner decides to skip generating draft tokens, e.g. when
+    # input length exceeds the drafter's capacity. In such cases, the scheduler should
+    # be notified that the scheduled draft tokens were not used, such as for statistics.
+    skipped_draft_tokens: bool = False
+
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs, max_num_logprobs + 1]
     # [num_reqs]
@@ -194,6 +200,11 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # Whether the drafter was skipped this step (e.g. input_fits_in_drafter
+    # was False).  Used by the scheduler to avoid counting dummy/placeholder
+    # spec-decode tokens in acceptance-rate statistics.
+    drafting_was_skipped: bool = False
 
 
 # ModelRunnerOutput wrapper for async scheduling.
