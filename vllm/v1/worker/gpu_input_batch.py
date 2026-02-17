@@ -938,9 +938,6 @@ class InputBatch:
         In async scheduling case, update output_token_ids in sampling metadata
         from prior steps sampled token ids once they've finished copying to CPU.
         This is called right before they are needed by the logits processors.
-
-        For async spec decode mode: extends output_token_ids with actual tokens.
-        For non-async spec decode mode: replaces -1 placeholders with actual tokens.
         """
         output_token_ids = self.sampling_metadata.output_token_ids
         if self.sampled_token_ids_cpu is None or not output_token_ids:
