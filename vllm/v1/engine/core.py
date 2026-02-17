@@ -965,7 +965,9 @@ class EngineCoreProc(EngineCore):
             nonlocal shutdown_requested
             if not shutdown_requested:
                 shutdown_requested = True
-                raise SystemExit()
+                if engine_core is not None:
+                    # Set PAUSED_SHUTDOWN to reject new requests
+                    engine_core.scheduler.set_pause_state(PauseState.PAUSED_SHUTDOWN)
 
         # Either SIGTERM or SIGINT will terminate the engine_core
         signal.signal(signal.SIGTERM, signal_handler)
@@ -1041,8 +1043,8 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
+        # Loop until shutdown signal received
+        while self.scheduler.pause_state != PauseState.PAUSED_SHUTDOWN:
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
@@ -1112,6 +1114,19 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
+
+            # Reject new requests during shutdown
+            if self.scheduler.pause_state == PauseState.PAUSED_SHUTDOWN:
+                logger.info(
+                    "Rejecting request %s (server shutting down)", req.request_id
+                )
+                self._send_error_output(
+                    req.request_id,
+                    req.client_index,
+                    FinishReason.ERROR,
+                )
+                return
+
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
