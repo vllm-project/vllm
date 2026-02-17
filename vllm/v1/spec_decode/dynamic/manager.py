@@ -38,9 +38,9 @@ class DynamicSpeculativeDecodingManager:
         assert self.dynamic_config.max_num_speculative_tokens > 0, (
             "max_num_speculative_tokens must be > 0"
         )
-        assert all(0.0 <= a <= 1.0 for a in self.dynamic_config.acceptance_rate_per_pos), (
-            "all acceptance_rate_per_pos values must be in [0.0, 1.0]"
-        )
+        assert all(
+            0.0 <= a <= 1.0 for a in self.dynamic_config.acceptance_rate_per_pos
+        ), "all acceptance_rate_per_pos values must be in [0.0, 1.0]"
         assert 1 in self.dynamic_config.batch_stats, (
             f"BS 1 not found in {self.dynamic_config.batch_stats.keys()}"
         )
