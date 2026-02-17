@@ -87,11 +87,8 @@ class BlockTables:
             self.num_blocks.np[i, req_index] = start + len(block_ids)
 
     def apply_staged_writes(self) -> None:
-        # NOTE: Each block_table.apply_write() already batches all writes for
-        # that group into a single kernel launch. The loop here launches one
-        # kernel per KV cache group. For most models (num_kv_cache_groups == 1),
-        # this is a single launch. For hybrid attention models with multiple
-        # groups, this could be further optimized by batching across groups.
+        # TODO(woosuk): This can be inefficient since it launches one kernel per
+        # block table. Implement a kernel to handle all block tables at once.
         for block_table in self.block_tables:
             block_table.apply_write()
         self.num_blocks.copy_to_uva()

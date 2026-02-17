@@ -8,13 +8,15 @@ Measures:
 5. fused gather+slot_mappings (1 kernel launch)
 6. Total scheduling overhead per step
 """
+import argparse
 import json
+import os
 import sys
 import time
 
 import torch
 
-sys.path.insert(0, '/workspace/h200-block-table-kernel-fusion')
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from vllm.v1.worker.gpu.block_table import BlockTables
 
@@ -204,6 +206,11 @@ def benchmark_block_table_ops(
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Benchmark block table kernels")
+    parser.add_argument("--output", type=str, default=None,
+                        help="Path to save JSON results")
+    args = parser.parse_args()
+
     print("Block Table Kernel Benchmark")
     print("=" * 60)
 
@@ -232,11 +239,11 @@ if __name__ == "__main__":
             print(f"  {k}: {v:.4f} ms" if isinstance(v, float) else
                   f"  {k}: {v}")
 
-    # Save results
-    out_path = '/workspace/h200-block-table-kernel-fusion/results/08-benchmark-comparison/comparison.json'
-    with open(out_path, 'w') as f:
-        json.dump(all_results, f, indent=2)
-    print(f"\nResults saved to {out_path}")
+    if args.output:
+        os.makedirs(os.path.dirname(args.output), exist_ok=True)
+        with open(args.output, 'w') as f:
+            json.dump(all_results, f, indent=2)
+        print(f"\nResults saved to {args.output}")
 
     # Print comparison table
     print("\n" + "=" * 80)
