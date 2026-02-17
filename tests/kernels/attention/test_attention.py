@@ -139,14 +139,13 @@ def test_paged_attention(
     ):
         pytest.skip()
 
-    if (
-        version == "rocm"
-        and current_platform.is_navi()
-        and (
-            kv_cache_dtype == "fp8" or head_size != 128 or block_size != 16 or use_alibi
+    if version == "rocm" and current_platform.is_navi():
+        # gfx12 (RDNA4) supports FP8 KV cache via software dequant
+        fp8_unsupported = (
+            kv_cache_dtype == "fp8" and not current_platform.supports_fp8()
         )
-    ):
-        pytest.skip()
+        if fp8_unsupported or head_size != 128 or block_size != 16 or use_alibi:
+            pytest.skip()
 
     global PARTITION_SIZE
 
