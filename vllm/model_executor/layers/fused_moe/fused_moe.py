@@ -1917,17 +1917,7 @@ class TritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        p = current_platform
-        if p.is_rocm():
-            from vllm.platforms.rocm import on_gfx9
-
-            is_rocm_on_gfx9 = on_gfx9()
-        else:
-            is_rocm_on_gfx9 = False
-
-        device_supports_fp8 = is_rocm_on_gfx9 or (
-            p.is_cuda() and p.has_device_capability((8, 9))
-        )
+        device_supports_fp8 = current_platform.supports_fp8()
 
         if not device_supports_fp8:
             return (weight_key, activation_key) == (None, None)
