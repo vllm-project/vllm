@@ -266,9 +266,7 @@ class MultiModalRegistry:
         )
         mm_inputs = processor.apply(
             prompt=processor_inputs.prompt,
-            mm_items=processor_inputs.mm_items.select(
-                {k for k, c in mm_counts.items() if c > 0}
-            ),
+            mm_items=processor_inputs.mm_items,
             hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
             tokenization_kwargs=processor_inputs.tokenization_kwargs,
         )

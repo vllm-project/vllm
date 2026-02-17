@@ -1178,7 +1178,10 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
 
         In addition, return whether prompt updates have been applied.
         """
-        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
+        valid_mm_items = mm_items.select(
+            {k for k, c in mm_items.get_all_counts().items() if c > 0}
+        )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
 
         processed_data = self._call_hf_processor(
             prompt=prompt_text,
