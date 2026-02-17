@@ -137,7 +137,9 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
 
 def _platform_aware_cudagraph(desired: CUDAGraphMode) -> CUDAGraphMode:
     """Return desired cudagraph mode if platform supports static graph, else NONE."""
-    return desired if current_platform.support_static_graph_mode() else CUDAGraphMode.NONE
+    return (
+        desired if current_platform.support_static_graph_mode() else CUDAGraphMode.NONE
+    )
 
 
 OPTIMIZATION_LEVEL_00 = {
