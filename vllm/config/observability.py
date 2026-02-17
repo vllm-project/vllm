@@ -81,7 +81,7 @@ class ObservabilityConfig:
     """JSON mapping of Prometheus histogram metric name patterns to custom
     bucket boundaries. Keys are metric name substrings (matched against the
     full metric name), and values are lists of numeric bucket boundaries.
-    Example: '{"ttft": [0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
+    Example: '{"time_to_first_token": [0.01, 0.05, 0.1, 0.5, 1.0, 5.0],
     "e2e_request_latency": [0.5, 1.0, 5.0, 10.0, 30.0]}'.
     Unmatched metrics use the built-in default buckets."""
 
