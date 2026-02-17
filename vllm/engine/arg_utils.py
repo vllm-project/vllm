@@ -75,7 +75,7 @@ from vllm.config.model import (
     RunnerOption,
     TokenizerMode,
 )
-from vllm.config.multimodal import MMCacheType, MMEncoderTPMode
+from vllm.config.multimodal import MMCacheType, MMEncoderTPMode, MultimodalTensorIpc
 from vllm.config.observability import DetailedTraceModules
 from vllm.config.parallel import DistributedExecutorBackend, ExpertPlacementStrategy
 from vllm.config.scheduler import SchedulerPolicy
@@ -479,9 +479,7 @@ class EngineArgs:
     io_processor_plugin: str | None = None
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
     video_pruning_rate: float = MultiModalConfig.video_pruning_rate
-    multimodal_tensor_ipc: Literal["direct_rpc", "torch_shm"] = (
-        MultiModalConfig.multimodal_tensor_ipc
-    )
+    multimodal_tensor_ipc: MultimodalTensorIpc = MultiModalConfig.multimodal_tensor_ipc
     # LoRA fields
     enable_lora: bool = False
     max_loras: int = LoRAConfig.max_loras
