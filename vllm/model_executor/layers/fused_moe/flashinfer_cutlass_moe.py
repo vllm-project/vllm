@@ -252,6 +252,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
         activation_str_to_value_map = {
             MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
+            MoEActivation.SWIGLUOAI: ActivationType.Swiglu,  # gpt-oss alias
             MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }
         assert activation in activation_str_to_value_map, (
@@ -320,7 +321,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 fc1_expert_weights = w1.view(torch.long)
                 fc2_expert_weights = w2.view(torch.long)
                 fake_input_scale = torch.ones(
-                    self.moe_config.num_experts, device=hidden_states.device
+                    self.num_experts, device=hidden_states.device
                 )
                 quant_scales = [
                     self.w1_scale.view(torch.int32),
