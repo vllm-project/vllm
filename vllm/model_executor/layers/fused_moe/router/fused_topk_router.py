@@ -125,6 +125,7 @@ class FusedTopKRouter(BaseRouter):
         renormalize: bool = True,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        num_expert_group: int | None = None,
     ):
         super().__init__(
             top_k=top_k,
@@ -135,6 +136,7 @@ class FusedTopKRouter(BaseRouter):
         )
         self.renormalize = renormalize
         self.scoring_func = scoring_func
+        self.num_expert_group = num_expert_group
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -142,6 +144,7 @@ class FusedTopKRouter(BaseRouter):
             scoring_func=self.scoring_func,
             top_k=self.top_k,
             renormalize=self.renormalize,
+            num_expert_group=self.num_expert_group,
         )
 
     def _compute_routing(

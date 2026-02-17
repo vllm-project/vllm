@@ -146,6 +146,7 @@ class FusedTopKBiasRouter(BaseRouter):
         routed_scaling_factor: float = 1.0,
         enable_eplb: bool = False,
         indices_type_getter: Callable[[], torch.dtype | None] | None = None,
+        num_expert_group: int | None = None,
     ):
         super().__init__(
             top_k=top_k,
@@ -158,6 +159,7 @@ class FusedTopKBiasRouter(BaseRouter):
         self.renormalize = renormalize
         self.scoring_func = scoring_func
         self.routed_scaling_factor = routed_scaling_factor
+        self.num_expert_group = num_expert_group
 
     @property
     def routing_method_type(self) -> RoutingMethodType:
@@ -165,6 +167,7 @@ class FusedTopKBiasRouter(BaseRouter):
             scoring_func=self.scoring_func,
             top_k=self.top_k,
             renormalize=self.renormalize,
+            num_expert_group=self.num_expert_group,
         )
 
     def _compute_routing(
