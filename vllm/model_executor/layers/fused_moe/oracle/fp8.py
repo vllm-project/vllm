@@ -58,7 +58,9 @@ class Fp8MoeBackend(Enum):
 
 
 def _get_priority_backends(
-    moe_config: FusedMoEConfig, weight_key: QuantKey, activation_key: QuantKey
+    moe_config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
 ) -> list[Fp8MoeBackend]:
     """
     Get available backends in priority order based on platform and config.
