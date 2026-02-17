@@ -64,7 +64,11 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
 
             self._g1_alphas = (w1_scale * a1_scale).squeeze()
             self._g2_alphas = (w2_scale * a2_scale).squeeze()
-            self._g1_scale_c = self._g1_alphas / self.quant_config.a2_scale
+            self._g1_scale_c = (
+                self._g1_alphas / self.quant_config.a2_scale
+                if moe_config.is_act_and_mul
+                else torch.ones_like(self._g1_alphas) * self.quant_config.a2_scale
+            )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

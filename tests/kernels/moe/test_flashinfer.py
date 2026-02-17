@@ -366,7 +366,7 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             inplace=False,
         )
 
-        flashinfer_cutlass_output = kernel(
+        flashinfer_cutlass_output = kernel.apply(
             td.hidden_states,
             td.layer.w13_weight,
             td.layer.w2_weight,
