@@ -187,5 +187,9 @@ class QuantizationConfig(ABC):
 
     @classmethod
     def uses_meta_device_weights(cls) -> bool:
-        """Whether this method creates weights on meta device for online quant."""
+        """Whether this method creates weights on meta device for online quant.
+
+        Using meta device allows post-processing weights layer-wise instead of
+        after all weights are loaded, reducing peak memory usage during loading.
+        """
         return False
