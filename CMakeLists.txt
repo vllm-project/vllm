@@ -771,6 +771,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
     endif()
   endif()
 
+  # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
+  # This kernel implements a highly optimized GEMM for the DeepSeek V2/V3
+  # Q/KV "A" projection (hidden_size=7168 -> q_lora_rank+kv_lora_rank+rope=2112)
+  # at small batch sizes (1-16 tokens), using Hopper-specific async copy and
+  # mbarrier instructions.
+  cuda_archs_loose_intersection(FUSED_A_GEMM_ARCHS "9.0a;" "${CUDA_ARCHS}")
+  if(FUSED_A_GEMM_ARCHS)
+    set(SRCS "csrc/gemm/dsv3_fused_a_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${SRCS}"
+      CUDA_ARCHS "${FUSED_A_GEMM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC "${SRCS}")
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_DSV3_FUSED_A_GEMM=1")
+    message(STATUS "Building dsv3_fused_a_gemm for archs: ${FUSED_A_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
+                   "in CUDA target architectures.")
+  endif()
+
   # moe_data.cu is used by all CUTLASS MoE kernels.
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(CUTLASS_MOE_DATA_ARCHS "9.0a;10.0f;11.0f;12.0f" "${CUDA_ARCHS}")
