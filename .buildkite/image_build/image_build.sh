@@ -151,7 +151,7 @@ print_bake_config() {
     docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
     echo "--- :arrow_down: Uploading bake config to Buildkite"
-    buildkite-agent artifact upload "${BAKE_CONFIG_FILE}"
+    (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
 }
 
 #################################
@@ -168,8 +168,8 @@ REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
 BRANCH=$4
-VLLM_USE_PRECOMPILED=$5
-VLLM_MERGE_BASE_COMMIT=$6
+VLLM_USE_PRECOMPILED=0
+VLLM_MERGE_BASE_COMMIT=""
 IMAGE_TAG=$7
 IMAGE_TAG_LATEST=${8:-} # only used for main branch, optional
 
