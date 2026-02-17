@@ -177,7 +177,7 @@ def naive_batched_moe(
         w2,
         topk_weight,
         topk_ids,
-        global_num_experts=moe_config.num_experts,
+        global_num_experts=w1.shape[0],
         activation=moe_config.activation,
         apply_router_weight_on_input=False,
         expert_map=None,
