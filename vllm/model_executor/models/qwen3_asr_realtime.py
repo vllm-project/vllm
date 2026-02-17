@@ -177,7 +177,6 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
 class Qwen3ASRRealtimeGeneration(
     Qwen3ASRForConditionalGeneration, SupportsRealtime
 ):
-    skip_warmup_audio_preprocessing = True
     realtime_max_tokens = 64
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
