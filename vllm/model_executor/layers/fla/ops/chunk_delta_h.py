@@ -315,9 +315,7 @@ def chunk_gated_delta_rule_fwd_h(
 
     h_dtype = state_dtype if state_dtype is not None else k.dtype
     h = k.new_empty(B, NT, H, V, K, dtype=h_dtype)
-    final_state = (
-        k.new_empty(N, H, V, K, dtype=h_dtype) if output_final_state else None
-    )
+    final_state = k.new_empty(N, H, V, K, dtype=h_dtype) if output_final_state else None
 
     v_new = torch.empty_like(u) if save_new_value else None
 
