@@ -310,12 +310,12 @@ class CudaPlatformBase(Platform):
             except ImportError:
                 supported = None
             raise ValueError(
-                f"User-specified --block-size "
-                f"{cache_config.block_size} is incompatible with "
-                f"--attention-backend {user_specified_backend.name}"
-                f" (supported kernel block sizes: {supported})."
-                f" Either remove --block-size to auto-select,"
-                f" or choose a compatible value."
+                f"User-specified --block-size {cache_config.block_size} "
+                f"is incompatible with the specified "
+                f"--attention-backend {user_specified_backend.name} "
+                f"(supported kernel block sizes: {supported}). "
+                f"Either remove --block-size to auto-select, "
+                f"or choose a compatible value."
             )
         else:
             # User specified --block-size but no backend supports it.
@@ -330,9 +330,9 @@ class CudaPlatformBase(Platform):
             raise ValueError(
                 f"No valid attention backend found for --block-size "
                 f"{cache_config.block_size}. "
-                f"Reasons: {{{reasons_str}}}."
-                f" Either remove --block-size to auto-select,"
-                f" or choose a compatible value."
+                f"Reasons: {{{reasons_str}}}. "
+                f"Either remove --block-size to auto-select, "
+                f"or choose a compatible value."
             )
 
     @classmethod
