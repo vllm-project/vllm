@@ -547,9 +547,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
             )
 
-        # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
-        block_tables = self.block_tables.gather_block_tables(idx_mapping)
-
         # Get query_start_loc.
         query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
@@ -608,12 +605,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits,
         )
 
-        # Compute slot mappings: [num_kv_cache_groups, num_tokens]
-        slot_mappings = self.block_tables.compute_slot_mappings(
-            idx_mapping,
-            query_start_loc,
-            self.input_buffers.positions[:num_tokens],
-        )
+        # Fused gather block tables + compute slot mappings (single kernel).
+        # Block tables: num_kv_cache_groups x [num_reqs, max_num_blocks]
+        # Slot mappings: [num_kv_cache_groups, num_tokens]
+        block_tables, slot_mappings = \
+            self.block_tables.gather_and_compute_slot_mappings(
+                idx_mapping,
+                query_start_loc,
+                self.input_buffers.positions[:num_tokens],
+            )
         # Layer name -> slot mapping.
         slot_mappings_by_layer = build_slot_mappings_by_layer(
             slot_mappings, self.kv_cache_config
