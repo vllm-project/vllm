@@ -1694,6 +1694,11 @@ class LLM:
                            a different model or update the model, where
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
+                - Level 3: Offloads the model weights to disk and discards the
+                           kv cache. The model weights are not backed up in CPU
+                           memory. The content of kv cache is forgotten. This
+                           level's sleep helps use minimum CPU memory and loads
+                           efficiently from disk when woken up.
         """
         if level > 0:
             self.reset_prefix_cache()
