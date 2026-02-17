@@ -71,7 +71,7 @@ while [[ $# -gt 0 ]]; do
       usage
       ;;
     *)
-      echo "Unknown argument: $1\n"
+      printf "Unknown argument: %s\n" "$1"
       usage
       ;;
   esac
@@ -84,15 +84,17 @@ mkdir -p "$OUTPUT_DIR"
 QPS_VALUES=(25 20 15 10 5 1)
 
 # Common parameters
-COMMON_PARAMS="--backend $BACKEND \
-               --model $MODEL \
-               --dataset $DATASET \
-               --structured-output-ratio $STRUCTURED_OUTPUT_RATIO \
-               --save-results \
-               --result-dir $OUTPUT_DIR \
-               --output-len $MAX_NEW_TOKENS \
-               --port $PORT \
-               --tokenizer-mode $TOKENIZER_MODE"
+COMMON_PARAMS=(
+  --backend "$BACKEND"
+  --model "$MODEL"
+  --dataset "$DATASET"
+  --structured-output-ratio "$STRUCTURED_OUTPUT_RATIO"
+  --save-results
+  --result-dir "$OUTPUT_DIR"
+  --output-len "$MAX_NEW_TOKENS"
+  --port "$PORT"
+  --tokenizer-mode "$TOKENIZER_MODE"
+)
 
 echo "Starting structured output benchmark with model: $MODEL"
 echo "Backend: $BACKEND"
@@ -109,17 +111,17 @@ for qps in "${QPS_VALUES[@]}"; do
   GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
 
   # Construct filename for this run
-  FILENAME="${BACKEND}_${qps}qps_$(basename $MODEL)_${DATASET}_${GIT_HASH}.json"
+  FILENAME="${BACKEND}_${qps}qps_$(basename "$MODEL")_${DATASET}_${GIT_HASH}_${GIT_BRANCH}.json"
 
   NUM_PROMPTS=$(echo "$TOTAL_SECONDS * $qps" | bc)
   NUM_PROMPTS=${NUM_PROMPTS%.*}  # Remove fractional part
   echo "Running benchmark with $NUM_PROMPTS prompts"
 
   # Run the benchmark
-  python "$SCRIPT_DIR/benchmark_serving_structured_output.py" $COMMON_PARAMS \
-    --request-rate $qps \
+  python "$SCRIPT_DIR/benchmark_serving_structured_output.py" "${COMMON_PARAMS[@]}" \
+    --request-rate "$qps" \
     --result-filename "$FILENAME" \
-    --num-prompts $NUM_PROMPTS
+    --num-prompts "$NUM_PROMPTS"
 
   echo "Completed benchmark with QPS: $qps"
   echo "----------------------------------------"

@@ -50,8 +50,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 vllm bench serve \
-    --model $MODEL_NAME \
-    --host $HOST \
-    --port $PORT \
-    --num-prompts $NUM_PROMPTS \
-    --request-rate $REQUEST_RATE
+    --model "$MODEL_NAME" \
+    --host "$HOST" \
+    --port "$PORT" \
+    --num-prompts "$NUM_PROMPTS" \
+    --request-rate "$REQUEST_RATE"

@@ -34,7 +34,7 @@ wait_for_server() {
     done" && return 0 || return 1
 }
 
-vllm serve $MODEL_NAME \
+vllm serve "$MODEL_NAME" \
     --port 8100 \
     --max-model-len 100 \
     --enforce-eager \
