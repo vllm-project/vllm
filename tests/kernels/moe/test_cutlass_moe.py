@@ -216,7 +216,7 @@ def run_with_expert_maps(
             ),
             inplace=False,
         )
-        out_tensor = out_tensor + kernel(**kwargs)
+        out_tensor = out_tensor + kernel.apply(**kwargs)
 
     return out_tensor
 

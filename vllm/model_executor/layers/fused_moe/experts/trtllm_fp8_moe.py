@@ -235,16 +235,19 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         routed_scaling_factor: float | None = None,
         topk_group: int | None = None,
     ) -> torch.Tensor:
+        # Confirm supported activation function.
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
         activation_type = activation_to_flashinfer_type(activation)
 
-        assert self.routing_method_type == RoutingMethodType.Llama4
-        assert apply_router_weight_on_input
+        # Confirm Llama-4 routing is proper.
+        if self.routing_method_type == RoutingMethodType.Llama4:
+            assert apply_router_weight_on_input
+        else:
+            assert not apply_router_weight_on_input
 
-        # Should only have Llama4 routing here.
-        assert routed_scaling_factor is not None
-        assert e_score_correction_bias is None
-        assert num_expert_group is None
+        # The DeepSeekV3 routing method requires float32 router logits.
+        if self.routing_method_type == RoutingMethodType.DeepSeekV3:
+            router_logits = router_logits.to(torch.float32)
 
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
