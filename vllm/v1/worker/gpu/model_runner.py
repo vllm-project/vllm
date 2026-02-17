@@ -57,7 +57,7 @@ from vllm.v1.worker.gpu.kv_connector import (
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
-from vllm.v1.worker.gpu.pp_handler import PPHandler
+from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -185,11 +185,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.use_pp:
             self.is_first_pp_rank = get_pp_group().is_first_rank
             self.is_last_pp_rank = get_pp_group().is_last_rank
-            self.pp_handler: PPHandler | None = PPHandler(self.device)
         else:
             self.is_first_pp_rank = True
             self.is_last_pp_rank = True
-            self.pp_handler = None
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -987,8 +985,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # IntermediateTensors instead of final hidden states. Receive the
         # sampled tokens broadcast by the last rank and update local state.
         if not self.is_last_pp_rank:
-            assert self.pp_handler is not None
-            received = self.pp_handler.maybe_receive_sampled_tokens(
+            received = pp_receive(
                 input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
             assert received is not None
@@ -1003,10 +1000,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Broadcast to non-last PP ranks (handles spec decode multi-token).
         if self.use_pp:
-            assert self.pp_handler is not None
-            self.pp_handler.maybe_broadcast_sampled_tokens(
-                sampler_output, num_sampled, num_rejected
-            )
+            pp_broadcast(sampler_output.sampled_token_ids, num_sampled, num_rejected)
 
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
             self.model.compute_logits,
