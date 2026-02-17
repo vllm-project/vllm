@@ -73,7 +73,7 @@ class LogitsProcessor(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def apply(self, logits: torch.Tensor) -> torch.Tensor:
+    def apply(self, logits: torch.Tensor, predict_bonus_token: bool) -> torch.Tensor:
         """Apply LogitsProcessor to batch logits tensor.
 
         The updated tensor must be returned but may be
