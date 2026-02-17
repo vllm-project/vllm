@@ -206,16 +206,39 @@ def has_flashinfer_trtllm_fused_moe() -> bool:
 
 @functools.cache
 def has_flashinfer_cutlass_fused_moe() -> bool:
-    """Return `True` if FlashInfer CUTLASS fused MoE is available."""
+    """Return `True` if FlashInfer CUTLASS fused MoE engine is available.
+
+    Only checks for the core CUTLASS MoE entry point. FP4-specific
+    utilities (fp4_quantize, nvfp4_block_scale_interleave) are checked
+    separately via has_flashinfer_nvfp4() and gated by
+    _supports_quant_scheme(). This allows FP8 CUTLASS MoE to work on
+    architectures like SM121 (GB10) that have cutlass_fused_moe but
+    may lack FP4 utilities.
+    """
     if not has_flashinfer_moe():
         return False
 
-    # Check if all required functions are available
     required_functions = [
         ("flashinfer.fused_moe", "cutlass_fused_moe"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
+
+
+@functools.cache
+def has_flashinfer_nvfp4() -> bool:
+    """Return `True` if FlashInfer NVFP4 quantization utilities are available.
+
+    Checks for fp4_quantize and nvfp4_block_scale_interleave which are
+    required for NVFP4 quantization paths but not for FP8 CUTLASS MoE.
+    """
+    required_functions = [
         ("flashinfer", "fp4_quantize"),
         ("flashinfer", "nvfp4_block_scale_interleave"),
-        ("flashinfer.fused_moe", "trtllm_fp4_block_scale_moe"),
     ]
 
     for module_name, attr_name in required_functions:
@@ -695,6 +718,7 @@ __all__ = [
     "has_flashinfer_comm",
     "has_flashinfer_all2all",
     "has_flashinfer_cutlass_fused_moe",
+    "has_flashinfer_nvfp4",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",

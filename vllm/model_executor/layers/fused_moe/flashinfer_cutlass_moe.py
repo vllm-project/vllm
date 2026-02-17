@@ -25,6 +25,7 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import (
     flashinfer_cutlass_fused_moe,
     has_flashinfer_cutlass_fused_moe,
+    has_flashinfer_nvfp4,
 )
 
 logger = init_logger(__name__)
@@ -124,9 +125,11 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym)
                 and (p.is_device_capability(90) or p.is_device_capability_family(120))
             )
-            # nvfp4 on 10.0+
+            # nvfp4 on 10.0+ (requires FP4 utilities)
             or (
-                scheme == (kNvfp4Static, kNvfp4Dynamic) and p.has_device_capability(100)
+                scheme == (kNvfp4Static, kNvfp4Dynamic)
+                and p.has_device_capability(100)
+                and has_flashinfer_nvfp4()
             )
         )
 
