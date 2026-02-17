@@ -490,12 +490,11 @@ class BaseRenderer(ABC, Generic[_T]):
                     )
 
                 for i, item in enumerate(data_items):
-                    if item is None:
-                        if uuid_items[i] is None:
-                            raise ValueError(
-                                f"multi_modal_data[{modality!r}][{i}] is empty but "
-                                f"multi_modal_uuids[{modality!r}][{i}] is missing."
-                            )
+                    if item is None and uuid_items[i] is None:
+                        raise ValueError(
+                            f"multi_modal_data[{modality!r}][{i}] is empty but "
+                            f"multi_modal_uuids[{modality!r}][{i}] is missing."
+                        )
 
     def _process_mm_uuids(
         self,
