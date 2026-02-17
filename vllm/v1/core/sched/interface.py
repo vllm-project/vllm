@@ -23,14 +23,17 @@ class PauseState(enum.IntEnum):
     """Scheduler pause state.
 
     - UNPAUSED: Normal operation
-    - PAUSE_NEW: No new requests are scheduled, requests already in
-                 running state are scheduled.
-    - PAUSE_ALL: No requests are scheduled
+    - PAUSED_NEW: No new requests are scheduled, requests already in
+                  running state are scheduled. New ADD requests are queued.
+    - PAUSED_ALL: No requests are scheduled
+    - PAUSED_SHUTDOWN: Like PAUSED_ALL, but new ADD requests are rejected
+                       (not queued for resume). Used during engine shutdown.
     """
 
     UNPAUSED = 0
     PAUSED_NEW = 1
     PAUSED_ALL = 2
+    PAUSED_SHUTDOWN = 3
 
 
 class SchedulerInterface(ABC):
