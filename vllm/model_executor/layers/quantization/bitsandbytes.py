@@ -28,6 +28,24 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 
+def _check_bitsandbytes_version():
+    min_version = "0.49.2" if current_platform.is_rocm() else "0.46.1"
+    try:
+        import bitsandbytes
+
+        if version.parse(bitsandbytes.__version__) < version.parse(min_version):
+            raise ImportError(
+                "bitsandbytes version is wrong. Please "
+                f"install bitsandbytes>={min_version}."
+            )
+    except ImportError as err:
+        raise ImportError(
+            f"Please install bitsandbytes>={min_version} via "
+            f"`pip install bitsandbytes>={min_version}` to use "
+            "bitsandbytes quantizer."
+        ) from err
+
+
 class BitsAndBytesConfig(QuantizationConfig):
     """Config class for BitsAndBytes Quantization.
 
@@ -183,22 +201,7 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
     """
 
     def __init__(self, quant_config: BitsAndBytesConfig):
-        min_version = "0.49.2" if current_platform.is_rocm() else "0.46.1"
-        try:
-            import bitsandbytes
-
-            if version.parse(bitsandbytes.__version__) < version.parse(min_version):
-                raise ImportError(
-                    "bitsandbytes version is wrong. Please "
-                    f"install bitsandbytes>={min_version}."
-                )
-        except ImportError as err:
-            raise ImportError(
-                f"Please install bitsandbytes>={min_version} via "
-                f"`pip install bitsandbytes>={min_version}` to use "
-                "bitsandbytes quantizer."
-            ) from err
-
+        _check_bitsandbytes_version()
         self.quant_config = quant_config
 
     def create_weights(
@@ -443,21 +446,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         moe: FusedMoEConfig,
     ):
         super().__init__(moe)
-        min_version = "0.49.2" if current_platform.is_rocm() else "0.46.1"
-        try:
-            import bitsandbytes
-
-            if version.parse(bitsandbytes.__version__) < version.parse(min_version):
-                raise ImportError(
-                    "bitsandbytes version is wrong. Please "
-                    f"install bitsandbytes>={min_version}."
-                )
-        except ImportError as err:
-            raise ImportError(
-                f"Please install bitsandbytes>={min_version} via "
-                f"`pip install bitsandbytes>={min_version}` to use "
-                "bitsandbytes quantizer."
-            ) from err
+        _check_bitsandbytes_version()
         self.quant_config = quant_config
 
     def create_weights(
