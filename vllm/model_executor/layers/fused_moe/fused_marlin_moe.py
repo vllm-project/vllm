@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
     disable_inplace,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
+    get_marlin_input_dtype,
     marlin_make_workspace_new,
     marlin_moe_intermediate_size,
     marlin_quant_input,
@@ -530,7 +531,6 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        input_dtype: torch.dtype | None = None,
         max_num_tokens: int | None = None,
         num_dispatchers: int | None = None,
         w13_g_idx: torch.Tensor | None = None,
@@ -551,7 +551,8 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
         self.w13_g_idx_sort_indices = w13_g_idx_sort_indices
         self.w2_g_idx_sort_indices = w2_g_idx_sort_indices
         self.is_k_full = is_k_full
-        self.input_dtype = input_dtype
+        self.input_dtype = get_marlin_input_dtype()
+
         super().__init__(
             moe_config=moe_config,
             quant_config=quant_config,

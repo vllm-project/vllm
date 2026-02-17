@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     mxfp4_mxfp8_moe_quant_config,
@@ -217,7 +220,6 @@ class Mxfp4Config(QuantizationConfig):
                 return XpuMxfp4MoEMethod(layer.moe_config)
             else:
                 quant_method = Mxfp4MoEMethod(layer.moe_config)
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return quant_method
         elif isinstance(layer, Attention):
             # TODO: Add support for MXFP4 Attention.
@@ -241,7 +243,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.weight_dtype = "mxfp4"
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
 
-        self.marlin_input_dtype = None
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
@@ -406,21 +407,26 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            assert not self.moe.use_ep, "Mxfp4 Marlin doesn't support EP yet"
-            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
-
-            from vllm.model_executor.layers.fused_moe.prepare_finalize import (
-                MoEPrepareAndFinalizeNoEP,
+            prepare_moe_fp4_layer_for_marlin(
+                layer, input_dtype=get_marlin_input_dtype()
             )
 
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.moe_quant_config is not None
-            self.kernel = mk.FusedMoEModularKernel(
-                MoEPrepareAndFinalizeNoEP(),
+
+            prepare_finalize = maybe_make_prepare_finalize(
+                moe=self.moe,
+                quant_config=self.moe_quant_config,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                allow_new_interface=True,
+            )
+            assert prepare_finalize is not None
+
+            self.moe_mk = mk.FusedMoEModularKernel(
+                prepare_finalize,
                 MarlinExperts(
                     self.moe,
                     self.moe_quant_config,
-                    input_dtype=self.marlin_input_dtype,
                 ),
                 inplace=not self.moe.disable_inplace,
                 shared_experts=None,
@@ -926,7 +932,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            return self.kernel(
+            return self.moe_mk(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
