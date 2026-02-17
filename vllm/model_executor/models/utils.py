@@ -13,6 +13,7 @@ from torch.func import functional_call
 from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -30,6 +31,7 @@ from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import (
     is_pin_memory_available,
     is_uva_available,
@@ -612,12 +614,18 @@ class PPMissingLayer(torch.nn.Identity):
 
 _CPU_OFFLOAD_BYTES = 0
 _CPU_OFFLOAD_MAX_BYTES = 0
+_CPU_OFFLOAD_PARAMS = set()
 
 
 def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
     _CPU_OFFLOAD_BYTES = 0
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
+
+
+def set_cpu_offload_params(params: set[str]) -> None:
+    global _CPU_OFFLOAD_PARAMS
+    _CPU_OFFLOAD_PARAMS = params
 
 
 def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
@@ -633,37 +641,41 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
         return module
 
-    pin_memory = is_pin_memory_available()
-    uva_available = is_uva_available()
-
-    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-    uva_offloading = True
+    pin_memory = (
+        is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
+    )
+    uva_offloading = is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
     offloaded_parameters = False
-    for p in module.parameters():
+    for name, p in module.named_parameters():
         if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
             # we use per-parameter offloading
             # one module might have some parameters offloaded and some not
             break
 
-        # `torch.empty_like` does not support `pin_memory` argument
-        cpu_data = torch.empty_strided(
-            size=p.data.size(),
-            stride=p.data.stride(),
-            dtype=p.data.dtype,
-            layout=p.data.layout,
-            device="cpu",
-            pin_memory=pin_memory,
-        )
-        cpu_data.copy_(p.data)
+        if _CPU_OFFLOAD_PARAMS:
+            # Check if parameter belongs to the offloading set
+            # Add dots here to ensure we match full segments only
+            # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight" but not
+            # "mlp.experts.w2_weight_scale"
+            should_offload = any(
+                f".{param}." in f".{name}." for param in _CPU_OFFLOAD_PARAMS
+            )
+            if not should_offload:
+                continue
+
+        cpu_data = p.data.to(device="cpu")
+        if pin_memory:
+            cpu_data = cpu_data.pin_memory()
+
         if not uva_offloading:
             p.data = cpu_data
         else:
-            # keep the cpu data alive
-            p._vllm_offloaded_cpu_data = cpu_data
             p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
+            p._vllm_is_uva_offloaded = True
+
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
         offloaded_parameters = True
 
@@ -678,7 +690,12 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
                 k: v.to(device, non_blocking=True)
                 for k, v in module.state_dict().items()
             }
-            output = functional_call(module, device_state, args=args, kwargs=kwargs)
+
+            # set `tie_weights=False` as tied weights in original model
+            # become untied when calling .to(device) individually
+            output = functional_call(
+                module, device_state, args=args, kwargs=kwargs, tie_weights=False
+            )
             module.forward = forward
             return output
 
@@ -709,6 +726,10 @@ def make_layers(
         ]
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
     )
+    if _CPU_OFFLOAD_MAX_BYTES > 0:
+        logger.info(
+            "Total CPU offloaded parameters: %s GBs", format_gib(_CPU_OFFLOAD_BYTES)
+        )
     return start_layer, end_layer, modules
 
 

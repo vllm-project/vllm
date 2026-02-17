@@ -114,10 +114,10 @@ run_tests_for_model() {
   eval "$FULL_CMD &"
 
   # Wait for all instances to start
-  echo "Waiting for prefill instance on port $PORT to start..."
-  wait_for_server $PREFILL_PORT
-  echo "Waiting for decode instance on port $PORT to start..."
-  wait_for_server $DECODE_PORT
+  echo "Waiting for prefill instance on port $PREFILL_PORT to start..."
+  wait_for_server "$PREFILL_PORT"
+  echo "Waiting for decode instance on port $DECODE_PORT to start..."
+  wait_for_server "$DECODE_PORT"
 
   # Build the command for the proxy server with all the hosts and ports
   PROXY_PORT=8192
@@ -133,7 +133,7 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python -m pytest -s -v ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
+  PREFILL_PORT=$PREFILL_PORT DECODE_PORT=$DECODE_PORT PROXY_PORT=$PROXY_PORT python -m pytest -s -v "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
 
   # Clean up before running next model
   cleanup_instances
