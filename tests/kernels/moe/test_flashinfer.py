@@ -479,36 +479,57 @@ def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
         routing_logits = torch.randn((m, e), device="cuda", dtype=torch.float32)
         routing_bias = torch.randn(e, device="cuda", dtype=torch.float32)
 
-        # This should NOT crash with n_group=None
-        import flashinfer
+        activation = MoEActivation.SILU
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=activation,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=torch.bfloat16,
+            is_act_and_mul=activation.is_gated,
+            routing_method=RoutingMethodType.DeepSeekV3,
+        )
 
-        from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
-
-        a1q, a1q_scale = moe_kernel_quantize_input(
-            A=x,
-            A_scale=None,
-            quant_dtype=torch.float8_e4m3fn,
-            per_act_token_quant=False,
+        quant_config = fp8_w8a8_moe_quant_config(
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
             block_shape=block_shape,
         )
-        output = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
-            routing_logits=routing_logits,
-            routing_bias=routing_bias,
-            hidden_states=a1q,
-            hidden_states_scale=a1q_scale,
-            gemm1_weights=w13_fp8,
-            gemm1_weights_scale=w13_scale,
-            gemm2_weights=w2_fp8,
-            gemm2_weights_scale=w2_scale,
-            num_experts=e,
-            top_k=topk,
-            n_group=None,
-            topk_group=None,
-            intermediate_size=n,
-            local_expert_offset=0,
-            local_num_experts=e,
+
+        kernel = mk.FusedMoEKernel(
+            maybe_make_prepare_finalize(
+                moe=moe_config,
+                quant_config=quant_config,
+                allow_new_interface=True,
+                use_monolithic=True,
+            ),
+            TrtLlmFp8Experts(
+                moe_config=moe_config,
+                quant_config=quant_config,
+            ),
+            inplace=False,
+        )
+
+        # This should NOT crash with n_group=None
+        output = kernel.apply_monolithic(
+            hidden_states=x,
+            w1=w13_fp8,
+            w2=w2_fp8,
+            router_logits=routing_logits,
+            activation=activation,
+            global_num_experts=e,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+            # grouped topk + fused topk bias parameters
+            num_expert_group=None,
+            e_score_correction_bias=routing_bias,
             routed_scaling_factor=1.0,
-            routing_method_type=RoutingMethodType.DeepSeekV3,
+            topk_group=None,
         )
 
         assert output is not None

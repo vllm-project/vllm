@@ -179,10 +179,9 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
     ) -> torch.Tensor:
         assert not apply_router_weight_on_input
         assert activation == MoEActivation.SILU
-        assert (
-            e_score_correction_bias is None
-            or e_score_correction_bias.dtype == hidden_states.dtype
-        )
+
+        if e_score_correction_bias is not None:
+            e_score_correction_bias.to(hidden_states.dtype)
 
         if self.routing_method_type == RoutingMethodType.DeepSeekV3:
             router_logits = router_logits.to(torch.float32)
@@ -210,7 +209,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=num_expert_group,
+            n_group=(num_expert_group or 0),
             topk_group=(topk_group or 0),
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
