@@ -208,18 +208,12 @@ class Qwen3ASRRealtimeGeneration(
             f"<|im_start|>assistant\n"
         )
 
-        is_first_yield = True
+        prompt_token_ids = tokenizer.encode(prompt_template)
 
         async for audio_chunk in audio_stream:
             buffer.write_audio(audio_chunk)
 
             while (segment := buffer.read_audio()) is not None:
-                if is_first_yield:
-                    prompt_token_ids = tokenizer.encode(prompt_template)
-                    is_first_yield = False
-                else:
-                    prompt_token_ids = tokenizer.encode(prompt_template)
-
                 yield TokensPrompt(
                     prompt_token_ids=prompt_token_ids,
                     multi_modal_data={"audio": segment},
@@ -227,7 +221,6 @@ class Qwen3ASRRealtimeGeneration(
 
         remaining = buffer.flush()
         if remaining is not None and len(remaining) > 0:
-            prompt_token_ids = tokenizer.encode(prompt_template)
             yield TokensPrompt(
                 prompt_token_ids=prompt_token_ids,
                 multi_modal_data={"audio": remaining},
