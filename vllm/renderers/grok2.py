@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from typing import Any
 
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
@@ -21,23 +21,15 @@ from .params import ChatParams
 logger = init_logger(__name__)
 
 
-class Grok2Renderer(BaseRenderer):
+class Grok2Renderer(BaseRenderer[Grok2Tokenizer]):
     @classmethod
-    def from_config(
+    def from_config(  # type: ignore[override]
         cls,
-        config: ModelConfig,
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
-        return cls(config, tokenizer_kwargs)
-
-    def __init__(
-        self,
-        config: ModelConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> None:
-        super().__init__(config)
-
-        if config.skip_tokenizer_init:
+    ) -> "Grok2Renderer":
+        model_config = config.model_config
+        if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
             tokenizer = cached_get_tokenizer(
@@ -45,18 +37,7 @@ class Grok2Renderer(BaseRenderer):
                 **tokenizer_kwargs,
             )
 
-        self._tokenizer = tokenizer
-
-    @property
-    def tokenizer(self) -> Grok2Tokenizer | None:
-        return self._tokenizer
-
-    def get_tokenizer(self) -> Grok2Tokenizer:
-        tokenizer = self.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
-
-        return tokenizer
+        return cls(config, tokenizer)
 
     def render_messages(
         self,
@@ -66,7 +47,7 @@ class Grok2Renderer(BaseRenderer):
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
-            self.config,
+            self.model_config,
             content_format="string",
         )
 
@@ -92,7 +73,7 @@ class Grok2Renderer(BaseRenderer):
         tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
-            self.config,
+            self.model_config,
             content_format="string",
         )
 
