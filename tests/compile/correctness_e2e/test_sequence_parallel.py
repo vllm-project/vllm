@@ -229,7 +229,7 @@ def _compare_sp(
     if chunked_prefill:
         common_args.append("--enable-chunked-prefill")
     if eager_mode:
-        common_args.append("--enforce-eager")
+        common_args.append("-cc.cudagraph_mode=none")
     if runner != "auto":
         common_args.extend(["--runner", runner])
     if trust_remote_code:
