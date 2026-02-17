@@ -202,13 +202,7 @@ def rocm_unquantized_gemm_impl(
         cu_count = num_compute_units()
         out = ops.wvSplitK(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif (
-        use_skinny
-        and m % 4 == 0
-        and n == 1
-        and k <= 8192
-        and bias is None
-    ):
+    elif use_skinny and m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
         out = ops.LLMM1(weight, x_view, 4)
         return out.reshape(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)

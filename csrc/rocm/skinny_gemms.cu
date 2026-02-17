@@ -25,10 +25,14 @@
   #define __HIP__GFX9__
 #endif
 
-#if defined(__HIPCC__) &&                                             \
+#if defined(__HIPCC__) &&                                                    \
     (defined(__gfx1100__) || defined(__gfx1101__) || defined(__gfx1150__) || \
      defined(__gfx1151__) || defined(__gfx1200__) || defined(__gfx1201__))
   #define __HIP__GFX1X__
+#endif
+
+#if defined(__HIPCC__) && (defined(__gfx1200__) || defined(__gfx1201__))
+  #define __HIP__GFX12__
 #endif
 
 #if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
@@ -60,9 +64,20 @@ bool on_gfx1x() {
   if (!is_cached) {
     auto dprops = at::cuda::getCurrentDeviceProperties();
     std::string device_arch = dprops->gcnArchName;
-    result =
-        device_arch.find("gfx11") != std::string::npos ||
-        device_arch.find("gfx12") != std::string::npos;
+    result = device_arch.find("gfx11") != std::string::npos ||
+             device_arch.find("gfx12") != std::string::npos;
+    is_cached = true;
+  }
+  return result;
+}
+
+bool on_gfx12() {
+  static bool is_cached = false;
+  static bool result = false;
+  if (!is_cached) {
+    auto dprops = at::cuda::getCurrentDeviceProperties();
+    std::string device_arch = dprops->gcnArchName;
+    result = device_arch.find("gfx12") != std::string::npos;
     is_cached = true;
   }
   return result;
@@ -306,24 +321,25 @@ torch::Tensor LLMM1(at::Tensor& in_a, at::Tensor& in_b,
 }
 
 #if defined(__HIP__GFX9__) && !defined(__HIP__GFX1X__)
-  #define DOT2C(V0, V2, V3)                                                     \
-    if constexpr (std::is_same_v<scalar_t, half>) {                             \
-      asm("v_dot2c_f32_f16 %0, %2, %3" : "=v"(V0) : "0"(V0), "v"(V2), "v"(V3)); \
-    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {            \
-      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *             \
-                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));              \
-      V0 += (s.x + s.y);                                                        \
+  #define DOT2C(V0, V2, V3)                                          \
+    if constexpr (std::is_same_v<scalar_t, half>) {                  \
+      asm("v_dot2c_f32_f16 %0, %2, %3"                               \
+          : "=v"(V0)                                                 \
+          : "0"(V0), "v"(V2), "v"(V3));                              \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) { \
+      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *  \
+                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));   \
+      V0 += (s.x + s.y);                                             \
     }
 #elif defined(__HIP__GFX1X__)
   // gfx1x: v_dot2_f32_f16 (VOP3-P, dot10-insts, available on gfx11+gfx12)
-  #define DOT2C(V0, V2, V3)                                                     \
-    if constexpr (std::is_same_v<scalar_t, half>) {                             \
-      asm("v_dot2_f32_f16 %0, %1, %2, %0"                                      \
-          : "+v"(V0) : "v"(V2), "v"(V3));                                       \
-    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {            \
-      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *             \
-                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));              \
-      V0 += (s.x + s.y);                                                        \
+  #define DOT2C(V0, V2, V3)                                               \
+    if constexpr (std::is_same_v<scalar_t, half>) {                       \
+      asm("v_dot2_f32_f16 %0, %1, %2, %0" : "+v"(V0) : "v"(V2), "v"(V3)); \
+    } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {      \
+      float2 s = __bfloat1622float2(*((__hip_bfloat162*)(&(V2)))) *       \
+                 __bfloat1622float2(*((__hip_bfloat162*)(&(V3))));        \
+      V0 += (s.x + s.y);                                                  \
     }
 #endif
 
@@ -515,7 +531,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-#if defined(__HIP__GFX9__)
+  #if defined(__HIP__GFX9__)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
@@ -525,13 +541,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-#else
+  #else
           // RDNA wave32: complete within-row reduction, then cross-row.
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-#endif
+  #endif
         }
       }
 
@@ -551,10 +567,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
     } else {
-#ifdef __HIP__GFX9__
-  #pragma unroll
+  #ifdef __HIP__GFX9__
+    #pragma unroll
       for (int n = 0; n < N; n++) {
-  #pragma unroll
+    #pragma unroll
         for (int y = 0; y < YTILE; y++) {
           // float accm1 = 0;
           // for (int i=0; i<64; i++)
@@ -598,7 +614,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-#endif  // __HIP__GFX9__ (MFMA path)
+  #endif  // __HIP__GFX9__ (MFMA path)
     }
     m += CuCount * _WvPrGrp * YTILE;
   }
@@ -825,7 +841,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-#if defined(__HIP__GFX9__)
+  #if defined(__HIP__GFX9__)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
@@ -835,13 +851,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-#else
+  #else
           // RDNA wave32: complete within-row reduction, then cross-row.
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-#endif
+  #endif
         }
       }
 
@@ -863,10 +879,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
     } else {
-#ifdef __HIP__GFX9__
-  #pragma unroll
+  #ifdef __HIP__GFX9__
+    #pragma unroll
       for (int n = 0; n < N; n++) {
-  #pragma unroll
+    #pragma unroll
         for (int y = 0; y < YTILE; y++) {
           // float accm1 = 0;
           // for (int i=0; i<64; i++)
@@ -913,7 +929,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-#endif  // __HIP__GFX9__ (MFMA path)
+  #endif  // __HIP__GFX9__ (MFMA path)
     }
 
     m += CuCount * _WvPrGrp * YTILE;
@@ -1203,7 +1219,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-#if defined(__HIP__GFX9__)
+  #if defined(__HIP__GFX9__)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 wave_shr:1 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
@@ -1213,13 +1229,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_bcast:31 bound_ctrl:0"
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
-#else
+  #else
           // RDNA wave32: complete within-row reduction, then cross-row.
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
               : "=v"(sum[n][y])
               : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
           sum[n][y] += __shfl_xor(sum[n][y], 16);
-#endif
+  #endif
         }
       }
 
@@ -1241,10 +1257,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
     } else {
-#ifdef __HIP__GFX9__
-  #pragma unroll
+  #ifdef __HIP__GFX9__
+    #pragma unroll
       for (int n = 0; n < N; n++) {
-  #pragma unroll
+    #pragma unroll
         for (int y = 0; y < YTILE; y++) {
           float accm = sum4[n][y][0];
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
@@ -1287,7 +1303,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           }
         }
       }
-#endif  // __HIP__GFX9__ (MFMA path)
+  #endif  // __HIP__GFX9__ (MFMA path)
     }
 
     m += CuCount * _WvPrGrp * YTILE;
@@ -1359,7 +1375,7 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size() / 2;
 
-#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N)                 \
+#define WVSPLITK_CFG(_THRDS, _WVPRGRP, _YTILE, _UNRL, _N)                  \
   {                                                                        \
     dim3 block(_THRDS, _WVPRGRP);                                          \
     int __wvPrGrp = mindiv(M_in, CuCount * _YTILE, _WVPRGRP);              \
@@ -1824,7 +1840,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
   }
 }
-#else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
+#else  // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
           int UNRL, int N, int GrpsShrB, int CHUNKK>
 __global__ void wvSplitKrc_(const int actlN, const int K, const int M,
@@ -1930,7 +1946,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-#if defined(__HIP__MI3XX__)  // TODO: Add NAVI support
+#if defined(__HIP__MI3XX__) || defined(__HIP__GFX1X__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -1974,12 +1990,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
 
-  using floatx16 = __attribute__((__vector_size__(16 * sizeof(float)))) float;
   float sA = *s_A;
   float sB = *s_B;
 
   while (m < M) {
+  #ifdef __HIP__GFX12__
+    // gfx12: per-lane scalar accumulation via v_dot4_f32_fp8_fp8
+    float sum[N][YTILE] = {};
+  #else
+    // gfx9: MFMA accumulation
     scalar8 sum[N][YTILE] = {};
+  #endif
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
       bigType bigB[YTILE][UNRL];
@@ -2011,6 +2032,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         for (uint32_t n = 0; n < N; n++) {
+  #ifdef __HIP__GFX12__
+          // gfx12: 4 x dot4 per A_CHUNK=16 bytes (4 FP8 per dot4)
+          for (int y = 0; y < YTILE; ++y) {
+    #pragma unroll
+            for (int i = 0; i < A_CHUNK / 4; i++) {
+              sum[n][y] = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                  bigA[n][k2].i[i], bigB[y][k2].i[i], sum[n][y]);
+            }
+          }
+  #else
+          // gfx9: MFMA path
           for (int i = 0; i < A_CHUNK; i += 8) {
             for (int y = 0; y < YTILE; ++y) {
               sum[n][y] = __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8(
@@ -2018,11 +2050,33 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                   0);
             }
           }
+  #endif
         }
       }
     }
 
     // Final reduction
+  #ifdef __HIP__GFX12__
+    // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
+    for (int n = 0; n < N; n++) {
+      for (int y = 0; y < YTILE; y++) {
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        sum[n][y] += __shfl_xor(sum[n][y], 16);
+      }
+    }
+  #else
+    // gfx9 MFMA reduction
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
         float accm0 = sum[n][y][0];
@@ -2037,8 +2091,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         sum[n][y][0] = accm0;
       }
     }
+  #endif
 
-    if (threadIdx.x == 0) {
+    const bool writeback_lane =
+  #ifdef __HIP__GFX12__
+        threadIdx.x == (THRDS - 1);
+  #else
+        threadIdx.x == 0;
+  #endif
+    if (writeback_lane) {
       scalar_t biases[N][YTILE] = {};
       if (BIAS)
         for (int n = 0; n < N; n++) {
@@ -2049,13 +2110,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-          sum[n][y][0] *= sA * sB;
+  #ifdef __HIP__GFX12__
+          float result = sum[n][y] * sA * sB;
+  #else
+          float result = sum[n][y][0] * sA * sB;
+  #endif
           if constexpr (std::is_same_v<scalar_t, half>) {
-            sum[n][y][0] += __half2float(biases[n][y]);
+            result += __half2float(biases[n][y]);
           } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-            sum[n][y][0] += __bfloat162float(biases[n][y]);
+            result += __bfloat162float(biases[n][y]);
           }
-          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0]);
+          C[m + y + n * M] = __float2s<scalar_t>(result);
         }
       }
     }
@@ -2063,7 +2128,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI3XX__) TODO: Add NAVI support
+#else   // !defined(__HIP__MI3XX__) && !defined(__HIP__GFX1X__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
@@ -2075,9 +2140,9 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
                                   const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__MI3XX__) TODO: Add NAVI support
+#endif  // defined(__HIP__MI3XX__) || defined(__HIP__GFX1X__)
 
-#if defined(__HIP__MI3XX__)  // TODO: Add NAVI support
+#if defined(__HIP__MI3XX__) || defined(__HIP__GFX1X__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -2120,12 +2185,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   uint32_t m = (blockIdx.x * _WvPrGrp + (threadIdx.y % _WvPrGrp)) * YTILE;
 
-  using floatx16 = __attribute__((__vector_size__(16 * sizeof(float)))) float;
   float sA = *s_A;
   float sB = *s_B;
 
   while (m < M) {
+  #ifdef __HIP__GFX12__
+    // gfx12: per-lane scalar accumulation via v_dot4_f32_fp8_fp8
+    float sum[N][YTILE] = {};
+  #else
+    // gfx9: MFMA accumulation
     scalar8 sum[N][YTILE] = {};
+  #endif
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
       bigType bigB[YTILE][UNRL];
@@ -2159,6 +2229,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         for (uint32_t n = 0; n < N; n++) {
+  #ifdef __HIP__GFX12__
+          // gfx12: 4 x dot4 per A_CHUNK=16 bytes (4 FP8 per dot4)
+          for (int y = 0; y < YTILE; ++y) {
+    #pragma unroll
+            for (int i = 0; i < A_CHUNK / 4; i++) {
+              sum[n][y] = __builtin_amdgcn_dot4_f32_fp8_fp8(
+                  bigA[n][k2].i[i], bigB[y][k2].i[i], sum[n][y]);
+            }
+          }
+  #else
+          // gfx9: MFMA path
           for (int i = 0; i < A_CHUNK; i += 8) {
             for (int y = 0; y < YTILE; ++y) {
               sum[n][y] = __builtin_amdgcn_mfma_f32_16x16x32_fp8_fp8(
@@ -2166,11 +2247,33 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                   0);
             }
           }
+  #endif
         }
       }
     }
 
     // Final reduction
+  #ifdef __HIP__GFX12__
+    // gfx12 wave32: DPP row_shr within 16-lane rows + cross-row shuffle
+    for (int n = 0; n < N; n++) {
+      for (int y = 0; y < YTILE; y++) {
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:8 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:4 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:2 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shr:1 bound_ctrl:0 "
+            : "=v"(sum[n][y])
+            : "0"(sum[n][y]), "v"(sum[n][y]), "v"(sum[n][y]));
+        sum[n][y] += __shfl_xor(sum[n][y], 16);
+      }
+    }
+  #else
+    // gfx9 MFMA reduction
     for (int n = 0; n < N; n++) {
       for (int y = 0; y < YTILE; y++) {
         float accm0 = sum[n][y][0];
@@ -2185,8 +2288,15 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         sum[n][y][0] = accm0;
       }
     }
+  #endif
 
-    if (threadIdx.x == 0) {
+    const bool writeback_lane =
+  #ifdef __HIP__GFX12__
+        threadIdx.x == (THRDS - 1);
+  #else
+        threadIdx.x == 0;
+  #endif
+    if (writeback_lane) {
       scalar_t biases[N][YTILE] = {};
       if (BIAS)
         for (int n = 0; n < N; n++) {
@@ -2197,13 +2307,17 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
-          sum[n][y][0] *= sA * sB;
+  #ifdef __HIP__GFX12__
+          float result = sum[n][y] * sA * sB;
+  #else
+          float result = sum[n][y][0] * sA * sB;
+  #endif
           if constexpr (std::is_same_v<scalar_t, half>) {
-            sum[n][y][0] += __half2float(biases[n][y]);
+            result += __half2float(biases[n][y]);
           } else if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
-            sum[n][y][0] += __bfloat162float(biases[n][y]);
+            result += __bfloat162float(biases[n][y]);
           }
-          C[m + y + n * M] = __float2s<scalar_t>(sum[n][y][0]);
+          C[m + y + n * M] = __float2s<scalar_t>(result);
         }
       }
     }
@@ -2211,7 +2325,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI3XX__) TODO: Add NAVI support
+#else   // !defined(__HIP__MI3XX__) && !defined(__HIP__GFX1X__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
@@ -2223,7 +2337,7 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
                               const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__MI3XX__) TODO: Add NAVI support
+#endif  // defined(__HIP__MI3XX__) || defined(__HIP__GFX1X__)
 
 void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
                const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
@@ -2256,23 +2370,29 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
   const int max_lds_len = get_lds_size();
 
-#define WVSPLITKQ(_WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)             \
-  {                                                                           \
-    dim3 block(64, _WvPrGrp);                                                 \
-    if ((Kap_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {            \
-      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEs, 16));     \
-      wvSplitKQ_hf_sml_<fptype, fp8_t, 64, _YTILEs, _WvPrGrp, 16, _UNRLs, _N> \
-          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
-                                       By_in, b_ptr, a_ptr, bias_ptr, c_ptr,  \
-                                       s_a, s_b, __wvPrGrp, CuCount);         \
-    } else {                                                                  \
-      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEm, 16));     \
-      wvSplitKQ_hf_<fptype, fp8_t, 64, _YTILEm, _WvPrGrp, 16, _UNRLm, _N>     \
-          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,     \
-                                       By_in, b_ptr, a_ptr, bias_ptr, c_ptr,  \
-                                       s_a, s_b, __wvPrGrp, CuCount);         \
-    }                                                                         \
+#define WVSPLITKQ_IMPL(_THRDS, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
+  {                                                                            \
+    dim3 block(_THRDS, _WvPrGrp);                                              \
+    if ((Kap_in * N_in <= max_lds_len) && (M_in % _YTILEs == 0)) {             \
+      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEs, 16));      \
+      wvSplitKQ_hf_sml_<fptype, fp8_t, _THRDS, _YTILEs, _WvPrGrp, 16, _UNRLs,  \
+                        _N><<<grid, block, 0, stream>>>(                       \
+          K_in, Kap_in, Kbp_in, M_in, Bx_in, By_in, b_ptr, a_ptr, bias_ptr,    \
+          c_ptr, s_a, s_b, __wvPrGrp, CuCount);                                \
+    } else {                                                                   \
+      int __wvPrGrp = min(_WvPrGrp, mindiv(M_in, CuCount * _YTILEm, 16));      \
+      wvSplitKQ_hf_<fptype, fp8_t, _THRDS, _YTILEm, _WvPrGrp, 16, _UNRLm, _N>  \
+          <<<grid, block, 0, stream>>>(K_in, Kap_in, Kbp_in, M_in, Bx_in,      \
+                                       By_in, b_ptr, a_ptr, bias_ptr, c_ptr,   \
+                                       s_a, s_b, __wvPrGrp, CuCount);          \
+    }                                                                          \
   }
+
+#define WVSPLITKQ(_WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)      \
+  if (on_gfx12())                                                      \
+    WVSPLITKQ_IMPL(32, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N) \
+  else                                                                 \
+    WVSPLITKQ_IMPL(64, _WvPrGrp, _YTILEs, _YTILEm, _UNRLs, _UNRLm, _N)
 
   AT_DISPATCH_REDUCED_FLOATING_TYPES(out_c.scalar_type(), "wvSplitKQ", [&] {
     using fptype = typename scalar<scalar_t>::type;
@@ -2293,10 +2413,10 @@ void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
           WVSPLITKQ(16, 2, 2, 2, 2, 2)
           break;
         case 3:
-          WVSPLITKQ(16, 2, 2, 2, 2, 3)
+          WVSPLITKQ(16, 2, 2, 1, 1, 3)
           break;
         case 4:
-          WVSPLITKQ(16, 2, 2, 2, 2, 4)
+          WVSPLITKQ(16, 2, 2, 1, 1, 4)
           break;
         default:
           throw std::runtime_error(
