@@ -256,6 +256,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+        # Initialized in process_weights_after_loading for CUTLASS/SM90 backends
         self.moe_mk: mk.FusedMoEModularKernel | None = None
 
     def create_weights(
@@ -980,6 +981,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
         )
 
+        assert self.moe_mk is not None
         return self.moe_mk(
             hidden_states=x,
             w1=layer.w13_weight,
