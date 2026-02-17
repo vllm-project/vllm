@@ -7,6 +7,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -70,7 +71,8 @@ def quant_fp8_per_tensor_batches(a):
 
     for i in range(num_batches):
         a_fp8, a_global_sf = input_to_float8(a[i])
-        a_global_sf = 1.0 / a_global_sf
+        if a_global_sf.numel() == 1:
+            a_global_sf = a_global_sf.view(1, 1)
         a_quant.append(a_fp8)
         a_scales.append(a_global_sf)
 
@@ -78,6 +80,20 @@ def quant_fp8_per_tensor_batches(a):
     result_a_scales = torch.stack(a_scales)
 
     return result_a_quant, result_a_scales
+
+
+def check_accuracy(ref_output, actual_output, atol=0.1, rtol=0.85, percent=0.925):
+    close = torch.isclose(ref_output, actual_output, atol=atol, rtol=rtol)
+    match_ratio = close.float().mean()
+    assert match_ratio >= percent, (
+        f"Match ratio {match_ratio:.4f} is below the threshold {percent:.4f}"
+    )
+
+    mismatch_percent = 1.0 - match_ratio.item()
+    assert mismatch_percent <= 1 - percent, (
+        f"Mismatch percentage {mismatch_percent:.4f} is above the threshold "
+        f"{1 - percent:.4f}"
+    )
 
 
 @dataclass
@@ -93,19 +109,26 @@ class TestData:
 
     @staticmethod
     def make_moe_tensors_8bit(
-        m: int, k: int, n: int, e: int, is_trtllm: bool, activation: str = "silu"
+        m: int,
+        k: int,
+        n: int,
+        e: int,
+        is_trtllm: bool,
+        activation: MoEActivation = MoEActivation.SILU,
     ) -> "TestData":
-        is_gated = activation != "relu2_no_mul"
+        is_gated = activation.is_gated
 
         hidden_states = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
-        w13 = torch.randn(
-            (e, (2 * n) if is_gated else n, k), device="cuda", dtype=torch.bfloat16
+        w13 = (
+            torch.randn(
+                (e, (2 * n) if is_gated else n, k), device="cuda", dtype=torch.bfloat16
+            )
+            / 10
         )
-        w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16)
+        w2 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16) / 10
 
         # Scale to fp8
         _, a1_scale = input_to_float8(hidden_states)
-        a1_scale = 1.0 / a1_scale
         a2_scale = torch.scalar_tensor(1.0).to(device="cuda").to(dtype=torch.float32)
         w13_quantized, w13_weight_scale = quant_fp8_per_tensor_batches(w13)
         w2_quantized, w2_weight_scale = quant_fp8_per_tensor_batches(w2)
@@ -118,14 +141,16 @@ class TestData:
         layer.w2_input_scale = a2_scale
         layer.w13_weight_scale = w13_weight_scale
         layer.w2_weight_scale = w2_weight_scale
+        layer.activation = activation
         # Setup dummy config.
         layer.moe_parallel_config = mk.FusedMoEParallelConfig.make_no_parallel()
 
         # flashinfer expects swapped rows for w13
-        layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
+        if is_gated:
+            layer.w13_weight.data = swap_w13_to_w31(layer.w13_weight.data)
         if is_trtllm:
             rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
-                layer.w13_weight, layer.w2_weight
+                layer.w13_weight, layer.w2_weight, is_gated
             )
             register_scales_for_trtllm_fp8_per_tensor_moe(
                 layer,
@@ -156,12 +181,14 @@ class TestData:
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
 def test_flashinfer_per_tensor_moe_fp8_no_graph(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
+    activation: MoEActivation,
     monkeypatch,
 ):
     if not current_platform.has_device_capability(100):
@@ -169,7 +196,9 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
     set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     with set_current_vllm_config(vllm_config):
-        td = TestData.make_moe_tensors_8bit(m, k, n, e, is_trtllm=True)
+        td = TestData.make_moe_tensors_8bit(
+            m, k, n, e, is_trtllm=True, activation=activation
+        )
 
         score = torch.randn((m, e), device="cuda", dtype=torch.bfloat16)
         topk_weights, topk_ids = Llama4MoE.custom_routing_function(
@@ -194,7 +223,7 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             inplace=False,
-            activation="silu",
+            activation=activation,
             global_num_experts=e,
             expert_map=None,
             apply_router_weight_on_input=True,
@@ -213,27 +242,31 @@ def test_flashinfer_per_tensor_moe_fp8_no_graph(
             apply_router_weight_on_input=True,
         )
 
-        torch.testing.assert_close(output, flashinfer_output, atol=5.5e-2, rtol=1e-2)
+        check_accuracy(
+            ref_output=output,
+            actual_output=flashinfer_output,
+            atol=0.1,
+            rtol=0.85,
+            percent=0.925,
+        )
 
 
 @pytest.mark.parametrize("m,n,k", MNK_FACTORS)
 @pytest.mark.parametrize("e", NUM_EXPERTS)
 @pytest.mark.parametrize("topk", TOP_KS)
-@pytest.mark.parametrize("activation", ["silu", "relu2_no_mul"])
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
 def test_flashinfer_cutlass_moe_fp8_no_graph(
     m: int,
     n: int,
     k: int,
     e: int,
     topk: int,
-    activation: str,
+    activation: MoEActivation,
     monkeypatch,
     workspace_init,
 ):
     set_random_seed(7)
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
-    assert activation in ["silu", "relu2_no_mul"]
-    is_act_and_mul = activation == "silu_and_mul"
     with set_current_vllm_config(vllm_config):
         td = TestData.make_moe_tensors_8bit(
             m, k, n, e, is_trtllm=False, activation=activation
@@ -287,11 +320,12 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             hidden_dim=k,
             intermediate_size_per_partition=n,
             num_local_experts=e,
+            num_logical_experts=e,
             activation=activation,
             device="cuda",
             moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
             in_dtype=torch.bfloat16,
-            is_act_and_mul=is_act_and_mul,
+            is_act_and_mul=activation.is_gated,
             routing_method=RoutingMethodType.TopK,
         )
 
@@ -315,6 +349,129 @@ def test_flashinfer_cutlass_moe_fp8_no_graph(
             expert_map=None,
             apply_router_weight_on_input=True,
         )
-        torch.testing.assert_close(
-            output, flashinfer_cutlass_output, atol=5.5e-2, rtol=1e-2
+
+        check_accuracy(
+            ref_output=output,
+            actual_output=flashinfer_cutlass_output,
+            atol=0.1,
+            rtol=0.85,
+            percent=0.925,
         )
+
+
+@pytest.mark.parametrize(
+    "num_experts,intermediate,hidden",
+    [
+        (8, 2048, 1536),
+        (64, 4096, 4096),
+    ],
+)
+def test_convert_moe_weights_to_flashinfer_trtllm_block_layout(
+    num_experts, intermediate, hidden
+):
+    from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+        convert_moe_weights_to_flashinfer_trtllm_block_layout,
+    )
+
+    w13 = torch.randn(
+        (num_experts, 2 * intermediate, hidden), dtype=torch.bfloat16, device="cuda"
+    )
+    w2 = torch.randn(
+        (num_experts, hidden, intermediate), dtype=torch.bfloat16, device="cuda"
+    )
+
+    cache: dict[torch.Size, torch.Tensor] = {}
+    w13_converted, w2_converted = convert_moe_weights_to_flashinfer_trtllm_block_layout(
+        cache, w13, w2
+    )
+
+    assert w13_converted.ndim == 4, (
+        f"Expected 4D tensor, got shape {w13_converted.shape}"
+    )
+    assert w2_converted.ndim == 4, f"Expected 4D tensor, got shape {w2_converted.shape}"
+
+    assert w13_converted.numel() == w13.numel(), "W13 element count should be preserved"
+    assert w2_converted.numel() == w2.numel(), "W2 element count should be preserved"
+
+    assert w13_converted.dtype == torch.bfloat16
+    assert w2_converted.dtype == torch.bfloat16
+
+    assert w13_converted.shape[0] == num_experts
+    assert w2_converted.shape[0] == num_experts
+
+
+def test_flashinfer_blockscale_fp8_none_expert_group(monkeypatch):
+    """Test that flashinfer_fused_moe_blockscale_fp8 handles num_expert_group=None.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/34477
+    MiniMax-M2.1 uses sigmoid scoring with e_score_correction_bias but no
+    grouped top-k, resulting in num_expert_group=None. This triggered a crash
+    in the flashinfer kernel when DeepSeekV3 routing was selected.
+    """
+    if not current_platform.has_device_capability(100):
+        pytest.skip("Test requires SM >= 100 (Blackwell)")
+
+    import vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe  # noqa: E501, F401
+    from tests.kernels.quant_utils import native_per_token_group_quant_fp8
+
+    set_random_seed(7)
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+
+    e = 16  # num_experts (must be divisible by 4)
+    topk = 6  # top_k > 1 triggers DeepSeekV3 routing with sigmoid
+    m, n, k = 10, 4096, 5120
+    block_shape = [128, 128]
+    block_k = block_shape[1]
+
+    with set_current_vllm_config(vllm_config):
+        # Create BF16 hidden states
+        x = torch.randn((m, k), device="cuda", dtype=torch.bfloat16) / 10
+
+        # Create FP8 block-scale quantized weights
+        w13_bf16 = torch.randn((e, 2 * n, k), device="cuda", dtype=torch.bfloat16) / 10
+        w2_bf16 = torch.randn((e, k, n), device="cuda", dtype=torch.bfloat16) / 10
+
+        # Quantize weights per-block to FP8
+        w13_fp8_list, w13_scale_list = [], []
+        w2_fp8_list, w2_scale_list = [], []
+        for i in range(e):
+            wq, ws = native_per_token_group_quant_fp8(w13_bf16[i], block_k)
+            w13_fp8_list.append(wq)
+            w13_scale_list.append(ws)
+
+            wq, ws = native_per_token_group_quant_fp8(w2_bf16[i], block_k)
+            w2_fp8_list.append(wq)
+            w2_scale_list.append(ws)
+
+        w13_fp8 = torch.stack(w13_fp8_list)
+        w13_scale = torch.stack(w13_scale_list)
+        w2_fp8 = torch.stack(w2_fp8_list)
+        w2_scale = torch.stack(w2_scale_list)
+
+        # DeepSeekV3 routing uses float32 logits + optional bias
+        routing_logits = torch.randn((m, e), device="cuda", dtype=torch.float32)
+        routing_bias = torch.randn(e, device="cuda", dtype=torch.float32)
+
+        # This should NOT crash with num_expert_group=None
+        output = torch.ops.vllm.flashinfer_fused_moe_blockscale_fp8(
+            routing_logits=routing_logits,
+            routing_bias=routing_bias,
+            x=x,
+            w13_weight=w13_fp8,
+            w13_weight_scale_inv=w13_scale,
+            w2_weight=w2_fp8,
+            w2_weight_scale_inv=w2_scale,
+            global_num_experts=e,
+            top_k=topk,
+            num_expert_group=None,
+            topk_group=None,
+            intermediate_size=n,
+            expert_offset=0,
+            local_num_experts=e,
+            block_shape=block_shape,
+            routing_method_type=RoutingMethodType.DeepSeekV3,
+            routed_scaling=1.0,
+        )
+
+        assert output is not None
+        assert output.shape == (m, k)

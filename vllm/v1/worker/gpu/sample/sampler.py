@@ -7,12 +7,11 @@ import torch
 import vllm.envs as envs
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
-from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
-from vllm.v1.worker.gpu.sample.gumbel import apply_temperature, gumbel_sample
+from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
+from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
-from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
@@ -24,6 +23,9 @@ class Sampler:
         max_num_reqs: int,
         vocab_size: int,
         device: torch.device,
+        all_token_ids: torch.Tensor,
+        prompt_len: torch.Tensor,
+        total_len: torch.Tensor,
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
     ):
@@ -35,6 +37,7 @@ class Sampler:
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
         self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
+        self.bad_words_state = BadWordsState(all_token_ids, prompt_len, total_len)
         self.num_speculative_tokens = num_speculative_tokens
 
     def add_request(
@@ -43,18 +46,20 @@ class Sampler:
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
+        self.bad_words_state.add_request(req_idx, sampling_params)
 
     def apply_staged_writes(
         self,
-        prefill_token_ids: torch.Tensor,
+        all_token_ids: torch.Tensor,
         prefill_lens: np.ndarray,
         prompt_lens: np.ndarray,
     ) -> None:
         self.sampling_states.apply_staged_writes()
         self.penalties_state.apply_staged_writes(
-            prefill_token_ids, prefill_lens, prompt_lens
+            all_token_ids, prefill_lens, prompt_lens
         )
         self.logit_bias_state.apply_staged_writes()
+        self.bad_words_state.apply_staged_writes()
 
     def __call__(
         self,
@@ -126,21 +131,25 @@ class Sampler:
             self.num_speculative_tokens,
         )
 
+        # Apply bad words masking in place.
+        self.bad_words_state.apply_bad_words(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
+        )
+
         # Apply temperature in place.
-        apply_temperature(logits, idx_mapping, self.sampling_states.temperature.gpu)
+        self.sampling_states.apply_temperature(logits, idx_mapping, idx_mapping_np)
 
-        # Apply min_p in place if any request has a non-zero min_p.
-        do_min_p = self.sampling_states.do_min_p(idx_mapping_np)
-        if do_min_p:
-            apply_min_p(logits, idx_mapping, self.sampling_states.min_p.gpu)
+        # Apply min_p in place.
+        self.sampling_states.apply_min_p(logits, idx_mapping, idx_mapping_np)
 
-        # Apply top_k and/or top_p. This might return a new tensor.
-        do_top_k = self.sampling_states.do_top_k(idx_mapping_np)
-        top_k = self.sampling_states.top_k.gpu[idx_mapping] if do_top_k else None
-        do_top_p = self.sampling_states.do_top_p(idx_mapping_np)
-        top_p = self.sampling_states.top_p.gpu[idx_mapping] if do_top_p else None
-        if do_top_k or do_top_p:
-            logits = apply_top_k_top_p(logits, top_k, top_p)
+        # Apply top_k and/or top_p. This might or might not return a new tensor.
+        logits = self.sampling_states.apply_top_k_top_p(
+            logits, idx_mapping, idx_mapping_np
+        )
 
         # Sample the next token.
         sampled = gumbel_sample(

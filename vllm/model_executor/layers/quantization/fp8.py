@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -965,7 +966,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO(rob): convert this to MK.
         if layer.enable_eplb:
             raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
-        assert layer.activation == "silu", (
+        assert layer.activation == MoEActivation.SILU, (
             f"Expected 'silu' activation but got {layer.activation}"
         )
 
@@ -1010,6 +1011,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.moe_mk is not None
         assert not self.is_monolithic
@@ -1023,7 +1025,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            shared_experts_input=layer._get_shared_experts_input(x),
+            shared_experts_input=shared_experts_input,
         )
 
 
