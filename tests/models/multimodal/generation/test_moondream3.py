@@ -12,6 +12,7 @@ These tests verify end-to-end inference capabilities including:
 - HF parity (live comparison when possible, golden fallback)
 """
 
+import contextlib
 import json
 import os
 import subprocess
@@ -158,10 +159,8 @@ def _run_hf_detect_point_subprocess(timeout: int = 600):
     except (subprocess.TimeoutExpired, FileNotFoundError, json.JSONDecodeError):
         return None
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(result_file)
-        except OSError:
-            pass
 
 # Prompts for each image asset
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
@@ -437,26 +436,22 @@ def test_point_skill(llm, image_assets: ImageTestAssets):
 
 
 @large_gpu_mark(min_gb=48)
-def test_detect_hf_parity(llm, image_assets: ImageTestAssets):
-    """Test detect output matches HF reference (golden values).
+def test_detect_hf_parity(
+    llm,
+    hf_detect_point_reference,
+    image_assets: ImageTestAssets,
+):
+    """Test detect output matches HF reference.
 
-    Golden values captured from HF transformers using direct safetensors
-    loading (bypasses transformers 5.x loading bugs). The HF model was run
-    with use_flex_decoding=False on the stop_sign image asset.
+    Compares vLLM detect("sign") on the stop_sign image against HF
+    reference values computed live via subprocess (preferred) or
+    golden fallback values (revision 1dae073c) when HF is unavailable.
     """
     from vllm import SamplingParams
 
-    # Golden reference: HF detect("sign") on stop_sign image.
-    hf_golden = {
-        "objects": [
-            {
-                "x_min": 0.16633163392543793,
-                "y_min": 0.1345907300710678,
-                "x_max": 0.3590589910745621,
-                "y_max": 0.4200967699289322,
-            }
-        ]
-    }
+    hf_ref = hf_detect_point_reference
+    hf_detect = hf_ref["detect"]
+    source = "live HF" if hf_ref["live"] else "golden (rev 1dae073c)"
 
     image = image_assets[0].pil_image  # stop_sign
     prompt = make_detect_prompt("sign")
@@ -471,29 +466,41 @@ def test_detect_hf_parity(llm, image_assets: ImageTestAssets):
     )
 
     result = json.loads(outputs[0].outputs[0].text)
-    assert len(result["objects"]) == len(hf_golden["objects"])
+    assert len(result["objects"]) == len(hf_detect["objects"]), (
+        f"object count mismatch: vLLM={len(result['objects'])} "
+        f"HF({source})={len(hf_detect['objects'])}"
+    )
 
-    for vllm_obj, hf_obj in zip(result["objects"], hf_golden["objects"]):
+    for vllm_obj, hf_obj in zip(result["objects"], hf_detect["objects"]):
         for key in ("x_min", "y_min", "x_max", "y_max"):
             diff = abs(vllm_obj[key] - hf_obj[key])
             assert diff < 0.01, (
-                f"detect '{key}' diff {diff:.6f} exceeds 0.01: "
+                f"detect '{key}' diff {diff:.6f} exceeds 0.01 "
+                f"(ref={source}): "
                 f"vLLM={vllm_obj[key]:.6f} HF={hf_obj[key]:.6f}"
             )
 
 
 @large_gpu_mark(min_gb=48)
-def test_point_hf_parity(llm, image_assets: ImageTestAssets):
-    """Test point output matches HF reference (golden values).
+def test_point_hf_parity(
+    llm,
+    hf_detect_point_reference,
+    image_assets: ImageTestAssets,
+):
+    """Test point output matches HF reference.
 
-    Golden values captured from HF transformers. Only the first point
-    is compared tightly (< 0.01) because autoregressive drift causes
-    later points to diverge.
+    Compares vLLM point("sign") on the stop_sign image against HF
+    reference values computed live via subprocess (preferred) or
+    golden fallback values (revision 1dae073c) when HF is unavailable.
+    Only the first point is compared tightly (< 0.01) because
+    autoregressive drift causes later points to diverge.
     """
     from vllm import SamplingParams
 
-    # Golden reference: HF point("sign") on stop_sign image.
-    hf_first_point = {"x": 0.2822265625, "y": 0.318359375}
+    hf_ref = hf_detect_point_reference
+    hf_point = hf_ref["point"]
+    source = "live HF" if hf_ref["live"] else "golden (rev 1dae073c)"
+    hf_first_point = hf_point["points"][0]
 
     image = image_assets[0].pil_image  # stop_sign
     prompt = make_point_prompt("sign")
@@ -515,7 +522,8 @@ def test_point_hf_parity(llm, image_assets: ImageTestAssets):
     for key in ("x", "y"):
         diff = abs(pt[key] - hf_first_point[key])
         assert diff < 0.01, (
-            f"point '{key}' diff {diff:.6f} exceeds 0.01: "
+            f"point '{key}' diff {diff:.6f} exceeds 0.01 "
+            f"(ref={source}): "
             f"vLLM={pt[key]:.6f} HF={hf_first_point[key]:.6f}"
         )
 
