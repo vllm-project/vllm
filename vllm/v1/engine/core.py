@@ -1424,22 +1424,7 @@ class EngineCoreProc(EngineCore):
         logger.exception(
             "Unexpected error pre-processing request %s", request.request_id
         )
-        self.output_queue.put_nowait(
-            (
-                request.client_index,
-                EngineCoreOutputs(
-                    engine_index=self.engine_index,
-                    finished_requests={request.request_id},
-                    outputs=[
-                        EngineCoreOutput(
-                            request_id=request.request_id,
-                            new_token_ids=[],
-                            finish_reason=FinishReason.ERROR,
-                        )
-                    ],
-                ),
-            )
-        )
+        self._send_request_error_output(request.request_id, request.client_index)
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
@@ -1496,6 +1481,13 @@ class EngineCoreProc(EngineCore):
                 ]
                 eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
                 self.output_queue.put_nowait((client_index, eco))
+
+    def _send_request_error_output(self, req_id: str, client_index: int) -> None:
+        outputs = [
+            EngineCoreOutput(req_id, [], finish_reason=FinishReason.ERROR),
+        ]
+        eco = EngineCoreOutputs(finished_requests=[req_id], outputs=outputs)
+        self.output_queue.put_nowait((client_index, eco))
 
 
 class DPEngineCoreProc(EngineCoreProc):
