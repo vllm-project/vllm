@@ -156,6 +156,7 @@ def naive_batched_moe(
         a1_scale=a1_scale,
         a2_scale=a2_scale,
     )
+    moe_config = make_dummy_moe_config()
 
     fused_experts = FusedMoEKernel(
         BatchedPrepareAndFinalize(
@@ -165,12 +166,22 @@ def naive_batched_moe(
             max_num_tokens=max_num_tokens,
             num_dispatchers=1,
             quant_config=quant_config,
-            moe_config=make_dummy_moe_config(),
+            moe_config=moe_config,
         ),
         inplace=False,
     )
 
-    return fused_experts(a, w1, w2, topk_weight, topk_ids)
+    return fused_experts.apply(
+        a,
+        w1,
+        w2,
+        topk_weight,
+        topk_ids,
+        global_num_experts=moe_config.num_experts,
+        activation=moe_config.activation,
+        apply_router_weight_on_input=False,
+        expert_map=None,
+    )
 
 
 def chunk_scales(

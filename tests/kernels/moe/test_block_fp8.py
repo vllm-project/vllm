@@ -21,6 +21,9 @@ from vllm.model_executor.layers.fused_moe import (
     fused_experts,
     fused_topk,
 )
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+)
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -269,12 +272,15 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     )
 
     def deep_gemm_moe_fp8(a, w1, w2, w1_s, w2_s, topk_weights, topk_ids):
-        return deep_gemm_experts(
+        return deep_gemm_experts.apply(
             hidden_states=a,
             w1=w1,
             w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            apply_router_weight_on_input=False,
+            expert_map=False,
         )
 
     # Set the context to avoid lots of warning spam.
