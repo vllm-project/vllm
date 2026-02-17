@@ -319,17 +319,18 @@ def prepare_fp4_layer_for_marlin(
     )
 
     if is_nvfp4:
-        weight_scale = nvfp4_marlin_process_scales(weight_scale)
-        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
-
+        # Compute stability scale factor BEFORE processing scales to S0E5M3,
+        # since the processed FP8 bytes have different numerical values.
         weight_global_scale = layer.weight_global_scale.to(param_dtype)
         weight_global_scale = nvfp4_marlin_process_global_scale(weight_global_scale)
-        layer.weight_global_scale = torch.nn.Parameter(
-            weight_global_scale, requires_grad=False
+        stability_scale_factor = marlin_process_stability_scale_factor(
+            weight_scale, weight_global_scale
         )
 
-        stability_scale_factor = marlin_process_stability_scale_factor(
-            layer.weight_scale, layer.weight_global_scale
+        weight_scale = nvfp4_marlin_process_scales(weight_scale)
+        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+        layer.weight_global_scale = torch.nn.Parameter(
+            weight_global_scale, requires_grad=False
         )
         layer.stability_scale_factor = torch.nn.Parameter(
             stability_scale_factor, requires_grad=False
@@ -454,16 +455,19 @@ def prepare_nvfp4_moe_layer_for_marlin(
         g_scales = nvfp4_marlin_process_global_scale(g_scales)
         return scales, g_scales
 
-    w13_scale, w13_scale_2 = premute_scales(w13_scale, w13_scale_2, "w13")
-    w2_scale, w2_scale_2 = premute_scales(w2_scale, w2_scale_2, "w2")
-
-    # STABILITY SCALE FACTORS
+    # Compute stability scale factors BEFORE processing scales to S0E5M3,
+    # since the processed FP8 bytes have different numerical values.
+    w13_g_processed = nvfp4_marlin_process_global_scale(w13_scale_2.to(param_dtype))
+    w2_g_processed = nvfp4_marlin_process_global_scale(w2_scale_2.to(param_dtype))
     w13_stability_scale_factor = marlin_process_moe_stability_scale_factor(
-        w13_scale, w13_scale_2
+        w13_scale.to(param_dtype), w13_g_processed
     )
     w2_stability_scale_factor = marlin_process_moe_stability_scale_factor(
-        w2_scale, w2_scale_2
+        w2_scale.to(param_dtype), w2_g_processed
     )
+
+    w13_scale, w13_scale_2 = premute_scales(w13_scale, w13_scale_2, "w13")
+    w2_scale, w2_scale_2 = premute_scales(w2_scale, w2_scale_2, "w2")
 
     return (
         w13,
@@ -537,6 +541,17 @@ def prepare_moe_fp4_layer_for_marlin(
 
         setattr(layer, name, weight)
 
+    # STABILITY SCALE FACTORS
+    # Compute BEFORE processing scales to S0E5M3, since the processed
+    # FP8 bytes have different numerical values.
+    if is_nvfp4:
+        for name in ["w13", "w2"]:
+            raw_scales = getattr(layer, name + "_weight_scale").to(param_dtype)
+            raw_gs = getattr(layer, name + "_weight_scale_2").to(param_dtype)
+            processed_gs = nvfp4_marlin_process_global_scale(raw_gs)
+            ssf = marlin_process_moe_stability_scale_factor(raw_scales, processed_gs)
+            setattr(layer, name + "_stability_scale_factor", ssf)
+
     # WEIGHT SCALES
     # Permute scales
     for name in ["w13", "w2"]:
@@ -579,15 +594,6 @@ def prepare_moe_fp4_layer_for_marlin(
             global_scale = nvfp4_marlin_process_global_scale(global_scale)
             global_scale = torch.nn.Parameter(global_scale, requires_grad=False)
             setattr(layer, name + "_weight_scale_2", global_scale)
-
-    # STABILITY SCALE FACTORS
-    if is_nvfp4:
-        for name in ["w13", "w2"]:
-            ssf = marlin_process_moe_stability_scale_factor(
-                getattr(layer, name + "_weight_scale"),
-                getattr(layer, name + "_weight_scale_2"),
-            )
-            setattr(layer, name + "_stability_scale_factor", ssf)
 
     # BIAS
     # Permute bias
