@@ -1715,6 +1715,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CPU_MOE_PREPACK",
         "VLLM_CPU_SGL_KERNEL",
         "VLLM_TEST_FORCE_LOAD_FORMAT",
+        "VLLM_SKIP_MODEL_VALIDATION",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
