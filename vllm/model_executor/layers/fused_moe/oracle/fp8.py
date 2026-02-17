@@ -55,85 +55,46 @@ class Fp8MoeBackend(Enum):
     XPU = "XPU"
 
 
-_AVAILABLE_BACKENDS_ROCM = [
-    Fp8MoeBackend.AITER,
-    Fp8MoeBackend.TRITON,
-    Fp8MoeBackend.BATCHED_TRITON,
-]
-
-_AVAILABLE_BACKENDS_XPU = [
-    Fp8MoeBackend.XPU
-]
-
-_AVAILABLE_BACKENDS_CUDA_SM90_EP = [
-    Fp8MoeBackend.TRITON,
-    Fp8MoeBackend.FLASHINFER_CUTLASS,
-    Fp8MoeBackend.FLASHINFER_TRTLLM,
-    Fp8MoeBackend.VLLM_CUTLASS,
-    Fp8MoeBackend.DEEPGEMM,
-    Fp8MoeBackend.MARLIN,
-    Fp8MoeBackend.BATCHED_DEEPGEMM,
-    Fp8MoeBackend.BATCHED_TRITON,
-]
-
-_AVAILABLE_BACKENDS_CUDA_SM90_TP = [
-    Fp8MoeBackend.TRITON,
-    Fp8MoeBackend.FLASHINFER_CUTLASS,
-    Fp8MoeBackend.FLASHINFER_TRTLLM,
-    Fp8MoeBackend.VLLM_CUTLASS,
-    Fp8MoeBackend.DEEPGEMM,
-    Fp8MoeBackend.MARLIN,
-    Fp8MoeBackend.BATCHED_DEEPGEMM,
-    Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
-    Fp8MoeBackend.BATCHED_TRITON,
-]
-
-_AVAILABLE_BACKENDS_CUDA_SM100 = [
-    Fp8MoeBackend.FLASHINFER_TRTLLM,
-    Fp8MoeBackend.FLASHINFER_CUTLASS,
-    Fp8MoeBackend.DEEPGEMM,
-    Fp8MoeBackend.VLLM_CUTLASS,
-    Fp8MoeBackend.TRITON,
-    Fp8MoeBackend.MARLIN,
-    Fp8MoeBackend.BATCHED_DEEPGEMM,
-    Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
-    Fp8MoeBackend.BATCHED_TRITON,
-]
-
-_AVAILABLE_BACKENDS_ALL = [
-    Fp8MoeBackend.FLASHINFER_TRTLLM,
-    Fp8MoeBackend.FLASHINFER_CUTLASS,
-    Fp8MoeBackend.DEEPGEMM,
-    Fp8MoeBackend.VLLM_CUTLASS,
-    Fp8MoeBackend.TRITON,
-    Fp8MoeBackend.MARLIN,
-    Fp8MoeBackend.BATCHED_DEEPGEMM,
-    Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
-    Fp8MoeBackend.BATCHED_TRITON,
-    Fp8MoeBackend.XPU,
-    Fp8MoeBackend.AITER
-]
-
-
-def _get_priority_backends(moe_config: FusedMoEConfig) -> list[Fp8MoeBackend]:
+def _get_priority_backends(
+    moe_config: FusedMoEConfig,
+    quant_config: FusedMoEQuantConfig
+) -> list[Fp8MoeBackend]:
     """
     Get available backends in priority order based on platform and config.
 
     This function can be extended to become more complex as needed.
     """
-    if current_platform.is_rocm():
-        return _AVAILABLE_BACKENDS_ROCM
-    elif current_platform.is_xpu():
-        return _AVAILABLE_BACKENDS_XPU
-    elif current_platform.is_cuda():
-        if current_platform.is_device_capability_family(100):
-            return _AVAILABLE_BACKENDS_CUDA_SM100
-        elif current_platform.is_device_capability(90):
-            if moe_config.moe_parallel_config.ep_size > 1:
-                return _AVAILABLE_BACKENDS_CUDA_SM90_EP
-            else:
-                return _AVAILABLE_BACKENDS_CUDA_SM90_TP
-    return _AVAILABLE_BACKENDS_ALL
+
+    _AVAILABLE_BACKENDS = [
+        Fp8MoeBackend.AITER,
+        Fp8MoeBackend.FLASHINFER_TRTLLM,
+        Fp8MoeBackend.FLASHINFER_CUTLASS,
+        Fp8MoeBackend.DEEPGEMM,
+        Fp8MoeBackend.VLLM_CUTLASS,
+        Fp8MoeBackend.TRITON,
+        Fp8MoeBackend.MARLIN,
+        Fp8MoeBackend.BATCHED_DEEPGEMM,
+        Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+        Fp8MoeBackend.BATCHED_TRITON,
+        Fp8MoeBackend.XPU,   
+    ]
+
+    def _move_to_front(backends: list[Fp8MoeBackend], backend: Fp8MoeBackend) -> list[Fp8MoeBackend]:
+        assert backend in backends
+        backends.remove(backend)
+        backends.insert(0, backend)
+    
+    # On Hopper for Block Fp8, prefer Triton for TP and FI CUTLASS for EP.
+    if (current_platform.is_cuda() and 
+        current_platform.is_device_capability(90) and 
+        quant_config.is_block_quantized
+    ):
+        if moe_config.moe_parallel_config.ep_size > 1:
+            _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.FLASHINFER_CUTLASS)
+        else:
+            _move_to_front(_AVAILABLE_BACKENDS, Fp8MoeBackend.TRITON)
+    
+    return _AVAILABLE_BACKENDS
 
 
 def backend_to_kernel_cls(
