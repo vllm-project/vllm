@@ -814,7 +814,7 @@ class WhisperForConditionalGeneration(
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
         if language is None:
-            logger.info(
+            logger.debug(
                 "No language specified. Language will be auto-detected "
                 "from audio. To skip detection, pass the `language` field "
                 "in the TranscriptionRequest."
