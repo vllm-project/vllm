@@ -7,8 +7,7 @@ This class runs in the scheduler, tracks which blocks are offloaded
 and their address.
 
 The class provides the following primitives:
-    lookup() - find the length of the maximal series of blocks,
-        starting from the first one, that are all offloaded.
+    lookup() - check whether a single block is offloaded and ready.
     prepare_load() - prepare given blocks to be read.
         The given blocks will be protected from eviction.
         This function returns a LoadSpec which encapsulates
@@ -68,21 +67,20 @@ class OffloadingEvent:
 
 class OffloadingManager(ABC):
     @abstractmethod
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
+    def lookup(self, block_hash: BlockHash) -> bool | None:
         """
-        Finds the length of the maximal series of blocks, starting from the
-        first one, that are all offloaded.
+        Checks whether a single block is offloaded and ready to be read.
 
         Args:
-            block_hashes: the hashes identifying the blocks to lookup.
+            block_hash: the hash identifying the block to lookup.
 
         Returns:
-            An integer representing the maximal number of blocks that
-            are currently offloaded, or None if the lookup should be retried
-            later. Returning None will delay the request handling by the vLLM
+            True if the block is offloaded and ready, False if not,
+            or None if the lookup should be retried later.
+            Returning None will delay the request handling by the vLLM
             scheduler.
         """
-        pass
+        ...
 
     @abstractmethod
     def prepare_load(self, block_hashes: Iterable[BlockHash]) -> LoadStoreSpec:

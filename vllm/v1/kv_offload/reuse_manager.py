@@ -26,7 +26,8 @@ class FilterReusedOffloadingManager(OffloadingManager):
     All methods are delegated to the *backing* manager.  Two methods are
     intercepted:
 
-    * ``lookup`` — records each visited block hash in an internal LRU counter.
+    * ``lookup`` — records the visited block hash in an internal LRU
+      counter, then delegates to the backing manager.
     * ``prepare_store`` — filters out block hashes that have not yet
       crossed the threshold *before* calling the backing
       ``prepare_store``.
@@ -65,18 +66,16 @@ class FilterReusedOffloadingManager(OffloadingManager):
     # Intercepted methods
     # ------------------------------------------------------------------
 
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
-        """Record each hash, then delegate lookup to backing manager."""
-        block_hashes = list(block_hashes)
-        for block_hash in block_hashes:
-            if block_hash in self.counts:
-                self.counts.move_to_end(block_hash)
-                self.counts[block_hash] += 1
-            else:
-                if len(self.counts) >= self.max_tracker_size:
-                    self.counts.popitem(last=False)  # evict LRU
-                self.counts[block_hash] = 1
-        return self._backing.lookup(block_hashes)
+    def lookup(self, block_hash: BlockHash) -> bool | None:
+        """Record the hash, then delegate lookup to backing manager."""
+        if block_hash in self.counts:
+            self.counts.move_to_end(block_hash)
+            self.counts[block_hash] += 1
+        else:
+            if len(self.counts) >= self.max_tracker_size:
+                self.counts.popitem(last=False)  # evict LRU
+            self.counts[block_hash] = 1
+        return self._backing.lookup(block_hash)
 
     def prepare_store(
         self, block_hashes: Iterable[BlockHash]

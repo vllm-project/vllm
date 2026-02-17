@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from itertools import islice
 from typing import Any
 
@@ -67,6 +67,44 @@ class OffloadingConnectorScheduler:
             self.block_size_factor,
         )
 
+    def _maximal_prefix_lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
+        """Find the length of the maximal prefix of offloaded blocks."""
+        hit_count = 0
+        defer_lookup = False
+        for block_hash in block_hashes:
+            result = self.manager.lookup(block_hash)
+            if result is None:
+                defer_lookup = True
+                # continue lookup to allow manager to kick-off async lookups
+                # for all blocks (until a miss is detected)
+                result = True
+            if not result:
+                break
+            hit_count += 1
+        return hit_count if not defer_lookup else None
+
+    def _sliding_window_lookup(
+        self, block_hashes: Sequence[BlockHash], sliding_window_size: int
+    ) -> int | None:
+        """Find the maximal ending position of consecutive offloaded blocks
+        within a sliding window."""
+        defer_lookup = False
+        consecutive_hits = 0
+        for idx in range(len(block_hashes) - 1, -1, -1):
+            result = self.manager.lookup(block_hashes[idx])
+            if result is None:
+                defer_lookup = True
+                # continue lookup to allow manager to kick-off async lookups
+                # for all blocks (until a hit is detected)
+                result = False
+            if not result:
+                consecutive_hits = 0
+            else:
+                consecutive_hits += 1
+                if consecutive_hits == sliding_window_size:
+                    return idx + sliding_window_size if not defer_lookup else None
+        return consecutive_hits if not defer_lookup else None
+
     def get_num_new_matched_tokens(
         self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
@@ -102,7 +140,7 @@ class OffloadingConnectorScheduler:
             return 0, False
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
-        hits = self.manager.lookup(
+        hits = self._maximal_prefix_lookup(
             self._get_block_hashes(request, start_idx=start_block_idx)
         )
         if hits is None:
