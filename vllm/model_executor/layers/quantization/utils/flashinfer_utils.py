@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -9,6 +10,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
+
+if TYPE_CHECKING:
+    from flashinfer.fused_moe.core import ActivationType
 
 logger = init_logger(__name__)
 
@@ -20,6 +24,10 @@ class FlashinferMoeBackend(Enum):
 
 
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
+    return activation_to_flashinfer_type(activation).value
+
+
+def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType":
     from flashinfer.fused_moe.core import ActivationType
 
     # silu and gelu are mapped to their gated versions SwiGLU and GeGLU respectively
@@ -30,7 +38,7 @@ def activation_to_flashinfer_int(activation: MoEActivation) -> int:
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
     }
-    return ACTIVATION_TO_FI_ACTIVATION[activation].value
+    return ACTIVATION_TO_FI_ACTIVATION[activation]
 
 
 def swap_w13_to_w31(x: torch.Tensor) -> torch.Tensor:

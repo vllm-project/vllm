@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_int,
+    activation_to_flashinfer_type,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -233,7 +233,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
         topk_group: int | None = None,
     ) -> torch.Tensor:
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
-        activation_type = activation_to_flashinfer_int(activation)
+        activation_type = activation_to_flashinfer_type(activation)
 
         assert self.routing_method_type == RoutingMethodType.Llama4
         assert apply_router_weight_on_input
