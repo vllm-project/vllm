@@ -8,10 +8,6 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    apply_fp4_marlin_linear,
-    prepare_fp4_layer_for_marlin,
-)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
@@ -36,7 +32,7 @@ class CompressedTensorsW4A4MXFp4(CompressedTensorsScheme):
     def __init__(self, use_marlin: bool = False):
         self.group_size = 32
         self.use_marlin = use_marlin
-     
+
     @classmethod
     def get_min_capability(cls) -> int:
         return 80
@@ -83,17 +79,9 @@ class CompressedTensorsW4A4MXFp4(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename weight_packed to weight that marlin expects
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
 
-        """
-        if self.use_marlin:
-            prepare_fp4_layer_for_marlin(layer)
-        else:
-            # Pre-compile flashinfer modules to avoid JIT compilation during torch.compile
-        """
-    
     def apply_weights(
         self,
         layer: torch.nn.Module,
@@ -116,29 +104,24 @@ class CompressedTensorsW4A4MXFp4(CompressedTensorsScheme):
 
         from flashinfer import mxfp4_quantize
 
-        from vllm.utils.flashinfer import flashinfer_mm_fp4
+        from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
 
-        # Reshape input to 2D
         input_shape = x.shape
         x_2d = x.view(-1, input_shape[-1])
-
-        # Step 1: Quantize activations to MXFP4 (4-bit E2M1, block_size=32)
-        # Returns: (packed_uint8 [M, K//2], E8M0_scales_uint8 [M, K//32])
         x_mxfp4_packed, x_scales_e8m0 = mxfp4_quantize(x_2d)
 
- 
-        # Need to transpose weight to [K//2, N]
-        output = flashinfer_mm_fp4(
-            A=x_mxfp4_packed,  # [M, K//2]
-            B=layer.weight.t(),  # [K//2, N]
-            A_scale=x_scales_e8m0,  # [M, K//32]
-            B_scale=layer.weight_scale.t(),  # [K//32, N]
-            g_scale=None,  # No global scale for MXFP4
-            dtype=torch.bfloat16,
+        # mxfp4_quantize returns swizzled scales which cudnn backend expects
+
+        output = flashinfer_scaled_fp4_mm(
+            x_mxfp4_packed,
+            layer.weight,
+            x_scales_e8m0,
+            layer.weight_scale,
+            alpha=None,  # No global scale for MXFP4
+            out_dtype=x.dtype,
             backend="auto",
             block_size=self.group_size,
-            use_8x4_sf_layout=False,
-            use_nvfp4=False
+            use_nvfp4=False,
         )
 
         # Add bias if present
