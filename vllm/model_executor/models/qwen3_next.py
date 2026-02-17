@@ -863,7 +863,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     core_attn_out_non_spec,
                     last_recurrent_state,
                     chunk_state_history,
-                ) = chunk_gated_delta_rule(
+                ) = fla_chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
@@ -875,6 +875,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
                     return_intermediate_states=True,
+                    state_dtype=ssm_state.dtype,
                 )
 
                 # Write the last recurrent state for prefill requests
@@ -1048,7 +1049,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     core_attn_out_non_spec,
                     last_recurrent_state,
                     _,
-                ) = chunk_gated_delta_rule(
+                ) = fla_chunk_gated_delta_rule(
                     q=query_non_spec,
                     k=key_non_spec,
                     v=value_non_spec,
@@ -1059,6 +1060,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                     cu_seqlens=non_spec_query_start_loc,
                     head_first=False,
                     use_qk_l2norm_in_kernel=True,
+                    state_dtype=ssm_state.dtype,
                 )
                 # Init cache
                 ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
