@@ -31,6 +31,7 @@ from vllm.multimodal.inputs import (
     MultiModalInputs,
     MultiModalKwargsItems,
     MultiModalUUIDDict,
+    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -837,8 +838,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
