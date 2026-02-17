@@ -143,7 +143,7 @@ def use_aiter_triton_gemm(n, m, k, dtype):
 def rocm_unquantized_gemm_impl(
     x: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor | None = None
 ) -> torch.Tensor:
-    from vllm.platforms.rocm import on_gfx9, on_gfx950
+    from vllm.platforms.rocm import on_gfx1x, on_gfx9, on_gfx950
 
     n = x.numel() // x.size(-1)
     m = weight.shape[0]
@@ -194,15 +194,36 @@ def rocm_unquantized_gemm_impl(
         and x.is_contiguous()
     )
 
-    if use_skinny is not True:
+    # gfx1x (e.g. RDNA4/gfx12) does not have full wvSplitK support yet.
+    # Enable the LLMM1 skinny kernel for n==1 decode GEMMs only.
+    use_skinny_llmm1_gfx1x = (
+        envs.VLLM_ROCM_USE_SKINNY_GEMM
+        and on_gfx1x()
+        and not on_gfx9()
+        and x.dtype in [torch.float16, torch.bfloat16]
+        and n == 1
+        and m % 4 == 0
+        and k <= 8192
+        and k % 8 == 0
+        and bias is None
+        and x.is_contiguous()
+    )
+
+    if not use_skinny and not use_skinny_llmm1_gfx1x:
         return torch.nn.functional.linear(x, weight, bias)
 
     x_view = x.reshape(-1, x.size(-1))
-    if m > 8 and 0 < n <= 4:
+    if use_skinny and m > 8 and 0 < n <= 4:
         cu_count = num_compute_units()
         out = ops.wvSplitK(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
-    elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
+    elif (
+        (use_skinny or use_skinny_llmm1_gfx1x)
+        and m % 4 == 0
+        and n == 1
+        and k <= 8192
+        and bias is None
+    ):
         out = ops.LLMM1(weight, x_view, 4)
         return out.reshape(*x.shape[:-1], weight.shape[0])
     return torch.nn.functional.linear(x, weight, bias)
