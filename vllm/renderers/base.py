@@ -1,17 +1,29 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import time
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
+from vllm.inputs import (
+    EmbedsInputs,
+    EmbedsPrompt,
+    EncoderDecoderInputs,
+    ProcessorInputs,
+    SingletonInputs,
+    TextPrompt,
+    TokenInputs,
+    TokensPrompt,
+)
+from vllm.inputs.data import build_enc_dec_inputs, embeds_inputs, token_inputs
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
 
@@ -20,6 +32,8 @@ from .inputs import (
     DictPrompt,
     EncoderDecoderDictPrompt,
     EncoderDecoderTokPrompt,
+    SingletonDictPrompt,
+    SingletonTokPrompt,
     TokPrompt,
 )
 from .inputs.preprocess import extract_target_prompt
@@ -32,6 +46,12 @@ if TYPE_CHECKING:
         ConversationMessage,
     )
     from vllm.multimodal.cache import BaseMultiModalProcessorCache
+    from vllm.multimodal.inputs import (
+        MultiModalDataDict,
+        MultiModalInputs,
+        MultiModalUUIDDict,
+    )
+    from vllm.multimodal.parse import MultiModalDataItems
     from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
@@ -78,6 +98,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()
+
+            # This is used to generate internal request ID for MM processing
+            # It has no relation to the request ID for engine core
+            self._mm_req_counter = AtomicCounter()
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -284,17 +308,79 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return prompt
 
+    @overload
+    def _tokenize_singleton_prompt(
+        self,
+        prompt: TextPrompt | TokensPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt: ...
+
+    @overload
+    def _tokenize_singleton_prompt(  # type: ignore[misc]
+        self,
+        prompt: EmbedsPrompt,
+        params: TokenizeParams,
+    ) -> EmbedsPrompt: ...
+
+    def _tokenize_singleton_prompt(
+        self,
+        prompt: SingletonDictPrompt,
+        params: TokenizeParams,
+    ) -> SingletonTokPrompt:
+        if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
+            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+            prompt = self._tokenize_prompt(prompt, params)
+
+        if params.needs_detokenization and "prompt" not in prompt:
+            if "prompt_token_ids" not in prompt:
+                raise RuntimeError("Cannot run detokenization on embeddings")
+
+            prompt = self._detokenize_prompt(prompt)  # type: ignore[arg-type]
+
+        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+
+    @overload
+    async def _tokenize_singleton_prompt_async(
+        self,
+        prompt: TextPrompt | TokensPrompt,
+        params: TokenizeParams,
+    ) -> TokensPrompt: ...
+
+    @overload
+    async def _tokenize_singleton_prompt_async(  # type: ignore[misc]
+        self,
+        prompt: EmbedsPrompt,
+        params: TokenizeParams,
+    ) -> EmbedsPrompt: ...
+
+    async def _tokenize_singleton_prompt_async(
+        self,
+        prompt: SingletonDictPrompt,
+        params: TokenizeParams,
+    ) -> SingletonTokPrompt:
+        if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
+            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+            prompt = await self._tokenize_prompt_async(prompt, params)
+
+        if params.needs_detokenization and "prompt" not in prompt:
+            if "prompt_token_ids" not in prompt:
+                raise RuntimeError("Cannot run detokenization on embeddings")
+
+            prompt = await self._detokenize_prompt_async(prompt)  # type: ignore[arg-type]
+
+        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+
     def _tokenize_enc_dec_prompt(
         self,
         prompt: EncoderDecoderDictPrompt,
         params: TokenizeParams,
     ) -> EncoderDecoderTokPrompt:
         enc_prompt, dec_prompt = (
-            self.tokenize_prompt(prompt["encoder_prompt"], params),
+            self._tokenize_singleton_prompt(prompt["encoder_prompt"], params),
             (
                 None
                 if prompt["decoder_prompt"] is None
-                else self.tokenize_prompt(prompt["decoder_prompt"], params)
+                else self._tokenize_singleton_prompt(prompt["decoder_prompt"], params)
             ),
         )
 
@@ -309,11 +395,13 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> EncoderDecoderTokPrompt:
         enc_prompt, dec_prompt = await asyncio.gather(
-            self.tokenize_prompt_async(prompt["encoder_prompt"], params),
+            self._tokenize_singleton_prompt_async(prompt["encoder_prompt"], params),
             (
                 asyncio.sleep(0)
                 if prompt["decoder_prompt"] is None
-                else self.tokenize_prompt_async(prompt["decoder_prompt"], params)
+                else self._tokenize_singleton_prompt_async(
+                    prompt["decoder_prompt"], params
+                )
             ),
         )
 
@@ -321,27 +409,6 @@ class BaseRenderer(ABC, Generic[_T]):
             encoder_prompt=enc_prompt,
             decoder_prompt=dec_prompt,
         )
-
-    @overload
-    def tokenize_prompt(
-        self,
-        prompt: TextPrompt | TokensPrompt,
-        params: TokenizeParams,
-    ) -> TokensPrompt: ...
-
-    @overload
-    def tokenize_prompt(  # type: ignore[misc]
-        self,
-        prompt: EmbedsPrompt,
-        params: TokenizeParams,
-    ) -> EmbedsPrompt: ...
-
-    @overload
-    def tokenize_prompt(  # type: ignore[misc]
-        self,
-        prompt: EncoderDecoderDictPrompt,
-        params: TokenizeParams,
-    ) -> EncoderDecoderTokPrompt: ...
 
     def tokenize_prompt(
         self,
@@ -351,17 +418,7 @@ class BaseRenderer(ABC, Generic[_T]):
         if "encoder_prompt" in prompt:
             return self._tokenize_enc_dec_prompt(prompt, params)  # type: ignore[arg-type]
 
-        if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
-            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
-            prompt = self._tokenize_prompt(prompt, params)
-
-        if params.needs_detokenization and "prompt" not in prompt:
-            if "prompt_token_ids" not in prompt:
-                raise RuntimeError("Cannot run detokenization on embeddings")
-
-            prompt = self._detokenize_prompt(prompt)  # type: ignore[arg-type]
-
-        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+        return self._tokenize_singleton_prompt(prompt, params)
 
     def tokenize_prompts(
         self,
@@ -369,27 +426,6 @@ class BaseRenderer(ABC, Generic[_T]):
         params: TokenizeParams,
     ) -> list[TokPrompt]:
         return [self.tokenize_prompt(prompt, params) for prompt in prompts]
-
-    @overload
-    async def tokenize_prompt_async(
-        self,
-        prompt: TextPrompt | TokensPrompt,
-        params: TokenizeParams,
-    ) -> TokensPrompt: ...
-
-    @overload
-    async def tokenize_prompt_async(  # type: ignore[misc]
-        self,
-        prompt: EmbedsPrompt,
-        params: TokenizeParams,
-    ) -> EmbedsPrompt: ...
-
-    @overload
-    async def tokenize_prompt_async(  # type: ignore[misc]
-        self,
-        prompt: EncoderDecoderDictPrompt,
-        params: TokenizeParams,
-    ) -> EncoderDecoderTokPrompt: ...
 
     async def tokenize_prompt_async(
         self,
@@ -399,17 +435,7 @@ class BaseRenderer(ABC, Generic[_T]):
         if "encoder_prompt" in prompt:
             return await self._tokenize_enc_dec_prompt_async(prompt, params)  # type: ignore[arg-type]
 
-        if "prompt_token_ids" not in prompt and "prompt_embeds" not in prompt:
-            prompt = params.apply_pre_tokenization(self.tokenizer, prompt)
-            prompt = await self._tokenize_prompt_async(prompt, params)
-
-        if params.needs_detokenization and "prompt" not in prompt:
-            if "prompt_token_ids" not in prompt:
-                raise RuntimeError("Cannot run detokenization on embeddings")
-
-            prompt = await self._detokenize_prompt_async(prompt)  # type: ignore[arg-type]
-
-        return params.apply_post_tokenization(self.tokenizer, prompt)  # type: ignore[arg-type]
+        return await self._tokenize_singleton_prompt_async(prompt, params)
 
     async def tokenize_prompts_async(
         self,
@@ -423,7 +449,7 @@ class BaseRenderer(ABC, Generic[_T]):
     # Step 3: Add extra keys to the prompts
     def _apply_prompt_extras(
         self,
-        prompts: Sequence[DictPrompt | TokPrompt],
+        prompts: Sequence[TokPrompt],
         prompt_extras: dict[str, Any] | None,
     ):
         if not prompt_extras:
@@ -433,6 +459,200 @@ class BaseRenderer(ABC, Generic[_T]):
             target_prompt = extract_target_prompt(self.model_config, prompt)
             target_prompt.update(prompt_extras)  # type: ignore[arg-type]
 
+    # Step 4: Convert to engine inputs
+    def _validate_mm_uuids(
+        self,
+        mm_data: "MultiModalDataDict",
+        mm_items: "MultiModalDataItems",
+        mm_uuids: "MultiModalUUIDDict | None",
+    ) -> None:
+        if mm_uuids is None:
+            mm_uuids = {}
+
+        # NOTE: Keys corresponding to `None` in `mm_data` don't appear in `mm_items`
+        modalities = mm_data.keys() | mm_uuids.keys()
+
+        for modality in modalities:
+            data_items = mm_items.get(modality) or list[Any]()
+
+            uuid_items = mm_uuids.get(modality) or list[str | None]()
+            if isinstance(uuid_items, str):
+                uuid_items = [uuid_items]
+
+            if len(data_items) > 0:
+                if len(uuid_items) > 0 and len(data_items) != len(uuid_items):
+                    raise ValueError(
+                        f"If given, multi_modal_uuids[{modality!r}] must have "
+                        f"same length as multi_modal_data[{modality!r}], but "
+                        f"got {len(uuid_items)} vs {len(data_items)}."
+                    )
+
+                for i, item in enumerate(data_items):
+                    if item is None:
+                        if not uuid_items:
+                            raise ValueError(
+                                f"multi_modal_data[{modality!r}][{i}] is empty but "
+                                f"multi_modal_uuids[{modality!r}] is missing."
+                            )
+
+                        if uuid_items[i] is None:
+                            raise ValueError(
+                                f"multi_modal_data[{modality!r}][{i}] is empty but "
+                                f"multi_modal_uuids[{modality!r}][{i}] is missing."
+                            )
+
+    def _process_mm_uuids(
+        self,
+        mm_data: "MultiModalDataDict",
+        mm_items: "MultiModalDataItems",
+        mm_uuids: "MultiModalUUIDDict | None",
+        mm_req_id: str,
+    ):
+        model_config = self.model_config
+
+        # NOTE: When users explicitly turn off BOTH prefix caching and input
+        # processing caching, no multimodal features or embeddings will be
+        # reused across requests, therefore identifying multimodal data items
+        # by their content is no longer necessary, and we create uuids with
+        # `<mm_req_id>-<modality>-<index>`, overriding even user-provided ones.
+        if (
+            model_config.multimodal_config
+            and model_config.multimodal_config.mm_processor_cache_gb == 0
+            and not self.config.cache_config.enable_prefix_caching
+        ):
+            mm_uuids = {
+                modality: [f"{mm_req_id}-{modality}-{i}" for i in range(data_count)]
+                for modality, data_count in mm_items.get_all_counts().items()
+            }
+
+        self._validate_mm_uuids(mm_data, mm_items, mm_uuids)
+
+        return mm_uuids
+
+    # TODO: Remove str and tokenization_kwargs after deprecating InputPreprocessor
+    def _process_multimodal(
+        self,
+        prompt: list[int] | str,
+        mm_data: "MultiModalDataDict",
+        mm_processor_kwargs: Mapping[str, object] | None,
+        tokenization_kwargs: dict[str, Any] | None,
+        mm_uuids: "MultiModalUUIDDict | None",
+    ) -> "MultiModalInputs":
+        from vllm.multimodal.processing.context import set_request_id
+
+        mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
+
+        mm_processor = self.get_mm_processor()
+
+        mm_items = mm_processor.info.parse_mm_data(mm_data)
+        mm_uuids = self._process_mm_uuids(mm_data, mm_items, mm_uuids, mm_req_id)
+
+        with set_request_id(mm_req_id), set_default_torch_num_threads():
+            mm_inputs = mm_processor.apply(
+                prompt,
+                mm_items,
+                hf_processor_mm_kwargs=mm_processor_kwargs or {},
+                tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
+
+        self.update_mm_cache_stats()
+
+        return mm_inputs
+
+    def _process_tokens(
+        self,
+        prompt: TokensPrompt,
+    ) -> "TokenInputs | MultiModalInputs":
+        prompt_token_ids = prompt["prompt_token_ids"]
+
+        inputs: TokenInputs | MultiModalInputs
+        if multi_modal_data := prompt.get("multi_modal_data"):
+            inputs = self._process_multimodal(
+                prompt_token_ids,
+                multi_modal_data,
+                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                tokenization_kwargs=None,  # Tokenization already done in Step 2
+                mm_uuids=prompt.get("multi_modal_uuids"),
+            )
+        else:
+            inputs = token_inputs(prompt_token_ids)
+
+        if prompt_text := prompt.get("prompt"):
+            inputs["prompt"] = prompt_text
+        if cache_salt := prompt.get("cache_salt"):
+            inputs["cache_salt"] = cache_salt
+
+        return inputs
+
+    def _process_embeds(
+        self,
+        prompt: EmbedsPrompt,
+    ) -> EmbedsInputs:
+        if not self.model_config.enable_prompt_embeds:
+            raise ValueError(
+                "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
+            )
+
+        prompt_embeds = prompt["prompt_embeds"]
+
+        # prompt_embeds must be (seq_len, hidden_size), but if the user
+        # passes in a batch of size 1, i.e. (1, seq_len, hidden_size),
+        # we can unambiguously process the intent by squeezing the batch
+        # dimension.
+        if prompt_embeds.ndim == 3:
+            prompt_embeds = prompt_embeds.squeeze(dim=0)
+
+        if prompt_embeds.ndim != 2:
+            raise ValueError("prompt_embeds must be of shape (seq_len, hidden_size).")
+
+        # Tensors must be on CPU for serialization between processes
+        # in the MsgpackEncoder. Casting to CPU here ensures that there is no
+        # hidden device transfer in the critical path of generation.
+        prompt_embeds = prompt_embeds.cpu()
+
+        return embeds_inputs(
+            prompt_embeds=prompt_embeds,
+            cache_salt=prompt.get("cache_salt"),
+        )
+
+    def _process_singleton(
+        self,
+        prompt: SingletonTokPrompt,
+    ) -> SingletonInputs:
+        if "prompt_embeds" in prompt:
+            return self._process_embeds(prompt)  # type: ignore[arg-type]
+
+        return self._process_tokens(prompt)  # type: ignore[arg-type]
+
+    def _process_enc_dec(
+        self,
+        prompt: EncoderDecoderTokPrompt,
+    ) -> EncoderDecoderInputs:
+        enc_prompt = prompt["encoder_prompt"]
+        dec_prompt = prompt["decoder_prompt"]
+
+        return build_enc_dec_inputs(
+            encoder_inputs=self._process_singleton(enc_prompt),
+            decoder_inputs=(
+                None if dec_prompt is None else self._process_singleton(dec_prompt)
+            ),
+            decoder_start_token_id=self.get_dec_start_token_id(),
+        )
+
+    def process_for_engine(
+        self, prompt: TokPrompt, arrival_time: float
+    ) -> ProcessorInputs:
+        engine_prompt: ProcessorInputs
+        if "encoder_prompt" in prompt:
+            engine_prompt = self._process_enc_dec(prompt)  # type: ignore[arg-type]
+        else:
+            engine_prompt = self._process_singleton(prompt)
+
+        engine_prompt["arrival_time"] = arrival_time
+
+        return engine_prompt
+
     # Top-level methods
     def render_cmpl(
         self,
@@ -441,6 +661,8 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        arrival_time = time.time()
+
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
@@ -449,8 +671,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        # TODO: Apply multi-modal processor
-        return tok_prompts
+        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
 
     async def render_cmpl_async(
         self,
@@ -459,6 +680,8 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        arrival_time = time.time()
+
         if tok_params is None:
             tok_params = self.default_cmpl_tok_params
 
@@ -467,8 +690,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        # TODO: Apply multi-modal processor
-        return tok_prompts
+        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
 
     def render_chat(
         self,
@@ -478,6 +700,8 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        arrival_time = time.time()
+
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
@@ -496,8 +720,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        # TODO: Apply multi-modal processor
-        return out_conversations, tok_prompts
+        eng_prompts = [
+            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
+        ]
+
+        return out_conversations, eng_prompts
 
     async def render_chat_async(
         self,
@@ -507,6 +734,8 @@ class BaseRenderer(ABC, Generic[_T]):
         *,
         prompt_extras: dict[str, Any] | None = None,
     ):
+        arrival_time = time.time()
+
         if tok_params is None:
             tok_params = self.default_chat_tok_params
 
@@ -525,5 +754,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        # TODO: Apply multi-modal processor
-        return out_conversations, tok_prompts
+        eng_prompts = [
+            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
+        ]
+
+        return out_conversations, eng_prompts
