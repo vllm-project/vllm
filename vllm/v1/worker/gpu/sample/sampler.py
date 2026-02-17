@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+from vllm.v1.worker.gpu.states import RequestState
 
 
 class Sampler:
@@ -23,10 +24,7 @@ class Sampler:
         max_num_reqs: int,
         vocab_size: int,
         device: torch.device,
-        all_token_ids: torch.Tensor,
-        prompt_len: torch.Tensor,
-        prefill_len: torch.Tensor,
-        total_len: torch.Tensor,
+        req_states: RequestState,
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
     ):
@@ -36,11 +34,9 @@ class Sampler:
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
 
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
-        self.penalties_state = PenaltiesState(
-            all_token_ids, prompt_len, prefill_len, vocab_size
-        )
+        self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
-        self.bad_words_state = BadWordsState(all_token_ids, prompt_len, total_len)
+        self.bad_words_state = BadWordsState(req_states)
         self.num_speculative_tokens = num_speculative_tokens
 
     def add_request(

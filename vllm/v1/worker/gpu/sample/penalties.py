@@ -8,24 +8,16 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+from vllm.v1.worker.gpu.states import RequestState
 
 
 class PenaltiesState:
-    def __init__(
-        self,
-        all_token_ids: torch.Tensor,
-        prompt_len: torch.Tensor,
-        prefill_len: torch.Tensor,
-        vocab_size: int,
-    ):
-        self.all_token_ids = all_token_ids
-        self.prompt_len = prompt_len
-        self.prefill_len = prefill_len
-        self.vocab_size = vocab_size
+    def __init__(self, req_states: RequestState):
+        self.req_states = req_states
 
-        max_num_reqs = all_token_ids.shape[0]
-        self.max_model_len = all_token_ids.shape[1]
-        self.device = all_token_ids.device
+        max_num_reqs = req_states.max_num_reqs
+        self.vocab_size = req_states.vocab_size
+        self.device = req_states.device
 
         self.repetition_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
         self.frequency_penalty = UvaBackedTensor(max_num_reqs, dtype=torch.float32)
@@ -49,7 +41,7 @@ class PenaltiesState:
             max_num_reqs, self.vocab_size, dtype=torch.int32, device=self.device
         )
 
-        self._penalties_reqs: list[int] = []
+        self._new_penalties_reqs: list[int] = []
 
     def add_request(self, req_idx: int, sampling_params: SamplingParams) -> None:
         self.repetition_penalty.np[req_idx] = sampling_params.repetition_penalty
@@ -59,26 +51,29 @@ class PenaltiesState:
         do_penalty = use_penalty(sampling_params)
         self.use_penalty[req_idx] = do_penalty
         if do_penalty:
-            self._penalties_reqs.append(req_idx)
+            self._new_penalties_reqs.append(req_idx)
 
     def apply_staged_writes(self) -> None:
-        if self._penalties_reqs:
+        if self._new_penalties_reqs:
             idx_mapping = async_tensor_h2d(
-                self._penalties_reqs,
+                self._new_penalties_reqs,
                 dtype=torch.int32,
                 target_device=self.device,
                 pin_memory=True,
             )
+
+            prefill_lens = self.req_states.prefill_len.np[self._new_penalties_reqs]
+            max_prefill_len = int(prefill_lens.max())
             bincount(
                 idx_mapping,
-                self.all_token_ids,
-                self.prompt_len,
-                self.prefill_len,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prompt_len.gpu,
+                self.req_states.prefill_len.gpu,
                 self.prompt_bin_mask,
                 self.output_bin_counts,
-                self.max_model_len,
+                max_prefill_len,
             )
-            self._penalties_reqs.clear()
+            self._new_penalties_reqs.clear()
 
         self.repetition_penalty.copy_to_uva()
         self.frequency_penalty.copy_to_uva()
@@ -287,13 +282,13 @@ def bincount(
     prefill_len: torch.Tensor,
     prompt_bin_mask: torch.Tensor,
     output_bin_counts: torch.Tensor,
-    max_model_len: int,
+    max_prefill_len: int,
 ) -> None:
-    prompt_bin_mask[idx_mapping].zero_()
-    output_bin_counts[idx_mapping].zero_()
+    prompt_bin_mask[idx_mapping] = 0
+    output_bin_counts[idx_mapping] = 0
     num_reqs = idx_mapping.shape[0]
     BLOCK_SIZE = 1024
-    num_blocks = triton.cdiv(max_model_len, BLOCK_SIZE)
+    num_blocks = triton.cdiv(max_prefill_len, BLOCK_SIZE)
     _bincount_kernel[(num_reqs, num_blocks)](
         idx_mapping,
         all_token_ids,

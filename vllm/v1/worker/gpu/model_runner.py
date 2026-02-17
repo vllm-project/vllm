@@ -151,10 +151,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             vocab_size=self.vocab_size,
             device=self.device,
-            all_token_ids=self.req_states.all_token_ids.gpu,
-            prompt_len=self.req_states.prompt_len.gpu,
-            prefill_len=self.req_states.prefill_len.gpu,
-            total_len=self.req_states.total_len.gpu,
+            req_states=self.req_states,
             logprobs_mode=self.model_config.logprobs_mode,
             num_speculative_tokens=self.num_speculative_steps + 1,
         )
