@@ -148,6 +148,7 @@ async def test_request_cancellation(server: RemoteOpenAIServer):
             )
         )
         tasks.append(task)
+        await asyncio.sleep(0.001)
 
     done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
 
