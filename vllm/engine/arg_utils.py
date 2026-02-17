@@ -52,6 +52,7 @@ from vllm.config import (
     PoolerConfig,
     ProfilerConfig,
     SchedulerConfig,
+    ShutdownConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
     VllmConfig,
@@ -592,6 +593,9 @@ class EngineArgs:
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
+
+    shutdown_mode: Literal["abort", "wait"] = ShutdownConfig.mode
+    shutdown_wait_timeout: int = ShutdownConfig.wait_timeout
 
     weight_transfer_config: WeightTransferConfig | None = get_field(
         VllmConfig,
@@ -1233,6 +1237,17 @@ class EngineArgs:
             "--weight-transfer-config", **vllm_kwargs["weight_transfer_config"]
         )
 
+        # Shutdown arguments
+        shutdown_kwargs = get_kwargs(ShutdownConfig)
+        shutdown_group = parser.add_argument_group(
+            title="ShutdownConfig",
+            description=ShutdownConfig.__doc__,
+        )
+        shutdown_group.add_argument("--shutdown-mode", **shutdown_kwargs["mode"])
+        shutdown_group.add_argument(
+            "--shutdown-wait-timeout", **shutdown_kwargs["wait_timeout"]
+        )
+
         # Other arguments
         parser.add_argument(
             "--disable-log-stats",
@@ -1825,6 +1840,12 @@ class EngineArgs:
             compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
+
+        shutdown_config = ShutdownConfig(
+            mode=self.shutdown_mode,
+            wait_timeout=self.shutdown_wait_timeout,
+        )
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1846,6 +1867,7 @@ class EngineArgs:
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
             weight_transfer_config=self.weight_transfer_config,
+            shutdown_config=shutdown_config,
         )
 
         return config
