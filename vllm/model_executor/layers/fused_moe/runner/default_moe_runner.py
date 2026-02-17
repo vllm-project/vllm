@@ -239,14 +239,16 @@ class DefaultMoERunner(MoERunner):
         shared_experts_input: torch.Tensor | None = None
         if use_shared_experts_stream:
             assert self.shared_experts_stream is not None
+            assert self.moe_config.disable_inplace
 
             shared_experts_input = (
                 shared_input if shared_input is not None else hidden_states
             )
 
-            # Record that the clone will be used by shared_experts_stream
-            # to avoid gc issue from deallocation of hidden_states_clone
-            # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
+            # Record that the shared_experts_input will be used in the
+            # shared_experts_stream to to avoid gc issue from
+            # deallocation. For more details:
+            # https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
             # NOTE: We don't need shared_output.record_stream(current_stream())
             # because we synch the streams before using shared_output.
             shared_experts_input.record_stream(self.shared_experts_stream)
