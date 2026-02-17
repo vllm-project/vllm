@@ -8,6 +8,7 @@ from test_cutlass_w4a8_moe import cutlass_quantize
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe import fused_experts
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -145,11 +146,12 @@ def test_cutlass_w4a16_moe(
     )
     moe_config = FusedMoEConfig(
         num_experts=expert_num,
+        num_logical_experts=expert_num,
         experts_per_token=topk,
         hidden_dim=hidden_size,
         intermediate_size_per_partition=intermediate_size,
         num_local_experts=expert_num,
-        activation="silu",
+        activation=MoEActivation.SILU,
         device=device,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         in_dtype=torch.bfloat16,
@@ -166,7 +168,7 @@ def test_cutlass_w4a16_moe(
         topk_ids,
         quant_config=quant_config,
         moe_config=moe_config,
-        activation="silu",
+        activation=MoEActivation.SILU,
         global_num_experts=expert_num,
         expert_map=None,
         a_strides1=a_strides1_c_strides2,
@@ -187,7 +189,7 @@ def test_cutlass_w4a16_moe(
         w2_ref.transpose(1, 2).contiguous(),
         topk_weights,
         topk_ids,
-        activation="silu",
+        activation=MoEActivation.SILU,
         global_num_experts=expert_num,
     )
 
