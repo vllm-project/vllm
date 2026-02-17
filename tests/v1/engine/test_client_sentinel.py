@@ -23,7 +23,6 @@ FAULT_RECEIVER_ADDR = "tcp://127.0.0.1:8844"
 CMD_ADDR = "tcp://127.0.0.1:8845"
 FAULT_PUB_ADDR = "tcp://127.0.0.1:8846"
 ENGINE_CORE_CMD_ADDR = "tcp://127.0.0.1:8847"
-FAULT_PUB_TOPIC = "vllm_fault"
 
 
 def create_test_thread_safe_dict(initial_data=None):
@@ -101,7 +100,10 @@ def test_fault_receiver():
         ctx = zmq.Context()
         sub_socket = ctx.socket(zmq.SUB)
         sub_socket.connect(FAULT_PUB_ADDR)
-        sub_socket.setsockopt_string(zmq.SUBSCRIBE, FAULT_PUB_TOPIC)
+        fault_pub_topic = (
+            sentinel.vllm_config.fault_tolerance_config.fault_state_pub_topic
+        )
+        sub_socket.setsockopt_string(zmq.SUBSCRIBE, fault_pub_topic)
 
         if not sub_socket.poll(timeout=2000):  # 2-second timeout
             pytest.fail("Timeout waiting for published message")
@@ -110,7 +112,7 @@ def test_fault_receiver():
         ctx.term()
 
         prefix, data = message.split("|", 1)
-        assert prefix == FAULT_PUB_TOPIC
+        assert prefix == fault_pub_topic
         # New published format contains nested dicts: {"1": {"status": "Dead"}}
         parsed = json.loads(data)
         assert parsed.get("1", {}).get("status") == "Dead"

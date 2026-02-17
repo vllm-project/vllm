@@ -553,8 +553,9 @@ class ClientSentinel(BaseSentinel):
 
     def _pub_engine_status(self):
         engine_status = self.engine_status_dict.to_dict()
+        topic = self.vllm_config.fault_tolerance_config.fault_state_pub_topic.encode()
         self.fault_state_pub_socket.send_multipart(
-            (b"vllm_fault", msgspec.msgpack.encode(engine_status))
+            (topic, msgspec.msgpack.encode(engine_status))
         )
 
     def _alert_and_pause(self):
@@ -1243,7 +1244,10 @@ class AsyncMPClient(MPClient):
             self.fault_state_sub_socket = make_zmq_socket(
                 self.sync_ctx, self.fault_state_pub_socket_addr, zmq.SUB, bind=False
             )
-            self.fault_state_sub_socket.setsockopt(zmq.SUBSCRIBE, b"vllm_fault")
+            topic = (
+                self.vllm_config.fault_tolerance_config.fault_state_pub_topic.encode()
+            )
+            self.fault_state_sub_socket.setsockopt(zmq.SUBSCRIBE, topic)
             self.resources.client_sentinel_cmd_socket = self.client_sentinel_cmd_socket
             self.resources.fault_state_sub_socket = self.fault_state_sub_socket
             threading.Thread(

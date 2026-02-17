@@ -50,6 +50,11 @@ class FaultToleranceConfig:
     runtime.
     """
 
+    fault_state_pub_topic: str = "vllm_fault"
+    """
+    The topic string to use for publishing fault state messages via ZMQ.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
