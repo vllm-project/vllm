@@ -1,0 +1,15 @@
+Mixtral-8x7B-Fp8-AutoFp8-triton.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-deepgemm.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-fi-cutlass.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-marlin.yaml
+Qwen3-30B-A3B-Fp8-AutoFp8-triton.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-deepgemm.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-marlin.yaml
+Qwen3-30B-A3B-Fp8-CT-Block-triton.yaml
+Qwen3-30B-A3B-Fp8-CT-Channel-marlin.yaml
+Qwen3-30B-A3B-Fp8-CT-Channel-vllm-cutlass.yaml
+Llama-4-Scout-Fp8-ModelOpt-fi-cutlass.yaml
+Llama-4-Scout-Fp8-ModelOpt-marlin.yaml
+Llama-4-Scout-Fp8-ModelOpt-triton.yaml
+Qwen3-30B-A3B-BF16-fi-cutlass.yaml
+Qwen3-30B-A3B-BF16-triton.yaml

@@ -22,7 +22,6 @@ from vllm.v1.sample.logits_processor import (
     MoveDirectionality,
 )
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
@@ -90,11 +89,11 @@ class InputBatch:
         vocab_size: int,
         block_sizes: list[int],  # The block_size of each kv cache group
         kernel_block_sizes: list[int],
+        max_num_blocks_per_req: list[int] | None = None,
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
         is_spec_decode: bool = False,
         is_pooling_model: bool = False,
-        num_speculative_tokens: int = 0,
         cp_kv_cache_interleave_size: int = 1,
     ):
         self.is_pooling_model = is_pooling_model
@@ -147,7 +146,7 @@ class InputBatch:
             device=device,
             block_sizes=block_sizes,
             kernel_block_sizes=kernel_block_sizes,
-            num_speculative_tokens=num_speculative_tokens,
+            max_num_blocks=max_num_blocks_per_req,
             cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
         )
 
@@ -175,9 +174,6 @@ class InputBatch:
         )
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
-
-        # IDs of requests which do not support spec decoding
-        self.spec_decode_unsupported_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty(
@@ -346,8 +342,6 @@ class InputBatch:
         self.block_table.add_row(request.block_ids, req_index)
 
         if sampling_params := request.sampling_params:
-            if self.is_spec_decode and is_spec_decode_unsupported(sampling_params):
-                self.spec_decode_unsupported_reqs.add(req_id)
             if sampling_params.sampling_type == SamplingType.GREEDY:
                 # Should avoid division by zero later when apply_temperature.
                 self.temperature_cpu[req_index] = 0.0
@@ -446,6 +440,32 @@ class InputBatch:
 
         return req_index
 
+    def update_req_spec_token_ids(
+        self, request: CachedRequestState, scheduled_spec_tokens: dict[str, list[int]]
+    ) -> None:
+        req_id = request.req_id
+        req_index = self.req_id_to_index[req_id]
+        cur_spec_token_ids = self.spec_token_ids[req_index]
+        # When speculative decoding is used with structured output,
+        # the scheduler can drop draft tokens that do not
+        # conform to the schema. This can result in
+        # scheduler_output.scheduled_spec_decode_tokens being empty,
+        # even when speculative decoding is enabled.
+        cur_spec_token_ids.clear()
+        spec_token_ids = scheduled_spec_tokens.get(req_id, ())
+        num_spec_tokens = len(spec_token_ids)
+        request.prev_num_draft_len = num_spec_tokens
+        if not spec_token_ids:
+            return
+
+        # For async scheduling, token_ids_cpu assigned from
+        # spec_token_ids are placeholders and will be overwritten in
+        # _prepare_input_ids.
+        start_index = self.num_tokens_no_spec[req_index]
+        end_token_index = start_index + num_spec_tokens
+        self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+        cur_spec_token_ids.extend(spec_token_ids)
+
     def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense().
 
@@ -484,7 +504,6 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
-        self.spec_decode_unsupported_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -829,7 +848,7 @@ class InputBatch:
             presence_penalties=self.presence_penalties[:num_reqs],
             repetition_penalties=self.repetition_penalties[:num_reqs],
             output_token_ids=output_token_ids,
-            spec_token_ids=cast(list[list[int]], self.spec_token_ids),
+            spec_token_ids=self.spec_token_ids,
             no_penalties=self.no_penalties,
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
@@ -939,9 +958,40 @@ class InputBatch:
             if sampled_token_ids is None:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
-                sampled_token_ids = self.sampled_token_ids_cpu.squeeze(-1).tolist()
-            # Replace placeholder token id with actual sampled id.
-            req_output_token_ids[-1] = sampled_token_ids[prev_index]
+                sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+            # Replace placeholder token id(s) with actual sampled id(s).
+            new_ids: list[int] = sampled_token_ids[prev_index]
+            if not new_ids:
+                continue
+            num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
+            # Also account for case where there may be a smaller number of
+            # output placeholders (tokens can be discarded after a kv-load failure).
+            first_placeholder = req_output_token_ids.index(-1)
+            num_placeholders = len(req_output_token_ids) - first_placeholder
+            num_to_replace = min(num_sampled_ids, num_placeholders)
+            del new_ids[num_to_replace:]
+            end_index = first_placeholder + num_to_replace
+            req_output_token_ids[first_placeholder:end_index] = new_ids
+
+    def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
+        """
+        In async scheduling case, update spec_token_ids in sampling metadata with
+        real draft token ids from prior step. This is called right before they are
+        needed by the rejection sampler for penalty/bad_words computation.
+        """
+        if not draft_token_ids or not self.prev_req_id_to_index:
+            return
+
+        if (spec_token_ids := self.sampling_metadata.spec_token_ids) is not None:
+            for req_id, spec_ids in zip(self.req_ids, spec_token_ids):
+                if spec_ids:
+                    prev_index = self.prev_req_id_to_index.get(req_id)
+                    if prev_index is not None:
+                        draft_ids = draft_token_ids[prev_index]
+                        if draft_ids:
+                            del draft_ids[len(spec_ids) :]
+                            spec_ids.clear()
+                            spec_ids.extend(draft_ids)
 
     @property
     def num_reqs(self) -> int:

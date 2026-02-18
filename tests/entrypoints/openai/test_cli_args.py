@@ -6,7 +6,7 @@ import json
 import pytest
 
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
-from vllm.entrypoints.openai.serving_models import LoRAModulePath
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from ...utils import VLLM_PATH
@@ -208,3 +208,36 @@ def test_middleware(serve_parser, cli_args, expected_middleware):
     """Ensure multiple middleware args are parsed properly"""
     args = serve_parser.parse_args(args=cli_args)
     assert args.middleware == expected_middleware
+
+
+def test_default_chat_template_kwargs_parsing(serve_parser):
+    """Ensure default_chat_template_kwargs JSON is parsed correctly"""
+    args = serve_parser.parse_args(
+        args=["--default-chat-template-kwargs", '{"enable_thinking": false}']
+    )
+    assert args.default_chat_template_kwargs == {"enable_thinking": False}
+
+
+def test_default_chat_template_kwargs_complex(serve_parser):
+    """Ensure complex default_chat_template_kwargs JSON is parsed correctly"""
+    kwargs_json = '{"enable_thinking": false, "custom_param": "value", "num": 42}'
+    args = serve_parser.parse_args(args=["--default-chat-template-kwargs", kwargs_json])
+    assert args.default_chat_template_kwargs == {
+        "enable_thinking": False,
+        "custom_param": "value",
+        "num": 42,
+    }
+
+
+def test_default_chat_template_kwargs_default_none(serve_parser):
+    """Ensure default_chat_template_kwargs defaults to None"""
+    args = serve_parser.parse_args(args=[])
+    assert args.default_chat_template_kwargs is None
+
+
+def test_default_chat_template_kwargs_invalid_json(serve_parser):
+    """Ensure invalid JSON raises an error"""
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(
+            args=["--default-chat-template-kwargs", "not valid json"]
+        )

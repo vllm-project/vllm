@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.attention.layer import MLAAttention
 from vllm.config import CacheConfig
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
 
 
@@ -29,13 +29,14 @@ class MLAModules:
     indexer_rotary_emb: torch.nn.Module | None = None
 
 
-@CustomOp.register("multi_head_latent_attention")
-class MultiHeadLatentAttentionWrapper(CustomOp):
-    """MLA layer registered as CustomOp to allow OOT backends to add
+# --8<-- [start:multi_head_latent_attention]
+@PluggableLayer.register("multi_head_latent_attention")
+class MultiHeadLatentAttentionWrapper(PluggableLayer):
+    """Pluggable MLA layer which allows OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
-    Note that currently MLA ignores the enable/disable mechanism of CustomOp
-    because there is only one in-tree implementation in forward_native.
-    TODO: implement this with a new PluggableLayer mechanism.
+    Note that currently oot platforms can still use CustomOp.register_oot to
+    replace MLA layer entirly, although we use PluggableLayer to register
+    this layer now.
 
     This class takes positions and hidden_states as input.
     The input tensors can either contain prefill tokens or decode tokens.
@@ -46,6 +47,8 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
        multi-query attention to decode tokens separately.
     3. Return the output tensor.
     """
+
+    # --8<-- [end:multi_head_latent_attention]
 
     def __init__(
         self,
@@ -107,7 +110,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
 
         self.prefix = prefix
 
-    def forward_native(
+    def forward(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -126,6 +129,7 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
             assert self.q_b_proj is not None, (
                 "q_b_proj is required when q_lora_rank is not None"
             )
+
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
@@ -171,6 +175,3 @@ class MultiHeadLatentAttentionWrapper(CustomOp):
         )
 
         return self.o_proj(attn_out)[0]
-
-    def forward_cuda(self, *args, **kwargs):
-        return self.forward_native(*args, **kwargs)

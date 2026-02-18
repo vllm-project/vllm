@@ -5,7 +5,7 @@ import copy
 from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from typing import Any, Optional, TypeAlias
+from typing import Any, TypeAlias
 
 from torch._C._autograd import DeviceType, _KinetoEvent, _ProfilerResult
 from torch._C._profiler import _EventType, _ExperimentalConfig, _ProfilerEvent
@@ -31,7 +31,7 @@ except ImportError:
 @dataclass
 class _ModuleTreeNode:
     event: _ProfilerEvent
-    parent: Optional["_ModuleTreeNode"] = None
+    parent: "_ModuleTreeNode | None" = None
     children: list["_ModuleTreeNode"] = field(default_factory=list)
     trace: str = ""
 

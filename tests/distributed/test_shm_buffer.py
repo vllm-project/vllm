@@ -22,7 +22,7 @@ class TestSingleWriterShmRingBuffer(unittest.TestCase):
     def tearDown(self):
         """Clean up after tests"""
         if self.ring_buffer:
-            del self.ring_buffer
+            self.ring_buffer.close()
 
     def test_buffer_opening(self):
         """Test opening an existing buffer"""

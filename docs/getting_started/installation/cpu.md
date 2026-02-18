@@ -131,7 +131,7 @@ VLLM_USE_PRECOMPILED=1 VLLM_PRECOMPILED_WHEEL_VARIANT=cpu VLLM_TARGET_DEVICE=cpu
 
 === "Apple silicon"
 
-    --8<-- "docs/getting_started/installation/cpu.arm.inc.md:build-image-from-source"
+    --8<-- "docs/getting_started/installation/cpu.apple.inc.md:build-image-from-source"
 
 === "IBM Z (S390X)"
     --8<-- "docs/getting_started/installation/cpu.s390x.inc.md:build-image-from-source"
@@ -172,13 +172,13 @@ Note, it is recommended to manually reserve 1 CPU for vLLM front-end process whe
 
 ### What are supported models on CPU?
 
-For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu)
+For the full and up-to-date list of models validated on CPU platforms, please see the official documentation: [Supported Models on CPU](../../models/hardware_supported_models/cpu.md)
 
 ### How to find benchmark configuration examples for supported CPU models?
 
-For any model listed under [Supported Models on CPU](https://docs.vllm.ai/en/latest/models/hardware_supported_models/cpu), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in [cpu test cases](https://github.com/vllm-project/vllm/blob/main/.buildkite/performance-benchmarks/tests/serving-tests-cpu.json)
-For details on how these optimized configurations are determined, see: [performance-benchmark-details](https://github.com/vllm-project/vllm/tree/main/.buildkite/performance-benchmarks#performance-benchmark-details).
-To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](https://docs.vllm.ai/en/latest/contributing/benchmarks/#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
+For any model listed under [Supported Models on CPU](../../models/hardware_supported_models/cpu.md), optimized runtime configurations are provided in the vLLM Benchmark Suite’s CPU test cases, defined in cpu test cases as serving-tests-cpu.json. Full test cases for Text-only models, Multi-Modal models and Embedded models are in cpu Text-Only test cases as serving-tests-cpu-text.json, cpu Multi-Modal test cases as serving-tests-cpu-multimodal.json and cpu Embedded test cases as serving-tests-cpu-embed.json.  
+For details on how these optimized configurations are determined, see: [performance-benchmark-details](../../../.buildkite/performance-benchmarks/README.md#performance-benchmark-details).
+To benchmark the supported models using these optimized settings, follow the steps in [running vLLM Benchmark Suite manually](../../benchmarking/dashboard.md#manually-trigger-the-benchmark) and run the Benchmark Suite on a CPU environment.  
 
 Below is an example command to benchmark all CPU-supported models using optimized configurations.
 
@@ -198,6 +198,28 @@ lscpu | grep "NUMA node(s):" | awk '{print $3}'
 
 For performance reference, users may also consult the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm&deviceName=cpu)
 , which publishes default-model CPU results produced using the same Benchmark Suite.
+
+#### Dry-Run
+
+For users only need to get the optimized runtime configurations without running benchmark, a Dry-Run mode is provided.
+By passing an environment variable DRY_RUN=1 with run-performance-benchmarks.sh,
+all commands will be generated under `./benchmark/results/`.
+
+```bash
+ON_CPU=1 DRY_RUN=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+By providing different JSON file, users can get runtime configurations for different models such as Embedded Models.
+
+```bash
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-embed.json DRY_RUN=1 bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
+
+By providing MODEL_FILTER and DTYPE_FILTER, only commands for related model ID and Data Type will be generated.
+
+```bash
+ON_CPU=1 SERVING_JSON=serving-tests-cpu-text.json DRY_RUN=1 MODEL_FILTER=meta-llama/Llama-3.1-8B-Instruct DTYPE_FILTER=bfloat16  bash .buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh
+```
 
 ### How to decide `VLLM_CPU_OMP_THREADS_BIND`?
 

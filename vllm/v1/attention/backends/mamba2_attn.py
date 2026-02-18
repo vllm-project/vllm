@@ -5,15 +5,15 @@ from dataclasses import dataclass, replace
 
 import torch
 
-from vllm.attention.backends.abstract import AttentionBackend
 from vllm.config import VllmConfig
 from vllm.utils.math_utils import cdiv
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
-)
-from vllm.v1.attention.backends.utils import (
-    CommonAttentionMetadata,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -89,6 +89,10 @@ def compute_varlen_chunk_metadata(
 
 class Mamba2AttentionBackend(AttentionBackend):
     @staticmethod
+    def get_name() -> str:
+        return "MAMBA2_ATTN"
+
+    @staticmethod
     def get_builder_cls() -> type["Mamba2AttentionMetadataBuilder"]:
         return Mamba2AttentionMetadataBuilder
 
@@ -101,7 +105,7 @@ class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     # Chunk-related metadata (only for prefill)
     seq_idx_p: torch.Tensor | None = None
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
-    # each chunk, its offests into the varlen sequence dimension. It is defined
+    # each chunk, its offsets into the varlen sequence dimension. It is defined
     # such that the i-th chunk contains tokens from cu_chunk_seqlen_p[i] to
     # cu_chunk_seqlen_p[i+1].
     cu_chunk_seqlen_p: torch.Tensor | None = None
@@ -123,10 +127,11 @@ class Mamba2AttentionMetadataBuilder(
         device: torch.device,
     ):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
-        self.chunk_size = vllm_config.model_config.get_mamba_chunk_size()
-        assert self.chunk_size is not None, (
+        chunk_size = vllm_config.model_config.get_mamba_chunk_size()
+        assert chunk_size is not None, (
             "chunk_size needs to be set in the model config for Mamba2 models"
         )
+        self.chunk_size: int = chunk_size
 
     def _compute_chunk_metadata(
         self,
@@ -215,7 +220,10 @@ class Mamba2AttentionMetadataBuilder(
             num_prefills = common.num_prefills
             num_decode_tokens = common.num_decode_tokens
 
-            num_computed_tokens_p_cpu = common_attn_metadata.num_computed_tokens_cpu[
+            num_computed_tokens_cpu = (
+                common_attn_metadata.compute_num_computed_tokens().cpu()
+            )
+            num_computed_tokens_p_cpu = num_computed_tokens_cpu[
                 num_reqs - num_prefills : num_reqs
             ]
             query_start_loc_p_cpu = (

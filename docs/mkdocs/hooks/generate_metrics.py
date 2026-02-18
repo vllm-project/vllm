@@ -13,14 +13,14 @@ GENERATED_METRICS_DIR = DOCS_DIR / "generated" / "metrics"
 
 # Files to scan for metric definitions - each will generate a separate table
 METRIC_SOURCE_FILES = [
-    {"path": "vllm/v1/metrics/loggers.py", "output": "general.md"},
+    {"path": "vllm/v1/metrics/loggers.py", "output": "general.inc.md"},
     {
         "path": "vllm/v1/spec_decode/metrics.py",
-        "output": "spec_decode.md",
+        "output": "spec_decode.inc.md",
     },
     {
         "path": "vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py",
-        "output": "nixl_connector.md",
+        "output": "nixl_connector.inc.md",
     },
 ]
 

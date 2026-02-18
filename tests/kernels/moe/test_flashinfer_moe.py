@@ -12,17 +12,24 @@ from tests.kernels.quantization.nvfp4_utils import (
 from tests.kernels.utils import torch_moe
 from vllm import _custom_ops as ops
 from vllm.config import ParallelConfig, VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    RoutingMethodType,
+)
 from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
     FlashInferExperts,
     is_valid_flashinfer_cutlass_fused_moe,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (
-    create_flashinfer_prepare_finalize,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe import fused_topk
 from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
+from vllm.utils.torch_utils import set_random_seed
 
 if not has_flashinfer_cutlass_fused_moe() or not current_platform.has_device_capability(
     100
@@ -48,7 +55,7 @@ MNK_FACTORS = [
 @pytest.mark.parametrize("e", [40, 64, 256])
 @pytest.mark.parametrize("topk", [1, 6, 8])
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
-@pytest.mark.parametrize("activation", ["silu_and_mul", "relu2"])
+@pytest.mark.parametrize("activation", [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL])
 @torch.inference_mode()
 def test_flashinfer_fp4_moe_no_graph(
     m: int,
@@ -57,17 +64,17 @@ def test_flashinfer_fp4_moe_no_graph(
     e: int,
     topk: int,
     dtype: torch.dtype,
-    activation: str,
+    activation: MoEActivation,
     workspace_init,
 ):
-    current_platform.seed_everything(7)
+    set_random_seed(7)
     with set_current_vllm_config(
         VllmConfig(parallel_config=ParallelConfig(pipeline_parallel_size=1))
     ):
         a = torch.randn((m, k), device="cuda", dtype=dtype) / 10
 
         quant_blocksize = 16
-        is_gated_act = activation == "silu_and_mul"
+        is_gated_act = activation.is_gated
 
         w1_q, w2_q, quant_config = make_test_quant_config(
             e,
@@ -85,12 +92,26 @@ def test_flashinfer_fp4_moe_no_graph(
 
         assert is_valid_flashinfer_cutlass_fused_moe(a, w1_q, w2_q)
 
-        flashinfer_experts = FusedMoEModularKernel(
-            create_flashinfer_prepare_finalize(use_dp=False, use_nvfp4=True),
-            FlashInferExperts(out_dtype=dtype, quant_config=quant_config),
+        moe_config = FusedMoEConfig(
+            num_experts=e,
+            experts_per_token=topk,
+            hidden_dim=k,
+            intermediate_size_per_partition=n,
+            num_local_experts=e,
+            num_logical_experts=e,
+            activation=activation,
+            device="cuda",
+            moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+            in_dtype=dtype,
+            is_act_and_mul=is_gated_act,
+            routing_method=RoutingMethodType.TopK,
         )
 
-        fi_activation = {"silu_and_mul": "silu", "relu2": "relu2_no_mul"}[activation]
+        flashinfer_experts = FusedMoEModularKernel(
+            MoEPrepareAndFinalizeNoEP(),
+            FlashInferExperts(moe_config=moe_config, quant_config=quant_config),
+            inplace=False,
+        )
 
         flashinfer_output = flashinfer_experts(
             hidden_states=a,
@@ -98,7 +119,7 @@ def test_flashinfer_fp4_moe_no_graph(
             w2=w2_q,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            activation=fi_activation,
+            activation=activation,
         )
 
         # Reference check:

@@ -1,10 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Sequence
 from functools import cached_property
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.logger import init_logger
@@ -40,8 +43,8 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
                 "constructor during construction."
             )
 
-        self.start_token_id = tokenizer.tokenizer.get_control_token(self.start_token)
-        self.end_token_id = tokenizer.tokenizer.get_control_token(self.end_token)
+        self.start_token_id = tokenizer.tokenizer.get_special_token(self.start_token)
+        self.end_token_id = tokenizer.tokenizer.get_special_token(self.end_token)
 
         if self.start_token_id is None or self.end_token_id is None:
             raise RuntimeError(
@@ -63,7 +66,7 @@ class MistralReasoningParser(BaseThinkingReasoningParser):
 
         return SpecialTokens.end_think
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         has_eot_token = False
 
         for id in input_ids[::-1]:

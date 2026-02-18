@@ -16,6 +16,10 @@ from transformers.models.qwen3.configuration_qwen3 import Qwen3Config
 from transformers.models.qwen3_moe.configuration_qwen3_moe import Qwen3MoeConfig
 
 from vllm.config.model import ModelConfig, get_hf_text_config
+from vllm.transformers_utils.model_arch_config_convertor import (
+    MODEL_ARCH_CONFIG_CONVERTORS,
+    ModelArchConfigConvertorBase,
+)
 from vllm.v1.metrics.perf import (
     AttentionMetrics,
     BaseConfigParser,
@@ -33,6 +37,12 @@ class MockModelConfig:
     def __init__(self, hf_config, dtype):
         self.hf_config = hf_config
         self.hf_text_config = get_hf_text_config(hf_config)
+        convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
+            self.hf_config.model_type, ModelArchConfigConvertorBase
+        )
+        self.model_arch_config = convertor_cls(
+            self.hf_config, self.hf_text_config
+        ).convert()
         self.dtype = dtype
         self.is_attention_free = False
 

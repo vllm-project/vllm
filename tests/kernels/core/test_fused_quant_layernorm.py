@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import itertools
+
 import pytest
 import torch
 
@@ -14,13 +16,14 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
 from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
 )
+from vllm.platforms import current_platform
 
 DTYPES = [torch.bfloat16, torch.float]
-QUANT_DTYPES = [torch.int8, torch.float8_e4m3fn]
+QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
 VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
-    *[(1, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5120, 5137]],
+    *[(1, i) for i in [1, 64, 128, *VEC_HIDDEN_SIZES, 5120, 5137]],
     *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
     *[(4096, i) for i in [1, 64, 5137]],
 ]
@@ -28,6 +31,7 @@ NUM_TOKENS_HIDDEN_SIZES = [
 ADD_RESIDUAL = [False, True]
 SCALE_UBS = [True, False]
 GROUP_SIZES = [None, [1, 64], [1, 128]]
+TMA_ALIGNMENTS = [0, 4]
 SEEDS = [0]
 CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
 
@@ -61,14 +65,14 @@ def ref_dynamic_per_token_or_block_quant(
     group_size: list[int] | None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if scale_ub is not None:
-        assert quant_dtype == torch.float8_e4m3fn
+        assert quant_dtype == current_platform.fp8_dtype()
 
     # Norm
     torch_out, residual = ref_rms_norm(rms_norm_layer, x, residual)
 
     # Quant
     if group_size is not None:
-        if quant_dtype == torch.float8_e4m3fn:
+        if quant_dtype == current_platform.fp8_dtype():
             torch_out, scales = per_token_group_quant_fp8(
                 torch_out, group_size=group_size[1], use_ue8m0=False
             )
@@ -78,7 +82,7 @@ def ref_dynamic_per_token_or_block_quant(
                 torch_out, group_size=group_size[1]
             )
     else:
-        if quant_dtype == torch.float8_e4m3fn:
+        if quant_dtype == current_platform.fp8_dtype():
             torch_out, scales = ops.scaled_fp8_quant(
                 torch_out, scale_ub=scale_ub, use_per_token_if_dynamic=True
             )
@@ -109,12 +113,21 @@ def ops_dynamic_per_token_or_block_quant(
     residual: torch.Tensor | None,
     scale_ub: torch.Tensor | None,
     group_size: list[int] | None,
+    tma_alignment: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     if residual is not None:
         residual = residual.clone()
     if group_size is not None:
         out, scales = ops.rms_norm_per_block_quant(
-            x, weight, EPS, quant_dtype, group_size, scale_ub, residual, True
+            x,
+            weight,
+            EPS,
+            quant_dtype,
+            group_size,
+            scale_ub,
+            residual,
+            True,
+            tma_alignment,
         )
         scales = scales.contiguous()
     else:
@@ -131,9 +144,10 @@ def ops_impl(
     residual: torch.Tensor | None,
     scale_ub: torch.Tensor | None,
     group_size: list[int] | None,
+    tma_alignment: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
     return ops_dynamic_per_token_or_block_quant(
-        weight, x, quant_dtype, residual, scale_ub, group_size
+        weight, x, quant_dtype, residual, scale_ub, group_size, tma_alignment
     )
 
 
@@ -142,11 +156,15 @@ def ops_impl(
 @pytest.mark.parametrize("has_scale_ub", SCALE_UBS)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("quant_dtype", QUANT_DTYPES)
-@pytest.mark.parametrize("group_size", GROUP_SIZES)
+@pytest.mark.parametrize(
+    "group_size, tma_alignment",
+    [(None, 0), *itertools.product(GROUP_SIZES, TMA_ALIGNMENTS)],
+)
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
 @torch.inference_mode()
 def test_rms_norm(
+    default_vllm_config,
     num_tokens: int,
     hidden_size: int,
     add_residual: bool,
@@ -154,6 +172,7 @@ def test_rms_norm(
     dtype: torch.dtype,
     quant_dtype: torch.dtype,
     group_size: list[int] | None,
+    tma_alignment: int,
     seed: int,
     device: str,
 ) -> None:
@@ -161,6 +180,7 @@ def test_rms_norm(
     if torch.cuda.is_available():
         torch.cuda.manual_seed(seed)
     torch.set_default_device(device)
+    torch.cuda.set_device(device)
 
     if group_size is not None and hidden_size % group_size[1] != 0:
         # skip
@@ -170,7 +190,21 @@ def test_rms_norm(
         # blockwise baseline doesn't support scale_ub
         return
 
-    if has_scale_ub and quant_dtype != torch.float8_e4m3fn:
+    if (
+        group_size is None or quant_dtype != current_platform.fp8_dtype()
+    ) and tma_alignment != 0:
+        # TMA alignment is only supported for groupwise fp8 kernels
+        return
+
+    if (
+        group_size is not None
+        and tma_alignment != 0
+        and hidden_size // group_size[1] % tma_alignment == 0
+    ):
+        # Skip tests where TMA alignment doesn't create extra padding to save time
+        return
+
+    if has_scale_ub and quant_dtype != current_platform.fp8_dtype():
         # skip
         return
 
@@ -193,7 +227,7 @@ def test_rms_norm(
         layer, x, quant_dtype, residual, scale_ub, group_size
     )
     ops_out, ops_scales, ops_residual = ops_impl(
-        layer.weight, x, quant_dtype, residual, scale_ub, group_size
+        layer.weight, x, quant_dtype, residual, scale_ub, group_size, tma_alignment
     )
 
     assert ref_out.dtype == quant_dtype

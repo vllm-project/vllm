@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import enum
 from abc import ABC, abstractmethod
 from collections.abc import Iterable
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 
@@ -16,6 +17,20 @@ if TYPE_CHECKING:
     from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
     from vllm.v1.request import Request, RequestStatus
     from vllm.v1.structured_output import StructuredOutputManager
+
+
+class PauseState(enum.IntEnum):
+    """Scheduler pause state.
+
+    - UNPAUSED: Normal operation
+    - PAUSE_NEW: No new requests are scheduled, requests already in
+                 running state are scheduled.
+    - PAUSE_ALL: No requests are scheduled
+    """
+
+    UNPAUSED = 0
+    PAUSED_NEW = 1
+    PAUSED_ALL = 2
 
 
 class SchedulerInterface(ABC):
@@ -85,11 +100,27 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def update_draft_token_ids(
-        self,
-        draft_token_ids: "DraftTokenIds",
+    def update_draft_token_ids(self, draft_token_ids: "DraftTokenIds") -> None:
+        """Update requests with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def update_draft_token_ids_in_output(
+        self, draft_token_ids: "DraftTokenIds", scheduler_output: "SchedulerOutput"
     ) -> None:
-        """Update the draft token ids for the scheduled requests."""
+        """Update scheduler output with newly generated draft token ids, applying
+        structured output grammar validation if needed.
+
+        Args:
+            draft_token_ids: The input draft token ids for each request.
+            scheduler_output: Update the given scheduler_output
+                with the corresponding draft token ids.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -104,11 +135,11 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def finish_requests(
         self,
-        request_ids: str | Iterable[str],
+        request_ids: str | Iterable[str] | None,
         finished_status: "RequestStatus",
-    ) -> None:
+    ) -> list[tuple[str, int]]:
         """Finish the requests in the scheduler's internal queue. If the request
-        is not in the queue, this method will do nothing.
+        is not in the queue, this method will do nothing for that request.
 
         This method is called in two cases:
         1. When the request is aborted by the client.
@@ -116,8 +147,12 @@ class SchedulerInterface(ABC):
            de-tokenizing its generated tokens.
 
         Args:
-            request_ids: A single or a list of request IDs.
+            request_ids: A single or a list of request IDs, or None to finish all.
             finished_status: The finished status of the given requests.
+
+        Returns:
+            Tuple of (req_id, client_index) for requests that were aborted. Will not
+            include any that were already finished.
         """
         raise NotImplementedError
 
@@ -151,6 +186,16 @@ class SchedulerInterface(ABC):
         not yet returned in SchedulerOutputs."""
         return self.has_unfinished_requests() or self.has_finished_requests()
 
+    @property
+    @abstractmethod
+    def pause_state(self) -> PauseState:
+        """Current pause state of the scheduler."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def set_pause_state(self, pause_state: PauseState) -> None:
+        raise NotImplementedError
+
     @abstractmethod
     def reset_prefix_cache(
         self, reset_running_requests: bool = False, reset_connector: bool = False
@@ -168,12 +213,21 @@ class SchedulerInterface(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache to invalidate all cached encoder outputs.
+
+        This should be called when model weights are updated to ensure
+        stale vision embeddings are not reused.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
         raise NotImplementedError
 
     @abstractmethod
-    def make_stats(self) -> Optional["SchedulerStats"]:
+    def make_stats(self) -> "SchedulerStats | None":
         """Make a SchedulerStats object for logging.
 
         The SchedulerStats object is created for every scheduling step.
@@ -185,5 +239,5 @@ class SchedulerInterface(ABC):
         """Shutdown the scheduler."""
         raise NotImplementedError
 
-    def get_kv_connector(self) -> Optional["KVConnectorBase_V1"]:
+    def get_kv_connector(self) -> "KVConnectorBase_V1 | None":
         return None

@@ -67,6 +67,7 @@ class EagleMistralLarge3Model(DeepseekV2Model):
             input_is_parallel=False,
             quant_config=quant_config,
             return_bias=False,
+            prefix=maybe_prefix(prefix, "fc"),
         )
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(

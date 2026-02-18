@@ -55,7 +55,7 @@ def cold_startup():
             os.environ.pop("VLLM_CACHE_ROOT", None)
 
 
-def run_startup_in_subprocess(engine_args_dict, result_queue):
+def run_startup_in_subprocess(engine_args, result_queue):
     """
     Run LLM startup in a subprocess and return timing metrics via a queue.
     This ensures complete isolation between iterations.
@@ -63,9 +63,6 @@ def run_startup_in_subprocess(engine_args_dict, result_queue):
     try:
         # Import inside the subprocess to avoid issues with forking
         from vllm import LLM
-        from vllm.engine.arg_utils import EngineArgs
-
-        engine_args = EngineArgs(**engine_args_dict)
 
         # Measure total startup time
         start_time = time.perf_counter()
@@ -104,7 +101,7 @@ def save_to_pytorch_benchmark_format(
     cold_startup_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={
-            "avg_cold_startup_time": results["avg_cold_startup_time"],
+            "avg_cold_startup_time": [results["avg_cold_startup_time"]],
         },
         extra_info={
             "cold_startup_times": results["cold_startup_times"],
@@ -117,7 +114,7 @@ def save_to_pytorch_benchmark_format(
     cold_compilation_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={
-            "avg_cold_compilation_time": results["avg_cold_compilation_time"],
+            "avg_cold_compilation_time": [results["avg_cold_compilation_time"]],
         },
         extra_info={
             "cold_compilation_times": results["cold_compilation_times"],
@@ -132,7 +129,7 @@ def save_to_pytorch_benchmark_format(
     warm_startup_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={
-            "avg_warm_startup_time": results["avg_warm_startup_time"],
+            "avg_warm_startup_time": [results["avg_warm_startup_time"]],
         },
         extra_info={
             "warm_startup_times": results["warm_startup_times"],
@@ -145,7 +142,7 @@ def save_to_pytorch_benchmark_format(
     warm_compilation_records = convert_to_pytorch_benchmark_format(
         args=args,
         metrics={
-            "avg_warm_compilation_time": results["avg_warm_compilation_time"],
+            "avg_warm_compilation_time": [results["avg_warm_compilation_time"]],
         },
         extra_info={
             "warm_compilation_times": results["warm_compilation_times"],
@@ -162,19 +159,19 @@ def add_cli_args(parser: argparse.ArgumentParser):
     parser.add_argument(
         "--num-iters-cold",
         type=int,
-        default=5,
+        default=3,
         help="Number of cold startup iterations.",
     )
     parser.add_argument(
         "--num-iters-warmup",
         type=int,
-        default=3,
+        default=1,
         help="Number of warmup iterations before benchmarking warm startups.",
     )
     parser.add_argument(
         "--num-iters-warm",
         type=int,
-        default=5,
+        default=3,
         help="Number of warm startup iterations.",
     )
     parser.add_argument(
@@ -200,15 +197,13 @@ def main(args: argparse.Namespace):
         Create LLM instance in a subprocess and measure startup time.
         Returns timing metrics, using subprocess for complete isolation.
         """
-        # Convert engine_args to dictionary for pickling
-        engine_args_dict = dataclasses.asdict(engine_args)
 
         # Create a queue for inter-process communication
         result_queue = multiprocessing.Queue()
         process = multiprocessing.Process(
             target=run_startup_in_subprocess,
             args=(
-                engine_args_dict,
+                engine_args,
                 result_queue,
             ),
         )

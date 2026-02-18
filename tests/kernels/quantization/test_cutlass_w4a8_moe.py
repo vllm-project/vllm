@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.utils.torch_utils import set_random_seed
 
 IS_SUPPORTED_BY_GPU = (
     current_platform.is_cuda() and current_platform.get_device_capability()[0] >= 9
@@ -248,7 +249,7 @@ def compute_moe_reference_output(setup: MoETestSetup) -> torch.Tensor:
 @pytest.mark.parametrize("random_zero", [True, False])
 def test_cutlass_w4a8_moe_mm_end_to_end(shape, random_zero):
     num_experts, N, K = shape
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     setup = make_moe_test_setup(
         num_experts=num_experts, K=K, N=N, max_blocks=64, random_zero=random_zero
     )
@@ -308,7 +309,7 @@ class W4A8MoELayer(torch.nn.Module):
     reason="W4A8 Grouped GEMM is not supported on this GPU type.",
 )
 def test_cutlass_w4a8_moe_mm_cuda_graph():
-    current_platform.seed_everything(42)
+    set_random_seed(42)
     # Fixed config for CUDA graph test (single parameter point).
     num_experts = 8
     K = 512

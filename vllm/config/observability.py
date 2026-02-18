@@ -6,7 +6,6 @@ from typing import Any, Literal, cast
 
 from packaging.version import parse
 from pydantic import Field, field_validator, model_validator
-from pydantic.dataclasses import dataclass
 
 from vllm import version
 from vllm.config.utils import config
@@ -16,7 +15,6 @@ DetailedTraceModules = Literal["model", "worker", "all"]
 
 
 @config
-@dataclass
 class ObservabilityConfig:
     """Configuration for observability - metrics and tracing."""
 
@@ -67,6 +65,17 @@ class ObservabilityConfig:
     enable_mfu_metrics: bool = False
     """Enable Model FLOPs Utilization (MFU) metrics."""
 
+    enable_mm_processor_stats: bool = False
+    """Enable collection of timing statistics for multimodal processor operations.
+    This is for internal use only (e.g., benchmarks) and is not exposed as a CLI
+    argument."""
+
+    enable_logging_iteration_details: bool = False
+    """Enable detailed logging of iteration details.
+    If set, vllm EngineCore will log iteration details
+    This includes number of context/generation requests and tokens
+    and the elapsed cpu time for the iteration."""
+
     @cached_property
     def collect_model_forward_time(self) -> bool:
         """Whether to collect model forward time for the request."""
@@ -113,9 +122,9 @@ class ObservabilityConfig:
     @classmethod
     def _validate_otlp_traces_endpoint(cls, value: str | None) -> str | None:
         if value is not None:
-            from vllm.tracing import is_otel_available, otel_import_error_traceback
+            from vllm.tracing import is_tracing_available, otel_import_error_traceback
 
-            if not is_otel_available():
+            if not is_tracing_available():
                 raise ValueError(
                     "OpenTelemetry is not available. Unable to configure "
                     "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "

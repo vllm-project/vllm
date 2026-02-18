@@ -119,8 +119,9 @@ class DeepseekVLV2Config(PretrainedConfig):
         self.candidate_resolutions = candidate_resolutions
         self.vocab_size = self.text_config.vocab_size
 
-        # update model_type for OCR model
-        if "DeepseekOCRForCausalLM" in (
-            self.architectures or kwargs.get("architectures", [])
-        ):
+        # update model_type for OCR models
+        architectures = self.architectures or kwargs.get("architectures", [])
+        if "DeepseekOCRForCausalLM" in architectures:
             self.model_type = "deepseek_ocr"
+        elif "DeepseekOCR2ForCausalLM" in architectures:
+            self.model_type = "deepseek_ocr2"

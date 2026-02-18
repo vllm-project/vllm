@@ -6,4 +6,4 @@
 
 ## Arguments
 
---8<-- "docs/argparse/bench_sweep_plot_pareto.inc.md"
+--8<-- "docs/generated/argparse/bench_sweep_plot_pareto.inc.md"
