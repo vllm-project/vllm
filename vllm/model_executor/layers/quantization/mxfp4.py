@@ -116,28 +116,31 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
             logger.info_once("Using FlashInfer MXFP4 BF16 backend for SM90")
             return Mxfp4Backend.SM90_FI_MXFP4_BF16
         elif (
-            current_platform.is_device_capability_family(100)
+            current_platform.is_blackwell_class()
             and has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS
         ):
-            logger.info_once("Using FlashInfer MXFP4 MXFP8 CUTLASS backend for SM100")
+            logger.info_once(
+                "Using FlashInfer MXFP4 MXFP8 CUTLASS backend for Blackwell-class GPU"
+            )
             return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
         elif (
             current_platform.is_device_capability_family(100)
             and has_flashinfer()
             and envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
         ):
+            # TRTLLM MXFP4 backend only supports SM100/SM103, not SM120/SM121
             return Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-        elif current_platform.is_device_capability_family(100) and has_flashinfer():
+        elif current_platform.is_blackwell_class() and has_flashinfer():
             logger.info_once(
-                "Using FlashInfer MXFP4 BF16 backend for SM100, "
-                "For faster performance on SM100, consider setting "
+                "Using FlashInfer MXFP4 BF16 backend for Blackwell-class GPU. "
+                "For faster performance, consider setting "
                 "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8=1, though this may impact "
                 "accuracy."
             )
             return Mxfp4Backend.SM100_FI_MXFP4_BF16
         elif (
-            current_platform.is_device_capability_family(100)
+            current_platform.is_blackwell_class()
             or current_platform.is_device_capability(90)
         ) and not has_flashinfer():
             logger.warning_once(

@@ -15,10 +15,11 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     Reasoning parser for the Qwen3 model.
 
     The Qwen3 model uses <think>...</think> tokens to denote reasoning text
-    within its output. The model provides a strict switch to disable reasoning
-    output via the 'enable_thinking=False' parameter. This parser extracts the
-    reasoning content enclosed by <think> and </think> tokens from the model's
-    output.
+    within its output. This parser extracts the reasoning content.
+
+    Note: Qwen3-Thinking models add <think> as a prompt prefix, so the model
+    output may only contain </think> without the opening tag. This parser
+    handles both cases.
     """
 
     @property
@@ -37,35 +38,28 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         """
         Extract reasoning content from the model output.
 
-        Qwen3 has stricter requirements - it needs both start and end tokens
-        to be present, unlike other models that work with just the end token.
-
-        For text <think>abc</think>xyz:
-        - 'abc' goes to reasoning
-        - 'xyz' goes to content
+        Handles two formats:
+        1. Full format: <think>reasoning</think>content
+        2. Prefix format: reasoning</think>content (when <think> is in prompt)
 
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
         """
-
-        # Check if the model output contains both <think> and </think> tokens.
-        if self.start_token not in model_output or self.end_token not in model_output:
+        # If no end token, no reasoning to extract
+        if self.end_token not in model_output:
             return None, model_output
 
-        # Check if the <think> is present in the model output, remove it
-        # if it is present.
+        # Remove start token if present (partition handles missing token gracefully)
         model_output_parts = model_output.partition(self.start_token)
         model_output = (
             model_output_parts[2] if model_output_parts[1] else model_output_parts[0]
         )
 
-        # Check if the model output contains the </think> tokens.
-        # If the end token is not found, return the model output as is.
-        if self.end_token not in model_output:
-            return None, model_output
-
-        # Extract reasoning content from the model output.
+        # Extract reasoning content (everything before </think>)
         reasoning, _, content = model_output.partition(self.end_token)
 
-        final_content = content or None
+        # Strip whitespace for consistency
+        reasoning = reasoning.strip() if reasoning else None
+        final_content = content.strip() if content else None
+
         return reasoning, final_content
