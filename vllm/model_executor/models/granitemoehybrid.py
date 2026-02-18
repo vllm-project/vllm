@@ -474,7 +474,7 @@ class GraniteMoeHybridModel(nn.Module):
                     continue
 
                 param = params_dict[name_mapped]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 success = False
 
                 if weight_loader is not None:
