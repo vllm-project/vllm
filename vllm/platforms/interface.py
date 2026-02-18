@@ -394,7 +394,7 @@ class Platform:
         pass
 
     @classmethod
-    def apply_config_platform_defaults(self, vllm_config: "VllmConfig") -> None:
+    def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         """
         Apply the platform-specific default values to the config.
 
