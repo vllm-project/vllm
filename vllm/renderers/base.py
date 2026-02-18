@@ -4,6 +4,7 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -22,7 +23,7 @@ from vllm.inputs import (
 from vllm.inputs.data import build_enc_dec_inputs, embeds_inputs, token_inputs
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import AsyncMicrobatchTokenizer
+from vllm.utils.async_utils import AsyncMicrobatchTokenizer, make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -78,6 +79,12 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self.tokenizer = tokenizer
 
+        # Shared single-thread executor for all blocking tokenizer and
+        # multimodal preprocessing operations.  HuggingFace Fast Tokenizers
+        # (Rust backend) use interior mutability (&mut self) and are NOT
+        # thread-safe, so every access must be serialized through one thread.
+        self._executor = ThreadPoolExecutor(max_workers=1)
+
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
@@ -112,7 +119,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
         if self._async_tokenizer is None:
-            self._async_tokenizer = AsyncMicrobatchTokenizer(self.get_tokenizer())
+            self._async_tokenizer = AsyncMicrobatchTokenizer(
+                self.get_tokenizer(),
+                executor=self._executor,
+            )
 
         return self._async_tokenizer
 
@@ -154,10 +164,18 @@ class BaseRenderer(ABC, Generic[_T]):
         if self._mm_cache_stats is not None:
             self._mm_cache_stats.reset = True
 
+    async def clear_mm_cache_async(self) -> None:
+        """Serialize clear_mm_cache through the shared executor to avoid
+        races with concurrent process_inputs on the mm_processor_cache."""
+        await make_async(self.clear_mm_cache, executor=self._executor)()
+
     def shutdown(self) -> None:
         mm_processor_cache = self.mm_processor_cache
         if mm_processor_cache is not None:
             mm_processor_cache.close()
+
+        if executor := getattr(self, "_executor", None):
+            executor.shutdown(wait=False)
 
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
@@ -653,6 +671,18 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return engine_prompt
 
+    async def _process_for_engine_async(
+        self,
+        tok_prompts: list[TokPrompt],
+        arrival_time: float,
+    ) -> list[ProcessorInputs]:
+        """Offload process_for_engine to the shared executor to avoid
+        blocking the event loop during multimodal preprocessing."""
+        return await make_async(
+            lambda: [self.process_for_engine(p, arrival_time) for p in tok_prompts],
+            executor=self._executor,
+        )()
+
     # Top-level methods
     def render_cmpl(
         self,
@@ -690,7 +720,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return [self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts]
+        return await self._process_for_engine_async(tok_prompts, arrival_time)
 
     def render_chat(
         self,
@@ -754,8 +784,6 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        eng_prompts = [
-            self.process_for_engine(prompt, arrival_time) for prompt in tok_prompts
-        ]
+        eng_prompts = await self._process_for_engine_async(tok_prompts, arrival_time)
 
         return out_conversations, eng_prompts
