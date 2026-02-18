@@ -105,6 +105,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             self.gemm1_clamp_limit = torch.tensor(
                 [7.0] * self.num_experts, dtype=torch.float32, device=self.device
             )
+            if quant_config.quant_dtype == "mxfp8":
+                self.fake_input_scale = torch.ones(self.num_experts, device=self.device)
 
     @property
     def expects_unquantized_inputs(self) -> bool:
@@ -318,16 +320,15 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             swiglu_limit = self.gemm1_clamp_limit
 
             if self.quant_dtype == "mxfp8":
+                assert self.fake_input_scale is not None
                 fc1_expert_weights = w1.view(torch.long)
                 fc2_expert_weights = w2.view(torch.long)
-                fake_input_scale = torch.ones(
-                    self.num_experts, device=hidden_states.device
-                )
+
                 quant_scales = [
                     self.w1_scale.view(torch.int32),
-                    fake_input_scale,
+                    self.fake_input_scale,
                     self.w2_scale.view(torch.int32),
-                    fake_input_scale,
+                    self.fake_input_scale,
                 ]
                 use_mxfp8_act_scaling = True
             else:
