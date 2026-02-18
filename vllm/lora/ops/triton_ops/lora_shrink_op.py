@@ -270,7 +270,7 @@ def _lora_shrink_fake(
     lora_token_start_loc: torch.Tensor,
     lora_ids: torch.Tensor,
     no_lora_flag_cpu: torch.Tensor,
-    num_active_loras: torch.Tensor,
+    num_active_loras: torch.Tensor,  # CPU tensor [1], number of active LoRAs
     scaling: float,
 ) -> None:
     return
