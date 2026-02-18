@@ -5,4 +5,4 @@ metric_threshold: 0.568
 reasoning_effort: "low"
 server_args: "--tensor-parallel-size 2"
 env:
-  SM100_FI_MXFP4_MXFP8_CUTLASS: "1"
+  VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: "1"
