@@ -51,6 +51,9 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
+    get_padding_alignment,
+)
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 
@@ -260,12 +263,14 @@ def maybe_roundup_hidden_size(
         ):
             hidden_size = round_up(hidden_size, 128)
         elif (
-            current_platform.is_rocm()
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
+            current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
             or current_mxfp4_backend == Mxfp4Backend.MARLIN
         ):
             hidden_size = round_up(hidden_size, 256)
+        elif current_platform.is_rocm():
+            pad_align = get_padding_alignment()
+            hidden_size = round_up(hidden_size, pad_align)
 
     return hidden_size
 
