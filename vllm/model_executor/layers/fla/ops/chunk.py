@@ -180,7 +180,7 @@ def chunk_gated_delta_rule(
         intermediate_states (Optional[torch.Tensor]):
             When ``return_intermediate_states`` is ``True`` a tensor containing
             the per-chunk state snapshots shaped ``[num_chunks_total, H, V, K]``.
-            Otherwise ``None``.
+            Otherwise missing.
 
     Examples::
         >>> import torch
@@ -265,4 +265,7 @@ def chunk_gated_delta_rule(
     )
     if head_first:
         o = rearrange(o, "b t h ... -> b h t ...")
-    return o, final_state, intermediate_states
+    if return_intermediate_states:
+        return o, final_state, intermediate_states
+    else:
+        return o, final_state
