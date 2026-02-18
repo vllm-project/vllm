@@ -13,6 +13,7 @@
   #include "quantization/w8a8/fp8/amd/quant_utils.cuh"
 #else
   #include "quantization/w8a8/fp8/nvidia/quant_utils.cuh"
+  #include "quantization/fp4/nvfp4_utils.cuh"
 #endif
 
 #include <algorithm>
@@ -330,6 +331,111 @@ __global__ void concat_and_cache_mla_kernel(
   copy(k_pe, kv_cache, k_pe_stride, block_stride, pe_dim, kv_lora_rank);
 }
 
+#ifndef USE_ROCM
+template <typename scalar_t>
+__global__ void concat_and_cache_mla_nvfp4_kernel(
+    const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
+    const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
+    uint8_t* __restrict__ kv_cache,  // [num_blocks, block_size, cache_stride]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int block_stride,                    //
+    const int entry_stride,                    //
+    const int kv_c_stride,                     //
+    const int k_pe_stride,                     //
+    const int kv_lora_rank,                    //
+    const int pe_dim,                          //
+    const int block_size                       //
+) {
+  constexpr int NVFP4_BLOCK_SIZE = 16;
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0) {
+    return;
+  }
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+  const int head_dim = kv_lora_rank + pe_dim;
+  const int num_blocks = head_dim / NVFP4_BLOCK_SIZE;
+  const int64_t token_base_offset =
+      block_idx * block_stride + block_offset * entry_stride;
+  uint8_t* token_ptr = kv_cache + token_base_offset;
+
+  const int packed_data_size = head_dim / 2;
+  float* scale_ptr = reinterpret_cast<float*>(token_ptr + packed_data_size);
+
+  for (int block_id = threadIdx.x; block_id < num_blocks;
+       block_id += blockDim.x) {
+    const int block_start_idx = block_id * NVFP4_BLOCK_SIZE;
+
+    float values[NVFP4_BLOCK_SIZE];
+    float amax = 0.0f;
+  #pragma unroll
+    for (int i = 0; i < NVFP4_BLOCK_SIZE; i++) {
+      const int elem_idx = block_start_idx + i;
+      float val = 0.0f;
+      if (elem_idx < kv_lora_rank) {
+        const int64_t src_idx = token_idx * kv_c_stride + elem_idx;
+        if constexpr (std::is_same_v<scalar_t, half>) {
+          val = __half2float(kv_c[src_idx]);
+        } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+          val = __bfloat162float(kv_c[src_idx]);
+        } else {
+          val = float(kv_c[src_idx]);
+        }
+      } else {
+        const int64_t src_idx =
+            token_idx * k_pe_stride + (elem_idx - kv_lora_rank);
+        if constexpr (std::is_same_v<scalar_t, half>) {
+          val = __half2float(k_pe[src_idx]);
+        } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+          val = __bfloat162float(k_pe[src_idx]);
+        } else {
+          val = float(k_pe[src_idx]);
+        }
+      }
+      values[i] = val;
+      amax = fmaxf(amax, fabsf(val));
+    }
+
+    constexpr float E2M1_MAX = 6.0f;
+    float block_scale = amax * (1.0f / E2M1_MAX);
+    block_scale = fmaxf(block_scale, FLT_MIN);
+
+    __nv_fp8_e4m3 fp8_scale = __nv_fp8_e4m3(block_scale);
+    float quantized_scale = float(fp8_scale);
+    float output_scale =
+        (quantized_scale != 0.0f) ? (1.0f / quantized_scale) : 0.0f;
+
+    float scaled_values[NVFP4_BLOCK_SIZE];
+  #pragma unroll
+    for (int i = 0; i < NVFP4_BLOCK_SIZE; i++) {
+      float scaled = values[i] * output_scale;
+      scaled = fmaxf(-6.0f, fminf(6.0f, scaled));
+      scaled_values[i] = scaled;
+    }
+
+    float2 vec1[4];
+    float2 vec2[4];
+  #pragma unroll
+    for (int i = 0; i < 4; i++) {
+      vec1[i] = make_float2(scaled_values[i * 2], scaled_values[i * 2 + 1]);
+      vec2[i] =
+          make_float2(scaled_values[8 + i * 2], scaled_values[8 + i * 2 + 1]);
+    }
+
+    const uint32_t packed1 = vllm::fp32_vec8_to_e2m1(vec1);
+    const uint32_t packed2 = vllm::fp32_vec8_to_e2m1(vec2);
+    const int packed_offset = block_start_idx / 2;
+
+    *reinterpret_cast<uint32_t*>(token_ptr + packed_offset) = packed1;
+    *reinterpret_cast<uint32_t*>(token_ptr + packed_offset + 4) = packed2;
+
+    scale_ptr[block_id] = quantized_scale;
+  }
+}
+#endif  // USE_ROCM
+
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void concat_and_cache_ds_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
@@ -496,6 +602,138 @@ __global__ void indexer_k_quant_and_cache_kernel(
     reinterpret_cast<float*>(kv_cache)[dst_scale_idx / 4] = scale;
   }
 }
+
+#ifndef USE_ROCM
+// E2M1 lookup table: [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0]
+// Must be declared at global scope (not inside device function)
+__device__ __constant__ float nvfp4_e2m1_lut[8] = {0.0f, 0.5f, 1.0f, 1.5f,
+                                                   2.0f, 3.0f, 4.0f, 6.0f};
+#endif  // USE_ROCM
+
+#ifndef USE_ROCM
+// NVFP4-specific quantization kernel for KV cache
+// Reference: TensorRT-LLM PR #6244
+// Scale is stored in kv_cache itself (similar to FP8), not in a separate buffer
+template <typename scalar_t>
+__global__ void indexer_k_quant_and_cache_nvfp4_kernel(
+    const scalar_t* __restrict__ k,  // [num_tokens, head_dim]
+    uint8_t* __restrict__ kv_cache,  // [num_blocks, block_size, cache_stride]
+                                     // (packed data + scales)
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int head_dim,                        // dimension of each head
+    const int cache_block_size,                // cache block size
+    const int cache_stride  // stride for each token in kv_cache (includes space
+                            // for scales)
+) {
+  constexpr int NVFP4_BLOCK_SIZE = 16;  // NVFP4 uses 16 elements per block
+  constexpr int VEC_SIZE = 8;  // Process 8 elements at a time for NVFP4
+
+  const int64_t token_idx = blockIdx.x;
+  const int64_t block_start_idx = (blockIdx.y * blockDim.y * blockDim.x +
+                                   threadIdx.y * blockDim.x + threadIdx.x) *
+                                  NVFP4_BLOCK_SIZE;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  const int64_t block_idx = slot_idx / cache_block_size;
+  const int64_t block_offset = slot_idx % cache_block_size;
+
+  // NOTE: slot_idx can be -1 if the token is padded
+  if (slot_idx < 0 || (block_start_idx + NVFP4_BLOCK_SIZE > head_dim)) {
+    return;
+  }
+
+  // Load 16 elements for this block
+  float values[NVFP4_BLOCK_SIZE];
+  for (int i = 0; i < NVFP4_BLOCK_SIZE && (block_start_idx + i) < head_dim;
+       i++) {
+    if constexpr (std::is_same_v<scalar_t, half>) {
+      values[i] = __half2float(k[token_idx * head_dim + block_start_idx + i]);
+    } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+      values[i] =
+          __bfloat162float(k[token_idx * head_dim + block_start_idx + i]);
+    } else {
+      values[i] = float(k[token_idx * head_dim + block_start_idx + i]);
+    }
+  }
+
+  // Find max absolute value in this block
+  // Each thread processes a distinct 16-element block, so amax is computed
+  // independently per thread without warp reduction.
+  float amax = 0.0f;
+  for (int i = 0; i < NVFP4_BLOCK_SIZE && (block_start_idx + i) < head_dim;
+       i++) {
+    amax = fmaxf(amax, fabsf(values[i]));
+  }
+
+  // Compute block scale: max / 6.0 (max value of e2m1)
+  constexpr float E2M1_MAX = 6.0f;
+  float block_scale = (amax * (1.0f / E2M1_MAX));
+  block_scale = fmaxf(block_scale, FLT_MIN);
+
+  // Quantize to FP8 E4M3 for the scale factor
+  __nv_fp8_e4m3 fp8_scale = __nv_fp8_e4m3(block_scale);
+  float quantized_scale = float(fp8_scale);
+
+  // Compute output scale for quantization
+  float output_scale =
+      (quantized_scale != 0.0f) ? (1.0f / quantized_scale) : 0.0f;
+
+  // Scale and quantize the values
+  float scaled_values[NVFP4_BLOCK_SIZE];
+  for (int i = 0; i < NVFP4_BLOCK_SIZE && (block_start_idx + i) < head_dim;
+       i++) {
+    scaled_values[i] = values[i] * output_scale;
+    // Clamp to [-6.0, 6.0] range
+    scaled_values[i] = fmaxf(-6.0f, fminf(6.0f, scaled_values[i]));
+  }
+
+  // Convert to NVFP4 format (e2m1) - 8 values at a time
+  // Two FP4 values are packed into one uint8
+  // Layout per token: [packed_data (head_dim/2 uint8), scales (head_dim/16 * 4
+  // bytes float32)]
+  const int64_t packed_data_size =
+      head_dim / 2;  // packed data size in uint8 per token
+  const int64_t token_base_offset =
+      block_idx * cache_block_size * cache_stride + block_offset * cache_stride;
+  const int64_t dst_offset = token_base_offset + (block_start_idx / 2);
+
+  // Convert first 8 values
+  float2 vec1[4];
+  for (int i = 0; i < 4; i++) {
+    vec1[i] = make_float2(scaled_values[i * 2], scaled_values[i * 2 + 1]);
+  }
+  uint32_t packed1 = vllm::fp32_vec8_to_e2m1(vec1);
+
+  // Convert second 8 values
+  float2 vec2[4];
+  for (int i = 0; i < 4; i++) {
+    vec2[i] =
+        make_float2(scaled_values[8 + i * 2], scaled_values[8 + i * 2 + 1]);
+  }
+  uint32_t packed2 = vllm::fp32_vec8_to_e2m1(vec2);
+
+  // Store packed values (4 uint8 per uint32)
+  if (block_start_idx + NVFP4_BLOCK_SIZE <= head_dim) {
+    *reinterpret_cast<uint32_t*>(&kv_cache[dst_offset]) = packed1;
+    *reinterpret_cast<uint32_t*>(&kv_cache[dst_offset + 4]) = packed2;
+  }
+
+  // Store block scale in kv_cache itself (similar to FP8)
+  // Scale is stored after the packed data for each token
+  // Layout per token: [packed_data (head_dim/2 uint8), scales (head_dim/16 * 4
+  // bytes float32)]
+  // Each thread processes a distinct 16-element block and writes its own scale
+  // No need to restrict which thread writes (each thread writes a different
+  // scale location)
+  // Calculate scale storage location: after packed data for this token
+  const int64_t scale_offset_in_token =
+      packed_data_size;  // bytes after packed data
+  const int64_t scale_idx_in_token =
+      block_start_idx / NVFP4_BLOCK_SIZE;  // which scale (0 to head_dim/16-1)
+  const int64_t scale_byte_offset = token_base_offset + scale_offset_in_token +
+                                    scale_idx_in_token * sizeof(float);
+  reinterpret_cast<float*>(&kv_cache[scale_byte_offset])[0] = quantized_scale;
+}
+#endif  // USE_ROCM
 
 template <int BLOCK_Y_SIZE>
 __global__ void cp_gather_indexer_k_quant_cache_kernel(
@@ -715,6 +953,7 @@ void concat_and_cache_mla(
   int num_tokens = slot_mapping.size(0);
   int kv_lora_rank = kv_c.size(1);
   int pe_dim = k_pe.size(1);
+  int head_dim = kv_lora_rank + pe_dim;
   int block_size = kv_cache.size(1);
 
   if (kv_cache_dtype == "fp8_ds_mla") {
@@ -726,8 +965,17 @@ void concat_and_cache_mla(
                 "kv_c.itemsize() must be 2 for fp8_ds_mla");
     TORCH_CHECK(k_pe.itemsize() == 2,
                 "k_pe.itemsize() must be 2 for fp8_ds_mla");
+  } else if (kv_cache_dtype == "nvfp4") {
+    TORCH_CHECK(head_dim % 16 == 0,
+                "head_dim must be divisible by 16 for nvfp4");
+    const int packed_data_size = head_dim / 2;
+    const int scale_size = (head_dim / 16) * 4;
+    TORCH_CHECK(kv_cache.size(2) == packed_data_size + scale_size,
+                "kv_cache.size(2) must match packed nvfp4 layout");
+    TORCH_CHECK(kv_cache.scalar_type() == at::ScalarType::Byte,
+                "kv_cache must be uint8 for nvfp4");
   } else {
-    TORCH_CHECK(kv_cache.size(2) == kv_lora_rank + pe_dim);
+    TORCH_CHECK(kv_cache.size(2) == head_dim);
   }
 
   int kv_c_stride = kv_c.stride(0);
@@ -748,6 +996,41 @@ void concat_and_cache_mla(
     dim3 block(96);
     DISPATCH_BY_KV_CACHE_DTYPE(kv_c.dtype(), kv_cache_dtype,
                                CALL_CONCAT_AND_CACHE_DS_MLA);
+  } else if (kv_cache_dtype == "nvfp4") {
+#ifdef USE_ROCM
+    TORCH_CHECK(false, "nvfp4 kv cache is not supported on ROCm");
+#else
+    dim3 grid(num_tokens);
+    const int nvfp4_blocks = head_dim / 16;
+    const int threads = std::min(std::max(nvfp4_blocks, 1), 256);
+    dim3 block(threads);
+    if (kv_c.dtype() == torch::kFloat32) {
+      vllm::concat_and_cache_mla_nvfp4_kernel<float>
+          <<<grid, block, 0, stream>>>(
+              kv_c.data_ptr<float>(), k_pe.data_ptr<float>(),
+              kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
+              block_stride, entry_stride, kv_c_stride, k_pe_stride,
+              kv_lora_rank, pe_dim, block_size);
+    } else if (kv_c.dtype() == torch::kFloat16) {
+      vllm::concat_and_cache_mla_nvfp4_kernel<half><<<grid, block, 0, stream>>>(
+          reinterpret_cast<half*>(kv_c.data_ptr()),
+          reinterpret_cast<half*>(k_pe.data_ptr()),
+          kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
+          block_stride, entry_stride, kv_c_stride, k_pe_stride, kv_lora_rank,
+          pe_dim, block_size);
+    } else if (kv_c.dtype() == torch::kBFloat16) {
+      vllm::concat_and_cache_mla_nvfp4_kernel<__nv_bfloat16>
+          <<<grid, block, 0, stream>>>(
+              reinterpret_cast<__nv_bfloat16*>(kv_c.data_ptr()),
+              reinterpret_cast<__nv_bfloat16*>(k_pe.data_ptr()),
+              kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
+              block_stride, entry_stride, kv_c_stride, k_pe_stride,
+              kv_lora_rank, pe_dim, block_size);
+    } else {
+      TORCH_CHECK(false,
+                  "Unsupported input dtype for nvfp4 kv cache: ", kv_c.dtype());
+    }
+#endif
   } else {
     dim3 grid(num_tokens);
     dim3 block(std::min(kv_lora_rank, 512));
@@ -856,6 +1139,87 @@ __global__ void gather_and_maybe_dequant_cache(
   // build in release.
   assert(CTA_SIZE == blockDim.x);
 
+  // NVFP4 special handling: scales are stored in kv_cache itself
+  if constexpr (kv_dt == Fp8KVCacheDataType::kNvFp4) {
+    constexpr int NVFP4_BLOCK_SIZE = 16;
+    const int head_dim = ENTRY_SIZE;
+    const int packed_data_size = head_dim / 2;
+
+    for (int token_id = blockIdx.x; token_id < num_tokens;
+         token_id += gridDim.x) {
+      int64_t batch_id = token_to_seq[token_id];
+      int64_t batch_start = cu_seq_lens[batch_id];
+      int64_t batch_end = cu_seq_lens[batch_id + 1];
+      int32_t batch_offset = token_id - batch_start;
+
+      if (token_id >= batch_end) continue;
+      int32_t offset = 0;
+      if (seq_starts != nullptr) {
+        offset = seq_starts[batch_id];
+      }
+      batch_offset += offset;
+      int32_t block_table_id = batch_offset / block_size;
+      int32_t slot_id = batch_offset % block_size;
+      int32_t block_table_offset =
+          batch_id * block_table_stride + block_table_id;
+      int32_t block_id = block_table[block_table_offset];
+      int64_t cache_offset =
+          block_id * cache_block_stride + slot_id * cache_entry_stride;
+
+      const uint8_t* token_packed_data =
+          reinterpret_cast<const uint8_t*>(src_cache) + cache_offset;
+      const float* token_scales =
+          reinterpret_cast<const float*>(token_packed_data + packed_data_size);
+      scalar_t* dst_ptr = dst + token_id * dst_entry_stride;
+
+      // Process elements in blocks of 16 (NVFP4_BLOCK_SIZE)
+      const int num_blocks = head_dim / NVFP4_BLOCK_SIZE;
+      const int blocks_per_thread = (num_blocks + blockDim.x - 1) / blockDim.x;
+      const int start_block = threadIdx.x * blocks_per_thread;
+      const int end_block = min(start_block + blocks_per_thread, num_blocks);
+
+      for (int block_idx = start_block; block_idx < end_block; block_idx++) {
+        const int block_start = block_idx * NVFP4_BLOCK_SIZE;
+        const float block_scale = token_scales[block_idx];
+
+        // Process 16 elements in this block
+        for (int i = 0; i < NVFP4_BLOCK_SIZE; i++) {
+          const int elem_idx = block_start + i;
+          if (elem_idx >= head_dim) break;
+
+          const int packed_idx = elem_idx / 2;
+          const int nibble_idx = elem_idx % 2;
+
+          // Extract the 4-bit value from packed data
+          uint8_t packed_byte = token_packed_data[packed_idx];
+          uint8_t fp4_val = (nibble_idx == 0) ? (packed_byte & 0x0F)
+                                              : ((packed_byte >> 4) & 0x0F);
+
+          // Extract sign and magnitude
+          bool sign = (fp4_val & 0x08) != 0;
+          uint8_t magnitude = fp4_val & 0x07;
+
+          // Lookup e2m1 value and apply sign
+          float e2m1_val = nvfp4_e2m1_lut[magnitude];
+          if (sign) e2m1_val = -e2m1_val;
+
+          // Dequantize: multiply by block scale
+          float dequantized_val = e2m1_val * block_scale;
+
+          // Convert to output type
+          if constexpr (std::is_same_v<scalar_t, half>) {
+            dst_ptr[elem_idx] = __float2half(dequantized_val);
+          } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+            dst_ptr[elem_idx] = __float2bfloat16(dequantized_val);
+          } else {
+            dst_ptr[elem_idx] = scalar_t(dequantized_val);
+          }
+        }
+      }
+    }
+    return;
+  }
+
 #pragma unroll
   for (int token_id = blockIdx.x; token_id < num_tokens;
        token_id += gridDim.x) {
@@ -918,16 +1282,17 @@ __global__ void gather_and_maybe_dequant_cache(
 // SCALAR_T is the data type of the destination tensor.
 // CACHE_T is the stored data type of kv-cache.
 // KV_DTYPE is the real data type of kv-cache.
-#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                        \
-  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,      \
-                                       thread_block_size>                     \
-      <<<grid, block, 0, stream>>>(                                           \
-          reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                   \
-          reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                        \
-          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(),   \
-          token_to_seq.data_ptr<int32_t>(), num_tokens, block_size,           \
-          block_table_stride, cache_block_stride, cache_entry_stride,         \
-          dst_entry_stride, reinterpret_cast<const float*>(scale.data_ptr()), \
+#define CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE)                      \
+  vllm::gather_and_maybe_dequant_cache<SCALAR_T, CACHE_T, KV_DTYPE, 576,    \
+                                       thread_block_size>                   \
+      <<<grid, block, 0, stream>>>(                                         \
+          reinterpret_cast<CACHE_T*>(src_cache.data_ptr()),                 \
+          reinterpret_cast<SCALAR_T*>(dst.data_ptr()),                      \
+          block_table.data_ptr<int32_t>(), cu_seq_lens.data_ptr<int32_t>(), \
+          token_to_seq.data_ptr<int32_t>(), num_tokens, block_size,         \
+          block_table_stride, cache_block_stride, cache_entry_stride,       \
+          dst_entry_stride,                                                 \
+          reinterpret_cast<const float*>(dummy_scale.data_ptr()),           \
           seq_starts_ptr);
 
 // Gather sequences from the cache into the destination tensor.
@@ -986,7 +1351,162 @@ void gather_and_maybe_dequant_cache(
   const int32_t* seq_starts_ptr =
       seq_starts.has_value() ? seq_starts.value().data_ptr<int32_t>() : nullptr;
 
+  // For NVFP4, scale parameter is not used (scales are stored in kv_cache
+  // itself) Pass empty scale tensor, the kernel will read scales from kv_cache
+  torch::Tensor dummy_scale = scale;
+  if (kv_cache_dtype == "nvfp4") {
+    TORCH_CHECK(head_dim % 16 == 0,
+                "head_dim must be divisible by 16 for NVFP4");
+    // Create a dummy scale tensor (not used, but required by the macro)
+    dummy_scale = torch::empty({1}, torch::TensorOptions()
+                                        .dtype(torch::kFloat32)
+                                        .device(src_cache.device()));
+  }
+
   DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype, CALL_GATHER_CACHE);
+}
+
+#ifndef USE_ROCM
+namespace vllm {
+
+template <typename scalar_t>
+__global__ void dequantize_mla_kv_cache_nvfp4_kernel(
+    const uint8_t* __restrict__ src_cache, scalar_t* __restrict__ dst_cache,
+    const int32_t* __restrict__ block_table,
+    const int32_t* __restrict__ seq_lens, const int32_t batch_size,
+    const int32_t max_blocks, const int32_t block_size, const int32_t head_dim,
+    const int64_t block_table_stride, const int64_t src_block_stride,
+    const int64_t src_entry_stride, const int64_t dst_block_stride,
+    const int64_t dst_entry_stride) {
+  const int32_t linear_block = blockIdx.x;
+  if (linear_block >= batch_size * max_blocks) return;
+
+  const int32_t batch_id = linear_block / max_blocks;
+  const int32_t block_idx = linear_block - batch_id * max_blocks;
+  const int32_t seq_len = seq_lens[batch_id];
+  if (seq_len <= 0) return;
+
+  const int32_t num_blocks = (seq_len + block_size - 1) / block_size;
+  if (block_idx >= num_blocks) return;
+
+  const int32_t src_block_id =
+      block_table[batch_id * block_table_stride + block_idx];
+  if (src_block_id < 0) return;
+
+  constexpr int32_t nvfp4_block = 16;
+  const int32_t packed_data_size = head_dim / 2;
+  const int32_t elements_per_block = block_size * head_dim;
+  const int32_t dst_block_id = linear_block;
+
+  for (int32_t idx = threadIdx.x; idx < elements_per_block; idx += blockDim.x) {
+    const int32_t token_idx = idx / head_dim;
+    const int32_t elem_idx = idx - token_idx * head_dim;
+
+    const uint8_t* token_ptr = src_cache + src_block_id * src_block_stride +
+                               token_idx * src_entry_stride;
+    const uint8_t* packed_data = token_ptr;
+    const float* scales =
+        reinterpret_cast<const float*>(token_ptr + packed_data_size);
+
+    const int32_t packed_idx = elem_idx >> 1;
+    const int32_t nibble_idx = elem_idx & 1;
+    const uint8_t packed_byte = packed_data[packed_idx];
+    const uint8_t fp4_val =
+        (nibble_idx == 0) ? (packed_byte & 0x0F) : ((packed_byte >> 4) & 0x0F);
+
+    const bool sign = (fp4_val & 0x08) != 0;
+    const uint8_t magnitude = fp4_val & 0x07;
+    float e2m1_val = nvfp4_e2m1_lut[magnitude];
+    if (sign) e2m1_val = -e2m1_val;
+
+    const float block_scale = scales[elem_idx / nvfp4_block];
+    const float dequantized_val = e2m1_val * block_scale;
+
+    scalar_t* dst_ptr = dst_cache + dst_block_id * dst_block_stride +
+                        token_idx * dst_entry_stride;
+    if constexpr (std::is_same_v<scalar_t, half>) {
+      dst_ptr[elem_idx] = __float2half(dequantized_val);
+    } else if constexpr (std::is_same_v<scalar_t, __nv_bfloat16>) {
+      dst_ptr[elem_idx] = __float2bfloat16(dequantized_val);
+    } else {
+      dst_ptr[elem_idx] = scalar_t(dequantized_val);
+    }
+  }
+}
+
+}  // namespace vllm
+#endif
+
+void dequantize_mla_kv_cache_nvfp4(
+    torch::Tensor const& src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, 432]
+    torch::Tensor const& dst_cache,    // [BATCH*MAX_BLOCKS, BLOCK_SIZE, 576]
+    torch::Tensor const& block_table,  // [BATCH, MAX_BLOCKS]
+    torch::Tensor const& seq_lens) {   // [BATCH]
+#ifdef USE_ROCM
+  TORCH_CHECK(false, "dequantize_mla_kv_cache_nvfp4 is not supported on ROCm");
+#else
+  at::cuda::OptionalCUDAGuard device_guard(src_cache.device());
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  TORCH_CHECK(src_cache.is_cuda(), "src_cache must be on CUDA");
+  TORCH_CHECK(dst_cache.is_cuda(), "dst_cache must be on CUDA");
+  TORCH_CHECK(block_table.is_cuda(), "block_table must be on CUDA");
+  TORCH_CHECK(seq_lens.is_cuda(), "seq_lens must be on CUDA");
+
+  TORCH_CHECK(block_table.dtype() == torch::kInt32,
+              "block_table must be int32");
+  TORCH_CHECK(seq_lens.dtype() == torch::kInt32, "seq_lens must be int32");
+  TORCH_CHECK(src_cache.dtype() == torch::kUInt8, "src_cache must be uint8");
+  TORCH_CHECK(dst_cache.dtype() == torch::kFloat16 ||
+                  dst_cache.dtype() == torch::kBFloat16,
+              "dst_cache must be float16 or bfloat16");
+
+  const int32_t batch_size = block_table.size(0);
+  const int32_t max_blocks = block_table.size(1);
+  const int32_t block_size = src_cache.size(1);
+  const int32_t head_dim = dst_cache.size(2);
+
+  TORCH_CHECK(dst_cache.size(0) == batch_size * max_blocks,
+              "dst_cache.size(0) must be batch_size * max_blocks");
+  TORCH_CHECK(dst_cache.size(1) == block_size, "dst_cache block_size mismatch");
+  TORCH_CHECK(head_dim == 576, "head_dim must be 576 for MLA");
+  TORCH_CHECK(head_dim % 16 == 0, "head_dim must be divisible by 16 for NVFP4");
+
+  const int32_t packed_data_size = head_dim / 2;
+  const int32_t scale_size = (head_dim / 16) * 4;
+  TORCH_CHECK(src_cache.size(2) == packed_data_size + scale_size,
+              "src_cache head_dim mismatch for NVFP4 MLA cache");
+
+  const int64_t block_table_stride = block_table.stride(0);
+  const int64_t src_block_stride = src_cache.stride(0);
+  const int64_t src_entry_stride = src_cache.stride(1);
+  const int64_t dst_block_stride = dst_cache.stride(0);
+  const int64_t dst_entry_stride = dst_cache.stride(1);
+
+  constexpr int32_t threads = 256;
+  dim3 grid(batch_size * max_blocks);
+  dim3 block(threads);
+
+  if (dst_cache.dtype() == torch::kFloat16) {
+    vllm::dequantize_mla_kv_cache_nvfp4_kernel<half>
+        <<<grid, block, 0, stream>>>(
+            src_cache.data_ptr<uint8_t>(),
+            reinterpret_cast<half*>(dst_cache.data_ptr()),
+            block_table.data_ptr<int32_t>(), seq_lens.data_ptr<int32_t>(),
+            batch_size, max_blocks, block_size, head_dim, block_table_stride,
+            src_block_stride, src_entry_stride, dst_block_stride,
+            dst_entry_stride);
+  } else {
+    vllm::dequantize_mla_kv_cache_nvfp4_kernel<__nv_bfloat16>
+        <<<grid, block, 0, stream>>>(
+            src_cache.data_ptr<uint8_t>(),
+            reinterpret_cast<__nv_bfloat16*>(dst_cache.data_ptr()),
+            block_table.data_ptr<int32_t>(), seq_lens.data_ptr<int32_t>(),
+            batch_size, max_blocks, block_size, head_dim, block_table_stride,
+            src_block_stride, src_entry_stride, dst_block_stride,
+            dst_entry_stride);
+  }
+#endif
 }
 
 namespace vllm {
@@ -1271,6 +1791,7 @@ void cp_gather_and_upconvert_fp8_kv_cache(
 }
 
 // Macro to dispatch the kernel based on the data type.
+// This macro is redefined in indexer_k_quant_and_cache function for NVFP4
 #define CALL_INDEXER_K_QUANT_AND_CACHE(KV_T, CACHE_T, KV_DTYPE)         \
   vllm::indexer_k_quant_and_cache_kernel<KV_T, CACHE_T, KV_DTYPE>       \
       <<<grid, block, 0, stream>>>(                                     \
@@ -1295,18 +1816,60 @@ void indexer_k_quant_and_cache(
               "k and kv_cache must be on the same device");
   TORCH_CHECK(k.device() == slot_mapping.device(),
               "k and slot_mapping must be on the same device");
-  TORCH_CHECK(head_dim % quant_block_size == 0,
-              "head_dim must be divisible by quant_block_size");
 
-  constexpr int vec_size = 4;
-  dim3 grid(num_tokens, (head_dim + quant_block_size * vec_size - 1) /
-                            (quant_block_size * vec_size));
-  dim3 block(32, vec_size);
   const at::cuda::OptionalCUDAGuard device_guard(device_of(k));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), "fp8_e4m3",
-                             CALL_INDEXER_K_QUANT_AND_CACHE);
+  // Validate parameters based on cache type
+  if (scale_fmt == "nvfp4") {
+    TORCH_CHECK(head_dim % 16 == 0,
+                "head_dim must be divisible by 16 for NVFP4");
+  } else {
+    TORCH_CHECK(head_dim % quant_block_size == 0,
+                "head_dim must be divisible by quant_block_size");
+  }
+
+  // For NVFP4, use specialized kernel directly (bypasses standard dispatch)
+  // For other types, use the standard dispatch macro
+  if (scale_fmt == "nvfp4") {
+    constexpr int NVFP4_BLOCK_SIZE = 16;
+    constexpr int vec_size = 8;
+    dim3 nvfp4_grid(num_tokens,
+                    (head_dim + NVFP4_BLOCK_SIZE - 1) / NVFP4_BLOCK_SIZE);
+    dim3 nvfp4_block(32, vec_size);
+
+    // Dispatch based on input dtype - unified with other types
+    if (k.dtype() == torch::kFloat32) {
+      vllm::indexer_k_quant_and_cache_nvfp4_kernel<float>
+          <<<nvfp4_grid, nvfp4_block, 0, stream>>>(
+              k.data_ptr<float>(), kv_cache.data_ptr<uint8_t>(),
+              slot_mapping.data_ptr<int64_t>(), head_dim, cache_block_size,
+              cache_stride);
+    } else if (k.dtype() == torch::kFloat16) {
+      vllm::indexer_k_quant_and_cache_nvfp4_kernel<half>
+          <<<nvfp4_grid, nvfp4_block, 0, stream>>>(
+              reinterpret_cast<half*>(k.data_ptr()),
+              kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
+              head_dim, cache_block_size, cache_stride);
+    } else if (k.dtype() == torch::kBFloat16) {
+      vllm::indexer_k_quant_and_cache_nvfp4_kernel<__nv_bfloat16>
+          <<<nvfp4_grid, nvfp4_block, 0, stream>>>(
+              reinterpret_cast<__nv_bfloat16*>(k.data_ptr()),
+              kv_cache.data_ptr<uint8_t>(), slot_mapping.data_ptr<int64_t>(),
+              head_dim, cache_block_size, cache_stride);
+    } else {
+      TORCH_CHECK(false,
+                  "Unsupported input dtype for NVFP4 KV cache: ", k.dtype());
+    }
+  } else {
+    // For non-NVFP4 types, use standard dispatch
+    constexpr int vec_size = 4;
+    dim3 grid(num_tokens, (head_dim + quant_block_size * vec_size - 1) /
+                              (quant_block_size * vec_size));
+    dim3 block(32, vec_size);
+    DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), scale_fmt,
+                               CALL_INDEXER_K_QUANT_AND_CACHE);
+  }
 }
 
 // Macro to dispatch the kernel based on the data amount.

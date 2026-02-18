@@ -15,6 +15,7 @@ enum class Fp8KVCacheDataType {
   kAuto = 0,
   kFp8E4M3 = 1,
   kFp8E5M2 = 2,
+  kNvFp4 = 3,
 };
 
 // fp8 vector types for quantization of kv cache

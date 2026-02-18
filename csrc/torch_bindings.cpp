@@ -759,6 +759,13 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
                  &gather_and_maybe_dequant_cache);
 
   cache_ops.def(
+      "dequantize_mla_kv_cache_nvfp4(Tensor src_cache, Tensor! dst_cache, "
+      "                              Tensor block_table, Tensor seq_lens) -> "
+      "()");
+  cache_ops.impl("dequantize_mla_kv_cache_nvfp4", torch::kCUDA,
+                 &dequantize_mla_kv_cache_nvfp4);
+
+  cache_ops.def(
       "cp_gather_cache(Tensor src_cache, Tensor! dst, Tensor block_table, "
       "Tensor cu_seq_lens, int batch_size, Tensor? seq_starts) -> ()");
   cache_ops.impl("cp_gather_cache", torch::kCUDA, &cp_gather_cache);
