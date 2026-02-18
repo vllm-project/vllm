@@ -49,6 +49,10 @@ class MyLLM(LLM):
 
     def __init__(self, *args, **kwargs):
         os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
+        # Remove the top-level CUDA_VISIBLE_DEVICES variable set by Ray
+        # so that vLLM can manage its own device placement within the worker.
+        os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+
         super().__init__(*args, **kwargs)
 
 
