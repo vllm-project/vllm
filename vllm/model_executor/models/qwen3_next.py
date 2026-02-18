@@ -106,6 +106,46 @@ logger = init_logger(__name__)
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
 
+def _copy_state_to_dest_from_pool(
+    dest: torch.Tensor,
+    pool: torch.Tensor,
+    pool_indices: torch.Tensor,
+    dest_offset: int = 0,
+) -> None:
+    """Copy pool[pool_indices[valid]] into dest[valid + dest_offset] for valid where
+    pool_indices >= 0. Used to fill a destination buffer from a state pool using
+    slot indices (e.g. initial_state from ssm_state for decode/prefill).
+    """
+    valid = torch.nonzero(pool_indices >= 0, as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return
+    pool_idx = pool_indices.index_select(0, valid).to(
+        device=pool.device, dtype=torch.long
+    )
+    data = pool.index_select(0, pool_idx)
+    dest.index_copy_(0, valid + dest_offset, data)
+
+
+def _copy_state_to_pool_from_src(
+    pool: torch.Tensor,
+    pool_slot_indices: torch.Tensor,
+    src: torch.Tensor,
+    src_offset: int = 0,
+) -> None:
+    """Copy src[valid + src_offset] into pool[pool_slot_indices[valid]] for valid
+    where pool_slot_indices >= 0. Used to write state back into the pool at
+    given slot indices (e.g. last recurrent state for prefill -> ssm_state).
+    """
+    valid = torch.nonzero(pool_slot_indices >= 0, as_tuple=False).squeeze(-1)
+    if valid.numel() == 0:
+        return
+    slots = pool_slot_indices.index_select(0, valid).to(
+        device=pool.device, dtype=torch.long
+    )
+    data = src.index_select(0, valid + src_offset).to(pool.dtype)
+    pool.index_copy_(0, slots, data)
+
+
 def fi_chunk_gated_delta_rule(
     q: torch.Tensor,
     k: torch.Tensor,
@@ -928,40 +968,20 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 # For decode sequences (if any), copy their existing state
                 if num_decodes > 0:
                     assert ssm_state_indices_decode is not None
-                    valid_decode_positions = torch.nonzero(
-                        ssm_state_indices_decode >= 0, as_tuple=False
-                    ).squeeze(-1)
-                    if valid_decode_positions.numel() > 0:
-                        decode_state_indices = ssm_state_indices_decode.index_select(
-                            0, valid_decode_positions
-                        ).to(device=ssm_state.device, dtype=torch.long)
-                        decode_states = ssm_state.index_select(0, decode_state_indices)
-                        initial_state.index_copy_(
-                            0,
-                            valid_decode_positions,
-                            decode_states,
-                        )
+                    _copy_state_to_dest_from_pool(
+                        dest=initial_state,
+                        pool=ssm_state,
+                        pool_indices=ssm_state_indices_decode,
+                    )
 
                 # For prefill sequences, copy cached state from block indices
                 if block_state_indices.numel() > 0:
-                    valid_block_positions = torch.nonzero(
-                        block_state_indices >= 0, as_tuple=False
-                    ).squeeze(-1)
-                    if valid_block_positions.numel() > 0:
-                        ssm_state_initials = ssm_state.index_select(
-                            0,
-                            block_state_indices.index_select(
-                                0, valid_block_positions
-                            ).to(device=ssm_state.device, dtype=torch.long),
-                        )
-                        prefill_positions_in_initial_state = (
-                            valid_block_positions + num_decodes
-                        )
-                        initial_state.index_copy_(
-                            0,
-                            prefill_positions_in_initial_state,
-                            ssm_state_initials,
-                        )
+                    _copy_state_to_dest_from_pool(
+                        dest=initial_state,
+                        pool=ssm_state,
+                        pool_indices=block_state_indices,
+                        dest_offset=num_decodes,
+                    )
 
                     if has_initial_state is not None:
                         req_has_initial_state = has_initial_state[
@@ -1000,23 +1020,12 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
 
                 # Write the last recurrent state for prefill requests
                 assert state_indices_prefill is not None
-                valid_prefill_positions = torch.nonzero(
-                    state_indices_prefill >= 0, as_tuple=False
-                ).squeeze(-1)
-                if valid_prefill_positions.numel() > 0:
-                    dest_slots = state_indices_prefill.index_select(
-                        0, valid_prefill_positions
-                    ).to(device=ssm_state.device, dtype=torch.long)
-                    prefill_positions_in_last_state = (
-                        valid_prefill_positions + num_decodes
-                    )
-                    ssm_state.index_copy_(
-                        0,
-                        dest_slots,
-                        last_recurrent_state.index_select(
-                            0, prefill_positions_in_last_state
-                        ).to(ssm_state.dtype),
-                    )
+                _copy_state_to_pool_from_src(
+                    pool=ssm_state,
+                    pool_slot_indices=state_indices_prefill,
+                    src=last_recurrent_state,
+                    src_offset=num_decodes,
+                )
 
                 # Write the last recurrent state for decode requests (if any)
                 if num_decodes > 0:
