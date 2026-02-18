@@ -131,6 +131,7 @@ class TestInitializeToolSessions:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
@@ -218,6 +219,7 @@ class TestValidateGeneratorInput:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
@@ -236,9 +238,6 @@ class TestValidateGeneratorInput:
             chat_template=None,
             chat_template_content_format="auto",
         )
-
-        # Set max_model_len for testing
-        instance.max_model_len = 100
 
         return instance
 

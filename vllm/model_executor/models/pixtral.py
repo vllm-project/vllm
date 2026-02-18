@@ -217,28 +217,13 @@ class PixtralProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_vision_config(
-        self,
-        processor: PixtralProcessorAdapter | None = None,
-    ):
-        if processor is None:
-            processor = self.get_hf_processor()
-
-        return PixtralVisionConfig(
-            image_size=processor.image_size,
-            patch_size=processor.patch_size,
-        )
-
     def get_num_image_tokens(
         self,
         *,
         image_width: int,
         image_height: int,
-        processor: PixtralProcessorAdapter | None = None,
+        processor: PixtralProcessorAdapter,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         ncols, nrows = processor.image_processor._image_to_num_tokens(
             Image.new("RGB", (image_width, image_height))
         )
@@ -261,6 +246,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -282,6 +268,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 

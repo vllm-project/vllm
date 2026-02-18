@@ -42,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -89,6 +90,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
 
     def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessorFast:
         return self.get_hf_processor(**kwargs).image_processor
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -176,7 +180,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         min_tiles: int,
         max_tiles: int,
         tile_size: int,
-    ) -> tuple[int, int]:
+    ) -> tuple[int, int, int]:
         aspect_ratio = width / height
         target_ratios = self._target_ratios(min_tiles, max_tiles)
         # find best matching grid configuration
@@ -190,18 +194,27 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         self,
         image_width: int,
         image_height: int,
-        processor: Lfm2VlProcessor | None,
-    ) -> tuple[int, int]:
-        if processor is None:
-            processor = self.get_image_processor()
+        processor: Lfm2VlProcessor,
+        mm_kwargs: Mapping[str, object],
+    ) -> tuple[int, int, int]:
+        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
 
-        downsample_factor = processor.image_processor.downsample_factor
-        encoder_patch_size = processor.image_processor.encoder_patch_size
-        max_pixels_tolerance = processor.image_processor.max_pixels_tolerance
-        min_tiles = processor.image_processor.min_tiles
-        max_tiles = processor.image_processor.max_tiles
-        max_image_tokens = processor.image_processor.max_image_tokens
-        tile_size = processor.image_processor.tile_size
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        downsample_factor = mm_kwargs.get(
+            "downsample_factor", image_processor.downsample_factor
+        )
+        encoder_patch_size = mm_kwargs.get(
+            "encoder_patch_size", image_processor.encoder_patch_size
+        )
+        max_pixels_tolerance = mm_kwargs.get(
+            "max_pixels_tolerance", image_processor.max_pixels_tolerance
+        )
+        min_tiles = mm_kwargs.get("min_tiles", image_processor.min_tiles)
+        max_tiles = mm_kwargs.get("max_tiles", image_processor.max_tiles)
+        max_image_tokens = mm_kwargs.get(
+            "max_image_tokens", image_processor.max_image_tokens
+        )
+        tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
 
         do_image_splitting = not min_tiles == max_tiles == 1
         is_image_large = self._is_image_too_large(
@@ -235,12 +248,14 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: Lfm2VlProcessor | None,
+        processor: Lfm2VlProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, _, total_patches = self._get_image_feature_grid_size(
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
         return total_patches
 
@@ -249,11 +264,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         spatial_shapes: torch.Tensor,
-        processor: Lfm2VlProcessor | None,
+        processor: Lfm2VlProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> str:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         grid_placeholder = "<|img_row_{n_h}_col_{n_w}|>"
         image_token = processor.image_token
         image_start_token = processor.image_start_token
@@ -263,6 +276,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         num_thumbnail_tokens, num_tokens_per_tile = self.get_num_image_tokens(
             spatial_shapes=spatial_shapes,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
         tile_img_placeholder = grid_placeholder + (image_token * num_tokens_per_tile)
 
@@ -270,6 +284,7 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
             image_width=image_width,
             image_height=image_height,
             processor=processor,
+            mm_kwargs=mm_kwargs,
         )
 
         if grid_w > 1 or grid_h > 1:
@@ -295,15 +310,25 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         self,
         *,
         spatial_shapes: torch.Tensor,
-        processor: Lfm2VlProcessor | None,
+        processor: Lfm2VlProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[int, int]:
-        tile_size = processor.image_processor.tile_size
-        downsample_factor = processor.image_processor.downsample_factor
-        encoder_patch_size = processor.image_processor.encoder_patch_size
+        image_processor: Lfm2VlImageProcessorFast = processor.image_processor
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        downsample_factor = mm_kwargs.get(
+            "downsample_factor", image_processor.downsample_factor
+        )
+        encoder_patch_size = mm_kwargs.get(
+            "encoder_patch_size", image_processor.encoder_patch_size
+        )
+        tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
+
         num_thumbnail_tokens = spatial_shapes[-1].prod() // (downsample_factor**2)
         num_patches_tile = tile_size // encoder_patch_size
         dwn_num_patches_tile = math.ceil(num_patches_tile / downsample_factor)
         num_tiles_tokens = dwn_num_patches_tile * dwn_num_patches_tile
+
         return num_thumbnail_tokens, num_tiles_tokens
 
 
@@ -319,6 +344,7 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -346,7 +372,9 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
     ) -> BatchFeature:
         # Text-only input not supported in composite processor
         if not (images := mm_data.get("images", [])):
-            prompt_ids = self.info.get_tokenizer().encode(prompt)
+            prompt_ids = self.info.get_tokenizer().encode(
+                prompt, add_special_tokens=False
+            )
             prompt_ids = self._apply_hf_processor_tokens_only(prompt_ids)
             return BatchFeature(dict(input_ids=[prompt_ids]), tensor_type="pt")
 
@@ -369,6 +397,7 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
                 image_width=size.width,
                 image_height=size.height,
                 processor=hf_processor,
+                mm_kwargs=mm_kwargs,
             )
             for size in image_sizes
         ]
@@ -411,6 +440,7 @@ class Lfm2VLMultiModalProcessor(BaseMultiModalProcessor[Lfm2VLProcessingInfo]):
                 image_height=image_size.height,
                 spatial_shapes=spatial_shapes,
                 processor=hf_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
             return PromptUpdateDetails.select_text(
                 image_repl,
