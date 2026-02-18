@@ -95,11 +95,16 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if either SiLU+Mul or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
-    return cfg.compilation_config.is_custom_op_enabled(
-        "silu_and_mul"
-    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    """
+    Enable if either SiLU+Mul or quant FP8 custom op is active;
+    otherwise Inductor handles fusion.
+    Also enable for FP4 models as FP4 quant is always custom so Inductor cannot fuse it.
+    """
+    return (
+        cfg.compilation_config.is_custom_op_enabled("silu_and_mul")
+        or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+        or (cfg.model_config is not None and cfg.model_config.is_nvfp4_quantized())
+    )
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
