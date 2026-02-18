@@ -59,7 +59,6 @@ from vllm.config import (
     get_attr_docs,
 )
 from vllm.config.cache import (
-    BlockSize,
     CacheDType,
     KVOffloadingBackend,
     MambaCacheMode,
@@ -431,7 +430,7 @@ class EngineArgs:
     max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )
-    block_size: BlockSize = CacheConfig.block_size
+    block_size: int = None  # type: ignore[assignment]
     enable_prefix_caching: bool | None = None
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
