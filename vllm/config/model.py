@@ -252,10 +252,6 @@ class ModelConfig:
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
-    logits_processor_pattern: str | None = None
-    """Optional regex pattern specifying valid logits processor qualified names
-    that can be passed with the `logits_processors` extra completion argument.
-    Defaults to `None`, which allows no processors."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -342,7 +338,6 @@ class ModelConfig:
             "config_format",
             "hf_token",
             "hf_overrides",
-            "logits_processor_pattern",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
@@ -362,6 +357,12 @@ class ModelConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
+
+        # NOTE: For some models (e.g, Qwen3-VL), whether the MM code path is enabled
+        # affects the computation graph of the language model, therefore we add it
+        # here early.
+        if self.multimodal_config:
+            factors["language_model_only"] = self.multimodal_config.language_model_only
         return hash_factors(factors)
 
     def _update_nested(
@@ -1119,6 +1120,9 @@ class ModelConfig:
     @cached_property
     def is_mm_prefix_lm(self) -> bool:
         """Whether to use bidirectional attention for mm positions."""
+        if hasattr(self.hf_config, "is_mm_prefix_lm"):
+            return bool(self.hf_config.is_mm_prefix_lm)
+        # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
             "gemma3",
             "molmo2",
@@ -1554,6 +1558,7 @@ class ModelConfig:
 
     @property
     def attn_type(self) -> AttnTypeStr:
+        """Determine the attention type based on model configuration."""
         if self.pooler_config is not None:
             seq_pooling_type = self._model_info.default_seq_pooling_type
             if seq_pooling_type == "CLS":
@@ -1681,6 +1686,20 @@ class ModelConfig:
     @property
     def is_quantized(self) -> bool:
         return getattr(self.hf_config, "quantization_config", None) is not None
+
+    def is_nvfp4_quantized(self) -> bool:
+        # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
+        if self.quantization in ("modelopt_fp4",):
+            return True
+
+        # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
+        # in the quantization config
+        quant_config = self.model_arch_config.quantization_config
+        return (
+            self.quantization == "compressed-tensors"
+            and quant_config is not None
+            and "nvfp4" in quant_config.get("format", "").lower()
+        )
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):

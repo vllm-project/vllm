@@ -172,6 +172,7 @@ def build_attn_metadata(
     num_tokens: int,
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
+    max_query_len: int,
     seq_lens: torch.Tensor,
     max_seq_len: int,
     block_tables: Sequence[torch.Tensor],
@@ -179,7 +180,6 @@ def build_attn_metadata(
     kv_cache_config: KVCacheConfig,
     dcp_local_seq_lens: torch.Tensor | None = None,
 ) -> dict[str, Any]:
-    max_query_len = int(query_start_loc_cpu.max())
     seq_lens = seq_lens[:num_reqs]
 
     if dcp_local_seq_lens is not None:

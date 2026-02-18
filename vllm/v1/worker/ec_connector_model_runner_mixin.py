@@ -72,7 +72,8 @@ class ECConnectorModelRunnerMixin:
         assert scheduler_output.ec_connector_metadata is not None
         ec_connector.bind_connector_metadata(scheduler_output.ec_connector_metadata)
 
-        if not ec_connector.is_producer:
+        # Load caches for consumer or both roles
+        if ec_connector.is_consumer:
             ec_connector.start_load_caches(encoder_cache, **kwargs)
 
         try:
