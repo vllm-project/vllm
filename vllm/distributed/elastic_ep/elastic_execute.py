@@ -26,6 +26,7 @@ from vllm.distributed import (
 )
 from vllm.distributed.parallel_state import (
     create_standby_groups,
+    destroy_old_comm_groups,
     prepare_communication_buffer_for_model,
     switch_to_standby_groups,
 )
@@ -233,9 +234,14 @@ class ElasticEPScalingExecutor:
             device=self.worker.device,
         )
 
+    def destroy_old_comm_groups(self) -> None:
+        destroy_old_comm_groups()
+
     def switch_and_prepare(self) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
+
+        destroy_old_comm_groups()
 
         switch_to_standby_groups()
 
