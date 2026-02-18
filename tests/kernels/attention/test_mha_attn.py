@@ -282,12 +282,8 @@ def test_mha_attn_varlen_forward_flashinfer(
         hidden_size = num_heads * head_size
         tp_size = 1
 
-        sequence_lengths_np = cu_seqlens_np[1:] - cu_seqlens_np[:-1]
-        sequence_lengths_np = MMEncoderAttention.maybe_add_padding_to_seqlens(
-            AttentionBackendEnum.FLASHINFER,
-            sequence_lengths_np,
-            len(sequence_lengths_np),
-            0,
+        sequence_lengths_np = MMEncoderAttention.maybe_compute_sequence_lengths(
+            AttentionBackendEnum.FLASHINFER, cu_seqlens_np
         )
         sequence_lengths = torch.from_numpy(sequence_lengths_np).to(
             device, dtype=torch.int32, non_blocking=True
