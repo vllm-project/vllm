@@ -699,29 +699,26 @@ class Worker(WorkerBase):
         if isinstance(output, ModelRunnerOutput | AsyncModelRunnerOutput):
             return output
 
-        if output is None:
-            if scheduler_output.has_structured_output_requests:
-                # Bitmasks will be computed by the scheduler, which will then
-                # call sample_tokens().
-                return None
+        if isinstance(output, IntermediateTensors):
+            parallel_config = self.vllm_config.parallel_config
+            assert (
+                parallel_config.distributed_executor_backend != "external_launcher"
+                and not get_pp_group().is_last_rank
+            )
 
-            # Sample immediately without separate RPC.
+            # launch non-blocking send of intermediate tensors
+            self._pp_send_work = get_pp_group().isend_tensor_dict(
+                output.tensors,
+                all_gather_group=get_tp_group(),
+                all_gather_tensors=all_gather_tensors,
+            )
+
+        if not scheduler_output.has_structured_output_requests:
+            # Run sample stage inline without separate RPC.
             return self.model_runner.sample_tokens(grammar_output=None)
 
-        assert isinstance(output, IntermediateTensors)
-        parallel_config = self.vllm_config.parallel_config
-        assert (
-            parallel_config.distributed_executor_backend != "external_launcher"
-            and not get_pp_group().is_last_rank
-        )
-
-        # launch non-blocking send of intermediate tensors
-        self._pp_send_work = get_pp_group().isend_tensor_dict(
-            output.tensors,
-            all_gather_group=get_tp_group(),
-            all_gather_tensors=all_gather_tensors,
-        )
-
+        # Bitmasks will be computed by the scheduler, which will then
+        # call sample_tokens().
         return None
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
