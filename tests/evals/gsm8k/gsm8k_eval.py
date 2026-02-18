@@ -159,7 +159,7 @@ def _score_gsm8k(
         "accuracy": accuracy,
         "invalid_rate": invalid_rate,
         "latency": latency,
-        "questions_per_second": num_questions / latency,
+        "questions_per_second": num_questions / latency if latency > 0 else 0.0,
         "total_output_tokens": total_output_tokens,
         "tokens_per_second": tokens_per_second,
         "num_questions": num_questions,
