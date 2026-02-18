@@ -1117,11 +1117,12 @@ class OpenAIServingResponses(OpenAIServing):
                 prev_outputs = copy(prev_response.output)
             else:
                 prev_outputs = []
-            for response_msg in request.input:
-                new_msg = parse_response_input(response_msg, prev_outputs)
+            for i, response_msg in enumerate(request.input):
+                # Pass next_msg to parse_response_input for reasoning channel selection
+                next_msg = request.input[i + 1] if i + 1 < len(request.input) else None
+                new_msg = parse_response_input(response_msg, prev_outputs, next_msg)
                 if new_msg.author.role != "system":
                     messages.append(new_msg)
-
                 # User passes in a tool call request and its output. We need
                 # to add the tool call request to prev_outputs so that the
                 # parse_response_input can find the tool call request when

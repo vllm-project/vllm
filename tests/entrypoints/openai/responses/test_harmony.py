@@ -1211,6 +1211,41 @@ async def test_function_call_with_previous_input_messages(
         "aquarius" in output_text or "otter" in output_text or "tuesday" in output_text
     )
 
+    # ============================================================
+    # Test for issue #28262: channel metadata preservation
+    # ============================================================
+
+    # Make a third request with function_call_output to test channel metadata
+    response_3 = await client.responses.create(
+        model=model_name,
+        input=[
+            {
+                "type": "function_call_output",
+                "call_id": function_call.call_id,
+                "output": str(result),
+            }
+        ],
+        tools=tools,
+        previous_response_id=response.id,
+        extra_body={"enable_response_messages": True},
+    )
+
+    assert response_3 is not None
+    assert response_3.status == "completed"
+
+    # Check input_messages have correct channel metadata
+    tool_msg_found = False
+    for msg_dict in response_3.input_messages:
+        # msg_dict is serialized format with 'author' and 'channel' fields
+        if msg_dict.get("author", {}).get("role") == "tool":
+            assert msg_dict.get("channel") == "commentary", (
+                f"Tool output should have channel='commentary', "
+                f"got '{msg_dict.get('channel')}'"
+            )
+            tool_msg_found = True
+
+    assert tool_msg_found, "Should have found a tool message in input_messages"
+
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
