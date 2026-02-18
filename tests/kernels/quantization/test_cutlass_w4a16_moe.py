@@ -40,7 +40,7 @@ init_workspace_manager(device=device)
     [
         (48, 2048, 7168),  # Kimi-K2 EP8
         (384, 256, 7168),  # Kimi-K2 TP8
-        (96, 1024, 7168),  # Kimi-K2 TP4 EP4
+        (192, 512, 7168),  # Kimi-K2 TP4 EP4
     ],
 )
 @pytest.mark.parametrize("topk", [8])
