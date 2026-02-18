@@ -257,6 +257,9 @@ def prepare_inputs_to_capture(
     input_buffers.seq_lens[:num_reqs] = num_tokens
     input_buffers.seq_lens[num_reqs:] = 0
 
+    input_buffers.dcp_local_seq_lens[:num_reqs] = num_tokens
+    input_buffers.dcp_local_seq_lens[num_reqs:] = 0
+
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
     slot_mappings = block_tables.slot_mappings[:, :num_tokens]
     slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -275,5 +278,6 @@ def prepare_inputs_to_capture(
         block_tables=input_block_tables,
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
+        dcp_local_seq_lens=input_buffers.dcp_local_seq_lens,
     )
     return attn_metadata, slot_mappings_by_layer
