@@ -608,6 +608,12 @@ class GPUModelRunner(
         self.new_computed_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
+        self.current_computed_tokens = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
+        self.num_scheduled_tokens_buf = self._make_buffer(
+            self.max_num_reqs, dtype=torch.int32
+        )
 
         self.encoder_seq_lens = self._make_buffer(self.max_num_reqs, dtype=torch.int32)
         if self.dcp_world_size > 1:
@@ -1733,10 +1739,12 @@ class GPUModelRunner(
                 current_indices_gpu = self.current_indices.gpu[:n_common]
 
                 valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
+                self.current_computed_tokens.np[:n_common] = (
+                    self.input_batch.num_computed_tokens_cpu[current_indices]
+                )
+                self.current_computed_tokens.copy_to_gpu(n_common)
                 self.num_computed_tokens[current_indices_gpu] = (
-                    self.input_batch.num_computed_tokens_cpu_tensor[current_indices].to(
-                        device=self.device, non_blocking=True
-                    )
+                    self.current_computed_tokens.gpu[:n_common]
                     + valid_counts.int()
                     - self.prev_num_draft_tokens.gpu[prev_indices_gpu]
                     - 1
@@ -1767,9 +1775,9 @@ class GPUModelRunner(
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
 
         self.query_pos.copy_to_gpu(total_num_scheduled_tokens)
-        num_scheduled_tokens_gpu = torch.from_numpy(num_scheduled_tokens).to(
-            self.device, non_blocking=True
-        )
+        self.num_scheduled_tokens_buf.np[:num_reqs] = num_scheduled_tokens
+        self.num_scheduled_tokens_buf.copy_to_gpu(num_reqs)
+        num_scheduled_tokens_gpu = self.num_scheduled_tokens_buf.gpu[:num_reqs]
         self.positions.gpu[:total_num_scheduled_tokens] = (
             self.num_computed_tokens[req_indices_gpu].to(torch.int64)
             + self.query_pos.gpu[:total_num_scheduled_tokens]
