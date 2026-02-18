@@ -34,13 +34,8 @@
 namespace {
 
 inline int getSMVersion() {
-  int device{-1};
-  cudaGetDevice(&device);
-  int sm_major = 0;
-  int sm_minor = 0;
-  cudaDeviceGetAttribute(&sm_major, cudaDevAttrComputeCapabilityMajor, device);
-  cudaDeviceGetAttribute(&sm_minor, cudaDevAttrComputeCapabilityMinor, device);
-  return sm_major * 10 + sm_minor;
+  auto* props = at::cuda::getCurrentDeviceProperties();
+  return props->major * 10 + props->minor;
 }
 
 inline bool getEnvEnablePDL() {
@@ -48,7 +43,7 @@ inline bool getEnvEnablePDL() {
   static bool enablePDL = false;
   std::call_once(flag, [&]() {
     if (getSMVersion() >= 90) {
-      char const* env = std::getenv("VLLM_ENABLE_PDL");
+      char const* env = std::getenv("TRTLLM_ENABLE_PDL");
       enablePDL = env && env[0] == '1' && env[1] == '\0';
     }
   });

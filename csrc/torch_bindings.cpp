@@ -242,7 +242,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  // conditionally compiled so impl in source file
+  ops.impl("dsv3_fused_a_gemm", torch::kCUDA, &dsv3_fused_a_gemm);
 
   // Quantized GEMM for AWQ.
   ops.def(
