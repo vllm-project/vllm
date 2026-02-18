@@ -614,16 +614,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         max_query_len = num_scheduled_tokens.max().item()
 
-        # Get prefill tokens.
-        prepare_prefill_inputs(
-            self.input_buffers.input_ids,
-            self.req_states.next_prefill_tokens,
-            idx_mapping,
-            query_start_loc,
-            self.req_states.all_token_ids.gpu,
-            self.req_states.prefill_len.gpu,
-            self.req_states.num_computed_tokens.gpu,
-        )
+        # Get prefill tokens if any.
+        if self.req_states.any_prefills(idx_mapping_np):
+            prepare_prefill_inputs(
+                self.input_buffers.input_ids,
+                self.req_states.next_prefill_tokens,
+                idx_mapping,
+                query_start_loc,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prefill_len.gpu,
+                self.req_states.num_computed_tokens.gpu,
+            )
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
@@ -1003,15 +1004,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, input_batch, kv_connector_output = self.execute_model_state
         self.execute_model_state = None  # type: ignore
 
-        # Non-last PP rank: hidden_states is None because this rank produced
-        # IntermediateTensors instead of final hidden states. Receive the
-        # sampled tokens broadcast by the last rank and update local state.
         if not self.is_last_pp_rank:
-            received = pp_receive(
+            # Non-last PP rank: hidden_states is None because this rank produced
+            # IntermediateTensors instead of final hidden states. Receive the
+            # sampled tokens broadcast from the last rank and update local state.
+            sampled, num_sampled, num_rejected = pp_receive(
                 input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
-            assert received is not None
-            sampled, num_sampled, num_rejected = received
             self.postprocess(input_batch, sampled, num_sampled, num_rejected)
             return None
 
@@ -1020,8 +1019,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, input_batch, grammar_output
         )
 
-        # Broadcast to non-last PP ranks (handles spec decode multi-token).
         if self.use_pp:
+            # Broadcast to non-last PP ranks (handles spec decode multi-token).
             pp_broadcast(sampler_output.sampled_token_ids, num_sampled, num_rejected)
 
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
