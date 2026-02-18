@@ -19,7 +19,6 @@ else:
 
 logger = init_logger(__name__)
 
-BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
     "bfloat16",
@@ -39,13 +38,11 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore
-    """Size of a contiguous cache block in number of tokens. On CUDA devices,
-    only block sizes up to 32 are supported.
+    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    """Size of a contiguous cache block in number of tokens.
 
-    This config has no static default. If left unspecified by the user, it will
-    be set in `Platform.check_and_update_config()` based on the current
-    platform."""
+    This is None until `Platform.check_and_update_config()` sets it based on
+    the current platform. Always an int by the time the engine starts."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -100,6 +97,17 @@ class CacheConfig:
     load a 13B model with BF16 weight, which requires at least 26GB GPU memory.
     Note that this requires fast CPU-GPU interconnect, as part of the model is
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
+    """
+    cpu_offload_params: set[str] = Field(default_factory=set)
+    """ The set of parameter name segments to target for CPU offloading.
+    Unmatched parameters are not offloaded. If this set is empty, parameters
+    are offloaded non-selectively until the memory limit defined by
+    `cpu_offload_gb` is reached.
+    Examples:
+        - For parameter name "mlp.experts.w2_weight":
+            - "experts" or "experts.w2_weight" will match.
+            - "expert" or "w2" will NOT match (must be exact segments).
+    This allows distinguishing parameters like "w2_weight" and "w2_weight_scale".
     """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when

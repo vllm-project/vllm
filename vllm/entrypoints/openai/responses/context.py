@@ -9,7 +9,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from typing import TYPE_CHECKING, Union
+from typing import TYPE_CHECKING, Final, Union
 
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
@@ -304,7 +304,7 @@ class ParsableContext(ConversationContext):
 
         self.tool_dicts = construct_tool_dicts(request.tools, request.tool_choice)
         self.chat_template = chat_template
-        self.chat_template_content_format = chat_template_content_format
+        self.chat_template_content_format: Final = chat_template_content_format
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []

@@ -142,12 +142,14 @@ def test_request_interface():
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 
+    sampling_params = SamplingParams(max_tokens=10)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+
     req = Request(
         request_id="test_request",
         prompt_token_ids=[1, 2, 3],
-        sampling_params=SamplingParams(max_tokens=10),
+        sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=100,
         lora_request=None,
     )
     assumes(req, "mm_features", is_instance_of=(list, NoneType))

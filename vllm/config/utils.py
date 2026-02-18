@@ -10,7 +10,7 @@ import json
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
-from dataclasses import MISSING, Field, field, fields, is_dataclass
+from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
@@ -66,7 +66,7 @@ def config(
     return decorator(cls)
 
 
-def get_field(cls: ConfigType, name: str) -> Field:
+def get_field(cls: ConfigType, name: str) -> Any:
     """Get the default factory field of a dataclass by name. Used for getting
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):

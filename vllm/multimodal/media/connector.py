@@ -146,7 +146,7 @@ class MediaConnector:
 
             connection = self.connection
             data = connection.get_bytes(
-                url,
+                url_spec.url,
                 timeout=fetch_timeout,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )
@@ -177,7 +177,7 @@ class MediaConnector:
 
             connection = self.connection
             data = await connection.async_get_bytes(
-                url,
+                url_spec.url,
                 timeout=fetch_timeout,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
             )

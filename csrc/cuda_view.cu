@@ -2,33 +2,58 @@
 #include <torch/cuda.h>
 #include <cuda_runtime.h>
 
-// This function assumes that `cpu_tensor` is a CPU tensor allocated with pinned
-// memory, and that UVA (Unified Virtual Addressing) is enabled.
+// This function assumes that `cpu_tensor` is a CPU tensor,
+// and that UVA (Unified Virtual Addressing) is enabled.
 torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor) {
   TORCH_CHECK(cpu_tensor.device().is_cpu(), "Input tensor must be on CPU");
 
-  // Get raw host pointer from CPU tensor
-  void* host_ptr = cpu_tensor.data_ptr();
+  // handle empty tensor
+  if (cpu_tensor.numel() == 0) {
+    return torch::empty(cpu_tensor.sizes(),
+                        cpu_tensor.options().device(torch::kCUDA));
+  }
 
-  // Get a device pointer corresponding to the pinned host memory
+  if (cpu_tensor.is_pinned()) {
+    // If CPU tensor is pinned, directly get the device pointer.
+    void* host_ptr = const_cast<void*>(cpu_tensor.data_ptr());
+    void* device_ptr = nullptr;
+    cudaError_t err = cudaHostGetDevicePointer(&device_ptr, host_ptr, 0);
+    TORCH_CHECK(err == cudaSuccess,
+                "cudaHostGetDevicePointer failed: ", cudaGetErrorString(err));
+
+    return torch::from_blob(
+        device_ptr, cpu_tensor.sizes(), cpu_tensor.strides(),
+        [base = cpu_tensor](void*) {},  // keep cpu tensor alive
+        cpu_tensor.options().device(torch::kCUDA));
+  }
+
+  // If CPU tensor is not pinned, allocate a new pinned memory buffer.
+  torch::Tensor contiguous_cpu = cpu_tensor.contiguous();
+  size_t nbytes = contiguous_cpu.nbytes();
+
+  void* host_ptr = nullptr;
+  cudaError_t err = cudaHostAlloc(&host_ptr, nbytes, cudaHostAllocMapped);
+  if (err != cudaSuccess) {
+    AT_ERROR("cudaHostAlloc failed: ", cudaGetErrorString(err));
+  }
+
+  err = cudaMemcpy(host_ptr, contiguous_cpu.data_ptr(), nbytes,
+                   cudaMemcpyDefault);
+  if (err != cudaSuccess) {
+    cudaFreeHost(host_ptr);
+    AT_ERROR("cudaMemcpy failed: ", cudaGetErrorString(err));
+  }
+
   void* device_ptr = nullptr;
-  cudaError_t err = cudaHostGetDevicePointer(&device_ptr, host_ptr, 0);
-  TORCH_CHECK(err == cudaSuccess,
-              "cudaHostGetDevicePointer failed: ", cudaGetErrorString(err));
+  err = cudaHostGetDevicePointer(&device_ptr, host_ptr, 0);
+  if (err != cudaSuccess) {
+    cudaFreeHost(host_ptr);
+    AT_ERROR("cudaHostGetDevicePointer failed: ", cudaGetErrorString(err));
+  }
 
-  // We'll use the same sizes, strides, and dtype as the CPU tensor.
-  // TODO: check if layout is respected.
-  auto sizes = cpu_tensor.sizes();
-  auto strides = cpu_tensor.strides();
-  auto options = cpu_tensor.options().device(torch::kCUDA);
+  auto deleter = [host_ptr](void*) { cudaFreeHost(host_ptr); };
 
-  // use default no-op deleter, since the memory is owned by the original CPU
-  // tensor
-  torch::Tensor cuda_tensor =
-      torch::from_blob(device_ptr, sizes, strides, options);
-
-  TORCH_CHECK(cuda_tensor.device().is_cuda(),
-              "Resulting tensor is not on CUDA device");
-
-  return cuda_tensor;
+  return torch::from_blob(device_ptr, contiguous_cpu.sizes(),
+                          contiguous_cpu.strides(), deleter,
+                          contiguous_cpu.options().device(torch::kCUDA));
 }

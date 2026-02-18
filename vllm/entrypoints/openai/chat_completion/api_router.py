@@ -57,7 +57,7 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
     try:
         generator = await handler.create_chat_completion(request, raw_request)
     except Exception as e:
-        return handler.create_error_response(e)
+        generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(
@@ -96,7 +96,7 @@ async def render_chat_completion(request: ChatCompletionRequest, raw_request: Re
     try:
         result = await handler.render_chat_request(request)
     except Exception as e:
-        return handler.create_error_response(e)
+        result = handler.create_error_response(e)
 
     if isinstance(result, ErrorResponse):
         return JSONResponse(content=result.model_dump(), status_code=result.error.code)

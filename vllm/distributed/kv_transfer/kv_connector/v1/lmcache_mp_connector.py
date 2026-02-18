@@ -36,7 +36,6 @@ except ImportError:
     )
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
     from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,

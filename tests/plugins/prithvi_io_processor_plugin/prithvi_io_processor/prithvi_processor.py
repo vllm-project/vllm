@@ -44,12 +44,8 @@ datamodule_config: DataModuleConfig = {
     "no_label_replace": -1,
     "num_workers": 8,
     "test_transform": [
-        albumentations.Resize(
-            always_apply=False, height=448, interpolation=1, p=1, width=448
-        ),
-        albumentations.pytorch.ToTensorV2(
-            transpose_mask=False, always_apply=True, p=1.0
-        ),
+        albumentations.Resize(height=448, interpolation=1, p=1, width=448),
+        albumentations.pytorch.ToTensorV2(transpose_mask=False, p=1.0),
     ],
 }
 

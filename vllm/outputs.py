@@ -162,7 +162,7 @@ class RequestOutput:
                         completion.token_ids.extend(next_completion.token_ids)
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
-                            completion.logprobs.extend(next_completion.logprobs)
+                            completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )

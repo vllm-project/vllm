@@ -151,6 +151,7 @@ def test_openapi_stateless(case: schemathesis.Case):
         # requires a longer timeout
         ("POST", "/v1/chat/completions"): LONG_TIMEOUT_SECONDS,
         ("POST", "/v1/completions"): LONG_TIMEOUT_SECONDS,
+        ("POST", "/v1/messages"): LONG_TIMEOUT_SECONDS,
     }.get(key, DEFAULT_TIMEOUT_SECONDS)
 
     # No need to verify SSL certificate for localhost
