@@ -277,6 +277,8 @@ class CoreEngineActorManager:
         else:
             ray.init()
 
+        vllm_config.parallel_config.allocate_elastic_ep_ports()
+
         if placement_groups is not None:
             assert local_dp_ranks is not None, (
                 "local_dp_ranks must be provided if placement_groups is provided"
