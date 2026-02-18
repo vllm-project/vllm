@@ -600,6 +600,29 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
 
+class Qwen3NextForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """For Qwen3-Next with GDN all-mode APC, force mamba_ssm_cache_dtype to
+        float32 when set to 'auto' to retain numerical stability (FLA kernel
+        accumulates in float32; lower-precision cache can cause discrepancies).
+        Only affects Qwen3-Next.
+        """
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config.mamba_cache_mode == "all"
+            and cache_config.mamba_ssm_cache_dtype == "auto"
+        ):
+            logger.warning(
+                "Mamba cache mode 'all' is enabled for Qwen3-Next (GDN APC), but "
+                "mamba_ssm_cache_dtype is set to '%s'. Forcing mamba_ssm_cache_dtype "
+                "to 'float32' to retain numerical stability. Use "
+                "--mamba-ssm-cache-dtype to override this behavior.",
+                cache_config.mamba_ssm_cache_dtype,
+            )
+            cache_config.mamba_ssm_cache_dtype = "float32"
+
+
 class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -611,27 +634,7 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
         hf_text_config = vllm_config.model_config.hf_text_config
         mamba_ssm_dtype = getattr(hf_text_config, "mamba_ssm_dtype", None)
-        if (
-            vllm_config.cache_config.mamba_cache_mode == "all"
-            and cache_config.mamba_ssm_cache_dtype == "auto"
-        ):
-            # The FLA Triton kernel (chunk_gated_delta_rule) accumulates the recurrent
-            # state h in float32 internally. If using a lower precision for the mamba
-            # ssm cache, it will cast h to that lower precision at the end of each
-            # step, which can cause minor numerical discrepancies for cached vs
-            # non-cached paths.
-            # Therefore, to retain bitwise identical output to when APC is disabled,
-            # we force the mamba_ssm_cache_dtype to be float32 when using mamba cache
-            # 'all' mode for Qwen3.5.
-            logger.warning(
-                "Mamba cache mode 'all' is enabled for Qwen3.5, but "
-                "mamba_ssm_cache_dtype is set to '%s'. Forcing mamba_ssm_cache_dtype "
-                "to 'float32' to retain numerical stability. Use "
-                "--mamba-ssm-cache-dtype override this behavior.",
-                cache_config.mamba_ssm_cache_dtype,
-            )
-            cache_config.mamba_ssm_cache_dtype = "float32"
-        elif cache_config.mamba_ssm_cache_dtype == "auto":
+        if cache_config.mamba_ssm_cache_dtype == "auto":
             if mamba_ssm_dtype is not None:
                 cache_config.mamba_ssm_cache_dtype = mamba_ssm_dtype
         elif (
@@ -678,6 +681,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
+    "Qwen3NextForCausalLM": Qwen3NextForCausalLMConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
