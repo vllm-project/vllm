@@ -41,7 +41,7 @@ from vllm.v1.core.kv_cache_utils import (
     init_none_hash,
 )
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import KVCacheUsageMetrics, SchedulerOutput
 from vllm.v1.engine import (
     EngineCoreOutput,
     EngineCoreOutputs,
@@ -343,7 +343,11 @@ class EngineCore:
             raise err
 
     @contextmanager
-    def log_iteration_details(self, scheduler_output: SchedulerOutput):
+    def log_iteration_details(
+        self,
+        scheduler_output: SchedulerOutput,
+        kv_cache_usage: KVCacheUsageMetrics | None = None,
+    ):
         if not self.vllm_config.observability_config.enable_logging_iteration_details:
             yield
             return
@@ -351,25 +355,36 @@ class EngineCore:
         iteration_details = compute_iteration_details(scheduler_output)
         before = time.monotonic()
         yield
-        logger.info(
-            "".join(
+        log_parts: list[str] = [
+            "Iteration(",
+            str(self._iteration_index),
+            "): ",
+            str(iteration_details.num_ctx_requests),
+            " context requests, ",
+            str(iteration_details.num_ctx_tokens),
+            " context tokens, ",
+            str(iteration_details.num_generation_requests),
+            " generation requests, ",
+            str(iteration_details.num_generation_tokens),
+            " generation tokens, iteration elapsed time: ",
+            format((time.monotonic() - before) * 1000, ".2f"),
+            " ms",
+        ]
+        if kv_cache_usage is not None:
+            log_parts.extend(
                 [
-                    "Iteration(",
-                    str(self._iteration_index),
-                    "): ",
-                    str(iteration_details.num_ctx_requests),
-                    " context requests, ",
-                    str(iteration_details.num_ctx_tokens),
-                    " context tokens, ",
-                    str(iteration_details.num_generation_requests),
-                    " generation requests, ",
-                    str(iteration_details.num_generation_tokens),
-                    " generation tokens, iteration elapsed time: ",
-                    format((time.monotonic() - before) * 1000, ".2f"),
-                    " ms",
+                    ", kv cache: ",
+                    format(kv_cache_usage.usage_pct, ".1f"),
+                    "% (",
+                    str(kv_cache_usage.used_blocks),
+                    "/",
+                    str(kv_cache_usage.total_blocks),
+                    " blocks, ",
+                    str(kv_cache_usage.used_tokens),
+                    " tokens)",
                 ]
             )
-        )
+        logger.info("".join(log_parts))
         self._iteration_index += 1
 
     def step(self) -> tuple[dict[int, EngineCoreOutputs], bool]:
@@ -385,10 +400,11 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
+        kv_cache_usage = self.scheduler.get_kv_cache_usage()
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
+            self.log_iteration_details(scheduler_output, kv_cache_usage),
         ):
             model_output = future.result()
             if model_output is None:
@@ -442,41 +458,44 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
+            kv_cache_usage = self.scheduler.get_kv_cache_usage()
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
-            if not self.is_ec_producer:
-                model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-            if self.is_pooling_model or not model_executed:
-                # No sampling required (no requests scheduled).
-                future = cast(Future[ModelRunnerOutput], exec_future)
-            else:
-                if not scheduler_output.pending_structured_output_tokens:
-                    # We aren't waiting for any tokens, get any grammar output
-                    # and sample immediately.
-                    grammar_output = self.scheduler.get_grammar_bitmask(
-                        scheduler_output
-                    )
-                    future = self.model_executor.sample_tokens(
-                        grammar_output, non_block=True
-                    )
+            with self.log_iteration_details(scheduler_output, kv_cache_usage):
+                if not self.is_ec_producer:
+                    model_executed = scheduler_output.total_num_scheduled_tokens > 0
+
+                if self.is_pooling_model or not model_executed:
+                    # No sampling required (no requests scheduled).
+                    future = cast(Future[ModelRunnerOutput], exec_future)
                 else:
-                    # We need to defer sampling until we have processed the model output
-                    # from the prior step.
-                    deferred_scheduler_output = scheduler_output
+                    if not scheduler_output.pending_structured_output_tokens:
+                        # We aren't waiting for any tokens, get any grammar output
+                        # and sample immediately.
+                        grammar_output = self.scheduler.get_grammar_bitmask(
+                            scheduler_output
+                        )
+                        future = self.model_executor.sample_tokens(
+                            grammar_output, non_block=True
+                        )
+                    else:
+                        # We need to defer sampling until we have processed
+                        # the model output from the prior step.
+                        deferred_scheduler_output = scheduler_output
 
-            if not deferred_scheduler_output:
-                # Add this step's future to the queue.
-                batch_queue.appendleft((future, scheduler_output, exec_future))
-                if (
-                    model_executed
-                    and len(batch_queue) < self.batch_queue_size
-                    and not batch_queue[-1][0].done()
-                ):
-                    # Don't block on next worker response unless the queue is full
-                    # or there are no more requests to schedule.
-                    return None, True
+                if not deferred_scheduler_output:
+                    # Add this step's future to the queue.
+                    batch_queue.appendleft((future, scheduler_output, exec_future))
+                    if (
+                        model_executed
+                        and len(batch_queue) < self.batch_queue_size
+                        and not batch_queue[-1][0].done()
+                    ):
+                        # Don't block on next worker response unless the queue is full
+                        # or there are no more requests to schedule.
+                        return None, True
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
@@ -486,9 +505,10 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
+        kv_cache_usage = self.scheduler.get_kv_cache_usage()
         with (
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output),
+            self.log_iteration_details(scheduler_output, kv_cache_usage),
         ):
             model_output = future.result()
             if model_output is None:
