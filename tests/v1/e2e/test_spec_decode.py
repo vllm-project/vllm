@@ -833,15 +833,17 @@ def assert_draft_model_correctness(args: ArgsTest):
         enforce_eager=args.enforce_eager,
         disable_log_stats=False,  # enables get_metrics()
     )
-    evaluate_llm_for_gsm8k(
-        spec_llm, expected_accuracy_threshold=args.expected_gsm8k_accuracy
-    )
     # we don't check the outputs, only check the metrics
     spec_llm.chat(test_prompts, args.sampling_config)
     metrics = spec_llm.get_metrics()
-
     acceptance_rate: float = compute_acceptance_rate(metrics)
     acceptance_len: float = compute_acceptance_len(metrics)
+
+    # Need to evaluate after getting metrics to avoid polluting the AR
+    evaluate_llm_for_gsm8k(
+        spec_llm, expected_accuracy_threshold=args.expected_gsm8k_accuracy
+    )
+
     del spec_llm  # CLEANUP
     torch.cuda.empty_cache()
     cleanup_dist_env_and_memory()
