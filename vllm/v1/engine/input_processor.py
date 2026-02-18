@@ -29,7 +29,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
-from vllm.utils.async_utils import make_async
 from vllm.utils.func_utils import supports_kw
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
@@ -101,11 +100,6 @@ class InputProcessor:
             platform_validate_request = compat_validate_request
 
         self._platform_validate_request = platform_validate_request
-
-        self.process_inputs_async = make_async(
-            self.process_inputs,
-            executor=self.renderer._executor,
-        )
 
     @property
     def tokenizer(self) -> TokenizerLike | None:

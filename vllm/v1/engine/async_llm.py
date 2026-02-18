@@ -139,7 +139,6 @@ class AsyncLLM(EngineClient):
 
         # Convert TokPrompt --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
-        self._process_inputs_async = self.input_processor.process_inputs_async
 
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
@@ -353,7 +352,7 @@ class AsyncLLM(EngineClient):
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            request = await self._process_inputs_async(
+            request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
                 params,
@@ -448,7 +447,7 @@ class AsyncLLM(EngineClient):
 
         # Create request for validation, also used as the finished signal
         # once the input stream is closed.
-        final_req = await self._process_inputs_async(
+        final_req = self.input_processor.process_inputs(
             request_id=request_id,
             prompt=TokensPrompt(prompt_token_ids=[0]),
             params=sampling_params,
@@ -469,7 +468,7 @@ class AsyncLLM(EngineClient):
                     else:
                         sp = sampling_params
                     # TODO(nick): Avoid re-validating reused sampling parameters
-                    req = await self._process_inputs_async(
+                    req = self.input_processor.process_inputs(
                         request_id=internal_req_id,
                         prompt=input_chunk.prompt,
                         params=sp,
