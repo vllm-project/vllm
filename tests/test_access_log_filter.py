@@ -5,7 +5,9 @@ Tests for the UvicornAccessLogFilter class.
 """
 
 import logging
+from argparse import Namespace
 
+from vllm.entrypoints.openai.server_utils import _get_excluded_paths
 from vllm.logging_utils.access_log_filter import (
     UvicornAccessLogFilter,
     create_uvicorn_log_config,
@@ -369,3 +371,75 @@ class TestIntegration:
 
         # Should allow because args is None
         assert filter.filter(record) is True
+
+
+class TestGetExcludedPaths:
+    """Test cases for the _get_excluded_paths helper."""
+
+    def test_no_flags_set(self):
+        """Should return empty list when no flags are set."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=False,
+            disable_access_log_for_endpoints=None,
+        )
+        assert _get_excluded_paths(args) == []
+
+    def test_shorthand_flag_only(self):
+        """Should return /health and /metrics when shorthand flag is set."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=True,
+            disable_access_log_for_endpoints=None,
+        )
+        assert _get_excluded_paths(args) == ["/health", "/metrics"]
+
+    def test_endpoints_flag_only(self):
+        """Should return parsed endpoints from comma-separated string."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=False,
+            disable_access_log_for_endpoints="/ping,/ready",
+        )
+        assert _get_excluded_paths(args) == ["/ping", "/ready"]
+
+    def test_both_flags_combined(self):
+        """Should merge paths from both flags."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=True,
+            disable_access_log_for_endpoints="/ping,/ready",
+        )
+        result = _get_excluded_paths(args)
+        assert result == ["/health", "/metrics", "/ping", "/ready"]
+
+    def test_deduplication(self):
+        """Should deduplicate when both flags specify the same paths."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=True,
+            disable_access_log_for_endpoints="/health,/metrics,/ping",
+        )
+        result = _get_excluded_paths(args)
+        assert result == ["/health", "/metrics", "/ping"]
+
+    def test_endpoints_flag_strips_whitespace(self):
+        """Should strip whitespace from comma-separated paths."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=False,
+            disable_access_log_for_endpoints=" /health , /metrics , /ping ",
+        )
+        result = _get_excluded_paths(args)
+        assert result == ["/health", "/metrics", "/ping"]
+
+    def test_endpoints_flag_skips_empty_entries(self):
+        """Should skip empty entries from trailing commas."""
+        args = Namespace(
+            disable_uvicorn_metrics_access_log=False,
+            disable_access_log_for_endpoints="/health,,/metrics,",
+        )
+        result = _get_excluded_paths(args)
+        assert result == ["/health", "/metrics"]
+
+    def test_missing_attributes_handled_gracefully(self):
+        """Should handle args without the shorthand attribute."""
+        args = Namespace(
+            disable_access_log_for_endpoints="/health",
+        )
+        result = _get_excluded_paths(args)
+        assert result == ["/health"]
