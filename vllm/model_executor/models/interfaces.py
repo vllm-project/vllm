@@ -130,6 +130,12 @@ class SupportsMultiModal(Protocol):
     Set internally by `_mark_tower_model`.
     """
 
+    _has_oov_mm_tokens: bool = True
+    """
+    Set to True by default to be safe, but should be set at
+    init time by `configure_mm_token_handling` models.
+    """
+
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
         """
@@ -148,6 +154,19 @@ class SupportsMultiModal(Protocol):
             input prompt.
         """
         ...
+
+    def configure_mm_token_handling(
+        self, vocab_size: int, mm_token_ids: list[int]
+    ) -> bool:
+        """Check if any multimodal tokens are out of vocabulary. If so, we will
+        explicitly mask all multimodal tokens out when computing text embeddings,
+        since the multimodal embeddings will be scattered over the results.
+        """
+        self._has_oov_mm_tokens = any(tok_id >= vocab_size for tok_id in mm_token_ids)
+        logger.info(
+            "Contains out of vocabulary multimodal tokens? %s",
+            self._has_oov_mm_tokens,
+        )
 
     def get_language_model(self) -> VllmModel:
         """
@@ -333,17 +352,14 @@ class SupportsMultiModal(Protocol):
         embed_input_ids: Callable[[Tensor], Tensor],
         *,
         is_multimodal: Tensor | None,
-        handle_oov_mm_token: bool,
     ) -> Tensor:
-        if handle_oov_mm_token and is_multimodal is not None:
-            is_text = ~is_multimodal
-            text_embeds = embed_input_ids(input_ids[is_text])
-
-            return torch.empty(
-                (input_ids.shape[0], text_embeds.shape[1]),
-                dtype=text_embeds.dtype,
-                device=text_embeds.device,
-            ).masked_scatter_(is_text.unsqueeze_(-1), text_embeds)
+        if is_multimodal is not None and self._has_oov_mm_tokens:
+            # Force all input IDs to be in vocab; we do this instead of squeezing
+            # to ensure that any external configuration requiring offset tracking,
+            # e.g., LoRA, are applied correctly regardless of whether or not
+            # we have multimodal tokens.
+            in_vocab_ids = input_ids.clone().masked_fill_(is_multimodal, 0)
+            return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
 
@@ -353,7 +369,6 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> Tensor:
         """
         Apply token embeddings to `input_ids`.
@@ -361,19 +376,19 @@ class SupportsMultiModal(Protocol):
         If `multimodal_embeddings` is passed, scatter them into
         `input_ids` according to the mask `is_multimodal`.
 
-        In case the multi-modal token IDs exceed the vocabulary size of
-        the language model, you can set `handle_oov_mm_token=False`
-        to avoid calling the language model's `embed_input_ids` method
-        on those tokens. Note however that doing so increases memory usage
-        as an additional buffer is needed to hold the input embeddings.
+        NOTE: If this model has multimodal tokens that are of vocabulary
+        (i.e., self._has_oov_mm_tokens=True), the input_ids will be copied
+        and masked to 0 during the forward pass for the text embeddings.
         """
         from .utils import _merge_multimodal_embeddings
 
+        # Get text embeddings first; multimodal embeddings will clobber
+        # any invalid contents in the indices of multimodal embeddings
+        # for the in vocabulary and out of vocabulary case.
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.get_language_model().embed_input_ids,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
