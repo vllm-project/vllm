@@ -156,7 +156,6 @@ def create_fused_moe_router(
             routed_scaling_factor=routed_scaling_factor,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
-            num_expert_group=num_expert_group,
         )
 
     return FusedTopKRouter(
@@ -167,5 +166,4 @@ def create_fused_moe_router(
         scoring_func=scoring_func,
         enable_eplb=enable_eplb,
         indices_type_getter=indices_type_getter,
-        num_expert_group=num_expert_group,
     )

@@ -129,13 +129,10 @@ def get_routing_method_type(
     scoring_func: str,
     top_k: int,
     renormalize: bool,
-    num_expert_group: int | None = None,
 ) -> RoutingMethodType:
     if scoring_func == "sigmoid":
         if top_k == 1:
             return RoutingMethodType.Llama4
-        elif num_expert_group is not None and num_expert_group > 0:
-            return RoutingMethodType.DeepSeekV3
         else:
             return RoutingMethodType.Unspecified
     elif scoring_func == "softmax":
