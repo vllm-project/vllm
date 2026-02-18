@@ -787,6 +787,8 @@ class LoRAModelManager:
                 else:
                     self._slice_moe_lora_ep(lora_model, module, module_name)
 
+        if not lora_model.loras:
+            return
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
         if isinstance(first_lora.lora_a, list):
