@@ -36,9 +36,13 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalUUIDItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
@@ -171,6 +175,7 @@ class CLIPDummyInputsBuilder(BaseDummyInputsBuilder[CLIPProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -202,19 +207,27 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
         self,
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        mm_uuid_items: MultiModalUUIDItems | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
         tokenization_kwargs: Mapping[str, object] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
-        if prompt and mm_items:
-            raise ValueError(
-                "CLIP accepts text-only or image-only inputs, not both! "
-                "Image-only inputs means passing an image with an empty text "
-                "prompt."
-            )
-
         if mm_items:
+            if isinstance(prompt, str):
+                if len(prompt) > 0:
+                    raise ValueError(
+                        "CLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty text prompt."
+                    )
+            else:
+                special_tokens = self.info.get_tokenizer().all_special_ids
+                if all(tok in special_tokens for tok in prompt):
+                    prompt = []
+                else:
+                    raise ValueError(
+                        "CLIP accepts text-only or image-only inputs, not both! "
+                        "You must pass an image with an empty token prompt."
+                    )
+
             # For multi-modal data, the prompt after processing should
             # only contain the dummy image tokens
             tokenization_kwargs = {
@@ -225,9 +238,9 @@ class CLIPMultiModalProcessor(BaseMultiModalProcessor[CLIPProcessingInfo]):
         return super().apply(
             prompt=prompt,
             mm_items=mm_items,
+            mm_uuid_items=mm_uuid_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
 
     def _hf_processor_applies_updates(

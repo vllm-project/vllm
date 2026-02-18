@@ -4,7 +4,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, replace
 from enum import Enum
-from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, Protocol, TypeVar
 
 import numpy as np
 import torch
@@ -144,14 +144,8 @@ class AttentionBackend(ABC):
 
     @classmethod
     def supports_block_size(cls, block_size: int | None) -> bool:
-        from vllm.config.cache import BlockSize
-
         if block_size is None:
             return True
-
-        valid_sizes = get_args(BlockSize)
-        if block_size not in valid_sizes:
-            return False
 
         supported_kernel_block_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_kernel_block_sizes:
@@ -166,6 +160,17 @@ class AttentionBackend(ABC):
             if block_size % supported_size == 0:
                 return True
         return False
+
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int = 16) -> int:
+        supported_sizes = cls.get_supported_kernel_block_sizes()
+        if not supported_sizes:
+            return default_block_size
+
+        if cls.supports_block_size(default_block_size):
+            return default_block_size
+
+        return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 
     @classmethod
     def is_mla(cls) -> bool:
@@ -347,7 +352,7 @@ class CommonAttentionMetadata:
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync.
     If a CPU copy is needed, use `seq_lens.cpu()` instead.
-    Will be removed in a future release (v0.15.0)
+    Will be removed in a future release, please migrate as soon as possible.
     """
     )
     def seq_lens_cpu(self) -> torch.Tensor:
@@ -361,7 +366,7 @@ class CommonAttentionMetadata:
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
     async scheduling. If a CPU copy is needed, it can be derived from 
     query_start_loc_cpu and seq_lens.
-    Will be removed in a future release (v0.15.0)
+    Will be removed in a future release, please migrate as soon as possible.
     """
     )
     def num_computed_tokens_cpu(self) -> torch.Tensor:
@@ -480,9 +485,14 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
+                max_num_queries_for_spec = (
+                    1
+                    + (2 if speculative_config.parallel_drafting else 1)
+                    * speculative_config.num_speculative_tokens
+                )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,
-                    1 + speculative_config.num_speculative_tokens,
+                    max_num_queries_for_spec,
                 )
 
         if (
