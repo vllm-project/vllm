@@ -519,7 +519,6 @@ class LLM:
             ),
             params=seq_params,
             lora_requests=seq_lora_requests,
-            tokenization_kwargs=tokenization_kwargs,
             priorities=seq_priority,
         )
 
@@ -1793,7 +1792,6 @@ class LLM:
             params=seq_params,
             use_tqdm=use_tqdm,
             lora_requests=seq_lora_requests,
-            tokenization_kwargs=tokenization_kwargs,
             priorities=seq_priority,
         )
 
@@ -1852,7 +1850,6 @@ class LLM:
             params=seq_params,
             lora_requests=seq_lora_requests,
             use_tqdm=use_tqdm,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
     def _render_and_run_requests(
@@ -1861,7 +1858,6 @@ class LLM:
         params: Sequence[SamplingParams | PoolingParams],
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         priorities: Sequence[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
@@ -1879,7 +1875,6 @@ class LLM:
             prompts=prompts,
             params=params,
             lora_requests=lora_requests,
-            tokenization_kwargs=tokenization_kwargs,
             priorities=priorities,
         )
 
@@ -1891,7 +1886,6 @@ class LLM:
         params: Sequence[SamplingParams | PoolingParams],
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         priorities: Sequence[int] | None = None,
     ) -> list[str]:
         added_request_ids: list[str] = []
@@ -1905,7 +1899,6 @@ class LLM:
                         prompt,
                         None if lora_requests is None else lora_requests[i],
                     ),
-                    tokenization_kwargs=tokenization_kwargs,
                     priority=0 if priorities is None else priorities[i],
                 )
                 added_request_ids.append(request_id)
@@ -1921,7 +1914,6 @@ class LLM:
         prompt: ProcessorInputs,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         priority: int = 0,
     ) -> str:
         if isinstance(params, SamplingParams):
@@ -1930,27 +1922,11 @@ class LLM:
 
         request_id = str(next(self.request_counter))
 
-        if params.truncate_prompt_tokens is not None:
-            params_type = type(params).__name__
-            warnings.warn(
-                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
-                "is deprecated and will be removed in v0.16. "
-                "Please pass it via `tokenization_kwargs` instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-            tokenization_kwargs = merge_kwargs(
-                tokenization_kwargs,
-                dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
-            )
-
         return self.llm_engine.add_request(
             request_id,
             prompt,
             params,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
 
