@@ -6,7 +6,6 @@ import gc
 import os
 from collections.abc import Callable
 from contextlib import AbstractContextManager, nullcontext
-from types import NoneType
 from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
@@ -696,10 +695,18 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
-            if isinstance(
-                output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
-            ):
-                return output
+
+        if isinstance(output, ModelRunnerOutput | AsyncModelRunnerOutput):
+            return output
+
+        if output is None:
+            if scheduler_output.has_structured_output_requests:
+                # Bitmasks will be computed by the scheduler, which will then
+                # call sample_tokens().
+                return None
+
+            # Sample immediately without separate RPC.
+            return self.model_runner.sample_tokens(grammar_output=None)
 
         assert isinstance(output, IntermediateTensors)
         parallel_config = self.vllm_config.parallel_config
