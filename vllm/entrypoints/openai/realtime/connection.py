@@ -129,6 +129,7 @@ class RealtimeConnection:
             except Exception as e:
                 logger.error("Failed to decode audio: %s", e)
                 await self.send_error("Invalid audio data", "invalid_audio")
+                return
 
         elif event_type == "input_audio_buffer.commit":
             if not self._is_model_validated:
@@ -140,6 +141,7 @@ class RealtimeConnection:
                     err_msg,
                     "model_not_validated",
                 )
+                return
 
             commit_event = InputAudioBufferCommit(**event)
             # final signals that the audio is finished
