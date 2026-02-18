@@ -205,7 +205,7 @@ class LoRAModel:
             # prefix mismatches where the module type is correct (e.g.,
             # q_proj) but the full path differs (e.g., model.layers.0...
             # vs language_model.model.layers.0...).
-            if model_module_names and parsed_module_names:
+            if model_module_names:
                 matched = any(
                     name in model_module_names for name in parsed_module_names
                 )
