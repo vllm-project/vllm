@@ -35,7 +35,7 @@ from vllm.entrypoints.pooling.score.utils import (
     get_score_prompt,
     validate_score_input,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
@@ -108,12 +108,15 @@ class ServingScores(OpenAIServing):
             *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
-        engine_prompts: list[TokensPrompt] = []
+        engine_prompts: list[ProcessorInputs] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
             text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+                token_inputs(
+                    text_token_prompt["prompt_token_ids"],
+                    prompt=input_text,
+                )
             )
 
         # Schedule the request and get the result generator.
@@ -125,7 +128,7 @@ class ServingScores(OpenAIServing):
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -207,12 +210,15 @@ class ServingScores(OpenAIServing):
             *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
-        engine_prompts: list[TokensPrompt] = []
+        engine_prompts: list[ProcessorInputs] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
             text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+                token_inputs(
+                    text_token_prompt["prompt_token_ids"],
+                    prompt=input_text,
+                )
             )
 
         # Schedule the request and get the result generator.
@@ -225,7 +231,7 @@ class ServingScores(OpenAIServing):
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
