@@ -16,6 +16,7 @@ from vllm.multimodal.audio import (
     normalize_audio,
     resample_audio_librosa,
     resample_audio_scipy,
+    split_audio,
 )
 
 
@@ -596,7 +597,6 @@ class TestAudioChunking:
 
     def test_split_audio_short_clip(self):
         """Audio shorter than max_clip_duration_s should not be split."""
-        from vllm.multimodal.audio import split_audio
 
         # 10 seconds of audio at 16kHz
         audio = np.random.randn(160000).astype(np.float32)
@@ -614,7 +614,6 @@ class TestAudioChunking:
 
     def test_split_audio_exact_length(self):
         """Audio exactly at max_clip_duration_s should not be split."""
-        from vllm.multimodal.audio import split_audio
 
         # Exactly 30 seconds at 16kHz
         audio = np.random.randn(480000).astype(np.float32)
@@ -632,7 +631,6 @@ class TestAudioChunking:
 
     def test_split_audio_long_clip(self):
         """Long audio should be split into multiple chunks."""
-        from vllm.multimodal.audio import split_audio
 
         # 65 seconds of audio at 16kHz
         audio = np.random.randn(1040000).astype(np.float32)
@@ -653,7 +651,6 @@ class TestAudioChunking:
 
     def test_split_audio_chunks_have_correct_length(self):
         """Each chunk (except last) should be approximately max_clip_duration_s."""
-        from vllm.multimodal.audio import split_audio
 
         # 65 seconds of audio at 16kHz
         audio = np.random.randn(1040000).astype(np.float32)
@@ -726,7 +723,6 @@ class TestAudioChunking:
 
     def test_split_audio_preserves_boundaries(self):
         """Verify first and last samples are preserved when chunking."""
-        from vllm.multimodal.audio import split_audio
 
         audio = np.arange(1120000, dtype=np.float32)  # 70s at 16kHz
 
@@ -743,7 +739,6 @@ class TestAudioChunking:
 
     def test_split_audio_with_different_sample_rates(self):
         """Test chunking works with different sample rates."""
-        from vllm.multimodal.audio import split_audio
 
         # 40 seconds at 8kHz
         audio_8k = np.random.randn(320000).astype(np.float32)
