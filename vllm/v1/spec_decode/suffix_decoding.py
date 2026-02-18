@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import torch
+
 from vllm.config import VllmConfig
 from vllm.v1.worker.gpu_input_batch import InputBatch
 
@@ -13,6 +15,7 @@ class SuffixDecodingProposer:
 
     def __init__(self, vllm_config: VllmConfig):
         config = vllm_config.speculative_config
+        assert config is not None, "Speculative config must be set"
         self.num_speculative_tokens = config.num_speculative_tokens
         self.max_tree_depth = config.suffix_decoding_max_tree_depth
         self.max_spec_factor = config.suffix_decoding_max_spec_factor
@@ -33,6 +36,9 @@ class SuffixDecodingProposer:
         self,
         input_batch: InputBatch,
         sampled_token_ids: list[list[int]],
+        slot_mappings: dict[str, torch.Tensor]
+        | list[dict[str, torch.Tensor]]
+        | None = None,  # unused
     ) -> list[list[int]]:
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding

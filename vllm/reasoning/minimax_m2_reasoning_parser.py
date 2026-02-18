@@ -88,7 +88,7 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         super().__init__(tokenizer, *args, **kwargs)
         self.end_token_id = self.vocab.get("</think>")
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         end_token_id = self.end_token_id
         return any(input_id == end_token_id for input_id in reversed(input_ids))
 

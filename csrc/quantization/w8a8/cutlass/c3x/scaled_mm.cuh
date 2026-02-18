@@ -141,8 +141,8 @@ struct cutlass_3x_gemm_sm100 {
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           KernelSchedule>::CollectiveOp;
 
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
+  using GemmKernel = enable_sm100f_only<cutlass::gemm::kernel::GemmUniversal<
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
 };
 
 template <typename ElementAB_, typename ElementD_,
@@ -202,8 +202,8 @@ struct cutlass_3x_gemm_sm120 {
               sizeof(typename CollectiveEpilogue::SharedStorage))>,
           KernelSchedule>::CollectiveOp;
 
-  using GemmKernel = cutlass::gemm::kernel::GemmUniversal<
-      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>;
+  using GemmKernel = enable_sm120_only<cutlass::gemm::kernel::GemmUniversal<
+      Shape<int, int, int, int>, CollectiveMainloop, CollectiveEpilogue, void>>;
 };
 
 }  // namespace vllm

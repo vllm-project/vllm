@@ -6,11 +6,10 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
-from vllm.multimodal import MultiModalRegistry
 from vllm.v1.request import Request
 
 if TYPE_CHECKING:
-    from vllm.config import ModelConfig, SchedulerConfig
+    from vllm.config import SchedulerConfig
 
 logger = init_logger(__name__)
 
@@ -76,6 +75,18 @@ class EncoderCacheManager:
         # mm_hash of mm_data => num_encoder_embeds of the mm_data
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
+
+    def reset(self) -> None:
+        """Reset the encoder cache to its initial state.
+
+        This clears all cached encoder outputs and resets capacity tracking.
+        Called when model weights are updated to invalidate stale embeddings.
+        """
+        self.cached.clear()
+        self.freeable.clear()
+        self.freed.clear()
+        self.num_free_slots = self.cache_size
+        self.num_freeable_slots = self.cache_size
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
@@ -237,7 +248,7 @@ class EncoderCacheManager:
 
         Typically called when a request is finished, cancelled, or aborted.
         """
-        input_ids = self.get_cached_input_ids(request).copy()
+        input_ids = self.get_cached_input_ids(request)
         for input_id in input_ids:
             self.free_encoder_input(request, input_id)
 
@@ -255,60 +266,16 @@ class EncoderCacheManager:
         return freed
 
 
-def compute_encoder_budget(
-    model_config: "ModelConfig",
-    scheduler_config: "SchedulerConfig",
-    mm_registry: MultiModalRegistry,
-) -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler
-    configurations.
-
-    Returns:
-        - Compute budget for encoder execution, measured in number of tokens
-            from the input sequence.
-        - Space budget for encoder cache size, measured in number of tokens
-            from the input sequence.
-    """
-    if mm_registry.supports_multimodal_inputs(model_config):
-        max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
-            model_config
-        )
-
-        return compute_mm_encoder_budget(
-            scheduler_config,
-            max_tokens_by_modality,
-        )
-
-    return compute_text_encoder_budget(scheduler_config)
-
-
-def compute_text_encoder_budget(scheduler_config: "SchedulerConfig") -> tuple[int, int]:
-    """Compute the encoder cache budget based on the model and scheduler
-    configurations for a text-only model.
-
-    Args:
-        scheduler_config: Scheduler configuration.
-
-    Returns:
-        - Compute budget for encoder execution, in unit of number of tokens
-            in the input sequence.
-        - Space budget for encoder cache size, in unit of number of tokens
-            in the input sequence.
-    """
-    # Currently text-only encoder-decoder models are not supported
-    return 0, 0
-
-
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
-    max_tokens_by_modality: Mapping[str, int],
+    mm_max_toks_per_item: Mapping[str, int],
 ) -> tuple[int, int]:
     """Compute the encoder cache budget based on the model and scheduler
     configurations for a multimodal model.
 
     Args:
         scheduler_config: Scheduler configuration.
-        max_tokens_by_modality: The maximum number of tokens for each
+        mm_max_toks_per_item: The maximum number of tokens per item for each
             non-text modality.
 
     Returns:
@@ -318,7 +285,7 @@ def compute_mm_encoder_budget(
             from the input sequence.
     """
 
-    if not max_tokens_by_modality:
+    if not mm_max_toks_per_item:
         logger.warning(
             "All non-text modalities supported by the model have been "
             "explicitly disabled via limit_mm_per_prompt. Encoder cache will "
@@ -326,7 +293,7 @@ def compute_mm_encoder_budget(
         )
         return 0, 0
 
-    max_tokens_per_mm_item = max(max_tokens_by_modality.values())
+    max_tokens_per_mm_item = max(mm_max_toks_per_item.values())
 
     if (
         scheduler_config.disable_chunked_mm_input
@@ -357,7 +324,14 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
     def __init__(self, cache_size: int):
         self.cache_size = cache_size
         self.num_free_slots = cache_size
-        self.freed: list[str] = []
+        self.allocated: list[str] = []
+        self.to_free: list[str] = []
+
+    def reset(self) -> None:
+        """Reset the encoder cache to its initial state."""
+        self.num_free_slots = self.cache_size
+        self.allocated.clear()
+        self.to_free.clear()
 
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         return False
@@ -383,7 +357,7 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         self.num_free_slots -= num_encoder_embeds
 
         mm_hash = request.mm_features[input_id].identifier
-        self.freed.append(mm_hash)
+        self.allocated.append(mm_hash)
 
     def free(self, request: Request) -> None:
         for input_id in range(len(request.mm_features)):
@@ -393,9 +367,14 @@ class EncoderDecoderCacheManager(EncoderCacheManager):
         return set(range(len(request.mm_features)))
 
     def get_freed_mm_hashes(self) -> list[str]:
-        freed = self.freed
-        self.freed = []
-        return freed
+        # As encoder cache is not used for enc-dec models, we can free the entries here
+        # The actual free happens in the runner, *before* the model is executed.
+        # Therefore, `freeable` acts as a buffer to free the entries only after the
+        # model is executed, mimicking the state transition of `EncoderCacheManager`.
+        to_free = self.to_free
+        self.to_free = self.allocated
+        self.allocated = []
+        return to_free
 
     def free_encoder_input(self, request: Request, input_id: int) -> None:
         num_encoder_embeds = request.get_num_encoder_embeds(input_id)

@@ -620,7 +620,6 @@ class RadioInternVisionModel(nn.Module):
         x: torch.Tensor,
         imgs_sizes: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
-        assert self.patch_generator is not None
         hidden_states = self.patch_generator(x, imgs_sizes=imgs_sizes)
         attn_mask = None
         if imgs_sizes is not None and len(imgs_sizes) > 1:

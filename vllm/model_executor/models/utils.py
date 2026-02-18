@@ -2,15 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
 import torch
 import torch.nn as nn
 from torch.func import functional_call
+from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -20,7 +23,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
-from vllm.model_executor.model_loader.online_quantization import (
+from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -28,13 +31,14 @@ from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
+from vllm.utils.mem_utils import format_gib
 from vllm.utils.platform_utils import (
     is_pin_memory_available,
     is_uva_available,
 )
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
-    get_cuda_view_from_cpu_tensor,
+    get_accelerator_view_from_cpu_tensor,
 )
 
 logger = init_logger(__name__)
@@ -210,8 +214,8 @@ class AutoWeightsLoader:
                     continue
 
                 raise ValueError(
-                    f"Attempted to load nested weight '{weight_qualname}' "
-                    f"into a single parameter '{base_prefix}'"
+                    f"Attempted to load nested weight {weight_qualname!r} "
+                    f"into a single parameter {base_prefix!r}"
                 )
 
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -250,7 +254,7 @@ class AutoWeightsLoader:
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
-        if isinstance(module, PPMissingLayer):
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             return
 
         # Avoid infinite recursion since this function is typically
@@ -312,9 +316,14 @@ class AutoWeightsLoader:
 
                     continue
 
+                desc_param_keys = {
+                    base_prefix + k for k, _ in module.named_parameters(recurse=True)
+                }
                 msg = (
-                    f"There is no module or parameter named '{prefix}' "
-                    f"in {type(self.module).__name__}"
+                    f"There is no module or parameter named {prefix!r} "
+                    f"in {self.module._get_name()}. "
+                    f"The available parameters belonging to {base_prefix} "
+                    f"({module._get_name()}) are: {desc_param_keys}"
                 )
                 raise ValueError(msg)
 
@@ -492,6 +501,100 @@ def isin_list(
     return torch.isin(elements, test_elements)
 
 
+class StageMissingLayer(nn.Module):
+    def __init__(self, stage_name: str, module: nn.Module | None = None) -> None:
+        super().__init__()
+
+        self.stage_name = stage_name
+
+        # Don't register this as a child module in order to
+        # avoid missing keys when loading weights
+        self.__dict__["module"] = module
+
+    def __getattr__(self, name: str):
+        return getattr(self.__dict__["module"], name)
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(f"{self} should not be called")
+
+    def extra_repr(self) -> str:
+        return f"stage_name={self.stage_name!r}"
+
+
+@contextmanager
+def collect_children(
+    module: nn.Module,
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, collect all direct child assignments to `module`,
+    returning a list of children names that is internally updated until the
+    context is exited.
+
+    If `targets` is set, instead collect descendents of `module`
+    that are an instance of `targets`, even if they aren't direct children.
+    """
+    children_names = list[str]()
+
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                children_names.append(name)
+
+        with register_module_module_registration_hook(hook):
+            yield children_names
+    else:
+        yield children_names
+
+        for name, module_ in module.named_modules():
+            if isinstance(module_, targets):
+                children_names.append(name)
+
+
+@contextmanager
+def no_init_weights(
+    module: nn.Module,
+    placeholder: Callable[[nn.Module], nn.Module],
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, prevent weight initialization from using device memory and
+    replace direct child assignments to `module` with the result of `placeholder()`.
+
+    If `targets` is set, instead prevent weight initialization and
+    replace assignments where the child is an instance of `targets`,
+    even if they aren't direct children of `module`.
+    """
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                return placeholder(submodule)
+
+            return submodule
+
+        with register_module_module_registration_hook(hook), torch.device("meta"):
+            yield
+    else:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if isinstance(module_, targets):
+                submodule.to("meta")  # Free memory
+            if isinstance(submodule, targets):
+                submodule.to("meta")  # Free memory
+                return placeholder(submodule)
+
+            return submodule
+
+        # Not all descendents are targeted, so we can't use a blanket
+        # `torch.device("meta")` context
+        with register_module_module_registration_hook(hook):
+            yield
+
+
 class LayerFn(Protocol):
     def __call__(self, prefix: str) -> torch.nn.Module: ...
 
@@ -511,12 +614,18 @@ class PPMissingLayer(torch.nn.Identity):
 
 _CPU_OFFLOAD_BYTES = 0
 _CPU_OFFLOAD_MAX_BYTES = 0
+_CPU_OFFLOAD_PARAMS = set()
 
 
 def set_cpu_offload_max_bytes(max_bytes: int) -> None:
     global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
     _CPU_OFFLOAD_BYTES = 0
     _CPU_OFFLOAD_MAX_BYTES = max_bytes
+
+
+def set_cpu_offload_params(params: set[str]) -> None:
+    global _CPU_OFFLOAD_PARAMS
+    _CPU_OFFLOAD_PARAMS = params
 
 
 def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
@@ -532,37 +641,41 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
     if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
         return module
 
-    pin_memory = is_pin_memory_available()
-    uva_available = is_uva_available()
-
-    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-    uva_offloading = True
+    pin_memory = (
+        is_pin_memory_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
+    )
+    uva_offloading = is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
 
     # offload parameters to CPU
     # use pin_memory if possible, which helps cudagraph capture speed
     offloaded_parameters = False
-    for p in module.parameters():
+    for name, p in module.named_parameters():
         if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
             # we use per-parameter offloading
             # one module might have some parameters offloaded and some not
             break
 
-        # `torch.empty_like` does not support `pin_memory` argument
-        cpu_data = torch.empty_strided(
-            size=p.data.size(),
-            stride=p.data.stride(),
-            dtype=p.data.dtype,
-            layout=p.data.layout,
-            device="cpu",
-            pin_memory=pin_memory,
-        )
-        cpu_data.copy_(p.data)
+        if _CPU_OFFLOAD_PARAMS:
+            # Check if parameter belongs to the offloading set
+            # Add dots here to ensure we match full segments only
+            # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight" but not
+            # "mlp.experts.w2_weight_scale"
+            should_offload = any(
+                f".{param}." in f".{name}." for param in _CPU_OFFLOAD_PARAMS
+            )
+            if not should_offload:
+                continue
+
+        cpu_data = p.data.to(device="cpu")
+        if pin_memory:
+            cpu_data = cpu_data.pin_memory()
+
         if not uva_offloading:
             p.data = cpu_data
         else:
-            # keep the cpu data alive
-            p._vllm_offloaded_cpu_data = cpu_data
-            p.data = get_cuda_view_from_cpu_tensor(cpu_data)
+            p.data = get_accelerator_view_from_cpu_tensor(cpu_data)
+            p._vllm_is_uva_offloaded = True
+
         _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
         offloaded_parameters = True
 
@@ -577,7 +690,12 @@ def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
                 k: v.to(device, non_blocking=True)
                 for k, v in module.state_dict().items()
             }
-            output = functional_call(module, device_state, args=args, kwargs=kwargs)
+
+            # set `tie_weights=False` as tied weights in original model
+            # become untied when calling .to(device) individually
+            output = functional_call(
+                module, device_state, args=args, kwargs=kwargs, tie_weights=False
+            )
             module.forward = forward
             return output
 
@@ -608,6 +726,10 @@ def make_layers(
         ]
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
     )
+    if _CPU_OFFLOAD_MAX_BYTES > 0:
+        logger.info(
+            "Total CPU offloaded parameters: %s GBs", format_gib(_CPU_OFFLOAD_BYTES)
+        )
     return start_layer, end_layer, modules
 
 
@@ -623,7 +745,7 @@ def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
 
     missing_layer_names = []
     for name, module in model.named_modules():
-        if isinstance(module, PPMissingLayer):
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             # NOTE: the trailing dot is used to match the prefix of the layer.
             # without the dot, we could match a layer that is not missing,
             # e.g., 'encoder.layer.1' would match 'encoder.layer.11'
@@ -635,7 +757,7 @@ def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
 
 def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     """Check if a parameter is missing in a pipeline parallel model."""
-    if isinstance(model, PPMissingLayer):
+    if isinstance(model, (StageMissingLayer, PPMissingLayer)):
         return True
 
     return any(
