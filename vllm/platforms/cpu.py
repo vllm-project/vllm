@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import glob
 import json
 import os
@@ -76,6 +77,55 @@ class CpuPlatform(Platform):
     dispatch_key: str = "CPU"
     dist_backend: str = "gloo"
     device_control_env_var = "CPU_VISIBLE_MEMORY_NODES"
+
+    @classmethod
+    def import_kernels(cls) -> None:
+        """Import CPU kernels with ISA compatibility check on x86_64.
+
+        The pre-built CPU wheel may contain AVX-512 instructions. If the
+        runtime CPU only supports AVX2, loading the shared library would
+        cause SIGILL (fatal, cannot be caught by try/except). We detect
+        this by test-loading in a subprocess when the CPU lacks AVX-512.
+        """
+        if cls._needs_isa_compat_check() and not cls._test_kernels_loadable():
+            logger.warning(
+                "Cannot load vllm._C: the pre-built CPU extension "
+                "may require AVX-512 instructions not supported by "
+                "this CPU. Consider building vLLM from source with "
+                "VLLM_CPU_DISABLE_AVX512=true or using a wheel "
+                "compatible with your CPU's instruction set."
+            )
+            with contextlib.suppress(ImportError):
+                import vllm._moe_C  # noqa: F401
+            return
+        super().import_kernels()
+
+    @staticmethod
+    def _needs_isa_compat_check() -> bool:
+        """True if on x86_64 Linux without AVX-512 (risk of ISA mismatch)."""
+        if platform.machine() not in ("x86_64", "amd64") or sys.platform != "linux":
+            return False
+        try:
+            with open("/proc/cpuinfo") as f:
+                for line in f:
+                    if line.startswith("flags"):
+                        return "avx512f" not in line.split()
+        except OSError:
+            pass
+        return False
+
+    @staticmethod
+    def _test_kernels_loadable() -> bool:
+        """Test-load vllm._C in a subprocess to detect SIGILL safely."""
+        try:
+            result = subprocess.run(
+                [sys.executable, "-c", "import vllm._C"],
+                capture_output=True,
+                timeout=10,
+            )
+            return result.returncode == 0
+        except Exception:
+            return False
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
