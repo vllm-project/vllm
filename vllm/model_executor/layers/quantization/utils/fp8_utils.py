@@ -510,6 +510,26 @@ class W8A8BlockFp8LinearOp:
     ) -> torch.Tensor:
         assert input_scale is None
         assert self.input_quant_op is not None
+
+        # Pad K dimension to multiple of block size if needed for Triton kernel.
+        # This handles models like DeepSeek-V2-Lite where intermediate_size
+        # (10944) is not divisible by the block size (128).
+        block_k = self.act_quant_group_shape.col
+        k = input_2d.shape[-1]
+        if k % block_k != 0:
+            pad_k = block_k - (k % block_k)
+            input_2d = torch.nn.functional.pad(input_2d, (0, pad_k))
+            weight = torch.nn.functional.pad(weight, (0, pad_k))
+            # Compute how many additional K-blocks we need after padding.
+            # Original: ceil(k/block_k), padded: ceil((k+pad_k)/block_k)
+            orig_k_blocks = triton.cdiv(k, block_k)
+            new_k_blocks = triton.cdiv(k + pad_k, block_k)
+            extra_k_blocks = new_k_blocks - orig_k_blocks
+            if extra_k_blocks > 0:
+                weight_scale = torch.nn.functional.pad(
+                    weight_scale, (0, extra_k_blocks)
+                )
+
         q_input, input_scale = self.input_quant_op(input_2d)
         return torch.ops.vllm.w8a8_triton_block_scaled_mm_func(
             q_input,
@@ -559,7 +579,11 @@ class W8A8BlockFp8LinearOp:
         ],
         QuantFP8,
     ]:
-        if use_cutlass:
+        # Skip CUTLASS for Blackwell (sm_120+) as block FP8 support is not
+        # stable yet. Fall back to Triton backend.
+        capability = current_platform.get_device_capability()
+        is_blackwell = capability is not None and capability.to_int() >= 120
+        if use_cutlass and not is_blackwell:
             return self._run_cutlass, (
                 QuantFP8(
                     False,
@@ -1444,16 +1468,14 @@ def validate_fp8_block_shape(
             f"is not divisible by weight quantization block_k = {block_k}."
         )
 
-    # Required by column parallel or enabling merged weights
+    # Required by column parallel with tensor parallelism.
+    # When TP > 1, each partition must be divisible by block size for proper
+    # slicing. For merged matrices without TP (e.g., gate_up_proj), partitions
+    # are logical only - the kernel treats them as a single matrix and handles
+    # partial blocks correctly via ceiling division in scale tensor sizing.
     is_tp_split = tp_size > 1 and output_size // sum(output_partition_sizes) == tp_size
-    is_merged_gemm = len(output_partition_sizes) > 1
-    if is_tp_split or is_merged_gemm:
-        sizes_to_check = output_partition_sizes
-        if not is_tp_split and is_merged_gemm:
-            # In case of merged matrices, we allow the last
-            # matrix to not be a multiple of block size
-            sizes_to_check = output_partition_sizes[:-1]
-        for output_partition_size in sizes_to_check:
+    if is_tp_split:
+        for output_partition_size in output_partition_sizes:
             if output_partition_size % block_n != 0:
                 raise ValueError(
                     f"Weight output_partition_size = "
