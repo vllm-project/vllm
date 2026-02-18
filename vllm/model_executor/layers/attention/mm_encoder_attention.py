@@ -44,7 +44,7 @@ FLASHINFER_MAX_SEQLEN_BUCKETS = [
     128 * 1024,
 ]
 
-# Shared workspace for FlashInfer CuDNN backend
+# Workspace buffer for FlashInfer CuDNN backend
 FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
 _flashinfer_workspace_buffer: torch.Tensor | None = None
 
