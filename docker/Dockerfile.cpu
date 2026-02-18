@@ -162,7 +162,7 @@ RUN \
     sed -i 's/^torch==.*/torch==2.11.0/g' requirements/cpu-test.in && \
     sed -i 's/torchaudio.*/torchaudio/g' requirements/cpu-test.in && \
     sed -i 's/torchvision.*/torchvision/g' requirements/cpu-test.in && \
-    uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --torch-backend cpu
+    uv pip compile requirements/cpu-test.in -o requirements/cpu-test.txt --index-strategy unsafe-best-match --extra-index-url https://download.pytorch.org/whl/test/cpu
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/cpu-test.txt
