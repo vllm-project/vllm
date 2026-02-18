@@ -697,27 +697,27 @@ async def build_endpoint_registry(
     Args:
         engine_client: The engine client
         args: Command line arguments
-        base_model_paths: List of base model paths
-        request_logger: Optional request logger
-        supported_tasks: Tuple of supported tasks
 
     Returns:
         Dictionary mapping endpoint keys to their configurations
     """
+    supported_tasks = await engine_client.get_supported_tasks()
+    logger.info("Supported tasks: %s", supported_tasks)
+
     # Create a state object to hold serving objects
     state = State()
 
     # Initialize all serving objects using init_app_state
     # This provides full functionality including chat template processing,
     # LoRA support, tool servers, etc.
-    await init_app_state(engine_client, state, args)
+    await init_app_state(engine_client, state, args, supported_tasks)
 
-    # Get serving objects from state
-    openai_serving_chat = state.openai_serving_chat
-    openai_serving_embedding = state.openai_serving_embedding
-    openai_serving_scores = state.openai_serving_scores
-    openai_serving_transcription = state.openai_serving_transcription
-    openai_serving_translation = state.openai_serving_translation
+    # Get serving objects from state (defaulting to None if not set)
+    openai_serving_chat = getattr(state, "openai_serving_chat", None)
+    openai_serving_embedding = getattr(state, "openai_serving_embedding", None)
+    openai_serving_scores = getattr(state, "openai_serving_scores", None)
+    openai_serving_transcription = getattr(state, "openai_serving_transcription", None)
+    openai_serving_translation = getattr(state, "openai_serving_translation", None)
 
     # Registry of endpoint configurations
     endpoint_registry: dict[str, dict[str, Any]] = {
