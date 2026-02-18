@@ -21,6 +21,7 @@ from pydantic_core.core_schema import ValidationInfo
 from starlette.datastructures import State
 from tqdm import tqdm
 
+from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.api_server import init_app_state
@@ -28,7 +29,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.cli_args import FrontendArgs
+from vllm.entrypoints.openai.cli_args import BaseFrontendArgs
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
@@ -59,6 +60,57 @@ from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+@config
+class BatchFrontendArgs(BaseFrontendArgs):
+    """Arguments for the batch runner frontend."""
+
+    host: str | None = None
+    """Host name for the Prometheus metrics server
+    (only needed if enable-metrics is set)."""
+    port: int = 8000
+    """Port number for the Prometheus metrics server
+    (only needed if enable-metrics is set)."""
+
+    @staticmethod
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+        from vllm.engine.arg_utils import get_kwargs
+
+        frontend_kwargs = get_kwargs(BatchFrontendArgs)
+        frontend_kwargs = BaseFrontendArgs._postprocess_base_args(frontend_kwargs)
+
+        batch_frontend_group = BaseFrontendArgs.add_group_with_arguments(
+            parser, BatchFrontendArgs, frontend_kwargs
+        )
+
+        # Add deprecated arguments for backward compatibility
+        batch_frontend_group.add_argument(
+            "--url",
+            type=str,
+            default="0.0.0.0",
+            help="[DEPRECATED] Host name for the Prometheus metrics server "
+            "(only needed if enable-metrics is set). Use --host instead.",
+            deprecated=True,
+        )
+        batch_frontend_group.add_argument(
+            "--metrics-url",
+            type=str,
+            default="0.0.0.0",
+            help="[DEPRECATED] URL to the Prometheus metrics server "
+            "(only needed if enable-metrics is set). Use --host instead.",
+            deprecated=True,
+        )
+        batch_frontend_group.add_argument(
+            "--metrics-port",
+            type=int,
+            default=8000,
+            help="[DEPRECATED] Port number for the Prometheus metrics server "
+            "(only needed if enable-metrics is set). Use --port instead.",
+            deprecated=True,
+        )
+
+        return parser
 
 
 class BatchTranscriptionRequest(TranscriptionRequest):
@@ -213,8 +265,8 @@ class BatchRequestOutput(OpenAIBaseModel):
 
 
 def make_arg_parser(parser: FlexibleArgumentParser):
+    parser = BatchFrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
-    parser = FrontendArgs.add_cli_args(parser)
 
     parser.add_argument(
         "-i",
@@ -246,32 +298,6 @@ def make_arg_parser(parser: FlexibleArgumentParser):
         action="store_true",
         help="Enable Prometheus metrics",
     )
-    parser.add_argument(
-        "--metrics-url",
-        type=str,
-        default="0.0.0.0",
-        help="URL to the Prometheus metrics server "
-        "(only needed if enable-metrics is set).",
-    )
-    # Note: Since FrontendArgs also adds --port, we delete --port here instead of
-    # deprecating it (avoiding conflicting option string).
-    # For metrics, use --metrics-port instead.
-    # We handle backward compatibility in parse_args().
-    parser.add_argument(
-        "--metrics-port",
-        type=int,
-        default=8000,
-        help="Port number for the Prometheus metrics server "
-        "(only needed if enable-metrics is set).",
-    )
-    parser.add_argument(
-        "--url",
-        type=str,
-        default="0.0.0.0",
-        help="[DEPRECATED] URL to the Prometheus metrics server "
-        "(only needed if enable-metrics is set). Use --metrics-url instead.",
-        deprecated=True,
-    )
 
     return parser
 
@@ -280,36 +306,49 @@ def parse_args():
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible batch runner.")
     args = make_arg_parser(parser).parse_args()
 
-    # Backward compatibility: If --port is set, use it for metrics_port
-    # This handles the case where users were using --port for metrics before
-    # FrontendArgs was introduced.
-    # Only apply backward compatibility if --metrics-port was not explicitly provided.
+    # Backward compatibility: If --url is set, use it for host
+    url_explicit = any(arg == "--url" or arg.startswith("--url=") for arg in sys.argv)
+    host_explicit = any(
+        arg == "--host" or arg.startswith("--host=") for arg in sys.argv
+    )
+    if url_explicit and hasattr(args, "url") and not host_explicit:
+        args.host = args.url
+        logger.warning_once(
+            "Using --url for metrics is deprecated. Please use --host instead."
+        )
+
+    # Backward compatibility: If --metrics-url is set, use it for host
+    metrics_url_explicit = any(
+        arg == "--metrics-url" or arg.startswith("--metrics-url=") for arg in sys.argv
+    )
+    if metrics_url_explicit and not host_explicit:
+        args.host = args.metrics_url
+        logger.warning_once(
+            "Using --metrics-url is deprecated. Please use --host instead."
+        )
+
+    # Backward compatibility: If --metrics-port is set, use it for port
     metrics_port_explicit = any(
         arg == "--metrics-port" or arg.startswith("--metrics-port=") for arg in sys.argv
     )
     port_explicit = any(
         arg == "--port" or arg.startswith("--port=") for arg in sys.argv
     )
-    if port_explicit and hasattr(args, "port") and not metrics_port_explicit:
-        args.metrics_port = args.port
+    if metrics_port_explicit and not port_explicit:
+        args.port = args.metrics_port
         logger.warning_once(
-            "Using --port for metrics is deprecated. "
-            "Please use --metrics-port instead. "
+            "Using --metrics-port is deprecated. Please use --port instead."
         )
 
-    # Backward compatibility: If --url is set, use it for metrics_url
-    # This handles the case where users were using --url for metrics before
-    # FrontendArgs was introduced.
-    # Only apply backward compatibility if --metrics-url was not explicitly provided.
-    metrics_url_explicit = any(
-        arg == "--metrics-url" or arg.startswith("--metrics-url=") for arg in sys.argv
-    )
-    url_explicit = any(arg == "--url" or arg.startswith("--url=") for arg in sys.argv)
-    if url_explicit and not metrics_url_explicit:
-        args.metrics_url = args.url
-        logger.warning_once(
-            "Using --url for metrics is deprecated. Please use --metrics-url instead."
-        )
+    # Map port and host to metrics_port and metrics_url for compatibility
+    # with the rest of the code that expects these attributes
+    if hasattr(args, "port"):
+        args.metrics_port = args.port
+    if hasattr(args, "host"):
+        args.metrics_url = args.host if args.host is not None else "0.0.0.0"
+    else:
+        args.metrics_url = "0.0.0.0"
+
     return args
 
 
