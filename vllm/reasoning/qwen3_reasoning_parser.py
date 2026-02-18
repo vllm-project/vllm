@@ -99,22 +99,32 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         prompt_is_reasoning_end and routes deltas as content without
         calling this method.
         """
-        # Skip start/end tokens when they arrive as lone special tokens.
-        if len(delta_token_ids) == 1 and delta_token_ids[0] in (
-            self.start_token_id,
-            self.end_token_id,
-        ):
-            return None
+        # Strip <think> from delta if present (old template / edge case
+        # where the model generates <think> itself).
+        if self.start_token_id in delta_token_ids:
+            start_idx = delta_text.find(self.start_token)
+            if start_idx >= 0:
+                delta_text = delta_text[start_idx + len(self.start_token) :]
 
         if self.end_token_id in delta_token_ids:
             # End token in this delta: split reasoning from content.
             end_index = delta_text.find(self.end_token)
-            reasoning = delta_text[:end_index]
-            content = delta_text[end_index + len(self.end_token) :]
-            return DeltaMessage(
-                reasoning=reasoning if reasoning else None,
-                content=content if content else None,
-            )
+            if end_index >= 0:
+                reasoning = delta_text[:end_index]
+                content = delta_text[end_index + len(self.end_token) :]
+                if not reasoning and not content:
+                    return None
+                return DeltaMessage(
+                    reasoning=reasoning if reasoning else None,
+                    content=content if content else None,
+                )
+            # end_token_id in IDs but not in text (already stripped)
+            return None
+
+        # No end token in this delta.
+        if not delta_text:
+            # Nothing left after stripping start token.
+            return None
         elif self.end_token_id in previous_token_ids:
             # End token already passed: everything is content now.
             return DeltaMessage(content=delta_text)

@@ -3,7 +3,11 @@
 
 import pytest
 
-from tests.reasoning.utils import run_reasoning_extraction
+from tests.reasoning.utils import (
+    StreamingReasoningReconstructor,
+    run_reasoning_extraction,
+    run_reasoning_extraction_streaming,
+)
 from transformers import AutoTokenizer
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
@@ -189,3 +193,59 @@ def test_reasoning(
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
+
+
+# Multi-token delta tests: simulate real-world streaming where a single
+# delta can contain multiple tokens (e.g., speculative decoding).
+MULTI_TOKEN_DELTA_CASES = [
+    pytest.param(
+        # <think> grouped with following text in one delta
+        ["<think>This is a reasoning section", "</think>", "This is the rest"],
+        "This is a reasoning section",
+        "This is the rest",
+        id="start_token_grouped_with_text",
+    ),
+    pytest.param(
+        # </think> grouped with following content in one delta
+        ["reasoning section", "</think>This is the rest"],
+        "reasoning section",
+        "This is the rest",
+        id="end_token_grouped_with_content",
+    ),
+    pytest.param(
+        # <think> and </think> in the same delta, no content after
+        ["<think>reasoning</think>"],
+        "reasoning",
+        None,
+        id="start_and_end_in_one_delta_no_content",
+    ),
+    pytest.param(
+        # No start token, end grouped with content (Qwen3.5 style)
+        ["reasoning section", "</think>content"],
+        "reasoning section",
+        "content",
+        id="no_start_end_grouped_with_content",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    "deltas, expected_reasoning, expected_content", MULTI_TOKEN_DELTA_CASES
+)
+def test_reasoning_streaming_multi_token_deltas(
+    deltas: list[str],
+    expected_reasoning: str | None,
+    expected_content: str | None,
+    qwen3_tokenizer,
+):
+    """Test that multi-token deltas don't leak <think> into reasoning."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        qwen3_tokenizer
+    )
+
+    reconstructor: StreamingReasoningReconstructor = run_reasoning_extraction_streaming(
+        parser, deltas
+    )
+
+    assert reconstructor.reasoning == expected_reasoning
+    assert (reconstructor.other_content or None) == expected_content
