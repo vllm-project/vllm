@@ -233,10 +233,12 @@ class BatchFrontendArgs(BaseFrontendArgs):
     """[DEPRECATED] Port number for the Prometheus metrics server
     (only needed if enable-metrics is set). Use --port instead."""
 
-    @staticmethod
+    @classmethod
     def _customize_cli_kwargs(
+        cls,
         frontend_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
+        frontend_kwargs = super()._customize_cli_kwargs(frontend_kwargs)
         frontend_kwargs["url"]["deprecated"] = True
         frontend_kwargs["metrics_url"]["deprecated"] = True
         frontend_kwargs["metrics_port"]["deprecated"] = True

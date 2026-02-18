@@ -156,11 +156,16 @@ class BaseFrontendArgs:
     This is intended for use in a Disaggregated Everything setup.
     """
 
-    @staticmethod
-    def _postprocess_base_args(
+    @classmethod
+    def _customize_cli_kwargs(
+        cls,
         frontend_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
-        """Postprocess kwargs shared by all BaseFrontendArgs subclasses."""
+        """Customize argparse kwargs before arguments are registered.
+
+        Subclasses should override this and call
+        ``super()._customize_cli_kwargs(frontend_kwargs)`` first.
+        """
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
 
@@ -175,13 +180,6 @@ class BaseFrontendArgs:
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin"
         )
-        return frontend_kwargs
-
-    @staticmethod
-    def _customize_cli_kwargs(
-        frontend_kwargs: dict[str, Any],
-    ) -> dict[str, Any]:
-        """Override in subclasses to apply class-specific kwarg tweaks."""
         return frontend_kwargs
 
     @staticmethod
@@ -206,12 +204,11 @@ class BaseFrontendArgs:
         """Register CLI arguments for this frontend class.
 
         Subclasses should override ``_customize_cli_kwargs`` instead of
-        this method so that ``_postprocess_base_args`` is always applied.
+        this method so that base-class postprocessing is always applied.
         """
         from vllm.engine.arg_utils import get_kwargs
 
         frontend_kwargs = get_kwargs(cls)
-        frontend_kwargs = BaseFrontendArgs._postprocess_base_args(frontend_kwargs)
         frontend_kwargs = cls._customize_cli_kwargs(frontend_kwargs)
 
         group_name = cls.__name__.replace("Args", "")
@@ -292,10 +289,13 @@ class FrontendArgs(BaseFrontendArgs):
     Uses vendored static assets bundled with vLLM.
     """
 
-    @staticmethod
+    @classmethod
     def _customize_cli_kwargs(
+        cls,
         frontend_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
+        frontend_kwargs = super()._customize_cli_kwargs(frontend_kwargs)
+
         # Special case: allowed_origins, allowed_methods, allowed_headers all
         # need json.loads type
         # Should also remove nargs
