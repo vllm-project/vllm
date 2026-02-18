@@ -4,6 +4,7 @@ from collections.abc import Iterable
 
 import torch
 
+from vllm.distributed import get_dcp_group
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
@@ -18,19 +19,36 @@ class BlockTables:
         max_num_batched_tokens: int,
         max_model_len: int,
         device: torch.device,
+        cp_kv_cache_interleave_size: int = 1,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
         self.max_model_len = max_model_len
         self.device = device
+        assert cp_kv_cache_interleave_size >= 1
+        self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
+
+        try:
+            dcp = get_dcp_group()
+            self.dcp_world_size, self.dcp_rank = dcp.world_size, dcp.rank_in_group
+        except AssertionError:
+            self.dcp_world_size, self.dcp_rank = 1, 0
+        # TODO(wentao): PCP supprot
+        self.total_cp_world_size = self.dcp_world_size
+        self.total_cp_rank = self.dcp_rank
 
         self.num_kv_cache_groups = len(self.block_sizes)
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
             block_size = self.block_sizes[i]
-            max_num_blocks = cdiv(self.max_model_len, block_size)
+            # with DCP, a request's KV is sharded across
+            # ranks, so one physical block on this rank
+            # corresponds to `block_size * total_cp_world_size`
+            # tokens in the global (unsharded) sequence.
+            virtual_block_size = block_size * self.total_cp_world_size
+            max_num_blocks = cdiv(self.max_model_len, virtual_block_size)
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,
@@ -131,6 +149,9 @@ class BlockTables:
             self.block_sizes_tensor,
             self.slot_mappings,
             self.slot_mappings.stride(0),
+            TOTAL_CP_WORLD_SIZE=self.total_cp_world_size,
+            TOTAL_CP_RANK=self.total_cp_rank,
+            CP_KV_CACHE_INTERLEAVE_SIZE=self.cp_kv_cache_interleave_size,
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
@@ -183,6 +204,9 @@ def _compute_slot_mappings_kernel(
     block_sizes,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
+    TOTAL_CP_WORLD_SIZE: tl.constexpr,
+    TOTAL_CP_RANK: tl.constexpr,
+    CP_KV_CACHE_INTERLEAVE_SIZE: tl.constexpr,
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
@@ -201,6 +225,7 @@ def _compute_slot_mappings_kernel(
     block_table_ptr = _load_ptr(block_table_ptrs + group_id, tl.int32)
     block_table_stride = tl.load(block_table_strides + group_id)
     block_size = tl.load(block_sizes + group_id)
+    virtual_block_size = block_size * TOTAL_CP_WORLD_SIZE
 
     req_state_idx = tl.load(idx_mapping + batch_idx)
     start_idx = tl.load(query_start_loc + batch_idx)
@@ -208,11 +233,26 @@ def _compute_slot_mappings_kernel(
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
         positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
-        block_indices = positions // block_size
+        block_indices = positions // virtual_block_size
         block_numbers = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + block_indices
         )
-        slot_ids = block_numbers * block_size + positions % block_size
+        virtual_block_offsets = positions - block_indices * virtual_block_size
+
+        # determine whether the token is stored on this CP rank.
+        is_local = (
+            virtual_block_offsets // CP_KV_CACHE_INTERLEAVE_SIZE
+        ) % TOTAL_CP_WORLD_SIZE == TOTAL_CP_RANK
+        # mapping virture block offsets to local block offsets.
+        local_block_offsets = (
+            virtual_block_offsets // (TOTAL_CP_WORLD_SIZE * CP_KV_CACHE_INTERLEAVE_SIZE)
+        ) * CP_KV_CACHE_INTERLEAVE_SIZE + (
+            virtual_block_offsets % CP_KV_CACHE_INTERLEAVE_SIZE
+        )
+
+        # physical slot index
+        slot_ids = block_numbers * block_size + local_block_offsets
+        slot_ids = tl.where(is_local, slot_ids, PAD_ID)
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)
 
 
