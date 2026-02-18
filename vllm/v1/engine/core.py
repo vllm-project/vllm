@@ -273,7 +273,7 @@ class EngineCoreSentinel(BaseSentinel):
 
     def shutdown(self):
         if self.engine_fault_socket is not None:
-            self.engine_fault_socket.close()
+            self.engine_fault_socket.close(linger=0)
         super().shutdown()
 
 

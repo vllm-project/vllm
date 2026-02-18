@@ -108,6 +108,7 @@ class BaseSentinel:
             self.logger(
                 "Socket closed, terminating %s", self.sentinel_name, level="info"
             )
+            self.sentinel_dead = True
             return False, None
         if has_msg:
             ft_request = msgspec.msgpack.decode(
@@ -331,12 +332,12 @@ class BaseSentinel:
             hasattr(self, "upstream_cmd_socket")
             and self.upstream_cmd_socket is not None
         ):
-            self.upstream_cmd_socket.close()
+            self.upstream_cmd_socket.close(linger=0)
         if (
             hasattr(self, "downstream_cmd_socket")
             and self.downstream_cmd_socket is not None
         ):
-            self.downstream_cmd_socket.close()
+            self.downstream_cmd_socket.close(linger=0)
         if self.ctx is not None:
             self.ctx.term()
         self.sentinel_dead = True

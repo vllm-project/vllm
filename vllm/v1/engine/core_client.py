@@ -658,11 +658,11 @@ class ClientSentinel(BaseSentinel):
             pass
 
     def shutdown(self):
-        self.fault_receiver_socket.close()
+        self.fault_receiver_socket.close(linger=0)
         self.fault_state_pub_socket.close()
-        self.inproc_res_send_socket.close()
-        self.inproc_res_recv_socket.close()
-        self.fault_tolerance_req_socket.close()
+        self.inproc_res_send_socket.close(linger=0)
+        self.inproc_res_recv_socket.close(linger=0)
+        self.fault_tolerance_req_socket.close(linger=0)
         super().shutdown()
 
 
