@@ -38,7 +38,7 @@ def _request(method: str, url: str) -> dict:
     except httpx.HTTPStatusError as exc:
         try:
             body = exc.response.json()
-        except Exception:
+        except json.JSONDecodeError:
             body = exc.response.text
         print(
             f"Error: HTTP {exc.response.status_code}: {body}",
