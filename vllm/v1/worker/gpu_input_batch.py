@@ -951,6 +951,10 @@ class InputBatch:
             if prev_index is None:
                 continue
             req_output_token_ids = output_token_ids[index]
+            if not req_output_token_ids or req_output_token_ids[-1] != -1:
+                # Final output id is not a placeholder, some tokens must have
+                # been discarded after a kv-load failure.
+                continue
             if sampled_token_ids is None:
                 assert self.async_copy_ready_event is not None
                 self.async_copy_ready_event.synchronize()
@@ -960,29 +964,16 @@ class InputBatch:
             if not new_ids:
                 continue
             num_sampled_ids = len(new_ids) if new_ids[-1] != -1 else new_ids.index(-1)
-            if num_sampled_ids == 0:
-                continue
-
-            # Check if there are placeholders to replace.
-            has_placeholders = req_output_token_ids and req_output_token_ids[-1] == -1
-
-            if has_placeholders:
-                # Replace placeholder token id(s) with actual sampled id(s).
-                # Also account for case where there may be a smaller number of
-                # output placeholders (tokens can be discarded after kv-load
-                # failure) or a larger number (async spec decode adds optimistic
-                # placeholders that may exceed the actual acceptance count).
-                first_placeholder = req_output_token_ids.index(-1)
-                num_placeholders = len(req_output_token_ids) - first_placeholder
-                num_to_replace = min(num_sampled_ids, num_placeholders)
-                end_index = first_placeholder + num_to_replace
-                req_output_token_ids[first_placeholder:end_index] = new_ids[
-                    :num_to_replace
-                ]
-                if num_to_replace < num_placeholders:
-                    del req_output_token_ids[end_index:]
-            else:
-                req_output_token_ids.extend(new_ids[:num_sampled_ids])
+            # Also account for case where there may be a smaller number of
+            # output placeholders (tokens can be discarded after kv-load
+            # failure) or a larger number (async spec decode adds optimistic
+            # placeholders that may exceed the actual acceptance count).
+            first_placeholder = req_output_token_ids.index(-1)
+            num_placeholders = len(req_output_token_ids) - first_placeholder
+            num_to_replace = min(num_sampled_ids, num_placeholders)
+            del new_ids[num_to_replace:]
+            req_output_token_ids[first_placeholder:] = new_ids
+            # ^ Implicitly deletes entries beyond (first_placeholder + num_to_replace)
 
     def update_async_spec_token_ids(self, draft_token_ids: list[list[int]]) -> None:
         """
