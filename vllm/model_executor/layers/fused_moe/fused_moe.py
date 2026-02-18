@@ -1247,12 +1247,14 @@ def get_default_config(
     if dtype == "fp8_w8a8" and block_shape is not None:
         # Block-wise quant: tile sizes are constrained by block_shape.
         # Use a small M tile for decode-like batches where tokens are
-        # spread thin across experts.
+        # spread thin across experts. Larger batches benefit from
+        # GROUP_SIZE_M > 1 because the per-block scales add memory
+        # traffic that benefits from L2 tile reuse.
         config = {
             "BLOCK_SIZE_M": 16 if M <= 64 else 64,
             "BLOCK_SIZE_N": block_shape[0],
             "BLOCK_SIZE_K": block_shape[1],
-            "GROUP_SIZE_M": 1,
+            "GROUP_SIZE_M": 1 if M <= 16 else 32,
             "SPLIT_K": 1,
             "num_warps": 4,
             "num_stages": 3 if not current_platform.is_rocm() else num_stages_rocm,
