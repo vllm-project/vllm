@@ -106,7 +106,11 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
                 [7.0] * self.num_experts, dtype=torch.float32, device=self.device
             )
             if quant_config.quant_dtype == "mxfp8":
-                self.fake_input_scale = torch.ones(self.num_experts, device=self.device)
+                self.fake_input_scale = torch.ones(
+                    self.num_experts,
+                    device=self.device,
+                    dtype=torch.float32,
+                )
 
     @property
     def expects_unquantized_inputs(self) -> bool:
