@@ -51,12 +51,11 @@ def helion_matmul_w_progress_fp8(
 
         for tile_k in hl.tile(K):
             # Cast FP8 -> FP32 for accumulation
-            a_f32 = a[tile_m, tile_k].to(torch.float32)  # [tile_m, tile_k]
-            b_f32 = b[tile_k, tile_n].to(torch.float32)  # [tile_k, tile_n]
-            acc = torch.addmm(acc, a_f32 * sa, b_f32 * sb)  # Matrix multiplication with scaling.
+            acc = torch.addmm(acc, a[tile_m, tile_k].to(torch.float32), 
+                                   b[tile_k, tile_n].to(torch.float32))
 
         # Convert result back to bfloat16
-        out[tile_m, tile_n] = acc.to(torch.bfloat16)
+        out[tile_m, tile_n] = (acc * sa * sb).to(torch.bfloat16)
 
     return out
 

@@ -34,7 +34,7 @@ def skip_if_platform_unsupported():
     except (ImportError, RuntimeError, KeyError):
         pytest.skip("Error detecting platform support for helion_matmul_w_progress_fp8 kernel")
 
-@pytest.fixture(autouse=True)
+@pytest.fixture(scope="function",autouse=True)
 def reset_config_manager_singleton():
     ConfigManager.reset_instance()
     ConfigManager()
@@ -42,38 +42,27 @@ def reset_config_manager_singleton():
     ConfigManager.reset_instance()
 
 
-TEST_SHAPES = [
-    #(512, 8192, 2048),
-    (128, 32, 64)
-]
-@pytest.mark.parametrize("M,N,K", TEST_SHAPES)
-def test_helion_fp8_all_gather_matmul(M, K, N):
-    """Test Helion FP8 all-gather followed by matmul operation.
-    
-    Run with:
-        VLLM_USE_HELION_BACKEND=1 torchrun --nproc_per_node=2 -m pytest tests/distributed/test_all_gather_gemm_fp8.py -v -s
-        or
-        VLLM_USE_HELION_BACKEND=1  python -m torch.distributed.run --standalone     --nproc-per-node 4     --rdzv-backend c10d --rdzv-endpoint localhost:0     -m pytest tests/distributed/test_all_gather_gemm_fp8.py 
-    """
-    # torchrun sets these environment variables automatically
+def init_distributed():
+    """Initialize distributed environment and GroupCoordinator."""
+    import weakref
+    from vllm.distributed.parallel_state import _groups, GroupCoordinator
+
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
-    
-    # Setup device - CRITICAL: each process gets its own GPU
-    torch.manual_seed(42 + rank)
+
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
-    
-    # Initialize distributed with torchrun's env vars
+
     if not dist.is_initialized():
-        dist.init_process_group("nccl")
-    
-    # Register dist.group.WORLD in vLLM's _groups registry
-    from vllm.distributed.parallel_state import _groups, GroupCoordinator
-    import weakref
-    
-    # Create a minimal GroupCoordinator wrapping WORLD
+        print(f"Initializing distributed: rank {rank}, local_rank {local_rank}, world_size {world_size}")
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            world_size=world_size,
+            rank=rank,
+        )
+
     world_group = GroupCoordinator(
         group_ranks=[list(range(world_size))],
         local_rank=local_rank,
@@ -81,25 +70,34 @@ def test_helion_fp8_all_gather_matmul(M, K, N):
         use_device_communicator=False,
         group_name="world",
     )
-    
-    # Register it in _groups using dist.group.WORLD's name as key
-    dist_group = dist.group.WORLD
-    assert dist_group is not None
-    # Store a weak reference to the GroupCoordinator in _groups so the kernel can access it without preventing garbage collection.
-    _groups[dist_group.group_name] = weakref.ref(world_group)
-    
-    # Test parameters
+    _groups[dist.group.WORLD.group_name] = weakref.ref(world_group)
+
+    return rank, local_rank, world_size, device, dist.group.WORLD, world_group
+
+
+def run_shape_test(M, K, N, rank, world_size, device, dist_group, world_group):
+    """Run a single shape through Helion FP8 all-gather + matmul."""
+    torch.manual_seed(41)  # deterministic for all ranks
+
     M_per_rank = M // world_size
 
-    # Create inputs
-    a_shared = torch.rand(M_per_rank, K, device=device, dtype=torch.float32) * 0.05
+    # Inputs
+    a_shared = torch.rand(M_per_rank, K, device=device, dtype=torch.bfloat16) * 0.05
     a_shared = a_shared.to(FP8_DTYPE)
+    b = (torch.rand(K, N, device=device, dtype=torch.bfloat16) *0.1+ 0.05).T.contiguous().T
+    b = b.to(FP8_DTYPE)
 
-    b = (torch.rand(K, N, device=device, dtype=torch.float32)  * 0.05).T.contiguous().T
-    b= b.to(FP8_DTYPE)
-    scale_a = torch.rand((M_per_rank, 1), device=device, dtype=torch.float32) * 0.1 + 0.05
-    scale_b = torch.rand((1, N), device=device, dtype=torch.float32) * 0.1 + 0.05
+    scale_a = torch.rand((M_per_rank, 1), device=device, dtype=torch.float32) * 0.05 + 0.01
+    scale_b = torch.rand((1, N), device=device, dtype=torch.float32) * 0.05 + 0.01
+
+    #adding clamping to avoid nan, inf (overflow)
+    min_val=1e-3 
+    max_val = 0.02 * (1024 / max(K, N))
+
+    scale_a = scale_a.clamp(min=min_val, max=max_val)
+    scale_b = scale_b.clamp(min=min_val, max=max_val)
     # call the HelionOp
+
     a_out, c = torch.ops.vllm.helion_all_gather_fp8_gemm(
         a_shared,
         b,
@@ -108,6 +106,7 @@ def test_helion_fp8_all_gather_matmul(M, K, N):
         world_size,
         dist_group.group_name,
     )
+
     # Compute golden reference
     ag_golden, mm_golden = torch.ops.symm_mem.fused_all_gather_scaled_matmul(
         a_shared,
@@ -128,4 +127,37 @@ def test_helion_fp8_all_gather_matmul(M, K, N):
         rtol=1e-1, 
         atol=1e-1
     )
+
+#TODO: if we run this test with one shape it will pass, if. we run multiple it will fail to intalize with nccl.
+@pytest.mark.parametrize("M,K,N", [
+    #small shapes
+    #(128, 32, 64),
+    #(256, 1024, 1024),
+    #medium shapes
+    #(2048, 1024, 2048),
+    #(2048, 4096, 4096),
+    #(4096, 2048, 4096),
+    #large shapes
+    #(4096, 5120, 5120),
+    (8192, 8192, 8192),
+])
+def test_helion_fp8_all_gather_matmul(M, K, N):
+    rank, local_rank, world_size, device, dist_group, world_group = init_distributed()
     
+    dist.barrier()
+    torch.cuda.empty_cache()
+    import gc
+    gc.collect()
+    
+    ConfigManager.reset_instance()
+    _ = ConfigManager()
+
+    try:
+        run_shape_test(M, K, N, rank, world_size, device, dist_group, world_group)
+        torch.cuda.synchronize()
+        if rank == 0:
+            print(f"Shape ({M}, {K}, {N}) PASSED")
+
+    except Exception as e:
+        print(f"Shape ({M}, {K}, {N}) FAILED: {e}")
+        raise
