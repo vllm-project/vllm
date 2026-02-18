@@ -223,45 +223,24 @@ class BatchFrontendArgs(BaseFrontendArgs):
     port: int = 8000
     """Port number for the Prometheus metrics server
     (only needed if enable-metrics is set)."""
+    url: str = "0.0.0.0"
+    """[DEPRECATED] Host name for the Prometheus metrics server
+    (only needed if enable-metrics is set). Use --host instead."""
+    metrics_url: str = "0.0.0.0"
+    """[DEPRECATED] URL to the Prometheus metrics server
+    (only needed if enable-metrics is set). Use --host instead."""
+    metrics_port: int = 8000
+    """[DEPRECATED] Port number for the Prometheus metrics server
+    (only needed if enable-metrics is set). Use --port instead."""
 
     @staticmethod
-    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        from vllm.engine.arg_utils import get_kwargs
-
-        frontend_kwargs = get_kwargs(BatchFrontendArgs)
-        frontend_kwargs = BaseFrontendArgs._postprocess_base_args(frontend_kwargs)
-
-        batch_frontend_group = BaseFrontendArgs.add_group_with_arguments(
-            parser, "BatchFrontend", BatchFrontendArgs, frontend_kwargs
-        )
-
-        # Add deprecated arguments for backward compatibility
-        batch_frontend_group.add_argument(
-            "--url",
-            type=str,
-            default="0.0.0.0",
-            help="[DEPRECATED] Host name for the Prometheus metrics server "
-            "(only needed if enable-metrics is set). Use --host instead.",
-            deprecated=True,
-        )
-        batch_frontend_group.add_argument(
-            "--metrics-url",
-            type=str,
-            default="0.0.0.0",
-            help="[DEPRECATED] URL to the Prometheus metrics server "
-            "(only needed if enable-metrics is set). Use --host instead.",
-            deprecated=True,
-        )
-        batch_frontend_group.add_argument(
-            "--metrics-port",
-            type=int,
-            default=8000,
-            help="[DEPRECATED] Port number for the Prometheus metrics server "
-            "(only needed if enable-metrics is set). Use --port instead.",
-            deprecated=True,
-        )
-
-        return parser
+    def _customize_cli_kwargs(
+        frontend_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        frontend_kwargs["url"]["deprecated"] = True
+        frontend_kwargs["metrics_url"]["deprecated"] = True
+        frontend_kwargs["metrics_port"]["deprecated"] = True
+        return frontend_kwargs
 
 
 def make_arg_parser(parser: FlexibleArgumentParser):

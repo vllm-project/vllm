@@ -160,7 +160,7 @@ class BaseFrontendArgs:
     def _postprocess_base_args(
         frontend_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
-        """Helper method to add common CLI arguments for frontend classes."""
+        """Postprocess kwargs shared by all BaseFrontendArgs subclasses."""
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads
 
@@ -178,7 +178,14 @@ class BaseFrontendArgs:
         return frontend_kwargs
 
     @staticmethod
-    def add_group_with_arguments(
+    def _customize_cli_kwargs(
+        frontend_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Override in subclasses to apply class-specific kwarg tweaks."""
+        return frontend_kwargs
+
+    @staticmethod
+    def _add_group_with_arguments(
         parser: FlexibleArgumentParser,
         group_name: str,
         group_cls: type,
@@ -193,6 +200,26 @@ class BaseFrontendArgs:
             frontend_group.add_argument(f"--{key.replace('_', '-')}", **value)
 
         return frontend_group
+
+    @classmethod
+    def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+        """Register CLI arguments for this frontend class.
+
+        Subclasses should override ``_customize_cli_kwargs`` instead of
+        this method so that ``_postprocess_base_args`` is always applied.
+        """
+        from vllm.engine.arg_utils import get_kwargs
+
+        frontend_kwargs = get_kwargs(cls)
+        frontend_kwargs = BaseFrontendArgs._postprocess_base_args(frontend_kwargs)
+        frontend_kwargs = cls._customize_cli_kwargs(frontend_kwargs)
+
+        group_name = cls.__name__.replace("Args", "")
+        BaseFrontendArgs._add_group_with_arguments(
+            parser, group_name, cls, frontend_kwargs
+        )
+
+        return parser
 
 
 @config
@@ -266,12 +293,9 @@ class FrontendArgs(BaseFrontendArgs):
     """
 
     @staticmethod
-    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        from vllm.engine.arg_utils import get_kwargs
-
-        frontend_kwargs = get_kwargs(FrontendArgs)
-        frontend_kwargs = BaseFrontendArgs._postprocess_base_args(frontend_kwargs)
-
+    def _customize_cli_kwargs(
+        frontend_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
         # Special case: allowed_origins, allowed_methods, allowed_headers all
         # need json.loads type
         # Should also remove nargs
@@ -294,11 +318,7 @@ class FrontendArgs(BaseFrontendArgs):
         if "nargs" in frontend_kwargs["disable_access_log_for_endpoints"]:
             del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
 
-        BaseFrontendArgs.add_group_with_arguments(
-            parser, "Frontend", FrontendArgs, frontend_kwargs
-        )
-
-        return parser
+        return frontend_kwargs
 
 
 def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
