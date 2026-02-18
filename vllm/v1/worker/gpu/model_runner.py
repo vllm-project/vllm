@@ -33,10 +33,10 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
-    prepare_dcp_local_seq_lens,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.dp_utils import (
     get_cudagraph_and_dp_padding,
@@ -192,6 +192,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.is_first_pp_rank = True
             self.is_last_pp_rank = True
 
+        # Decode context parallelism.
+        self.dcp_size = self.parallel_config.decode_context_parallel_size
+        self.use_dcp = self.dcp_size > 1
+        self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
+        self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
@@ -251,9 +257,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
             device=self.device,
-            cp_kv_cache_interleave_size=(
-                self.parallel_config.cp_kv_cache_interleave_size
-            ),
+            cp_size=self.dcp_size,
+            cp_rank=self.dcp_rank,
+            cp_interleave=self.cp_interleave,
         )
 
         self.attn_backends, self.attn_metadata_builders = init_attn_backend(
@@ -636,18 +642,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
 
-        dcp_size = self.parallel_config.decode_context_parallel_size
-        if dcp_size > 1:
+        if self.use_dcp:
+            # Prepare dcp local seq_lens.
             prepare_dcp_local_seq_lens(
                 self.input_buffers.dcp_local_seq_lens,
-                seq_lens,
+                self.input_buffers.seq_lens,
                 num_reqs,
-                dcp_size=dcp_size,
-                dcp_rank=get_dcp_group().rank_in_group,
-                cp_kv_cache_interleave_size=(
-                    self.parallel_config.cp_kv_cache_interleave_size
-                ),
+                self.dcp_size,
+                self.dcp_rank,
+                self.cp_interleave,
             )
+        dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs]
 
         # Prepare M-RoPE positions.
         if self.uses_mrope:
@@ -696,7 +701,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
-            dcp_local_seq_lens=self.input_buffers.dcp_local_seq_lens,
+            dcp_local_seq_lens=dcp_local_seq_lens,
         )
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
