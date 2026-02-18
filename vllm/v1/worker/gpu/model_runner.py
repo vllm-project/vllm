@@ -92,6 +92,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.observability_config = vllm_config.observability_config
 
         self.device = device
+        self.main_stream: torch.cuda.Stream | None = None
         self.dtype = self.model_config.dtype
         self.kv_cache_dtype = self.dtype
         if self.cache_config.cache_dtype != "auto":
@@ -238,6 +239,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    def _get_main_stream(self) -> torch.cuda.Stream:
+        # Cache the default CUDA stream to avoid lookup overhead.
+        if self.main_stream is None:
+            self.main_stream = torch.cuda.current_stream(self.device)
+        return self.main_stream
 
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
@@ -1065,6 +1072,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
             num_sampled_tokens=num_sampled,
+            main_stream=self._get_main_stream(),
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
         )
