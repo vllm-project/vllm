@@ -3,17 +3,17 @@
 
 import pytest
 import torch
-
 import torch.nn as nn
 
 import vllm
 from tests.compile.backend import TestBackend
-from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.compilation.passes.utility.scatter_split_replace import (
     ScatterSplitReplacementPass,
 )
-from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.config import CompilationConfig, CompilationMode, VllmConfig
+from vllm.model_executor.layers.rotary_embedding import RotaryEmbedding
+
 
 class ScatterSplitReplacementModel(nn.Module):
     """Model with a rope+getitem+slice_scatter+split_with_sizes sequence."""
