@@ -117,6 +117,19 @@ class WorkerLoRAManager:
             # Get model-defined prefixes to skip during LoRA loading.
             lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
 
+            # Build the set of all valid full module paths for LoRA
+            # targets. This includes both non-packed modules and unpacked
+            # component names from packed modules (e.g., q_proj from
+            # qkv_proj). Used to detect module name prefix mismatches.
+            model_module_names: set[str] = set()
+            for mod_name in self._adapter_manager.modules:
+                if mod_name in self._adapter_manager.packed_modules:
+                    model_module_names.update(
+                        self._adapter_manager.packed_modules[mod_name]
+                    )
+                else:
+                    model_module_names.add(mod_name)
+
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
@@ -128,6 +141,7 @@ class WorkerLoRAManager:
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
                 skip_prefixes=lora_skip_prefixes,
+                model_module_names=model_module_names,
             )
 
         except FileNotFoundError as e:
