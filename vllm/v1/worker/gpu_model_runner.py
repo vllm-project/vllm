@@ -5008,11 +5008,11 @@ class GPUModelRunner(
 
     def _get_cudagraph_profiling_info(
         self,
-    ) -> tuple[tuple[int | None, int | None], int, tuple[int | None, int | None], int]:
+    ) -> tuple[tuple[int, int] | None, int, tuple[int, int] | None, int]:
         cudagraph_mode = self.compilation_config.cudagraph_mode
 
         if cudagraph_mode == CUDAGraphMode.NONE or not self.cudagraph_batch_sizes:
-            return (None, None), 0, (None, None), 0
+            return None, 0, None, 0
 
         lora_cases = (
             2
@@ -5030,10 +5030,9 @@ class GPUModelRunner(
         def get_largest_and_count(mode: CUDAGraphMode):
             sizes = batch_sizes.get(mode, [])
             desc = sorted(set(sizes), reverse=True)
-            return (
-                (desc[0] if desc else None, desc[1] if len(desc) > 1 else None),
-                len(sizes) * lora_cases,
-            )
+            if len(desc) < 2:
+                return None, 0
+            return (desc[0], desc[1]), len(sizes) * lora_cases
 
         full_largest_two, full_count = get_largest_and_count(CUDAGraphMode.FULL)
         pw_largest_two, pw_count = get_largest_and_count(CUDAGraphMode.PIECEWISE)
@@ -5151,8 +5150,7 @@ class GPUModelRunner(
                 self.model.cudagraph_wrapper.graph_pool = profiling_pool
 
         def profile_graph_mode(
-            largest_two_sizes: tuple[int, int | None],
-            count: int,
+            largest_two_sizes: tuple[int, int],
             cudagraph_runtime_mode: CUDAGraphMode,
             uniform_decode: bool,
             measure_first_capture: bool,
@@ -5176,17 +5174,15 @@ class GPUModelRunner(
                 else 0
             )
             # Second capture measures per-graph overhead
-            per_graph = 0
-            if count > 1 and largest_two_sizes[1] is not None:
-                current_platform.synchronize()
-                before = self._warmup_and_capture(
-                    largest_two_sizes[1],
-                    cudagraph_runtime_mode=cudagraph_runtime_mode,
-                    uniform_decode=uniform_decode,
-                    num_warmups=0,
-                )
-                current_platform.synchronize()
-                per_graph = before - current_platform.mem_get_info()[0]
+            current_platform.synchronize()
+            before = self._warmup_and_capture(
+                largest_two_sizes[1],
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
+                uniform_decode=uniform_decode,
+                num_warmups=0,
+            )
+            current_platform.synchronize()
+            per_graph = before - current_platform.mem_get_info()[0]
             return first_capture_memory, per_graph
 
         set_cudagraph_capturing_enabled(True)
@@ -5195,28 +5191,24 @@ class GPUModelRunner(
             full_per_graph = 0
             piecewise_per_graph = 0
 
-            full_largest = full_largest_two[0]
-            if full_largest is not None:
+            if full_largest_two is not None:
                 cudagraph_mode = self.compilation_config.cudagraph_mode
                 uniform_decode = cudagraph_mode.separate_routine()
                 full_first_capture_memory, full_per_graph = profile_graph_mode(
-                    largest_two_sizes=(full_largest, full_largest_two[1]),
-                    count=full_count,
+                    largest_two_sizes=full_largest_two,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
                     uniform_decode=uniform_decode,
                     measure_first_capture=True,
                     profile_seq_lens=min(
                         self.max_model_len,
-                        self.max_num_tokens // full_largest,
+                        self.max_num_tokens // full_largest_two[0],
                     ),
                 )
 
             counter_before_piecewise = compilation_counter.num_cudagraph_captured
-            pw_largest = piecewise_largest_two[0]
-            if pw_largest is not None:
+            if piecewise_largest_two is not None:
                 _, piecewise_per_graph = profile_graph_mode(
-                    largest_two_sizes=(pw_largest, piecewise_largest_two[1]),
-                    count=piecewise_count,
+                    largest_two_sizes=piecewise_largest_two,
                     cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
                     uniform_decode=False,
                     measure_first_capture=False,
