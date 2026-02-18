@@ -65,9 +65,12 @@ from vllm.multimodal.inputs import (
     AudioItem,
     MultiModalDataDict,
     MultiModalFieldConfig,
+    MultiModalInputs,
     MultiModalKwargsItems,
+    MultiModalUUIDDict,
     VideoItem,
 )
+from vllm.multimodal.media.audio import extract_audio_from_video_bytes
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     ImageEmbeddingItems,
@@ -75,6 +78,7 @@ from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
+    VideoProcessorItems,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
@@ -1393,6 +1397,159 @@ class NanoNemotronVLMultiModalProcessor(
             target_sr=target_sr,
             target_channels=target_channels,
         )
+
+    def _extract_audio_from_videos(
+        self,
+        mm_data: MultiModalDataDict,
+        max_audio_duration: float | None = None,
+    ) -> tuple[MultiModalDataDict, list[AudioItem]]:
+        """Extract audio tracks from video bytes in *mm_data*.
+
+        Args:
+            mm_data: The multimodal data dict containing video items.
+            max_audio_duration: If set, only extract the first N seconds
+                of audio from each video.
+
+        Returns:
+            The (possibly augmented) *mm_data* and the list of
+            extracted audio items.
+        """
+        video_items = self._get_data_parser().parse_mm_data(
+            {"video": mm_data["video"]}
+        )
+        videos = video_items.get_items("video", VideoProcessorItems)
+        metadata_list = (
+            videos.metadata if isinstance(videos.metadata, list) else []
+        )
+
+        target_sr = None
+        if extractor := self.info.audio_extractor:
+            target_sr = extractor.sampling_rate
+
+        audio_items: list[AudioItem] = []
+        for idx, metadata in enumerate(metadata_list):
+            video_bytes = (
+                metadata.get("original_video_bytes") if metadata else None
+            )
+            if video_bytes is None:
+                raise ValueError(
+                    "`use_audio_in_video=True` requires the raw video "
+                    "bytes to be available in metadata. Make sure the "
+                    "server was started with "
+                    '--media-io-kwargs \'{"video": '
+                    '{"keep_video_bytes": true}}\' '
+                    f"(missing for video index {idx})."
+                )
+            audio_items.append(
+                extract_audio_from_video_bytes(
+                    video_bytes,
+                    sr=target_sr,
+                    max_duration=max_audio_duration,
+                )
+            )
+            metadata.pop("original_video_bytes", None)
+
+        mm_data = dict(mm_data)
+        mm_data["audio"] = audio_items
+        return mm_data, audio_items
+
+    def apply(
+        self,
+        prompt: str | list[int],
+        mm_data: MultiModalDataDict,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object] | None = None,
+        *,
+        mm_uuids: MultiModalUUIDDict | None = None,
+    ) -> MultiModalInputs:
+        use_audio_in_video = bool(
+            hf_processor_mm_kwargs.get("use_audio_in_video", False)
+        )
+        max_audio_duration = hf_processor_mm_kwargs.get(
+            "max_audio_duration", None
+        )
+        if max_audio_duration is not None:
+            max_audio_duration = float(max_audio_duration)
+
+        # Strip our custom kwargs so they don't reach the HF processor
+        _custom_keys = {"use_audio_in_video", "max_audio_duration"}
+        hf_processor_mm_kwargs = {
+            k: v
+            for k, v in hf_processor_mm_kwargs.items()
+            if k not in _custom_keys
+        }
+
+        if not (
+            use_audio_in_video
+            and "video" in mm_data
+            and "audio" not in mm_data
+        ):
+            return super().apply(
+                prompt,
+                mm_data,
+                hf_processor_mm_kwargs,
+                tokenization_kwargs,
+                mm_uuids=mm_uuids,
+            )
+
+        mm_data, audio_items = self._extract_audio_from_videos(
+            mm_data, max_audio_duration=max_audio_duration
+        )
+
+        if not isinstance(prompt, str):
+            tokenizer = self.info.get_tokenizer()
+            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+
+        for _ in audio_items:
+            prompt = prompt.replace(
+                "<video>", "<video>" + AUDIO_CONTEXT, 1
+            )
+
+        if tokenization_kwargs is None:
+            tokenization_kwargs = {}
+
+        mm_items = self._to_mm_items(mm_data)
+
+        # Use the non-cached path so that the HF processor receives
+        # both the prompt text (with <so_embedding>) and the audio data
+        # together, letting it handle the audio replacement natively.
+        (
+            prompt_ids,
+            mm_info,
+            is_update_applied,
+        ) = self._apply_hf_processor(
+            prompt,
+            mm_items,
+            hf_processor_mm_kwargs,
+            tokenization_kwargs,
+            mm_uuids=mm_uuids,
+        )
+
+        prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
+            mm_items=mm_items,
+            prompt_ids=prompt_ids,
+            mm_kwargs=mm_info.kwargs,
+            mm_prompt_updates=mm_info.prompt_updates,
+            is_update_applied=is_update_applied,
+        )
+
+        mm_placeholder_ranges = {
+            modality: [item.to_range() for item in placeholders]
+            for modality, placeholders in mm_placeholders.items()
+        }
+
+        t14 = time.time()
+        result = MultiModalInputs(
+            type="multimodal",
+            prompt_token_ids=prompt_ids,
+            mm_kwargs=mm_info.kwargs,
+            mm_hashes=mm_info.hashes,
+            mm_placeholders=mm_placeholder_ranges,
+        )
+        t15 = time.time()
+        print(f"[apply] MultiModalInputs pack took {t15 - t14:.3f} seconds")
+
+        return result
 
     def _get_mm_fields_config(
         self,
