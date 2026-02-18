@@ -709,8 +709,11 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 # Use copy mode to avoid hardlink failures with Docker cache mounts
 ENV UV_LINK_MODE=copy
 
-RUN apt-get update -y \
-    && apt-get install -y git
+RUN echo 'tzdata tzdata/Areas select America' | debconf-set-selections \
+    && echo 'tzdata tzdata/Zones/America select Los_Angeles' | debconf-set-selections \
+    && apt-get update -y \
+    && apt-get install -y git curl libsodium23 \
+    && rm -rf /var/lib/apt/lists/*
 
 # We can specify the standard or nightly build of PyTorch
 ARG PYTORCH_NIGHTLY
@@ -749,6 +752,28 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system hf_transfer
 ENV HF_HUB_ENABLE_HF_TRANSFER 1
+
+# Install generic test dependencies
+RUN --mount=type=cache,target=/root/.cache/uv \
+  uv pip install --system \
+  modelscope \
+  tensorizer \
+  'gpt-oss[eval]==0.0.5' \
+  'git+https://github.com/TIGER-AI-Lab/Mantis.git' \
+  --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0' \
+  --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2' \
+  # KV connector dependencies
+  -r requirements/kv_connectors.txt \
+  # Quantization test dependencies
+  torchao==0.13.0 --index-url https://download.pytorch.org/whl/cu129 \
+  conch-triton-kernels \
+  # Streaming correctness test dependencies from lm-eval branch
+  'git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api' \
+  # OpenTelemetry dependencies for tracing tests
+  'opentelemetry-sdk>=1.26.0' \
+  'opentelemetry-api>=1.26.0' \
+  'opentelemetry-exporter-otlp>=1.26.0' \
+  'opentelemetry-semantic-conventions-ai>=0.4.1'
 
 # Copy in the v1 package for testing (it isn't distributed yet)
 COPY vllm/v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
