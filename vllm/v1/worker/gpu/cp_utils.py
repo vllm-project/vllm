@@ -11,7 +11,7 @@ def prepare_dcp_local_seq_lens(
     num_reqs: int,
     dcp_size: int,
     dcp_rank: int,
-    cp_kv_cache_interleave_size: int,
+    cp_interleave: int,
 ) -> None:
     """Populate the persistent DCP local seq_lens buffer (CUDA graph safe)."""
     if dcp_size == 1:
@@ -25,7 +25,7 @@ def prepare_dcp_local_seq_lens(
         seq_lens,
         dcp_size,
         dcp_rank,
-        cp_kv_cache_interleave_size,
+        cp_interleave,
         num_reqs,
         max_num_reqs,
         BLOCK_SIZE,
@@ -52,8 +52,9 @@ def _dcp_local_seq_lens_kernel(
     rounds = seq_lens // (dcp_size * cp_interleave)
     remainder = seq_lens % (dcp_size * cp_interleave)
 
-    local_seq_lens = rounds * cp_interleave
-    local_seq_lens += tl.clamp(remainder - dcp_rank * cp_interleave, 0, cp_interleave)
+    remainder = tl.maximum(remainder - dcp_rank * cp_interleave, 0)
+    remainder = tl.minimum(remainder, cp_interleave)
+    local_seq_lens = rounds * cp_interleave + remainder
 
     # For [num_reqs, max_num_reqs), pad with 0
     local_seq_lens = tl.where(block < num_reqs, local_seq_lens, 0)
