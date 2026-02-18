@@ -99,6 +99,7 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
+    external_cached_tokens: int | None = None
 
 
 class UsageInfo(OpenAIBaseModel):

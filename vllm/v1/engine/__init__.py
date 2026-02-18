@@ -141,6 +141,8 @@ class EngineCoreOutput(
     trace_headers: Mapping[str, str] | None = None
     # The number of tokens with prefix cache hits (local + external).
     num_cached_tokens: int = 0
+    # The number of tokens with external cache hits.
+    num_external_cached_tokens: int = 0
     # The number of tokens computed remotely (original count from connector).
     num_external_computed_tokens: int = 0
     routed_experts: np.ndarray | None = None

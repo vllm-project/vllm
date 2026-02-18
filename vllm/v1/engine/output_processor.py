@@ -167,6 +167,7 @@ class RequestState:
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
+        self.num_external_cached_tokens = 0
 
         self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
 
@@ -367,6 +368,7 @@ class RequestState:
             kv_transfer_params=kv_transfer_params,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
+            num_external_cached_tokens=self.num_external_cached_tokens,
         )
 
     def _new_completion_output(
@@ -623,6 +625,9 @@ class OutputProcessor:
             kv_transfer_params = engine_core_output.kv_transfer_params
             routed_experts = engine_core_output.routed_experts
             req_state.num_cached_tokens = engine_core_output.num_cached_tokens
+            req_state.num_external_cached_tokens = (
+                engine_core_output.num_external_cached_tokens
+            )
             req_state.is_prefilling = False
 
             if pooling_output is None:
