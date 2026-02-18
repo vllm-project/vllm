@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
-import math
 import pickle
 import sys
 import threading
@@ -593,6 +592,49 @@ class MessageQueue:
                 self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
                 break
 
+    class ReadTimeout:
+        def __init__(self, timeout: float | None, should_warn: bool) -> None:
+            self.started = time.monotonic()
+            if timeout is not None:
+                self.deadline = self.started + timeout
+            else:
+                self.deadline = sys.maxsize
+
+            if should_warn:
+                self.warn_timeout_ms = VLLM_RINGBUFFER_WARNING_INTERVAL * 1000
+            else:
+                self.warn_timeout_ms = sys.maxsize
+
+            self._should_warn = should_warn
+            self.n_warning = 1
+            self.timeout = timeout
+
+        def timeout_ms(self) -> int:
+            """Returns a timeout that is:
+            - min(time to deadline, time to next warning) if we're logging warnings
+            - time to deadline, if we're not logging warnings
+            - sys.maxsize if the timeout is None and we're not logging warnings
+            """
+            if self.timeout is None:
+                time_left_ms = sys.maxsize
+            else:
+                time_left_ms = int((self.deadline - time.monotonic()) * 1000)
+            return min(self.warn_timeout_ms, time_left_ms)
+
+        def expired(self) -> bool:
+            """Returns True if the timeout has expired."""
+            return time.monotonic() >= self.deadline
+
+        def should_warn(self) -> bool:
+            """Returns true if it's time to log a warning for a timeout that is not
+            indefinite"""
+            if self._should_warn:
+                elapsed = time.monotonic() - self.started
+                if elapsed >= VLLM_RINGBUFFER_WARNING_INTERVAL * self.n_warning:
+                    self.n_warning += 1
+                    return True
+            return False
+
     @contextmanager
     def acquire_read(
         self,
@@ -600,22 +642,8 @@ class MessageQueue:
         indefinite: bool = False,
     ):
         assert self._is_local_reader, "Only readers can acquire read"
-        start_time = time.monotonic()
-        if timeout is not None:
-            deadline = start_time + timeout
-            wait_timeout_ms: int | None = (
-                VLLM_RINGBUFFER_WARNING_INTERVAL * 1000
-                if not indefinite
-                else sys.maxsize
-            )
-        else:
-            deadline = math.inf
-            # wait_timeout_ms is a constant if timeout is None
-            wait_timeout_ms = (
-                VLLM_RINGBUFFER_WARNING_INTERVAL * 1000 if not indefinite else None
-            )
+        read_timeout = self.ReadTimeout(timeout=timeout, should_warn=not indefinite)
 
-        n_warning = 1
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
                 # Memory fence ensures we see the latest writes from the writer.
@@ -632,28 +660,18 @@ class MessageQueue:
                     # for readers, `self.current_idx` is the next block to read
                     # if this block is not ready,
                     # we need to wait until it is written
-                    if timeout is not None:
-                        time_left_ms = int((deadline - time.monotonic()) * 1000)
-                        # if we time out, raise an exception
-                        if time_left_ms <= 0:
-                            raise TimeoutError
-                        wait_timeout_ms = min(cast(int, wait_timeout_ms), time_left_ms)
-                    # else: use constant wait_timeout_ms defined outside of loop
-
-                    self._spin_condition.wait(timeout_ms=wait_timeout_ms)
+                    if read_timeout.expired():
+                        raise TimeoutError
+                    self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
 
                     if self.shutting_down:
                         raise RuntimeError("cancelled")
 
                     # if we wait for a long time, log a message
-                    elapsed = time.monotonic() - start_time
-                    if not indefinite and (
-                        elapsed > VLLM_RINGBUFFER_WARNING_INTERVAL * n_warning
-                    ):
+                    if read_timeout.should_warn():
                         logger.info(
                             long_wait_time_msg(VLLM_RINGBUFFER_WARNING_INTERVAL)
                         )
-                        n_warning += 1
 
                     continue
                 # found a block that is not read by this reader

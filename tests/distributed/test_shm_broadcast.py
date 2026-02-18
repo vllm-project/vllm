@@ -156,8 +156,9 @@ def worker_fn_test_shutdown_busy():
     dist.barrier()
 
 
-def test_message_queue_shutdown_busy():
+def test_message_queue_shutdown_busy(caplog_vllm):
     distributed_run(worker_fn_test_shutdown_busy, 4)
+    print(caplog_vllm.text)
 
 
 @worker_fn_wrapper
@@ -312,3 +313,38 @@ def worker_fn_test_busy_to_idle():
 
 def test_message_queue_busy_to_idle():
     distributed_run(worker_fn_test_busy_to_idle, 4)
+
+
+def test_warning_logs(caplog_vllm):
+    """
+    Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
+    when indefinite=False
+    """
+
+    with mock.patch(
+        "vllm.distributed.device_communicators.shm_broadcast.VLLM_RINGBUFFER_WARNING_INTERVAL",
+        new=0.001,  # 1 ms
+    ):
+        writer = MessageQueue(
+            n_reader=1,
+            n_local_reader=1,
+            max_chunk_bytes=1024 * 1024,  # 1MB chunks
+            max_chunks=10,
+        )
+        reader = MessageQueue.create_from_handle(writer.export_handle(), rank=0)
+        writer.wait_until_ready()
+        reader.wait_until_ready()
+
+        # Reader times out
+        with pytest.raises(TimeoutError):
+            reader.dequeue(timeout=0.01, indefinite=False)
+
+        # Clean up when done
+        writer.shutdown()
+        reader.shutdown()
+
+        assert any(
+            "No available shared memory broadcast block found in 0.001 seconds"
+            in record.message
+            for record in caplog_vllm.records
+        )
