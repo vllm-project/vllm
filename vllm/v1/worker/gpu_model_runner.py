@@ -1730,26 +1730,40 @@ class GPUModelRunner(
         ):
             if current_indices:
                 n_common = len(current_indices)
-                self.prev_indices.np[:n_common] = prev_indices
-                self.prev_indices.copy_to_gpu(n_common)
-                prev_indices_gpu = self.prev_indices.gpu[:n_common]
+                if batch_index_mapping.indices_match:
+                    # Fast path: batch unchanged, every request keeps its
+                    # index — use direct slices instead of index tensors.
+                    valid_counts = self.valid_sampled_token_count_gpu[:n_common]
+                    self.num_computed_tokens[:n_common] = (
+                        self.input_batch.num_computed_tokens_cpu_tensor[:n_common].to(
+                            device=self.device, non_blocking=True
+                        )
+                        + valid_counts.int()
+                        - self.prev_num_draft_tokens.gpu[:n_common]
+                        - 1
+                    )
+                    self.num_accepted_tokens.gpu[:n_common] = valid_counts
+                else:
+                    self.prev_indices.np[:n_common] = prev_indices
+                    self.prev_indices.copy_to_gpu(n_common)
+                    prev_indices_gpu = self.prev_indices.gpu[:n_common]
 
-                self.current_indices.np[:n_common] = current_indices
-                self.current_indices.copy_to_gpu(n_common)
-                current_indices_gpu = self.current_indices.gpu[:n_common]
+                    self.current_indices.np[:n_common] = current_indices
+                    self.current_indices.copy_to_gpu(n_common)
+                    current_indices_gpu = self.current_indices.gpu[:n_common]
 
-                valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
-                self.current_computed_tokens.np[:n_common] = (
-                    self.input_batch.num_computed_tokens_cpu[current_indices]
-                )
-                self.current_computed_tokens.copy_to_gpu(n_common)
-                self.num_computed_tokens[current_indices_gpu] = (
-                    self.current_computed_tokens.gpu[:n_common]
-                    + valid_counts.int()
-                    - self.prev_num_draft_tokens.gpu[prev_indices_gpu]
-                    - 1
-                )
-                self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
+                    valid_counts = self.valid_sampled_token_count_gpu[prev_indices_gpu]
+                    self.current_computed_tokens.np[:n_common] = (
+                        self.input_batch.num_computed_tokens_cpu[current_indices]
+                    )
+                    self.current_computed_tokens.copy_to_gpu(n_common)
+                    self.num_computed_tokens[current_indices_gpu] = (
+                        self.current_computed_tokens.gpu[:n_common]
+                        + valid_counts.int()
+                        - self.prev_num_draft_tokens.gpu[prev_indices_gpu]
+                        - 1
+                    )
+                    self.num_accepted_tokens.gpu[current_indices_gpu] = valid_counts
 
             if new_indices:
                 n_new = len(new_indices)
