@@ -121,24 +121,9 @@ repos:
     name: Update Dockerfile dependency graph
     entry: tools/pre_commit/update-dockerfile-graph.sh
     language: script
-  - id: enforce-import-regex-instead-of-re
-    name: Enforce import regex as re
-    entry: python tools/pre_commit/enforce_regex_import.py
-    language: python
-    types: [python]
-    pass_filenames: false
-    additional_dependencies: [regex]
-  # forbid directly import triton
-  - id: forbid-direct-triton-import
-    name: "Forbid direct 'import triton'"
-    entry: python tools/pre_commit/check_triton_import.py
-    language: python
-    types: [python]
-    pass_filenames: false
-    additional_dependencies: [regex]
-  - id: check-pickle-imports
-    name: Prevent new pickle/cloudpickle imports
-    entry: python tools/pre_commit/check_pickle_imports.py
+  - id: check-forbidden-imports
+    name: Check for forbidden imports
+    entry: python tools/pre_commit/check_forbidden_imports.py
     language: python
     types: [python]
     additional_dependencies: [regex]
@@ -154,6 +139,15 @@ repos:
     files: ^docker/(Dockerfile|versions\.json)$
     pass_filenames: false
     additional_dependencies: [dockerfile-parse]
+  - id: attention-backend-docs
+    name: Check attention backend documentation is up to date
+    entry: python tools/pre_commit/generate_attention_backend_docs.py --check
+    language: python
+  - id: check-boolean-context-manager
+    name: Check for boolean ops in with-statements
+    entry: python tools/pre_commit/check_boolean_context_manager.py
+    language: python
+    types: [python]
   # Keep `suggestion` last
   - id: suggestion
     name: Suggestion

@@ -49,7 +49,7 @@ from vllm.distributed import utils as dist_utils
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv3dLayer
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -345,6 +345,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
+            prefix=f"{prefix}.attn",
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
@@ -606,15 +607,6 @@ class Qwen2_5_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"Qwen2.5-VL does not support {self.attn_backend} backend now."
-            )
-
         with set_model_tag("Qwen2_5_VisionBlock", is_encoder=True):
             self.blocks = nn.ModuleList(
                 [
@@ -760,6 +752,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen

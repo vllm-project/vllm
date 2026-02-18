@@ -24,12 +24,7 @@ from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
 class CudaGraphManager:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        uses_mrope: bool,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, uses_mrope: bool, device: torch.device):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.uses_mrope = uses_mrope
@@ -41,11 +36,7 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
-        self.cudagraph_mode: CUDAGraphMode
-        if self.compilation_config.cudagraph_mode is None:
-            self.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            self.cudagraph_mode = self.compilation_config.cudagraph_mode
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode
         self.cudagraph_sizes = get_cudagraph_sizes(
             self.compilation_config.cudagraph_capture_sizes,
             self.max_num_reqs,
@@ -54,7 +45,9 @@ class CudaGraphManager:
         )
 
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.pool = torch.cuda.graph_pool_handle()
+        self.pool = None
+        if self.cudagraph_mode != CUDAGraphMode.NONE:
+            self.pool = torch.cuda.graph_pool_handle()
         self.hidden_states: torch.Tensor | None = None
 
     def needs_capture(self) -> bool:
@@ -264,6 +257,9 @@ def prepare_inputs_to_capture(
     input_buffers.seq_lens[:num_reqs] = num_tokens
     input_buffers.seq_lens[num_reqs:] = 0
 
+    input_buffers.dcp_local_seq_lens[:num_reqs] = num_tokens
+    input_buffers.dcp_local_seq_lens[num_reqs:] = 0
+
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
     slot_mappings = block_tables.slot_mappings[:, :num_tokens]
     slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -276,10 +272,12 @@ def prepare_inputs_to_capture(
         num_tokens=num_tokens,
         query_start_loc_gpu=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
+        max_query_len=num_tokens_per_req,
         seq_lens=input_buffers.seq_lens,
         max_seq_len=max_model_len,
         block_tables=input_block_tables,
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
+        dcp_local_seq_lens=input_buffers.dcp_local_seq_lens,
     )
     return attn_metadata, slot_mappings_by_layer

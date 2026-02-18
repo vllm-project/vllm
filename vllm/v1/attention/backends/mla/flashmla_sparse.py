@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, ClassVar, Optional
+from typing import TYPE_CHECKING, ClassVar
 
 import numpy as np
 import torch
@@ -11,12 +11,10 @@ from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
-    MLACommonBaseImpl,
     get_mla_dims,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
-from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -25,6 +23,10 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
+    SparseMLAAttentionImpl,
+)
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import (
     reshape_attn_output_for_spec_decode,
@@ -201,166 +203,6 @@ class FlashMLASparseMetadata(AttentionMetadata):
 
     fp8_extra_metadata: FP8SeparatePrefillDecode | FP8KernelMetadata | None = None
     fp8_use_mixed_batch: bool = False
-
-
-# Kernel with prefill workspace support
-@triton.jit
-def _convert_req_index_to_global_index_kernel(
-    req_id_ptr,  # int32 [num_tokens]
-    block_table_ptr,  # int32 [num_requests, max_num_blocks_per_req]
-    token_indices_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    out_ptr,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    prefill_request_id_ptr,  # int32 [num_tokens], -1 for decode, >=0 for prefill
-    workspace_starts_ptr,  # int32 [num_prefill_reqs+1] or nullptr
-    # shapes (compile-time where possible)
-    max_num_blocks_per_req: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
-    BLOCK_N: tl.constexpr,  # tile width along columns
-    HAS_PREFILL: tl.constexpr,
-    # strides (in elements)
-    bt_stride0,
-    bt_stride1,
-    ti_stride0,
-    ti_stride1,
-    out_stride0,
-    out_stride1,
-):
-    # program_id(0) -> token_id (row)
-    # program_id(1) -> tile index along columns
-    token_id = tl.program_id(0)
-    tile_id = tl.program_id(1)
-
-    # Each program covers BLOCK_N consecutive columns
-    indice_id = tile_id * BLOCK_N + tl.arange(0, BLOCK_N)
-
-    # Load request id for this token (no mask: grid is exact)
-    req = tl.load(req_id_ptr + token_id)
-
-    # Load token indices for this tile
-    ti_ptr = token_indices_ptr + token_id * ti_stride0 + indice_id * ti_stride1
-    tok = tl.load(ti_ptr)  # int32
-
-    # Only token == -1 should propagate as -1
-    is_invalid_tok = tok < 0
-    is_prefill = False
-    if HAS_PREFILL:
-        prefill_req_id = tl.load(prefill_request_id_ptr + token_id)
-        is_prefill = prefill_req_id >= 0
-    # Compute block id and in-block offset
-    block_id = tok // BLOCK_SIZE
-    inblock_off = tok % BLOCK_SIZE
-
-    # Guard block_table access
-    valid_block = (block_id < max_num_blocks_per_req) & (block_id >= 0)
-    bt_ptr = block_table_ptr + req * bt_stride0 + block_id * bt_stride1
-    is_invalid_tok |= ~valid_block
-    base = tl.load(bt_ptr, mask=valid_block & ~is_prefill, other=0)
-    out_val = base * BLOCK_SIZE + inblock_off
-
-    # Override with prefill output if prefill is enabled
-    if HAS_PREFILL:
-        workspace_start = tl.load(
-            workspace_starts_ptr + prefill_req_id, mask=is_prefill, other=0
-        )
-        prefill_out = workspace_start + tok
-        out_val = tl.where(is_prefill, prefill_out, out_val)
-    out_val = tl.where(is_invalid_tok, -1, out_val)
-
-    # Store results
-    out_ptr_ij = out_ptr + token_id * out_stride0 + indice_id * out_stride1
-    tl.store(out_ptr_ij, out_val)
-
-
-def triton_convert_req_index_to_global_index(
-    req_id: torch.Tensor,  # int32 [num_tokens]
-    block_table: torch.Tensor,  # int32 [num_requests, max_num_blocks_per_req]
-    token_indices: torch.Tensor,  # int32 [num_tokens, NUM_TOPK_TOKENS]
-    BLOCK_SIZE: int = 64,
-    NUM_TOPK_TOKENS: int = 2048,
-    BLOCK_N: int = 128,  # tile width along columns
-    HAS_PREFILL_WORKSPACE: bool = False,
-    prefill_workspace_request_ids: torch.Tensor | None = None,
-    prefill_workspace_starts: torch.Tensor | None = None,
-):
-    """
-    out[token_id, indice_id] =
-        block_table[req_id[token_id],
-            token_indices[token_id, indice_id] // BLOCK_SIZE] * BLOCK_SIZE
-        + token_indices[token_id, indice_id] % BLOCK_SIZE
-
-    Only when token_indices[token_id, indice_id] == -1 do we output -1.
-    For safety, we also output -1 if the derived block_id would be
-        out-of-bounds.
-
-    When HAS_PREFILL_WORKSPACE is True, prefill tokens are mapped to workspace offsets
-    instead of global cache slots. prefill_workspace_request_ids and
-    prefill_workspace_starts must be provided.
-
-    prefill_workspace_request_ids: int32 [num_tokens], -1 for decode else
-        prefill request index (maps to prefill_workspace_starts)
-    prefill_workspace_starts: int32 [num_prefills], 0-indexed workspace
-        starts for each prefill request
-    """
-    assert req_id.dtype == torch.int32
-    assert block_table.dtype == torch.int32
-    assert token_indices.dtype == torch.int32
-    assert token_indices.shape[1] == NUM_TOPK_TOKENS
-    assert NUM_TOPK_TOKENS % BLOCK_N == 0, (
-        f"NUM_TOPK_TOKENS ({NUM_TOPK_TOKENS}) must be divisible by BLOCK_N ({BLOCK_N})"
-    )
-
-    if HAS_PREFILL_WORKSPACE:
-        assert prefill_workspace_request_ids is not None
-        assert prefill_workspace_starts is not None
-        assert prefill_workspace_request_ids.dtype == torch.int32
-        assert prefill_workspace_starts.dtype == torch.int32
-
-    num_tokens = req_id.shape[0]
-    max_num_blocks_per_req = block_table.shape[1]
-    tiles_per_row = NUM_TOPK_TOKENS // BLOCK_N
-
-    # Ensure contiguous tensors on the same device
-    req_id_c = req_id.contiguous()
-    block_table_c = block_table.contiguous()
-    token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
-
-    # Strides in elements
-    bt_stride0, bt_stride1 = block_table_c.stride()
-    ti_stride0, ti_stride1 = token_indices_c.stride()
-    out_stride0, out_stride1 = out.stride()
-
-    # Prepare prefill pointers
-    if HAS_PREFILL_WORKSPACE:
-        assert prefill_workspace_request_ids is not None  # for mypy
-        assert prefill_workspace_starts is not None  # for mypy
-        assert prefill_workspace_request_ids.is_contiguous()
-        assert prefill_workspace_starts.is_contiguous()
-
-    # Exact 2D grid: tokens × column tiles
-    grid = (num_tokens, tiles_per_row)
-
-    _convert_req_index_to_global_index_kernel[grid](
-        req_id_c,
-        block_table_c,
-        token_indices_c,
-        out,
-        prefill_workspace_request_ids,
-        prefill_workspace_starts,
-        # shapes / constexprs
-        max_num_blocks_per_req,
-        BLOCK_SIZE,
-        BLOCK_N,
-        HAS_PREFILL_WORKSPACE,
-        # strides
-        bt_stride0,
-        bt_stride1,
-        ti_stride0,
-        ti_stride1,
-        out_stride0,
-        out_stride1,
-    )
-    return out
 
 
 def get_prefill_workspace_size(max_model_len: int):
@@ -686,7 +528,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         return metadata
 
 
-class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
+class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
     @staticmethod
     def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
         # FP8 decode kernel only supports h_q = 64 or 128
@@ -707,22 +549,15 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
         topk_indice_buffer: torch.Tensor | None = None,
-        indexer: Optional["Indexer"] = None,
+        indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
-        super().__init__(
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **mla_args,
-        )
+        self.num_heads = num_heads
+        self.head_size = head_size
+        self.scale = float(scale)
+        self.num_kv_heads = num_kv_heads
+        self.kv_cache_dtype = kv_cache_dtype
+        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
         assert indexer is not None
         self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
@@ -974,78 +809,39 @@ class FlashMLASparseImpl(MLACommonBaseImpl[FlashMLASparseMetadata]):
         output = output[:, : self.num_heads, :]
         return output
 
-    def forward(
+    def forward_mqa(
         self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
         layer: AttentionLayer,
-        q: torch.Tensor,
-        k_c_normed: torch.Tensor,  # key in unified attn
-        k_pe: torch.Tensor,  # value in unified attn
-        kv_cache: torch.Tensor,
-        attn_metadata: FlashMLASparseMetadata | None,
-        output: torch.Tensor | None = None,
-        output_scale: torch.Tensor | None = None,
-        output_block_scale: torch.Tensor | None = None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
 
-        assert output is not None, "Output tensor must be provided."
+        # Concatenate q if it's a tuple (ql_nope, q_pe)
+        if isinstance(q, tuple):
+            q = torch.cat(q, dim=-1)
 
-        if output_scale is not None or output_block_scale is not None:
-            raise NotImplementedError(
-                "fused output quantization is not yet supported for MLACommonImpl"
-            )
+        num_actual_toks = q.shape[0]
 
-        if attn_metadata is None:
-            # Dummy run - no need to allocate buffers
-            # The zero fill is required when used with DP + EP
-            # to ensure all ranks within a DP group compute the
-            # same expert outputs.
-            return output.fill_(0)
-
-        num_actual_toks = attn_metadata.num_actual_tokens
-
-        # Inputs and outputs may be padded for CUDA graphs
-
-        q = q[:num_actual_toks, ...]
-        k_c_normed = k_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
+        # Get topk indices
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        q_nope, q_pe = q.split([self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
-        # Convert from (B, N, P) to (N, B, P)
-        q_nope = q_nope.transpose(0, 1)
-        # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
-        ql_nope = torch.bmm(q_nope, self.W_UK_T)
-        # Convert from (N, B, L) to (B, N, L)
-        ql_nope = ql_nope.transpose(0, 1)
-
         use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
 
-        q = torch.cat([ql_nope, q_pe], dim=-1)
-
-        # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=layer._k_scale,
-            )
-
         if not use_fp8_cache:
-            attn_out = self._forward_bf16_kv(q, kv_cache, topk_indices, attn_metadata)
+            attn_out = self._forward_bf16_kv(
+                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+            )
         elif attn_metadata.fp8_use_mixed_batch:
             attn_out = self._forward_fp8_kv_mixed_batch(
-                q, kv_cache, topk_indices, attn_metadata
+                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
         else:
             attn_out = self._forward_fp8_kv_separate_prefill_decode(
-                q, kv_cache, topk_indices, attn_metadata
+                q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
             )
 
-        self._v_up_proj(attn_out, out=output[:num_actual_toks])
-        return output
+        return attn_out, None

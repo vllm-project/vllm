@@ -9,24 +9,21 @@ from dataclasses import replace
 from typing import Annotated, Any, Literal
 
 import torch
-from pydantic import (
-    Field,
-    model_validator,
-)
+from pydantic import Field, model_validator
 
+from vllm.config import ModelConfig
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     LegacyStructuralTagResponseFormat,
-    LogitsProcessors,
     OpenAIBaseModel,
     StreamOptions,
     StructuralTagResponseFormat,
     UsageInfo,
-    get_logits_processors,
 )
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
+from vllm.renderers import TokenizeParams
 from vllm.sampling_params import (
     BeamSearchParams,
     RequestOutputKind,
@@ -118,19 +115,6 @@ class CompletionRequest(OpenAIBaseModel):
             "through out the inference process and return in response."
         ),
     )
-    logits_processors: LogitsProcessors | None = Field(
-        default=None,
-        description=(
-            "A list of either qualified names of logits processors, or "
-            "constructor objects, to apply when sampling. A constructor is "
-            "a JSON object with a required 'qualname' field specifying the "
-            "qualified name of the processor class/factory, and optional "
-            "'args' and 'kwargs' fields containing positional and keyword "
-            "arguments. For example: {'qualname': "
-            "'my_module.MyLogitsProcessor', 'args': [1, 2], 'kwargs': "
-            "{'param': 'value'}}."
-        ),
-    )
 
     return_tokens_as_token_ids: bool | None = Field(
         default=None,
@@ -178,6 +162,17 @@ class CompletionRequest(OpenAIBaseModel):
 
     # --8<-- [end:completion-extra-params]
 
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=self.max_tokens or 0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            add_special_tokens=self.add_special_tokens,
+            needs_detokenization=bool(self.echo and not self.return_token_ids),
+            max_total_tokens_param="max_model_len",
+            max_output_tokens_param="max_tokens",
+        )
+
     # Default sampling parameters for completion requests
     _DEFAULT_SAMPLING_PARAMS: dict = {
         "repetition_penalty": 1.0,
@@ -211,7 +206,6 @@ class CompletionRequest(OpenAIBaseModel):
     def to_sampling_params(
         self,
         max_tokens: int,
-        logits_processor_pattern: str | None,
         default_sampling_params: dict | None = None,
     ) -> SamplingParams:
         if default_sampling_params is None:
@@ -302,9 +296,6 @@ class CompletionRequest(OpenAIBaseModel):
             skip_special_tokens=self.skip_special_tokens,
             spaces_between_special_tokens=self.spaces_between_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
-            logits_processors=get_logits_processors(
-                self.logits_processors, logits_processor_pattern
-            ),
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             output_kind=RequestOutputKind.DELTA
             if self.stream

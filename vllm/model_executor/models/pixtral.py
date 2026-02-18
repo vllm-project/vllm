@@ -44,10 +44,14 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalUUIDDict,
     NestedTensors,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalUUIDItems,
+)
 from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
@@ -70,7 +74,7 @@ from .interfaces import (
     SupportsPP,
 )
 from .module_mapping import MultiModelKeys
-from .utils import init_vllm_registered_model, maybe_prefix
+from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
 from .vision import (
     VisionEncoderInfo,
     VisionFeatureSelectStrategy,
@@ -91,6 +95,10 @@ except ImportError:
     USE_XFORMERS_OPS = False
 
 PATCH_MERGE = "patch_merge"
+
+
+def _is_layer_none_or_staged(layer: nn.Module) -> bool:
+    return layer is None or isinstance(layer, StageMissingLayer)
 
 
 class PixtralImagePixelInputs(TensorSchema):
@@ -213,28 +221,13 @@ class PixtralProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_vision_config(
-        self,
-        processor: PixtralProcessorAdapter | None = None,
-    ):
-        if processor is None:
-            processor = self.get_hf_processor()
-
-        return PixtralVisionConfig(
-            image_size=processor.image_size,
-            patch_size=processor.patch_size,
-        )
-
     def get_num_image_tokens(
         self,
         *,
         image_width: int,
         image_height: int,
-        processor: PixtralProcessorAdapter | None = None,
+        processor: PixtralProcessorAdapter,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         ncols, nrows = processor.image_processor._image_to_num_tokens(
             Image.new("RGB", (image_width, image_height))
         )
@@ -257,6 +250,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -278,6 +272,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
@@ -299,9 +294,11 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         res = tokenizer.mistral.encode_chat_completion(request)
         dummy_tokens = res.tokens
 
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data)
+
         return ProcessorInputs(
             prompt=dummy_tokens,
-            mm_data=dummy_mm_data,
+            mm_items=dummy_mm_items,
             tokenization_kwargs=tokenization_kwargs,
         )
 
@@ -351,16 +348,16 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
         self,
         prompt: str | list[int],
         mm_data_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems | None,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
+            mm_uuid_items=mm_uuid_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
 
         # NOTE: The tokens are already inserted by the chat template
@@ -542,7 +539,7 @@ class PixtralForConditionalGeneration(
             # Single pass over weights
             for name, w in weights:
                 if is_vision_encoder_weights((name, w)):
-                    if self.vision_encoder is None:
+                    if _is_layer_none_or_staged(self.vision_encoder):
                         continue
                     # Load vision encoder weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -551,7 +548,7 @@ class PixtralForConditionalGeneration(
                         with torch.no_grad():
                             default_weight_loader(param, w)
                 elif is_patch_merger((name, w)):
-                    if self.patch_merger is None:
+                    if _is_layer_none_or_staged(self.patch_merger):
                         continue
                     # Load vision patch merger weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -559,7 +556,7 @@ class PixtralForConditionalGeneration(
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_pre_mm_projector_norm((name, w)):
-                    if self.pre_mm_projector_norm is None:
+                    if _is_layer_none_or_staged(self.pre_mm_projector_norm):
                         continue
                     # Load vision pre_mm_projector_norm weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
@@ -567,7 +564,7 @@ class PixtralForConditionalGeneration(
                     with torch.no_grad():
                         default_weight_loader(param, w)
                 elif is_vision_lang_adapter_weights((name, w)):
-                    if self.vision_language_adapter is None:
+                    if _is_layer_none_or_staged(self.vision_language_adapter):
                         continue
                     # Load vision-language adapter weights directly
                     trimmed_name = ".".join(name.split(".")[1:])
