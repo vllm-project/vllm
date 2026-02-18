@@ -108,9 +108,11 @@ steps:
   timeout_in_minutes: 50
   source_file_dependencies:
   - vllm/
+  - tests/detokenizer
   - tests/multimodal
   - tests/utils_
   commands:
+  - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
@@ -123,6 +125,7 @@ steps:
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
+  - tests/test_ray_env.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -136,6 +139,7 @@ steps:
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
+  - pytest -v -s test_ray_env.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
