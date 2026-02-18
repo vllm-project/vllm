@@ -279,38 +279,6 @@ def parse_args():
             "Using --url for metrics is deprecated. Please use --host instead."
         )
 
-    # Backward compatibility: If --metrics-url is set, use it for host
-    metrics_url_explicit = any(
-        arg == "--metrics-url" or arg.startswith("--metrics-url=") for arg in sys.argv
-    )
-    if metrics_url_explicit and not host_explicit:
-        args.host = args.metrics_url
-        logger.warning_once(
-            "Using --metrics-url is deprecated. Please use --host instead."
-        )
-
-    # Backward compatibility: If --metrics-port is set, use it for port
-    metrics_port_explicit = any(
-        arg == "--metrics-port" or arg.startswith("--metrics-port=") for arg in sys.argv
-    )
-    port_explicit = any(
-        arg == "--port" or arg.startswith("--port=") for arg in sys.argv
-    )
-    if metrics_port_explicit and not port_explicit:
-        args.port = args.metrics_port
-        logger.warning_once(
-            "Using --metrics-port is deprecated. Please use --port instead."
-        )
-
-    # Map port and host to metrics_port and metrics_url for compatibility
-    # with the rest of the code that expects these attributes
-    if hasattr(args, "port"):
-        args.metrics_port = args.port
-    if hasattr(args, "host"):
-        args.metrics_url = args.host if args.host is not None else "0.0.0.0"
-    else:
-        args.metrics_url = "0.0.0.0"
-
     return args
 
 
@@ -873,7 +841,7 @@ if __name__ == "__main__":
     # to publish metrics at the /metrics endpoint.
     if args.enable_metrics:
         logger.info("Prometheus metrics enabled")
-        start_http_server(port=args.metrics_port, addr=args.metrics_url)
+        start_http_server(port=args.port, addr=args.host)
     else:
         logger.info("Prometheus metrics disabled")
 
