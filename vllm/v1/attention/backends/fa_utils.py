@@ -75,10 +75,9 @@ def get_flash_attn_version(
         if device_capability.major == 9 and is_fa_version_supported(3):
             # Hopper (SM90): prefer FA3
             fa_version = 3
-        elif (
-            current_platform.is_blackwell_capability(device_capability)
-            and is_fa_version_supported(4)
-        ):
+        elif current_platform.is_blackwell_capability(
+            device_capability
+        ) and is_fa_version_supported(4):
             # Blackwell (SM100-SM121): prefer FA4
             fa_version = 4
         else:
