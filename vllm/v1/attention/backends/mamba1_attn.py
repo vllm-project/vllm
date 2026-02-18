@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
-from vllm.v1.attention.backend import AttentionBackend
+import torch
+
+from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.attention.backends.mamba_attn import (
     BaseMambaAttentionMetadata,
     BaseMambaAttentionMetadataBuilder,
@@ -22,7 +24,9 @@ class Mamba1AttentionBackend(AttentionBackend):
 
 @dataclass
 class Mamba1AttentionMetadata(BaseMambaAttentionMetadata):
-    pass
+    # Chunk alignment: offset within the first block where processing starts
+    # This is num_computed_tokens % block_size for each prefill request
+    chunk_start_offsets_p: torch.Tensor | None = None
 
 
 class Mamba1AttentionMetadataBuilder(
@@ -30,3 +34,24 @@ class Mamba1AttentionMetadataBuilder(
 ):
     metadata_cls = Mamba1AttentionMetadata
     supports_update_block_table: bool = False
+
+    def build(
+        self,
+        common_prefix_len: int,
+        common_attn_metadata: CommonAttentionMetadata,
+        fast_build: bool = False,
+    ) -> Mamba1AttentionMetadata:
+        common = self._compute_common_metadata(common_attn_metadata)
+
+        chunk_start_offsets_p = None
+
+        if (
+            common.num_prefills > 0
+            and self.vllm_config.cache_config.mamba_cache_mode == "all"
+            and common.num_computed_tokens_p is not None
+        ):
+            chunk_start_offsets_p = (
+                common.num_computed_tokens_p % self.kv_cache_spec.block_size
+            )
+
+        return replace(common, chunk_start_offsets_p=chunk_start_offsets_p)

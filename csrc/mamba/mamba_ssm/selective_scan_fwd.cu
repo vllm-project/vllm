@@ -170,8 +170,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     constexpr int kChunkSize = kNThreads * kNItems;
 
     // Use block_size for chunking when APC is enabled, otherwise use 2048 for backwards compatibility
-    const int iteration_chunk_size = params.cache_enabled ? params.block_size : 2048;
-    const int n_chunks = (seqlen + iteration_chunk_size - 1) / iteration_chunk_size;
+    const int block_size = params.cache_enabled ? params.block_size : 2048;
 
     const int* batch_cache_indices = cache_indices != nullptr ?
                                      cache_indices + batch_id * params.cache_indices_stride : nullptr;
@@ -181,10 +180,39 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                           reinterpret_cast<const int*>(params.block_idx_last_scheduled_token_ptr) : nullptr;
     const int* initial_state_idx = params.initial_state_idx_ptr != nullptr ?
                                    reinterpret_cast<const int*>(params.initial_state_idx_ptr) : nullptr;
+    const int* chunk_start_offsets = params.chunk_start_offsets_ptr != nullptr ?
+                                     reinterpret_cast<const int*>(params.chunk_start_offsets_ptr) : nullptr;
 
     const size_t load_cache_slot = params.cache_enabled && batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
 
+    // chunk_start_offset is (num_computed_tokens % block_size) - where we start within the first block
+    const int chunk_start_offset = (params.cache_enabled && chunk_start_offsets != nullptr) ?
+                                    chunk_start_offsets[batch_id] : 0;
+
+    const int block_idx_first = (params.cache_enabled && block_idx_first_scheduled != nullptr) ?
+                                 block_idx_first_scheduled[batch_id] : 0;
+
+    // Calculate aligned chunk sizes:
+    // - First chunk: tokens needed to complete the current block (or all tokens if less)
+    // - Subsequent chunks: full block_size each (or remaining if less)
+    const int first_chunk_size = (chunk_start_offset > 0) ?
+                                  min(seqlen, block_size - chunk_start_offset) :
+                                  min(seqlen, block_size);
+    const int remaining_after_first = max(0, seqlen - first_chunk_size);
+    const int n_chunks = 1 + (remaining_after_first + block_size - 1) / block_size;
+
+    // Track how many tokens we've processed and our absolute position in the sequence
+    int tokens_processed = 0;
+    int current_position = block_idx_first * block_size + chunk_start_offset;
+
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
+        int chunk_tokens;
+        if (chunk == 0) {
+            chunk_tokens = first_chunk_size;
+        } else {
+            chunk_tokens = min(block_size, seqlen - tokens_processed);
+        }
+        if (chunk_tokens <= 0) break;
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
         __syncthreads();
@@ -193,12 +221,12 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, seqlen - chunk * kChunkSize);
+            load_input<Ktraits>(u + r * params.u_d_stride, u_vals[r], smem_load, chunk_tokens);
             if constexpr (!kDirectIO) { __syncthreads(); }
-            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, seqlen - chunk * kChunkSize);
+            load_input<Ktraits>(delta + r * params.delta_d_stride, delta_vals_load[r], smem_load, chunk_tokens);
         }
-        u += kChunkSize;
-        delta += kChunkSize;
+        u += chunk_tokens;
+        delta += chunk_tokens;
     
         float delta_vals[kNRows][kNItems], delta_u_vals[kNRows][kNItems], out_vals[kNRows][kNItems];
         #pragma unroll
@@ -232,7 +260,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             weight_t B_vals[kNItems], C_vals[kNItems];
             if constexpr (kIsVariableB) {
                 load_weight<Ktraits>(Bvar + state_idx * params.B_dstate_stride, B_vals,
-                    smem_load_weight, (seqlen - chunk * kChunkSize) * (1));
+                    smem_load_weight, chunk_tokens);
                 if constexpr (!kIsVariableC) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -243,7 +271,7 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             if constexpr (kIsVariableC) {
                 auto &smem_load_weight_C = !kIsVariableB ? smem_load_weight : smem_load_weight1;
                 load_weight<Ktraits>(Cvar + state_idx * params.C_dstate_stride, C_vals,
-                    smem_load_weight_C, (seqlen - chunk * kChunkSize) * (1));
+                    smem_load_weight_C, chunk_tokens);
                 if constexpr (!kIsVariableB) {
                     #pragma unroll
                     for (int r = 0; r < kNRows; ++r) {
@@ -266,10 +294,8 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 for (int i = 0; i < kNItems; ++i) {
                     thread_data[i] = make_float2(exp2f(delta_vals[r][i] * A_val[r]),
                                                  !kIsVariableB ? delta_u_vals[r][i] : B_vals[i] * delta_u_vals[r][i]);
-                    if (seqlen % (kNItems * kNThreads) != 0) {  // So that the last state is correct
-                        if (threadIdx.x * kNItems + i >= seqlen - chunk * kChunkSize) {
-                            thread_data[i] = make_float2(1.f, 0.f);
-                        }
+                    if (threadIdx.x * kNItems + i >= chunk_tokens) {
+                        thread_data[i] = make_float2(1.f, 0.f);
                     }
                 }
                 // Initialize running total
@@ -301,14 +327,16 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                 if (threadIdx.x == 0) {
                     smem_running_prefix[state_idx + r * MAX_DSTATE] = prefix_op.running_prefix;
 
-                    // Store state at the end of each chunk when cache is enabled
+                    // Store state at the end of each aligned chunk when cache is enabled
                     if (params.cache_enabled && batch_cache_indices != nullptr) {
+                        const int position_after_chunk = current_position + chunk_tokens;
+                        const int block_idx_completed = (position_after_chunk - 1) / block_size;
 
                         size_t cache_slot;
                         if (chunk == n_chunks - 1) {
                             cache_slot = batch_cache_indices[block_idx_last_scheduled[batch_id]];
                         } else {
-                            cache_slot = batch_cache_indices[block_idx_first_scheduled[batch_id] + chunk];
+                            cache_slot = batch_cache_indices[block_idx_completed];
                         }
 
                         size_t state_offset = cache_slot * params.ssm_states_batch_stride +
@@ -331,38 +359,41 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
             }
         }
         input_t *out = reinterpret_cast<input_t *>(params.out_ptr) + sequence_start_index * params.out_batch_stride
-            + dim_id * kNRows * params.out_d_stride + chunk * kChunkSize;
+            + dim_id * kNRows * params.out_d_stride + tokens_processed;
         __syncthreads();
         #pragma unroll
         for (int r = 0; r < kNRows; ++r) {
             if constexpr (!kDirectIO) {
                 if (r > 0) { __syncthreads(); }
             }
-            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
+            store_output<Ktraits>(out + r * params.out_d_stride, out_vals[r], smem_store, chunk_tokens);
         }
 
         if constexpr (kHasZ) {
             input_t *z = reinterpret_cast<input_t *>(params.z_ptr) + sequence_start_index * params.z_batch_stride
-                + dim_id * kNRows * params.z_d_stride + chunk * kChunkSize;
+                + dim_id * kNRows * params.z_d_stride + tokens_processed;
             input_t *out_z = reinterpret_cast<input_t *>(params.out_z_ptr) + sequence_start_index * params.out_z_batch_stride
-                + dim_id * kNRows * params.out_z_d_stride + chunk * kChunkSize;
+                + dim_id * kNRows * params.out_z_d_stride + tokens_processed;
             #pragma unroll
             for (int r = 0; r < kNRows; ++r) {
                 input_t z_vals[kNItems];
                 __syncthreads();
-                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, seqlen - chunk * kChunkSize);
+                load_input<Ktraits>(z + r * params.z_d_stride, z_vals, smem_load, chunk_tokens);
                 #pragma unroll
                 for (int i = 0; i < kNItems; ++i) {
                     float z_val = z_vals[i];
                     out_vals[r][i] *= z_val / (1 + expf(-z_val));
                 }
                 __syncthreads();
-                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, seqlen - chunk * kChunkSize);
+                store_output<Ktraits>(out_z + r * params.out_z_d_stride, out_vals[r], smem_store, chunk_tokens);
             }
         }
 
-        Bvar += kChunkSize * 1;
-        Cvar += kChunkSize * 1;
+        Bvar += chunk_tokens;
+        Cvar += chunk_tokens;
+
+        tokens_processed += chunk_tokens;
+        current_position += chunk_tokens;
     }
 }
 
@@ -506,7 +537,8 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         int64_t block_size,
                         const std::optional<torch::Tensor> &block_idx_first_scheduled_token,
                         const std::optional<torch::Tensor> &block_idx_last_scheduled_token,
-                        const std::optional<torch::Tensor> &initial_state_idx) {
+                        const std::optional<torch::Tensor> &initial_state_idx,
+                        const std::optional<torch::Tensor> &chunk_start_offsets) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -548,6 +580,7 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.block_idx_first_scheduled_token_ptr = block_idx_first_scheduled_token.has_value() ? block_idx_first_scheduled_token.value().data_ptr() : nullptr;
     params.block_idx_last_scheduled_token_ptr = block_idx_last_scheduled_token.has_value() ? block_idx_last_scheduled_token.value().data_ptr() : nullptr;
     params.initial_state_idx_ptr = initial_state_idx.has_value() ? initial_state_idx.value().data_ptr() : nullptr;
+    params.chunk_start_offsets_ptr = chunk_start_offsets.has_value() ? chunk_start_offsets.value().data_ptr() : nullptr;
 
     // All stride are in elements, not bytes.
     params.A_d_stride = A.stride(0);
@@ -633,7 +666,8 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   int64_t block_size,
                   const std::optional<torch::Tensor> &block_idx_first_scheduled_token,
                   const std::optional<torch::Tensor> &block_idx_last_scheduled_token,
-                  const std::optional<torch::Tensor> &initial_state_idx) {
+                  const std::optional<torch::Tensor> &initial_state_idx,
+                  const std::optional<torch::Tensor> &chunk_start_offsets) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -778,7 +812,8 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        block_size,
                        block_idx_first_scheduled_token,
                        block_idx_last_scheduled_token,
-                       initial_state_idx
+                       initial_state_idx,
+                       chunk_start_offsets
                        );
 
     

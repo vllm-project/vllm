@@ -327,6 +327,7 @@ class MambaMixer(MambaBase, PluggableLayer):
                 attn_metadata.block_idx_first_scheduled_token_p
             )
             num_computed_tokens_p = attn_metadata.num_computed_tokens_p
+            chunk_start_offsets_p = attn_metadata.chunk_start_offsets_p
         else:
             block_idx_last_computed_token_d = None
             block_idx_last_computed_token_p = None
@@ -334,6 +335,7 @@ class MambaMixer(MambaBase, PluggableLayer):
             block_idx_last_scheduled_token_p = None
             block_idx_first_scheduled_token_p = None
             num_computed_tokens_p = None
+            chunk_start_offsets_p = None
 
         ssm_outputs = []
 
@@ -379,6 +381,7 @@ class MambaMixer(MambaBase, PluggableLayer):
                 block_idx_first_scheduled_token=block_idx_first_scheduled_token_p,
                 block_idx_last_scheduled_token=block_idx_last_scheduled_token_p,
                 initial_state_idx=block_idx_last_computed_token_p,
+                chunk_start_offsets=chunk_start_offsets_p,
             )
             ssm_outputs.append(scan_out_p)
 
