@@ -107,10 +107,10 @@ async def admin_drain(
             content={"error": str(err)},
             status_code=HTTPStatus.BAD_REQUEST.value,
         )
-    except Exception as err:
+    except Exception:
         logger.exception("Failed to drain")
         return JSONResponse(
-            content={"error": f"Failed to drain: {err}"},
+            content={"error": "Failed to drain. See server logs for details."},
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
         )
 
@@ -129,10 +129,10 @@ async def admin_resume(raw_request: Request) -> JSONResponse:
     try:
         await engine.resume_generation()
         return JSONResponse(content={"status": "resumed"})
-    except Exception as err:
+    except Exception:
         logger.exception("Failed to resume generation")
         return JSONResponse(
-            content={"error": f"Failed to resume generation: {err}"},
+            content={"error": "Failed to resume. See server logs for details."},
             status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
         )
 
