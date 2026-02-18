@@ -122,6 +122,8 @@ def is_supported_config_trtllm(
         return False, _make_reason("routing method")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
         return False, _make_reason("activation format")
+    elif moe_config.hidden_dim % 512 != 0:
+        return False, _make_reason("hidden_dim must be divisible by 512")
 
     return True, None
 
