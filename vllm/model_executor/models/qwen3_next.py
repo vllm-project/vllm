@@ -974,6 +974,11 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                         )
                         initial_state[prefill_indices[~req_has_initial_state], ...] = 0
 
+                # We always use the FLA kernel for prefill during all-mode prefix
+                # caching because
+                # 1) only the FLA kernel outputs intermediate states (FI does not)
+                # 2) In the FLA kernel we can set the ssm state's dtype to avoid
+                #    numerical discrepancies vs non-APC path.
                 (
                     core_attn_out_non_spec,
                     last_recurrent_state,
