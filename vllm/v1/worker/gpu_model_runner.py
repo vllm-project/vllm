@@ -1479,6 +1479,29 @@ class GPUModelRunner(
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
+        
+        # Debug: Print slot mapping for virtual requests created from gaps
+        for req_idx in range(num_reqs):
+            req_id = self.input_batch.req_ids[req_idx]
+            if req_id: # and "." in req_id:  # Virtual request from gap
+                # Get the slot mapping for this request
+                req_start_idx = cu_num_tokens[req_idx - 1] if req_idx > 0 else 0
+                req_end_idx = cu_num_tokens[req_idx]
+                req_num_tokens = num_scheduled_tokens[req_idx]
+                
+                # Get slot mapping from block table (it's computed but not yet in attention metadata)
+                slot_mapping_np = self.input_batch.block_table[0].slot_mapping.cpu[:total_num_scheduled_tokens]
+                req_slot_mapping = slot_mapping_np[req_start_idx:req_end_idx]
+                
+                print(f"[DEBUG] Virtual Request Slot Mapping (Model Runner):")
+                print(f"  req_id: {req_id}")
+                print(f"  req_idx: {req_idx}")
+                print(f"  num_scheduled_tokens: {req_num_tokens}")
+                print(f"  num_computed_tokens: {self.input_batch.num_computed_tokens_cpu[req_idx]}")
+                print(f"  token_range_in_batch: [{req_start_idx}, {req_end_idx})")
+                print(f"  slot_mapping (first 20): {req_slot_mapping[:20].tolist()}")
+                print(f"  slot_mapping (last 20): {req_slot_mapping[-20:].tolist()}")
+                print(f"  slot_mapping length: {len(req_slot_mapping)}")
 
         # Prepare the attention metadata.
         self.query_start_loc.np[0] = 0
@@ -1728,7 +1751,7 @@ class GPUModelRunner(
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
             cache_key = (kv_cache_spec, type(builder))
-
+            
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
                 if cascade_attn_prefix_lens
@@ -1776,6 +1799,7 @@ class GPUModelRunner(
 
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
+            
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
