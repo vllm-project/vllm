@@ -592,7 +592,7 @@ class MessageQueue:
                 self.current_idx = (self.current_idx + 1) % self.buffer.max_chunks
                 break
 
-    class ReadTimeout:
+    class ReadTimeoutWithWarnings:
         def __init__(self, timeout: float | None, should_warn: bool) -> None:
             self.started = time.monotonic()
             if timeout is not None:
@@ -647,7 +647,9 @@ class MessageQueue:
         indefinite: bool = False,
     ):
         assert self._is_local_reader, "Only readers can acquire read"
-        read_timeout = self.ReadTimeout(timeout=timeout, should_warn=not indefinite)
+        read_timeout = self.ReadTimeoutWithWarnings(
+            timeout=timeout, should_warn=not indefinite
+        )
 
         while True:
             with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
