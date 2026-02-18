@@ -59,7 +59,7 @@ except ImportError:
     sf = None
 
 # Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
-# being librosa's main backend. Used to validate if an audio loading error is due to a 
+# being librosa's main backend. Used to validate if an audio loading error is due to a
 # server error vs a client error (invalid audio file).
 # 1 = unrecognised format      (file is not a supported audio container)
 # 3 = malformed file           (corrupt or structurally invalid audio)
@@ -282,7 +282,11 @@ class OpenAISpeechToText(OpenAIServing):
                 # pre-requisite for chunking, as it assumes Whisper SR.
                 y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
             except Exception as exc:
-                if sf is not None and isinstance(exc, sf.LibsndfileError) and exc.code in _BAD_SF_CODES:  # noqa: E501
+                if (
+                    sf is not None
+                    and isinstance(exc, sf.LibsndfileError)
+                    and exc.code in _BAD_SF_CODES
+                ):
                     raise ValueError("Invalid or unsupported audio file.") from exc
                 raise
 
