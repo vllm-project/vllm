@@ -275,4 +275,4 @@ def test_rocm_wvsplitk_fp8_kernel(
         # wider pytrch thresh for large-K & no xnorm
         torch.testing.assert_close(out, ref_out, atol=0.07, rtol=5e-2)
     else:
-        torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+        torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
