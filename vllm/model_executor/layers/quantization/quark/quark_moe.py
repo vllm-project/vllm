@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -438,7 +439,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 expert_map=layer.expert_map,
             )
         elif self.use_marlin:
-            assert layer.activation == "silu", (
+            assert layer.activation == MoEActivation.SILU, (
                 f"{layer.activation} not supported for Marlin MoE."
             )
             return fused_marlin_moe(
@@ -932,7 +933,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 layer.w2_weight.view(self.fp4_dtype),
                 requires_grad=layer.w2_weight.requires_grad,
             )
+        # Pre-shuffle weight
+        shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
+            layer.w13_weight.data, layer.w2_weight.data
+        )
 
+        layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
+        layer.w13_weight.is_shuffled = True
+        layer.w2_weight.is_shuffled = True
         torch.cuda.empty_cache()
 
     def get_fused_moe_quant_config(
