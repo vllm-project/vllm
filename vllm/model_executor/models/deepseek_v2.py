@@ -746,7 +746,6 @@ class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.nn.Parameter | None]:
         num_tokens = input_.shape[0]
         if self._use_min_latency_gemm and (0 < num_tokens <= 16):
-            print("HERE!!!!")
             output = torch.empty(
                 num_tokens,
                 2112,
