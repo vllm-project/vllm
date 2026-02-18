@@ -2,13 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from transformers import AutoTokenizer
 
 from tests.reasoning.utils import (
     StreamingReasoningReconstructor,
     run_reasoning_extraction,
     run_reasoning_extraction_streaming,
 )
-from transformers import AutoTokenizer
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
 
 parser_name = "qwen3"
