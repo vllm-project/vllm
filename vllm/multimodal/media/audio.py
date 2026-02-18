@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
-import os
-import tempfile
 from io import BytesIO
 from pathlib import Path
 
+import numpy as np
 import numpy.typing as npt
 import pybase64
 import torch
@@ -14,6 +13,11 @@ from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
 
 from .base import MediaIO
+
+try:
+    import av
+except ImportError:
+    av = PlaceholderModule("av")  # type: ignore[assignment]
 
 try:
     import librosa
@@ -29,34 +33,45 @@ except ImportError:
 def extract_audio_from_video_bytes(
     data: bytes,
     sr: float | None = None,
-    max_duration: float | None = None,
 ) -> tuple[npt.NDArray, float]:
-    """Extract the audio track from raw video bytes using librosa.
+    """Extract the audio track from raw video bytes using PyAV.
+
+    PyAV wraps FFmpeg's C libraries in-process — no subprocess is
+    spawned, which is critical to avoid crashing CUDA-active vLLM
+    worker processes.
 
     Args:
         data: Raw video file bytes (e.g. from an mp4 file).
-        sr: Target sampling rate. If ``None``, the native rate is used.
-        max_duration: If set, only load the first *max_duration* seconds
-            of audio.
+        sr: Target sampling rate.  If ``None``, the native rate is used.
 
     Returns:
         A tuple of ``(waveform, sample_rate)`` suitable for use as an
         :class:`AudioItem`.
     """
-    # MP4 containers require file-path access (soundfile can't read them
-    # from BytesIO).  Write to a temp file and let librosa's audioread
-    # backend handle the container -- no subprocess is spawned, which is
-    # critical to avoid crashing CUDA-active vLLM worker processes.
-    tmp_dir = os.environ.get("TMPDIR", "/tmp")
-    with tempfile.NamedTemporaryFile(
-        suffix=".mp4", delete=False, dir=tmp_dir
-    ) as tmp:
-        tmp.write(data)
-        tmp_path = tmp.name
-    try:
-        return librosa.load(tmp_path, sr=sr, duration=max_duration)
-    finally:
-        os.unlink(tmp_path)
+    container = av.open(BytesIO(data))
+    stream = container.streams.audio[0]
+    native_sr = stream.rate
+
+    chunks: list[npt.NDArray] = []
+    for frame in container.decode(audio=0):
+        # to_ndarray() returns shape (channels, samples) for planar
+        # formats and (1, samples) for packed formats.
+        arr = frame.to_ndarray()
+        chunks.append(arr.mean(axis=0) if arr.ndim > 1 else arr)
+    container.close()
+
+    if not chunks:
+        audio = np.array([], dtype=np.float32)
+    else:
+        audio = np.concatenate(chunks).astype(np.float32)
+
+    if sr is not None and sr != native_sr:
+        audio = librosa.resample(
+            audio, orig_sr=float(native_sr), target_sr=float(sr)
+        )
+        return audio, float(sr)
+
+    return audio, float(native_sr)
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
