@@ -267,7 +267,7 @@ def run_multi_api_server(args: argparse.Namespace):
             if coordinator
             else None,
             engine_fault_socket_addr=addresses.engine_fault_socket_addr,
-            client_sentinel_cmd_addr=addresses.client_sentinel_cmd_addr,
+            client_sentinel_request_addr=addresses.client_sentinel_request_addr,
             engine_core_sentinel_cmd_addr=addresses.engine_core_sentinel_cmd_addr,
             engine_core_sentinel_identities=addresses.engine_core_sentinel_identities,
             fault_state_pub_socket_addr=addresses.fault_state_pub_socket_addr,

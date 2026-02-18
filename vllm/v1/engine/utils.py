@@ -74,8 +74,8 @@ class EngineZmqAddresses:
     frontend_stats_publish_address: str | None = None
     # ZMQ fault_state_pub_socket address of client sentinel
     fault_state_pub_socket_addr: str | None = None
-    # ZMQ client_sentinel_cmd socket address of client sentinel
-    client_sentinel_cmd_addr: str | None = None
+    # ZMQ client_sentinel_request socket address of client sentinel
+    client_sentinel_request_addr: str | None = None
     # ZMQ engine_core_sentinel_cmd socket address of engine_core sentinel
     engine_core_sentinel_cmd_addr: str | None = None
     # ZMQ engine_fault socket address of EngineCoreSentinel
@@ -967,7 +967,7 @@ def launch_core_engines(
             host=vllm_config.parallel_config.data_parallel_master_ip,
             port=vllm_config.fault_tolerance_config.internal_fault_report_port,
         )
-        addresses.client_sentinel_cmd_addr = get_engine_client_zmq_addr(
+        addresses.client_sentinel_request_addr = get_engine_client_zmq_addr(
             local_only=True, host=host
         )
         addresses.engine_core_sentinel_cmd_addr = get_engine_client_zmq_addr(

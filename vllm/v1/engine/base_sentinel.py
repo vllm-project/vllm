@@ -44,6 +44,7 @@ class BaseSentinel:
         self.ctx = zmq.Context()
         self.sentinel_tag = sentinel_tag
         self.logger = self._make_logger()
+        self.vllm_config = vllm_config
         self.ft_config = vllm_config.fault_tolerance_config
         if upstream_cmd_addr is not None:
             assert sentinel_identity is not None
@@ -226,7 +227,6 @@ class BaseSentinel:
             timeout,
             ft_request,
         )
-
         # check the execution results
         all_success = True
         for sentinel_identity in target_downstream_sentinels:

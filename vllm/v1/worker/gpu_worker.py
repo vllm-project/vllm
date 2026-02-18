@@ -130,7 +130,6 @@ class WorkerSentinel(BaseSentinel):
             sentinel_tag=f"{self.dp_rank}_{identity}",
             vllm_config=vllm_config,
         )
-        self.vllm_config = vllm_config
         self.init_distributed_env_callback = init_distributed_env_callback
         self.clear_input_batch_callback = clear_input_batch_callback
         self.device = device
