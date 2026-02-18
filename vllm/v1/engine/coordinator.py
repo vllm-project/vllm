@@ -107,6 +107,10 @@ class DPCoordinator:
     def close(self):
         self._finalizer()
 
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown coordinator process with configurable timeout."""
+        shutdown([self.proc], timeout=timeout)
+
 
 class EngineState:
     def __init__(self):

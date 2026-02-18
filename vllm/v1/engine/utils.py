@@ -157,6 +157,10 @@ class CoreEngineProcManager:
         """Shutdown all procs."""
         self._finalizer()
 
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown engine core processes with configurable timeout."""
+        shutdown(self.processes, timeout=timeout)
+
     def join_first(self):
         """Wait for any process to exit."""
         connection.wait(proc.sentinel for proc in self.processes)
@@ -767,6 +771,10 @@ class CoreEngineActorManager:
 
     def get_run_refs(self):
         return self.run_refs
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        """No-op shutdown - Ray actors are managed separately."""
+        pass
 
     def close(self):
         import ray
