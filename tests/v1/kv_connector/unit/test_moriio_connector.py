@@ -405,36 +405,36 @@ def test_register_kv_caches(mock_parallel_groups):
 
     backend_cls = AiterFlashAttentionBackend
 
-    with set_current_vllm_config(vllm_config):
-        # Create test kv cache tensors using proper backend shape
-        kv_cache_shape = backend_cls.get_kv_cache_shape(
-            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    # Create test kv cache tensors using proper backend shape
+    kv_cache_shape = backend_cls.get_kv_cache_shape(
+        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    )
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_caches = {
+        "layer0": shared_tensor,
+        "layer1": unique_tensor,
+        "layer2": shared_tensor,
+    }
+
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Event"
+        ),
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Thread"
+        ),
+    ):
+        # Create connector
+        vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+            {
+                "proxy_ip": "127.0.0.1",
+                "proxy_ping_port": 12345,
+                "http_port": 12346,
+            }
         )
-        shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        kv_caches = {
-            "layer0": shared_tensor,
-            "layer1": unique_tensor,
-            "layer2": shared_tensor,
-        }
 
-        with (
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Event"
-            ),
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector.threading.Thread"
-            ),
-        ):
-            # Create connector
-            vllm_config.kv_transfer_config.kv_connector_extra_config.update(
-                {
-                    "proxy_ip": "127.0.0.1",
-                    "proxy_ping_port": 12345,
-                    "http_port": 12346,
-                }
-            )
-
+        with set_current_vllm_config(vllm_config):
             connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
             connector.connector_worker = FakeMorIIOConnectorWorker(
                 vllm_config, connector.engine_id, hand_shake_latency=0
@@ -499,35 +499,35 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
 
     backend_cls = AiterFlashAttentionBackend
 
-    with set_current_vllm_config(vllm_config):
-        # Create test kv cache tensors using proper backend shape
-        kv_cache_shape = backend_cls.get_kv_cache_shape(
-            num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
-        )
-        shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
-        kv_caches = {
-            "layer0": shared_tensor,
-            "layer1": unique_tensor,
-            "layer2": shared_tensor,
-        }
+    # Create test kv cache tensors using proper backend shape
+    kv_cache_shape = backend_cls.get_kv_cache_shape(
+        num_blocks=2, block_size=16, num_kv_heads=4, head_size=64
+    )
+    shared_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    unique_tensor = torch.zeros(*kv_cache_shape, dtype=torch.float16)
+    kv_caches = {
+        "layer0": shared_tensor,
+        "layer1": unique_tensor,
+        "layer2": shared_tensor,
+    }
 
-        with (
-            patch(
-                "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper",
-                FakeMorIIOWrapper,
-            ),
-        ):
-            handshake_port = _find_free_port()
-            # Create connector
-            vllm_config.kv_transfer_config.kv_connector_extra_config.update(
-                {
-                    "proxy_ip": "127.0.0.1",
-                    "proxy_ping_port": 12345,
-                    "http_port": 12346,
-                    "handshake_port": handshake_port,
-                }
-            )
+    with (
+        patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine.MoRIIOWrapper",
+            FakeMorIIOWrapper,
+        ),
+    ):
+        handshake_port = _find_free_port()
+        # Create connector
+        vllm_config.kv_transfer_config.kv_connector_extra_config.update(
+            {
+                "proxy_ip": "127.0.0.1",
+                "proxy_ping_port": 12345,
+                "http_port": 12346,
+                "handshake_port": handshake_port,
+            }
+        )
+        with set_current_vllm_config(vllm_config):
             connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
 
             # Execute register_kv_caches
