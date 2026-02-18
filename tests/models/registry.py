@@ -761,10 +761,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         extras={"2b": "h2oai/h2ovl-mississippi-2b"},
         max_transformers_version="4.48",
-        transformers_version_reason={
-            "hf": "HF model is not compatible.",
-            "vllm": "Remote config code is not compatible.",
-        },
+        transformers_version_reason={"hf": "HF model is not compatible."},
     ),
     "HCXVisionForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Vision-Instruct-3B",

@@ -179,10 +179,22 @@ class CudaPlatformBase(Platform):
         # Skip hybrid (attention+mamba) models — their block_size is
         # managed by HybridAttentionMambaModelConfig
         if model_config is not None and not model_config.is_hybrid:
-            cls._update_block_size_for_backend(
-                vllm_config,
-                user_specified_block_size,
-            )
+            try:
+                cls._update_block_size_for_backend(
+                    vllm_config,
+                    user_specified_block_size,
+                )
+            except Exception:
+                # Some models (e.g. trust_remote_code models with
+                # incompatible transformers versions) may fail here.
+                # Fall back to the default block_size rather than
+                # crashing during config validation.
+                logger.debug(
+                    "Failed to update block size for attention backend, "
+                    "using default block_size=%d.",
+                    cache_config.block_size,
+                    exc_info=True,
+                )
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
