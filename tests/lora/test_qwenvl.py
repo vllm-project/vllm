@@ -121,6 +121,7 @@ class Qwen2VLTester:
             output_texts = [seq.text for seq in output_obj.sequences]
 
             for output_text, expected_text in zip(output_texts, expected_texts):
+                # NOTE beam search .text contains the whole text including inputs
                 assert output_text.endswith(expected_text), (
                     f"Generated {output_text} does not match expected {output_text}"
                 )
@@ -152,7 +153,6 @@ EXPECTED_OUTPUTS_VISION_NO_CONNECTOR = [
     "A closeup shot of the Tokyo Skytree with pink flowers in the foreground.",
 ]
 
-# NOTE - beam search .text contains the whole text
 EXPECTED_BEAM_SEARCH_OUTPUTS = [
     [
         "A majestic skyscraper stands",
