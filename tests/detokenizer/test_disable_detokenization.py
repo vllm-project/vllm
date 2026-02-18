@@ -7,7 +7,6 @@ from vllm.entrypoints.llm import LLM
 from vllm.sampling_params import SamplingParams
 
 
-@pytest.mark.skip_v1
 @pytest.mark.parametrize("model", ["distilbert/distilgpt2"])
 def test_computed_prefix_blocks(model: str):
     # This test checks if the engine generates completions both with and
