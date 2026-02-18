@@ -5108,10 +5108,6 @@ class GPUModelRunner(
 
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> tuple[int, int]:
-        # Setup: minimal KV cache and private graph pool
-        # NOTE: This must be called BEFORE _get_cudagraph_profiling_info()
-        # because initialize_kv_cache() may update cudagraph_mode based on
-        # attention backend constraints via _check_and_update_cudagraph_mode().
         with set_current_vllm_config(self.vllm_config):
             self._init_minimal_kv_cache_for_profiling()
 
@@ -5139,7 +5135,6 @@ class GPUModelRunner(
         )
         profiling_pool = current_platform.graph_pool_handle()
 
-        # Swap graph pool to private one (to avoid corrupting global pool)
         original_pool = None
         if isinstance(self.model, CUDAGraphWrapper):
             original_pool = self.model.graph_pool
@@ -5173,7 +5168,6 @@ class GPUModelRunner(
                 if measure_first_capture
                 else 0
             )
-            # Second capture measures per-graph overhead
             current_platform.synchronize()
             before = self._warmup_and_capture(
                 largest_two_sizes[1],
@@ -5296,7 +5290,6 @@ class GPUModelRunner(
         # after here.
         set_cudagraph_capturing_enabled(False)
 
-        # Release fragmented memory from graph capture process.
         current_platform.synchronize()
         current_platform.empty_cache()
 
