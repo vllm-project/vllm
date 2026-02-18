@@ -21,9 +21,6 @@ def main():
     from vllm.engine.arg_utils import needs_help
 
     showing_help = needs_help()
-    if not showing_help:
-        # Only do platform detection when not showing help
-        from vllm import platforms  # noqa: F401
 
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
@@ -45,8 +42,9 @@ def main():
     if not showing_help:
         cli_env_setup()
 
-    # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
-    # Skip this check if showing help to avoid platform detection
+    # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default.
+    # When showing help, skip this to avoid triggering CUDA/platform init
+    # (which can take ~10s or fail without a GPU).
     if len(sys.argv) > 1 and sys.argv[1] == "bench" and not showing_help:
         logger.debug(
             "Bench command detected, must ensure current platform is not "
