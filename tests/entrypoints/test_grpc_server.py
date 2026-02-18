@@ -482,14 +482,14 @@ async def test_grpc_health_service_unknown_service(health_stub):
 @pytest.mark.asyncio
 async def test_grpc_health_service_reflection(grpc_server):
     """Test that grpc.health.v1.Health appears in the reflection service list."""
-    channel = grpc.aio.insecure_channel(f"localhost:{grpc_server.port}")
+    channel = grpc.insecure_channel(f"localhost:{grpc_server.port}")
     try:
         reflection_db = ProtoReflectionDescriptorDatabase(channel)
         services = reflection_db.get_services()
 
         assert "grpc.health.v1.Health" in services
     finally:
-        await channel.close()
+        channel.close()
 
 
 # ---- _health_monitor Unit Tests ----
