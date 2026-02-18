@@ -49,6 +49,7 @@ def run_vllm(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
+    num_warmups: int = 0,
 ) -> tuple[float, list[RequestOutput] | None]:
     from vllm import LLM, SamplingParams
 
@@ -91,38 +92,41 @@ def run_vllm(
 
     use_beam_search = False
 
-    outputs = None
-    if not use_beam_search:
-        start = time.perf_counter()
-        if do_profile:
-            llm.start_profile()
-        outputs = llm.generate(
-            prompts, sampling_params, lora_request=lora_requests, use_tqdm=True
-        )
-        if do_profile:
-            llm.stop_profile()
-        end = time.perf_counter()
-    else:
+    def _run_iter(use_tqdm: bool) -> list[RequestOutput] | None:
+        if not use_beam_search:
+            return llm.generate(
+                prompts,
+                sampling_params,
+                lora_request=lora_requests,
+                use_tqdm=use_tqdm,
+            )
         assert lora_requests is None, "BeamSearch API does not support LoRA"
-        prompts = [request.prompt for request in requests]
-        # output_len should be the same for all requests.
+        prompts_bs = [request.prompt for request in requests]
         output_len = requests[0].expected_output_len
         for request in requests:
             assert request.expected_output_len == output_len
-        start = time.perf_counter()
-        if do_profile:
-            llm.start_profile()
         llm.beam_search(
-            prompts,
+            prompts_bs,
             BeamSearchParams(
                 beam_width=n,
                 max_tokens=output_len,
                 ignore_eos=True,
             ),
         )
-        if do_profile:
-            llm.stop_profile()
-        end = time.perf_counter()
+        return None
+
+    if num_warmups > 0:
+        print(f"Warming up with {num_warmups} iterations...")
+        for _ in tqdm(range(num_warmups), desc="Warmup iterations"):
+            _run_iter(use_tqdm=False)
+
+    start = time.perf_counter()
+    if do_profile:
+        llm.start_profile()
+    outputs = _run_iter(use_tqdm=True)
+    if do_profile:
+        llm.stop_profile()
+    end = time.perf_counter()
     return end - start, outputs
 
 
@@ -132,6 +136,7 @@ def run_vllm_chat(
     engine_args: EngineArgs,
     do_profile: bool,
     disable_detokenize: bool = False,
+    num_warmups: int = 0,
 ) -> tuple[float, list[RequestOutput]]:
     """
     Run vLLM chat benchmark. This function is recommended ONLY for benchmarking
@@ -165,6 +170,10 @@ def run_vllm_chat(
                 detokenize=not disable_detokenize,
             )
         )
+    if num_warmups > 0:
+        print(f"Warming up with {num_warmups} iterations...")
+        for _ in tqdm(range(num_warmups), desc="Warmup iterations"):
+            llm.chat(prompts, sampling_params, use_tqdm=False)
     start = time.perf_counter()
     if do_profile:
         llm.start_profile()
@@ -182,6 +191,7 @@ async def run_vllm_async(
     do_profile: bool,
     disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
+    num_warmups: int = 0,
 ) -> float:
     from vllm import SamplingParams
     from vllm.entrypoints.openai.api_server import (
@@ -230,18 +240,31 @@ async def run_vllm_async(
             prompts.append(prompt)
             lora_requests.append(request.lora_request)
 
-        generators = []
+        async def _run_batch(request_id_prefix: str) -> None:
+            generators = []
+            for i, (prompt, sp, lr) in enumerate(
+                zip(prompts, sampling_params, lora_requests)
+            ):
+                generator = llm.generate(
+                    prompt,
+                    sp,
+                    lora_request=lr,
+                    request_id=f"{request_id_prefix}_{i}",
+                )
+                generators.append(generator)
+            all_gens = merge_async_iterators(*generators)
+            async for i, res in all_gens:
+                pass
+
+        if num_warmups > 0:
+            print(f"Warming up with {num_warmups} iterations...")
+            for w in tqdm(range(num_warmups), desc="Warmup iterations"):
+                await _run_batch(f"warmup{w}")
+
         start = time.perf_counter()
         if do_profile:
             await llm.start_profile()
-        for i, (prompt, sp, lr) in enumerate(
-            zip(prompts, sampling_params, lora_requests)
-        ):
-            generator = llm.generate(prompt, sp, lora_request=lr, request_id=f"test{i}")
-            generators.append(generator)
-        all_gens = merge_async_iterators(*generators)
-        async for i, res in all_gens:
-            pass
+        await _run_batch("test")
         if do_profile:
             await llm.stop_profile()
         end = time.perf_counter()
@@ -256,6 +279,7 @@ def run_hf(
     max_batch_size: int,
     trust_remote_code: bool,
     disable_detokenize: bool = False,
+    num_warmups: int = 0,
 ) -> float:
     assert isinstance(tokenizer, PreTrainedTokenizerBase), (
         "the hf backend only supports HF tokenizers"
@@ -268,50 +292,51 @@ def run_hf(
         tokenizer.pad_token = tokenizer.eos_token
     llm = llm.cuda()
 
-    pbar = tqdm(total=len(requests))
-    start = time.perf_counter()
-    batch: list[str] = []
-    max_prompt_len = 0
-    max_output_len = 0
-    for i in range(len(requests)):
-        prompt = requests[i].prompt
-        prompt_len = requests[i].prompt_len
-        output_len = requests[i].expected_output_len
-        # Add the prompt to the batch.
-        batch.append(prompt)
-        max_prompt_len = max(max_prompt_len, prompt_len)
-        max_output_len = max(max_output_len, output_len)
-        if len(batch) < max_batch_size and i != len(requests) - 1:
-            # Check if we can add more requests to the batch.
-            next_prompt_len = requests[i + 1].prompt_len
-            next_output_len = requests[i + 1].expected_output_len
-            if (
-                max(max_prompt_len, next_prompt_len)
-                + max(max_output_len, next_output_len)
-            ) <= 2048:
-                # We can add more requests to the batch.
-                continue
-
-        # Generate the sequences.
-        input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
-        llm_outputs = llm.generate(
-            input_ids=input_ids.cuda(),
-            do_sample=True,
-            num_return_sequences=n,
-            temperature=1.0,
-            top_p=1.0,
-            use_cache=True,
-            max_new_tokens=max_output_len,
-        )
-        if not disable_detokenize:
-            # Include the decoding time.
-            tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
-        pbar.update(len(batch))
-
-        # Clear the batch.
-        batch = []
+    def _run_pass(pbar: tqdm | None = None) -> None:
+        batch: list[str] = []
         max_prompt_len = 0
         max_output_len = 0
+        for i in range(len(requests)):
+            prompt = requests[i].prompt
+            prompt_len = requests[i].prompt_len
+            output_len = requests[i].expected_output_len
+            batch.append(prompt)
+            max_prompt_len = max(max_prompt_len, prompt_len)
+            max_output_len = max(max_output_len, output_len)
+            if len(batch) < max_batch_size and i != len(requests) - 1:
+                next_prompt_len = requests[i + 1].prompt_len
+                next_output_len = requests[i + 1].expected_output_len
+                if (
+                    max(max_prompt_len, next_prompt_len)
+                    + max(max_output_len, next_output_len)
+                ) <= 2048:
+                    continue
+            input_ids = tokenizer(batch, return_tensors="pt", padding=True).input_ids
+            llm_outputs = llm.generate(
+                input_ids=input_ids.cuda(),
+                do_sample=True,
+                num_return_sequences=n,
+                temperature=1.0,
+                top_p=1.0,
+                use_cache=True,
+                max_new_tokens=max_output_len,
+            )
+            if not disable_detokenize:
+                tokenizer.batch_decode(llm_outputs, skip_special_tokens=True)
+            if pbar is not None:
+                pbar.update(len(batch))
+            batch = []
+            max_prompt_len = 0
+            max_output_len = 0
+
+    if num_warmups > 0:
+        print("Warming up...")
+        for _ in tqdm(range(num_warmups), desc="Warmup iterations"):
+            _run_pass(pbar=None)
+
+    pbar = tqdm(total=len(requests))
+    start = time.perf_counter()
+    _run_pass(pbar)
     end = time.perf_counter()
     return end - start
 
@@ -824,6 +849,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Number of output tokens per request, used only for prefix "
         "repetition dataset.",
     )
+    parser.add_argument(
+        "--num-warmups",
+        type=int,
+        default=0,
+        help="Number of warmup requests.",
+    )
 
     # (random, random-mm, random-rerank)
     add_random_dataset_base_args(parser)
@@ -862,6 +893,7 @@ def main(args: argparse.Namespace):
                     disable_frontend_multiprocessing=args.disable_frontend_multiprocessing,
                     disable_detokenize=args.disable_detokenize,
                     do_profile=args.profile,
+                    num_warmups=args.num_warmups,
                 )
             )
         else:
@@ -871,6 +903,7 @@ def main(args: argparse.Namespace):
                 EngineArgs.from_cli_args(args),
                 disable_detokenize=args.disable_detokenize,
                 do_profile=args.profile,
+                num_warmups=args.num_warmups,
             )
     elif args.backend == "hf":
         assert args.tensor_parallel_size == 1
@@ -884,6 +917,7 @@ def main(args: argparse.Namespace):
             args.hf_max_batch_size,
             args.trust_remote_code,
             args.disable_detokenize,
+            num_warmups=args.num_warmups,
         )
     elif args.backend == "vllm-chat":
         elapsed_time, request_outputs = run_vllm_chat(
@@ -892,6 +926,7 @@ def main(args: argparse.Namespace):
             EngineArgs.from_cli_args(args),
             disable_detokenize=args.disable_detokenize,
             do_profile=args.profile,
+            num_warmups=args.num_warmups,
         )
     else:
         raise ValueError(f"Unknown backend: {args.backend}")
