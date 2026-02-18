@@ -519,6 +519,14 @@ def _support_torch_compile(
             # if the config doesn't exist
             logger.debug("enable_cpp_symbolic_shape_guards config not available")
 
+        # Enable capturing scalar outputs and dynamic shape ops for
+        # MLA exposed split (mla_split_batch returns unbacked SymInt)
+        if envs.VLLM_MLA_EXPOSED_SPLIT:
+            dynamo_config_patches["capture_scalar_outputs"] = True
+            dynamo_config_patches[
+                "capture_dynamic_output_shape_ops"
+            ] = True
+
         # Prepare backed_size_oblivious config patch if needed
         fx_config_patches = {}
         if ds_type == DynamicShapesType.BACKED_SIZE_OBLIVIOUS:
