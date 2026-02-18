@@ -35,7 +35,7 @@ from vllm.entrypoints.pooling.score.utils import (
     get_score_prompt,
     validate_score_input,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
@@ -108,29 +108,27 @@ class ServingScores(OpenAIServing):
             *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
-        engine_prompts: list[TokensPrompt] = []
+        engine_prompts: list[ProcessorInputs] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
             text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+                token_inputs(
+                    text_token_prompt["prompt_token_ids"],
+                    prompt=input_text,
+                )
             )
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-        pooling_params = request.to_pooling_params()
-
-        try:
-            pooling_params.verify("embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        pooling_params = request.to_pooling_params("embed")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -212,37 +210,28 @@ class ServingScores(OpenAIServing):
             *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
-        engine_prompts: list[TokensPrompt] = []
+        engine_prompts: list[ProcessorInputs] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
             text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+                token_inputs(
+                    text_token_prompt["prompt_token_ids"],
+                    prompt=input_text,
+                )
             )
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        # Use token_embed task for late interaction models
-        from vllm import PoolingParams
-
-        pooling_params = PoolingParams(
-            task="token_embed",
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            use_activation=request.use_activation,
-        )
-
-        try:
-            pooling_params.verify("token_embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        pooling_params = request.to_pooling_params("token_embed")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -358,12 +347,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        default_pooling_params = request.to_pooling_params()
-
-        try:
-            default_pooling_params.verify("score", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        default_pooling_params = request.to_pooling_params("score")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -497,8 +481,7 @@ class ServingScores(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def do_rerank(
         self, request: RerankRequest, raw_request: Request | None = None
@@ -542,8 +525,7 @@ class ServingScores(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     def request_output_to_score_response(
         self,

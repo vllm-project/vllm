@@ -336,16 +336,6 @@ class BitsAndBytesLinearMethod(LinearMethodBase):
 
             current_index += output_size
 
-            # only update the matmul_states if it is not profile_run
-            if (
-                generation > 0
-                and not self.quant_config.llm_int8_has_fp16_weight
-                and matmul_states[i].CB is not None
-                and matmul_states[i].CxB is not None
-            ):
-                del matmul_states[i].CB
-                qweight[offsets[i] : offsets[i + 1]] = matmul_states[i].CxB
-
         out = out.to(original_type)
 
         if reshape_after_matmul:
@@ -501,6 +491,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
@@ -515,7 +506,7 @@ class BitsAndBytesMoEMethod(FusedMoEMethodBase):
             w2=w2,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
-            inplace=True,
+            inplace=not self.moe.disable_inplace,
             activation=layer.activation,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,

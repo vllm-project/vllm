@@ -60,7 +60,7 @@ from vllm.v1.attention.backends.utils import (
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, UniformTypeKVCacheSpecs
 from vllm.v1.utils import CpuGpuBuffer
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
@@ -658,12 +658,36 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
-        has_trtllm_support = can_use_trtllm_attention(
-            num_qo_heads=vllm_config.model_config.get_num_attention_heads(
-                vllm_config.parallel_config
-            ),
-            num_kv_heads=kv_cache_spec.num_kv_heads,
+        """Get the cudagraph support level for FlashInfer attention.
+
+        This depends on whether we can use TRTLLM attention for decodes, since we can
+        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
+        To check this, we must call can_use_trtllm_attention with the number of KV
+        heads from the kv_cache_spec. We check all available KV cache specs and
+        only return UNIFORM_BATCH if all of them support TRTLLM attention.
+        """
+        # For UniformTypeKVCacheSpecs, check all contained specs
+        kv_specs = (
+            kv_cache_spec.kv_cache_specs.values()
+            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs)
+            else [kv_cache_spec]
         )
+        num_qo_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
+        has_trtllm_support: bool = len(kv_specs) > 0
+        for spec in kv_specs:
+            if not isinstance(spec, AttentionSpec):
+                # FlashInfer only applies to attention, so we don't consider other types
+                # of KV spec (e.g. Mamba) here. This is mostly for type checking.
+                continue
+            if not can_use_trtllm_attention(
+                num_qo_heads=num_qo_heads,
+                num_kv_heads=spec.num_kv_heads,
+            ):
+                has_trtllm_support = False
+                break
+
         if has_trtllm_support:
             return AttentionCGSupport.UNIFORM_BATCH
         else:
@@ -895,9 +919,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Guard access to seq_lens_cpu, which may not always be needed
         # and can be expensive to retrieve in async mode.
         needs_seq_lens_cpu = self.use_dcp or use_cascade or not is_only_trtllm_decode
-        seq_lens_cpu = (
-            common_attn_metadata.seq_lens.cpu() if needs_seq_lens_cpu else None
-        )
+        seq_lens_cpu = common_attn_metadata.seq_lens_cpu if needs_seq_lens_cpu else None
         seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
         num_blocks_np = (
             (seq_lens_np + (page_size - 1)) // page_size

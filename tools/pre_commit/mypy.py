@@ -30,13 +30,10 @@ SEPARATE_GROUPS = [
     # v0 related
     "vllm/lora",
     "vllm/model_executor",
-    # v1 related
-    "vllm/v1/kv_offload",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
 EXCLUDE = [
-    "vllm/engine/arg_utils.py",
     "vllm/model_executor/parallel_utils",
     "vllm/model_executor/models",
     "vllm/model_executor/layers/fla/ops",
@@ -49,9 +46,6 @@ EXCLUDE = [
     "vllm/profiler",
     "vllm/reasoning",
     "vllm/tool_parser",
-    "vllm/v1/cudagraph_dispatcher.py",
-    "vllm/outputs.py",
-    "vllm/logger.py",
 ]
 
 
