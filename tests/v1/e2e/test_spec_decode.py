@@ -123,14 +123,13 @@ def evaluate_llm_for_gsm8k(llm: LLM, expected_accuracy_threshold: float = 0.70) 
 
     The default threshold assumes the LLM uses the same target model as the "model_name"
     fixture, with max model len == 4096. Precomputed reference value is 75% to 80%
-    on the first 100 questions of GSM8K with greedy decoding, so we check that it's
-    above a sanity threshold of 70% to verify that the model is correct.
+    on GSM8K with greedy decoding, so we check that it's above a sanity threshold of 70%
+    to verify that the model is correct.
     """
     if expected_accuracy_threshold <= 0.0:
         print("Skipping GSM8K evaluation")
         return
-    num_questions = 100
-    results = evaluate_gsm8k_offline(llm, num_questions=num_questions)
+    results = evaluate_gsm8k_offline(llm)
     accuracy = results["accuracy"]
     print(f"GSM8K accuracy: {accuracy:.3f}")
     assert accuracy >= expected_accuracy_threshold, (
@@ -464,8 +463,8 @@ def test_eagle_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     which should be the same when using eagle speculative decoding. Due to some variance
     in the engine, it is possible for some outputs to differ, so we expect that at least
-    6/10 output tokens match exactly, and that the GSM8k accuracy on a fixed set
-    of 100 prompts is above a precomputed reference threshold for each model.
+    6/10 output tokens match exactly, and that the GSM8k accuracy is above
+    a precomputed reference threshold for each model.
     """
     if attn_backend == "TREE_ATTN":
         # TODO: Fix this flaky test
@@ -591,8 +590,8 @@ def test_mtp_correctness(
     Compare the outputs of a original LLM and a speculative LLM
     which should be the same when using MTP speculative decoding. Due to some variance
     in the engine, it is possible for some outputs to differ, so we expect that at least
-    6/10 output tokens match exactly, and that the GSM8k accuracy on a fixed set of
-    100 prompts is above a precomputed reference threshold for each model.
+    6/10 output tokens match exactly, and that the GSM8k accuracy is above a precomputed
+    reference threshold for each model.
     """
     # Generate test prompts inside the function instead of using fixture
     test_prompts = get_test_prompts(mm_enabled)
