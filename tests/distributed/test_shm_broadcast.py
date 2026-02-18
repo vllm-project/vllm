@@ -318,9 +318,10 @@ def test_message_queue_busy_to_idle():
 def test_warning_logs(caplog_vllm):
     """
     Test that warning logs are emitted at VLLM_RINGBUFFER_WARNING_INTERVAL intervals
-    when indefinite=False
+    when indefinite=False, and are not emitted when indefinite=True.
     """
 
+    # Patch the warning log interval to every 1 ms during reads
     with mock.patch(
         "vllm.distributed.device_communicators.shm_broadcast.VLLM_RINGBUFFER_WARNING_INTERVAL",
         new=0.001,  # 1 ms
@@ -335,16 +336,25 @@ def test_warning_logs(caplog_vllm):
         writer.wait_until_ready()
         reader.wait_until_ready()
 
-        # Reader times out
+        # We should have at least one warning log here
         with pytest.raises(TimeoutError):
             reader.dequeue(timeout=0.01, indefinite=False)
-
-        # Clean up when done
-        writer.shutdown()
-        reader.shutdown()
-
         assert any(
             "No available shared memory broadcast block found in 0.001 seconds"
             in record.message
             for record in caplog_vllm.records
         )
+        caplog_vllm.clear()
+
+        # We should have no warnings this time
+        with pytest.raises(TimeoutError):
+            reader.dequeue(timeout=0.01, indefinite=True)
+        assert all(
+            "No available shared memory broadcast block found in 0.001 seconds"
+            not in record.message
+            for record in caplog_vllm.records
+        )
+
+        # Clean up when done
+        writer.shutdown()
+        reader.shutdown()
