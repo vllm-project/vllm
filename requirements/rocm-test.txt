@@ -102,3 +102,5 @@ terratorch==1.2.2
 segmentation-models-pytorch==0.5.0
 # Required for Prithvi tests
 imagehash==4.3.2
+# Examples (tensorizer) tests
+tensorizer==2.10.1
