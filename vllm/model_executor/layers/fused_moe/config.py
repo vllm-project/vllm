@@ -121,8 +121,6 @@ class RoutingMethodType(IntEnum):
     Unspecified = 8.0
 
 
-# NOTE: If the num_expert_group is not None, then its a GroupedTopK router type
-# Won't call this function in such case
 def get_routing_method_type(
     scoring_func: str,
     top_k: int,
