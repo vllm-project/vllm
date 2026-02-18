@@ -95,7 +95,6 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.math_utils import round_up
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interfaces import (
     MultiModalEmbeddings,
@@ -140,8 +139,6 @@ logger = init_logger(__name__)
 # We use 2048 dummy video frames that would generate vision embeddings
 # of the maximum size.
 DUMMY_VIDEO_NUM_FRAMES = 2048
-
-FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
 
 
 class Qwen3_VisionPatchEmbed(nn.Module):
@@ -220,7 +217,6 @@ class Qwen3_VisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        workspace_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -233,7 +229,6 @@ class Qwen3_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
-            workspace_buffer=workspace_buffer,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,
@@ -401,16 +396,6 @@ class Qwen3_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
-        workspace_buffer = (
-            None
-            if self.attn_backend != AttentionBackendEnum.FLASHINFER
-            else torch.zeros(
-                FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES,
-                dtype=torch.uint8,
-                device=self.device,
-            )
-        )
-
         self.blocks = nn.ModuleList(
             [
                 Qwen3_VisionBlock(
@@ -421,7 +406,6 @@ class Qwen3_VisionTransformer(nn.Module):
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
-                    workspace_buffer=workspace_buffer,
                 )
                 for layer_idx in range(vision_config.depth)
             ]
@@ -563,15 +547,16 @@ class Qwen3_VisionTransformer(nn.Module):
             axis=0, dtype=np.int32
         )
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
-        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
-        sequence_lengths = MMEncoderAttention.maybe_add_padding_to_seqlens(
-            self.attn_backend, sequence_lengths, len(sequence_lengths), 0
+        sequence_lengths = MMEncoderAttention.maybe_compute_sequence_lengths(
+            self.attn_backend, cu_seqlens
         )
-        sequence_lengths = torch.from_numpy(sequence_lengths).to(
-            self.device, non_blocking=True
-        )
+        if sequence_lengths is not None:
+            sequence_lengths = torch.from_numpy(sequence_lengths).to(
+                self.device, non_blocking=True
+            )
         max_seqlen = torch.tensor(
             MMEncoderAttention.compute_max_seqlen(self.attn_backend, cu_seqlens),
+            dtype=torch.int32,
             device=self.device,
         )
         cu_seqlens = MMEncoderAttention.maybe_recompute_cu_seqlens(

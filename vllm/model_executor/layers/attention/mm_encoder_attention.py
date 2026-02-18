@@ -32,10 +32,6 @@ logger = init_logger(__name__)
 # graph support in the future.
 # TODO: Remove buckets after issue #34763
 # (cuda graph support) is addressed.
-# TODO: When we have full CUDA graph support on
-# the mm encoder, we can remove these buckets
-# and only use a large enough padding size to
-# capture one large CUDA graph.
 FLASHINFER_BATCH_BUCKETS = [8, 16, 32, 64]
 FLASHINFER_MAX_SEQLEN_BUCKETS = [
     1 * 1024,
@@ -48,6 +44,51 @@ FLASHINFER_MAX_SEQLEN_BUCKETS = [
     128 * 1024,
 ]
 
+# Shared workspace for FlashInfer CuDNN backend
+FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
+_flashinfer_workspace_buffer: torch.Tensor | None = None
+
+
+def _get_flashinfer_workspace_buffer() -> torch.Tensor:
+    global _flashinfer_workspace_buffer
+    if _flashinfer_workspace_buffer is None:
+        _flashinfer_workspace_buffer = torch.zeros(
+            FLASHINFER_CUDNN_WORKSPACE_SIZE_BYTES,
+            dtype=torch.uint8,
+            device="cuda",
+        )
+    return _flashinfer_workspace_buffer
+
+
+def add_padding_to_seqlens(
+    seq: np.ndarray,
+    batch_size: int,
+    padding_value: int,
+) -> np.ndarray:
+    batch_size_padded = next(
+        (b for b in FLASHINFER_BATCH_BUCKETS if b >= batch_size),
+        round_up(batch_size, FLASHINFER_BATCH_BUCKETS[0]),
+    )
+    if batch_size_padded == batch_size:
+        return seq
+    return np.concatenate(
+        [
+            seq,
+            np.full((batch_size_padded - batch_size,), padding_value, dtype=seq.dtype),
+        ]
+    )
+
+
+def bucket_flashinfer_max_seqlen(
+    real_max_seqlen: int,
+) -> int:
+    if real_max_seqlen <= 0:
+        return FLASHINFER_MAX_SEQLEN_BUCKETS[0]
+    return next(
+        (s for s in FLASHINFER_MAX_SEQLEN_BUCKETS if s >= real_max_seqlen),
+        round_up(real_max_seqlen, FLASHINFER_MAX_SEQLEN_BUCKETS[-1]),
+    )
+
 
 # --8<-- [start:mm_encoder_attn]
 @CustomOp.register("mm_encoder_attn")
@@ -55,22 +96,6 @@ class MMEncoderAttention(CustomOp):
     """Multi-headed attention without any cache, used for multimodal encoder."""
 
     # --8<-- [end:mm_encoder_attn]
-    @classmethod
-    def maybe_bucket_max_seqlen(
-        cls,
-        attn_backend: AttentionBackendEnum,
-        real_max_seqlen: int,
-    ) -> int:
-        if attn_backend != AttentionBackendEnum.FLASHINFER:
-            return real_max_seqlen
-
-        if real_max_seqlen <= 0:
-            return FLASHINFER_MAX_SEQLEN_BUCKETS[0]
-        return next(
-            (s for s in FLASHINFER_MAX_SEQLEN_BUCKETS if s >= real_max_seqlen),
-            round_up(real_max_seqlen, FLASHINFER_MAX_SEQLEN_BUCKETS[-1]),
-        )
-
     @classmethod
     def compute_max_seqlen(
         cls,
@@ -90,34 +115,22 @@ class MMEncoderAttention(CustomOp):
         ):
             max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max())
         if attn_backend == AttentionBackendEnum.FLASHINFER:
-            max_seqlen = cls.maybe_bucket_max_seqlen(attn_backend, max_seqlen)
+            max_seqlen = bucket_flashinfer_max_seqlen(max_seqlen)
         return max_seqlen
 
     @classmethod
-    def maybe_add_padding_to_seqlens(
+    def maybe_compute_sequence_lengths(
         cls,
         attn_backend: AttentionBackendEnum,
-        seq: np.ndarray,
-        batch_size: int,
-        padding_value: int,
-    ) -> np.ndarray:
+        cu_seqlens: np.ndarray,
+    ) -> np.ndarray | None:
         if attn_backend != AttentionBackendEnum.FLASHINFER:
-            return seq
-
-        batch_size_padded = next(
-            (b for b in FLASHINFER_BATCH_BUCKETS if b >= batch_size),
-            round_up(batch_size, FLASHINFER_BATCH_BUCKETS[0]),
+            return None
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        sequence_lengths = add_padding_to_seqlens(
+            sequence_lengths, len(sequence_lengths), 0
         )
-        if batch_size_padded == batch_size:
-            return seq
-        return np.concatenate(
-            [
-                seq,
-                np.full(
-                    (batch_size_padded - batch_size,), padding_value, dtype=seq.dtype
-                ),
-            ]
-        )
+        return sequence_lengths
 
     @classmethod
     def maybe_recompute_cu_seqlens(
@@ -142,14 +155,14 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens_v = cu_seqlens * 3
         cu_seqlens_o = cu_seqlens
 
-        cu_seqlens_qk = cls.maybe_add_padding_to_seqlens(
-            attn_backend, cu_seqlens_qk, batch_size, cu_seqlens_qk[-1]
+        cu_seqlens_qk = add_padding_to_seqlens(
+            cu_seqlens_qk, batch_size, cu_seqlens_qk[-1]
         )
-        cu_seqlens_v = cls.maybe_add_padding_to_seqlens(
-            attn_backend, cu_seqlens_v, batch_size, cu_seqlens_v[-1]
+        cu_seqlens_v = add_padding_to_seqlens(
+            cu_seqlens_v, batch_size, cu_seqlens_v[-1]
         )
-        cu_seqlens_o = cls.maybe_add_padding_to_seqlens(
-            attn_backend, cu_seqlens_o, batch_size, cu_seqlens_o[-1]
+        cu_seqlens_o = add_padding_to_seqlens(
+            cu_seqlens_o, batch_size, cu_seqlens_o[-1]
         )
         return np.concatenate([cu_seqlens_qk, cu_seqlens_v, cu_seqlens_o])
 
@@ -160,7 +173,6 @@ class MMEncoderAttention(CustomOp):
         scale: float | None = None,
         num_kv_heads: int | None = None,
         prefix: str = "",
-        workspace_buffer: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> None:
         """
         Args:
@@ -178,7 +190,6 @@ class MMEncoderAttention(CustomOp):
         self.scale = 1.0 / (head_size**0.5) if scale is None else scale
         self.num_kv_heads = num_heads if num_kv_heads is None else num_kv_heads
         self.layer_name = prefix
-        self.workspace_buffer = workspace_buffer
         assert self.num_heads % self.num_kv_heads == 0, (
             f"num_heads ({self.num_heads}) is not "
             f"divisible by num_kv_heads ({self.num_kv_heads})"
@@ -203,6 +214,9 @@ class MMEncoderAttention(CustomOp):
         self._fa_version = (
             get_flash_attn_version() if self.is_flash_attn_backend else None
         )
+
+        if self.attn_backend == AttentionBackendEnum.FLASHINFER:
+            _get_flashinfer_workspace_buffer()
 
         logger.info_once(f"Using {self.attn_backend} for MMEncoderAttention.")
 
@@ -345,7 +359,7 @@ class MMEncoderAttention(CustomOp):
             k=key,
             v=value,
             scale=self.scale,
-            workspace_buffer=self.workspace_buffer,
+            workspace_buffer=_get_flashinfer_workspace_buffer(),
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
