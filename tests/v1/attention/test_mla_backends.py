@@ -732,6 +732,7 @@ def test_backend_correctness(
         block_size=default_block_size,
         hf_config_override=hf_config_override,
     )
+    vllm_config.cache_config.cache_dtype = kv_cache_dtype
 
     # For spec decode tests, add a speculative_config to set the reorder_batch_threshold
     if is_spec_decode_test:
@@ -1036,7 +1037,7 @@ def test_backend_correctness(
             head_size=vllm_config.model_config.get_head_size(),
             dtype=vllm_config.model_config.dtype,
             sliding_window=vllm_config.model_config.get_sliding_window(),
-            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            cache_dtype_str=kv_cache_dtype,
         )
 
         backend_output = run_attention_backend(
