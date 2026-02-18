@@ -238,7 +238,7 @@ def _compute_slot_mappings_kernel(
             # Context parallelism is used.
             is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
             rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
-            remainder = block_offsets % (CP_INTERLEAVE * CP_SIZE)
+            remainder = block_offsets % CP_INTERLEAVE
             local_offsets = rounds * CP_INTERLEAVE + remainder
             slot_ids = block_numbers * block_size + local_offsets
             slot_ids = tl.where(is_local, slot_ids, PAD_ID)
