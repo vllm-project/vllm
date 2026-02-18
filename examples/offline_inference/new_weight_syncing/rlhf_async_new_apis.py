@@ -28,7 +28,6 @@ causes unexpected behavior.
 
 import asyncio
 import os
-import time
 import uuid
 from dataclasses import asdict
 
@@ -51,8 +50,8 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
-MODEL_NAME_V1 = "Qwen/Qwen1.5-MoE-A2.7B"
-MODEL_NAME_V2 = "Qwen/Qwen1.5-MoE-A2.7B-Chat"
+MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
+MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
 
 
 class MyLLM(vllm.AsyncLLMEngine):
@@ -65,7 +64,6 @@ class MyLLM(vllm.AsyncLLMEngine):
         # children, which need full GPU visibility.
         if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
             del os.environ["CUDA_VISIBLE_DEVICES"]
-        os.environ["VLLM_BATCH_INVARIANT"] = "1"
         engine_args = vllm.AsyncEngineArgs(**kwargs)
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
@@ -76,22 +74,23 @@ class MyLLM(vllm.AsyncLLMEngine):
             log_stats=not engine_args.disable_log_stats,
         )
         self._generation_paused = False
+        self._current_token_count = 0
 
     async def pause_generation(self, **kwargs):
         await super().pause_generation(**kwargs)
-
-        # ensure that all tokens are flushed
         await asyncio.sleep(0.2)
         self._generation_paused = True
 
     async def do_generate(
         self, prompt_token_ids: list[int], sampling_params: vllm.SamplingParams
     ) -> tuple[vllm.RequestOutput, int]:
-        """Generate and return (output, pause_token_index).
+        """Generate a single request, updating _current_token_count as we go.
 
-        pause_token_index is the number of tokens generated before the
-        weight change, or -1 if the request completed before any pause.
+        Returns (output, pause_token_index). pause_token_index is the number
+        of tokens generated before the weight change, or -1 if no pause.
         """
+        self._current_token_count = 0
+        self._generation_paused = False
         pause_token_index = -1
         prev_token_count = 0
         async for request_output in self.generate(
@@ -101,12 +100,17 @@ class MyLLM(vllm.AsyncLLMEngine):
         ):
             output = request_output
             cur_token_count = len(output.outputs[0].token_ids)
+            self._current_token_count = cur_token_count
             if self._generation_paused and pause_token_index == -1:
-                # First yield after resume — the boundary is the previous
-                # token count (last output before the generator blocked).
                 pause_token_index = prev_token_count
             prev_token_count = cur_token_count
         return output, pause_token_index
+
+    async def pause_after_n_tokens(self, n: int):
+        """Poll until at least n tokens generated, then pause."""
+        while self._current_token_count < n:
+            await asyncio.sleep(0)
+        await self.pause_generation(mode="keep")
 
 
 @ray.remote(num_gpus=1)
@@ -152,9 +156,20 @@ class TrainModel:
             packed=packed,
         )
 
+    @torch.inference_mode()
+    def generate(self, token_ids: list[int], max_new_tokens: int) -> list[int]:
+        """Greedy-decode max_new_tokens from the given context."""
+        input_ids = torch.tensor([token_ids], device="cuda:0")
+        output = self.model.generate(
+            input_ids,
+            max_new_tokens=max_new_tokens,
+            do_sample=False,
+        )
+        new_token_ids = output[0, len(token_ids) :].tolist()
+        return new_token_ids
 
-# Initialize Ray and set the visible devices. The vLLM engine will
-# be placed on GPUs 1 and 2.
+
+# Initialize Ray and set the visible devices.
 ray.init()
 
 # Launch the training model actor. Ray's resource scheduler will allocate
@@ -173,39 +188,23 @@ llm = ray.remote(
 )(MyLLM).remote(
     model=MODEL_NAME_V1,
     enforce_eager=True,
-    tensor_parallel_size=1,
-    data_parallel_size=2,
+    max_model_len=8192,
     distributed_executor_backend="ray",
-    data_parallel_backend="ray",
+    enable_prefix_caching=False,
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 
-# Generate text from the prompts.
-prompts = [
-    "My name is",
-    "The president of the United States is",
-    "The capital of France is",
-    "The future of AI is",
-]
+PROMPT = "The president of the United States is"
 
-# Tokenize prompts to token IDs
 tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME_V1)
-prompt_token_ids_list = [
-    tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts
-]
+prompt_token_ids = tokenizer.encode(PROMPT, add_special_tokens=False)
 
-sampling_params = [
-    SamplingParams(temperature=0, max_tokens=8),
-    SamplingParams(temperature=0, max_tokens=32),
-    SamplingParams(temperature=0, max_tokens=32),
-    SamplingParams(temperature=0, max_tokens=32),
-]
 
 # Set up the communication channel between the training process and the
 # inference engine.
 master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
 
-world_size = 3  # 1 trainer + 2 inference workers (tensor_parallel_size=2)
+world_size = 2  # 1 trainer + 1 inference worker
 inference_handle = llm.init_weight_transfer_engine.remote(
     WeightTransferInitRequest(
         init_info=asdict(
@@ -224,24 +223,24 @@ train_handle = train_model.init_weight_transfer_group.remote(world_size)
 ray.get([train_handle, inference_handle])
 
 
-generation_futures = [
-    llm.do_generate.remote(prompt_token_ids, params)
-    for prompt_token_ids, params in zip(prompt_token_ids_list, sampling_params)
-]
+PAUSE_AFTER_N_TOKENS = 8
+N_NEW_TOKENS = 100
 
-finished, pending = ray.wait(generation_futures, num_returns=1)
-
-# Pause generation in preparation for weight sync.
-# mode="keep" preserves inflight requests so they resume after the pause
-# (no need for retry logic).
-ray.get(llm.pause_generation.remote(mode="keep"))
-
-# Synchronize the updated weights to the inference engine using batched API.
-# Collect all weight metadata from the training actor
+# Collect weight metadata once
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
-# Issue update_weights call with NCCL-specific update info
-# packed=True enables efficient batched tensor broadcasting
+# ── Phase 1: single request with weight sync ───────────────────────
+print(f"\n{'=' * 50}")
+print(f"Prompt: {PROMPT!r}")
+print(f"{'=' * 50}")
+
+gen_future = llm.do_generate.remote(
+    prompt_token_ids,
+    SamplingParams(temperature=0, max_tokens=PAUSE_AFTER_N_TOKENS + N_NEW_TOKENS),
+)
+
+ray.get(llm.pause_after_n_tokens.remote(PAUSE_AFTER_N_TOKENS))
+
 inference_handle = llm.update_weights.remote(
     WeightTransferUpdateRequest(
         update_info=asdict(
@@ -254,112 +253,47 @@ inference_handle = llm.update_weights.remote(
         )
     )
 )
-
-# Broadcast all weights from trainer using the weight transfer API
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
 
-# Resume generation since weight sync is complete
 ray.get(llm.resume_generation.remote())
+output, pause_idx = ray.get(gen_future)
 
-# Get all outputs. With mode="keep", paused requests resume and complete normally.
-# Each result is (RequestOutput, pause_token_index).
-finished_results = ray.get(finished)
-pending_results = ray.get(pending)
+all_token_ids = list(output.outputs[0].token_ids)
+before_text = tokenizer.decode(all_token_ids[:pause_idx])
+after_text = tokenizer.decode(all_token_ids[pause_idx:])
+print(f"  Old weights ({pause_idx} tokens): {before_text!r}")
+n_after = len(all_token_ids) - pause_idx
+print(f"  New weights ({n_after} tokens): {after_text!r}")
 
-print("-" * 50)
-print("Requests that completed BEFORE weight change:")
-print("-" * 50)
-for output, pause_idx in finished_results:
-    prompt_text = tokenizer.decode(output.prompt_token_ids)
-    print(f"Prompt: {prompt_text!r}")
-    print(f"Generated (all old weights): {output.outputs[0].text!r}")
-    print("-" * 50)
+context = list(output.prompt_token_ids) + all_token_ids[:pause_idx]
+expected = all_token_ids[pause_idx:]
 
-print("Requests that completed AFTER weight change (kept across pause/resume):")
-print("-" * 50)
-validation_cases = []
-for output, pause_idx in pending_results:
-    prompt_text = tokenizer.decode(output.prompt_token_ids)
-    all_token_ids = list(output.outputs[0].token_ids)
-    if pause_idx >= 0:
-        before_text = tokenizer.decode(all_token_ids[:pause_idx])
-        after_text = tokenizer.decode(all_token_ids[pause_idx:])
-        print(f"Prompt: {prompt_text!r}")
-        print(f"  Old weights ({pause_idx} tokens): {before_text!r}")
-        n_after = len(all_token_ids) - pause_idx
-        print(f"  New weights ({n_after} tokens): {after_text!r}")
-        validation_cases.append(
-            {
-                "prompt_text": prompt_text,
-                "context": list(output.prompt_token_ids) + all_token_ids[:pause_idx],
-                "expected": all_token_ids[pause_idx:],
-            }
-        )
-    else:
-        print(f"Prompt: {prompt_text!r}")
-        print(f"  Generated (all old weights): {output.outputs[0].text!r}")
-    print("-" * 50)
+# ── Phase 2: validate with huggingface model ───────────────────────
+print(f"\n{'=' * 50}")
+print("VALIDATION: comparing weight-synced vLLM with Hugging Face model")
+print(f"{'=' * 50}")
 
-# ── Validation ──────────────────────────────────────────────────────
-# Shut down the weight-synced engine and start a fresh one loaded
-# directly with V2 weights.  This gives a ground-truth comparison
-# using the exact same vLLM engine
-if validation_cases:
-    print()
-    print("=" * 50)
-    print("VALIDATION: restarting vLLM with V2 weights for comparison")
-    print("=" * 50)
+ray.get(llm.shutdown.remote())
+ray.kill(llm)
 
-    # Graceful shutdown removes the DP placement groups created by
-    # CoreEngineActorManager.  A hard ray.kill() would skip cleanup and
-    # leave stale node:IP_group_* resources that block the next engine.
-    ray.get(llm.shutdown.remote())
-    ray.kill(llm)
-    time.sleep(5)  # allow Ray to reclaim placement group resources
+actual = ray.get(train_model.generate.remote(context, len(expected)))
+match = actual == expected
 
-    llm_v2 = ray.remote(
-        num_cpus=0,
-        num_gpus=0,
-    )(MyLLM).remote(
-        model=MODEL_NAME_V2,
-        enforce_eager=True,
-        tensor_parallel_size=1,
-        data_parallel_size=2,
-        distributed_executor_backend="ray",
-        data_parallel_backend="ray",
-    )
-
-    # Send each context to the fresh engine with the same number of
-    # tokens we need to validate.
-    val_futures = []
-    for case in validation_cases:
-        n_tokens = len(case["expected"])
-        val_futures.append(
-            llm_v2.do_generate.remote(
-                case["context"],
-                SamplingParams(temperature=0, max_tokens=n_tokens),
+print(f"  context token_ids ({len(context)}): {context}")
+print()
+if match:
+    print(f"  [PASS] {PROMPT!r}")
+else:
+    print(f"  [FAIL] {PROMPT!r}")
+    print(f"         weight-synced vLLM: {tokenizer.decode(expected)!r}")
+    print(f"         HF train model:    {tokenizer.decode(actual)!r}")
+    for j, (e, a) in enumerate(zip(expected, actual)):
+        if e != a:
+            print(
+                f"         first divergence at output token {j}: "
+                f"expected {e} ({tokenizer.decode([e])!r}) vs "
+                f"actual {a} ({tokenizer.decode([a])!r})"
             )
-        )
-
-    val_results = ray.get(val_futures)
-
-    all_passed = True
-    for case, (val_output, _) in zip(validation_cases, val_results):
-        actual = list(val_output.outputs[0].token_ids)
-        match = actual == case["expected"]
-        status = "PASS" if match else "FAIL"
-        if not match:
-            all_passed = False
-        print(f"  [{status}] {case['prompt_text']!r}")
-        if not match:
-            expected_text = tokenizer.decode(case["expected"])
-            actual_text = tokenizer.decode(actual)
-            print(f"         weight-synced engine: {expected_text!r}")
-            print(f"         fresh V2 engine:      {actual_text!r}")
-    print("-" * 50)
-    print(f"Overall: {'ALL PASSED' if all_passed else 'SOME FAILED'}")
-    print("=" * 50)
-
-    ray.get(llm_v2.shutdown.remote())
-    ray.kill(llm_v2)
+            break
+print("=" * 50)
