@@ -94,7 +94,11 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-_O = TypeVar("_O", bound=RequestOutput | PoolingRequestOutput, default=RequestOutput)
+_O = TypeVar(
+    "_O",
+    bound=RequestOutput | PoolingRequestOutput,
+    default=RequestOutput | PoolingRequestOutput,
+)
 _P = TypeVar("_P", bound=SamplingParams | PoolingParams | None)
 _R = TypeVar("_R", default=Any)
 
@@ -526,7 +530,10 @@ class LLM:
 
     def wait_for_completion(
         self,
-        output_type: type[_O] | tuple[_O, ...] = (RequestOutput, PoolingRequestOutput),  # type: ignore[assignment]
+        output_type: type[_O] | tuple[type[_O], ...] = (
+            RequestOutput,
+            PoolingRequestOutput,
+        ),
         use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> list[_O]:
         """Wait for all enqueued requests to complete and return results.
@@ -1931,7 +1938,7 @@ class LLM:
 
     def _run_engine(
         self,
-        output_type: type[_O] | tuple[_O, ...],
+        output_type: type[_O] | tuple[type[_O], ...],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> list[_O]:
