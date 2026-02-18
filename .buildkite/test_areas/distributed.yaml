@@ -165,6 +165,7 @@ steps:
   num_devices: 2
   num_nodes: 2
   no_plugin: true
+  optional: true # TODO: revert once infra issue solved
   source_file_dependencies:
   - vllm/distributed/
   - vllm/engine/
