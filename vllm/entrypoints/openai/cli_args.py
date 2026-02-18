@@ -215,6 +215,13 @@ class FrontendArgs:
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    enable_admin_api: bool = False
+    """Enable the optional admin control plane API at /v1/admin/*.
+    Disabled by default. When enabled, provides endpoints for health,
+    model listing, queue stats, drain, and configuration inspection."""
+    admin_readonly: bool = False
+    """When set, disables mutating admin endpoints (drain, resume, reload).
+    Only read-only endpoints (health, models, queue, config) are allowed."""
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
