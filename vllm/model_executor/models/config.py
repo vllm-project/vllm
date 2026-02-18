@@ -610,7 +610,8 @@ class Qwen3NextForCausalLMConfig(VerifyAndUpdateConfig):
         """
         cache_config = vllm_config.cache_config
         if (
-            cache_config.mamba_cache_mode == "all"
+            cache_config.enable_prefix_caching
+            and cache_config.mamba_cache_mode == "all"
             and cache_config.mamba_ssm_cache_dtype == "auto"
         ):
             logger.warning(
