@@ -737,7 +737,10 @@ class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
             and self.weight.shape[0] == 2112
             and self.weight.shape[1] == 7168
             and current_platform.is_cuda()
-            and current_platform.has_device_capability(90)
+            and (
+                current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(100)
+            )
         )
 
     def forward(
