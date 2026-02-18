@@ -1292,6 +1292,12 @@ def get_default_config(
         # FP8 elements are half-width so larger K tiles are always cheap.
         block_k = 128 if dtype == "fp8_w8a8" or M <= 64 else 64
 
+        # Grouping adjacent M-blocks lets them share weight tiles in L2.
+        # Only helps when there are enough M-blocks per expert to group;
+        # with many experts each one sees few tokens so grouping is useless.
+        tokens_per_expert = M // max(E, 1)
+        group_m = 16 if tokens_per_expert > 128 else 1
+
         # Large batches have enough blocks to saturate the GPU, so we
         # use more warps per block to increase arithmetic intensity.
         num_warps = 4 if M <= 128 else 8
@@ -1307,7 +1313,7 @@ def get_default_config(
             "BLOCK_SIZE_M": block_m,
             "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": block_k,
-            "GROUP_SIZE_M": 1,
+            "GROUP_SIZE_M": group_m,
             "SPLIT_K": 1,
             "num_warps": num_warps,
             "num_stages": num_stages,
