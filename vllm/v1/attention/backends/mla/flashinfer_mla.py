@@ -94,11 +94,18 @@ class FlashInferMLABackend(MLACommonBackend):
         return "HND"
 
 
-g_fi_workspace = torch.zeros(
-    FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
-    dtype=torch.uint8,
-    device="cuda",
-)
+g_fi_workspace: torch.Tensor | None = None
+
+
+def _get_fi_workspace() -> torch.Tensor:
+    global g_fi_workspace
+    if g_fi_workspace is None:
+        g_fi_workspace = torch.zeros(
+            FLASHINFER_MLA_WORKSPACE_BUFFER_SIZE,
+            dtype=torch.uint8,
+            device="cuda",
+        )
+    return g_fi_workspace
 
 
 class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
@@ -146,7 +153,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
                 "FlashInferMLAImpl"
             )
 
-        self._workspace_buffer = g_fi_workspace
+        self._workspace_buffer = _get_fi_workspace()
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
 

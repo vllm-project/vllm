@@ -95,7 +95,15 @@ class SM100Workspace:
             self._workspace_buf.resize_(workspace_size)
 
 
-g_sm100_workspace = SM100Workspace(128 * 1024 * 1024)  # 128MB
+g_sm100_workspace: SM100Workspace | None = None
+
+
+def _get_sm100_workspace() -> SM100Workspace:
+    global g_sm100_workspace
+    if g_sm100_workspace is None:
+        g_sm100_workspace = SM100Workspace(128 * 1024 * 1024)  # 128MB
+    return g_sm100_workspace
+
 
 MAX_HEADS = 128
 
@@ -159,7 +167,7 @@ class CutlassMLAImpl(MLACommonImpl[MLACommonMetadata]):
             self._num_kv_splits = -1  # => Auto-detect
 
         # Share workspace buffer across all executions
-        self._workspace = g_sm100_workspace
+        self._workspace = _get_sm100_workspace()
 
     def _sm100_cutlass_mla_decode(
         self,
