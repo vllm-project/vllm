@@ -460,9 +460,7 @@ async def test_grpc_health_service_overall(health_stub):
 @pytest.mark.asyncio
 async def test_grpc_health_service_vllm_engine(health_stub):
     """Test standard gRPC health check for the VllmEngine service."""
-    request = health_pb2.HealthCheckRequest(
-        service="vllm.grpc.engine.VllmEngine"
-    )
+    request = health_pb2.HealthCheckRequest(service="vllm.grpc.engine.VllmEngine")
     response = await health_stub.Check(request)
 
     assert response.status == health_pb2.HealthCheckResponse.SERVING
@@ -509,8 +507,9 @@ async def test_health_monitor_sets_serving_when_healthy():
         stop_event.set()
 
     await asyncio.gather(
-        _health_monitor(mock_health_servicer, mock_async_llm, stop_event,
-                        interval=0.01),
+        _health_monitor(
+            mock_health_servicer, mock_async_llm, stop_event, interval=0.01
+        ),
         stop_after_one_cycle(),
     )
 
@@ -539,8 +538,9 @@ async def test_health_monitor_sets_not_serving_when_errored():
         stop_event.set()
 
     await asyncio.gather(
-        _health_monitor(mock_health_servicer, mock_async_llm, stop_event,
-                        interval=0.01),
+        _health_monitor(
+            mock_health_servicer, mock_async_llm, stop_event, interval=0.01
+        ),
         stop_after_one_cycle(),
     )
 
@@ -570,8 +570,9 @@ async def test_health_monitor_stops_on_event():
 
     # Should return promptly since stop_event is already set
     await asyncio.wait_for(
-        _health_monitor(mock_health_servicer, mock_async_llm, stop_event,
-                        interval=0.01),
+        _health_monitor(
+            mock_health_servicer, mock_async_llm, stop_event, interval=0.01
+        ),
         timeout=2.0,
     )
 
@@ -601,8 +602,9 @@ async def test_health_monitor_handles_exception():
         stop_event.set()
 
     await asyncio.gather(
-        _health_monitor(mock_health_servicer, mock_async_llm, stop_event,
-                        interval=0.01),
+        _health_monitor(
+            mock_health_servicer, mock_async_llm, stop_event, interval=0.01
+        ),
         stop_after_recovery(),
     )
 
