@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
 from vllm.platforms.cuda import CudaPlatform
 from vllm.platforms.rocm import RocmPlatform
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import _cached_get_attn_backend
 
@@ -70,6 +70,15 @@ def test_mha_attn_platform(default_vllm_config, device: str):
         ):
             attn = MMEncoderAttention(16, 72, scale=1)
             assert attn.attn_backend == AttentionBackendEnum.FLASH_ATTN
+
+        # Test CUDA with head_size=72 (not divisible by 32)
+        # - should use vLLM's FlashAttention
+        with (
+            patch("vllm.model_executor.models.vision.current_platform", CudaPlatform()),
+            set_default_torch_dtype(torch.float32),
+        ):
+            attn = MMEncoderAttention(16, 72, scale=1)
+            assert attn.attn_backend == AttentionBackendEnum.TRITON_ATTN
 
 
 def ref_attention(
@@ -153,7 +162,12 @@ def test_mha_attn_forward(
         v,
         scale=scale,
     ).reshape(batch_size, seq_len, num_heads * head_size)
-    torch.testing.assert_close(output, ref_output)
+    tol_kwargs = (
+        dict(rtol=1e-3, atol=1e-3)
+        if attn.attn_backend == AttentionBackendEnum.TRITON_ATTN
+        else {}
+    )
+    torch.testing.assert_close(output, ref_output, **tol_kwargs)
 
 
 @pytest.mark.parametrize("var_seq_len", VAR_SEQ_LENS)
