@@ -32,6 +32,7 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -751,7 +752,7 @@ class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
                 dtype=torch.bfloat16,
                 device=input_.device,
             )
-            torch.ops._C.dsv3_fused_a_gemm(
+            ops.dsv3_fused_a_gemm(
                 output,
                 input_,
                 self.weight.T,
