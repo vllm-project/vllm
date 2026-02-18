@@ -183,6 +183,21 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # From versions.json: .torch.cuda_arch_list
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
+# Download newer CUDA compiler toolchain for better GPU code generation
+# while keeping CUDA 12.8 headers/libs for runtime compatibility with PyTorch cu128.
+# Set NVCC_TOOLCHAIN_VERSION="" to disable.
+ARG NVCC_TOOLCHAIN_VERSION=12.9.86
+RUN if [ -n "${NVCC_TOOLCHAIN_VERSION}" ]; then \
+        ARCH=$(uname -m) && \
+        curl -sL "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-${ARCH}/cuda_nvcc-linux-${ARCH}-${NVCC_TOOLCHAIN_VERSION}-archive.tar.xz" \
+            | tar xJ && \
+        cp -f cuda_nvcc-linux-${ARCH}-${NVCC_TOOLCHAIN_VERSION}-archive/bin/nvcc /usr/local/cuda/bin/nvcc && \
+        cp -f cuda_nvcc-linux-${ARCH}-${NVCC_TOOLCHAIN_VERSION}-archive/bin/ptxas /usr/local/cuda/bin/ptxas && \
+        cp -f cuda_nvcc-linux-${ARCH}-${NVCC_TOOLCHAIN_VERSION}-archive/nvvm/bin/cicc /usr/local/cuda/nvvm/bin/cicc && \
+        rm -rf cuda_nvcc-linux-${ARCH}-${NVCC_TOOLCHAIN_VERSION}-archive && \
+        echo "Installed nvcc/ptxas/cicc ${NVCC_TOOLCHAIN_VERSION}"; \
+    fi
 #################### BUILD BASE IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
