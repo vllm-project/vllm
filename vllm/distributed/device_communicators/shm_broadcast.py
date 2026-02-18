@@ -600,30 +600,35 @@ class MessageQueue:
             else:
                 self.deadline = sys.maxsize
 
-            if should_warn:
-                self.warn_timeout_ms = VLLM_RINGBUFFER_WARNING_INTERVAL * 1000
-            else:
-                self.warn_timeout_ms = sys.maxsize
+            # if should_warn, we need to wake up periodically to log
+            self.warning_wait_timeout_ms: int | None = (
+                VLLM_RINGBUFFER_WARNING_INTERVAL * 1000 if should_warn else None
+            )
 
             self._should_warn = should_warn
             self.n_warning = 1
             self.timeout = timeout
 
-        def timeout_ms(self) -> int:
+        def timeout_ms(self) -> int | None:
             """Returns a timeout that is:
             - min(time to deadline, time to next warning) if we're logging warnings
             - time to deadline, if we're not logging warnings
-            - sys.maxsize if the timeout is None and we're not logging warnings
+            - None if the timeout is None and we're not logging warnings
+            - raise TimeoutError if we are past the deadline
             """
             if self.timeout is None:
-                time_left_ms = sys.maxsize
+                return self.warning_wait_timeout_ms
             else:
-                time_left_ms = int((self.deadline - time.monotonic()) * 1000)
-            return min(self.warn_timeout_ms, time_left_ms)
+                time_left = self.deadline - time.monotonic()
+                if time_left <= 0:
+                    raise TimeoutError
+                time_left_ms = int(time_left * 1000)
 
-        def expired(self) -> bool:
-            """Returns True if the timeout has expired."""
-            return time.monotonic() >= self.deadline
+                return (
+                    time_left_ms
+                    if self.warning_wait_timeout_ms is None
+                    else min(self.warning_wait_timeout_ms, time_left_ms)
+                )
 
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not
@@ -660,8 +665,6 @@ class MessageQueue:
                     # for readers, `self.current_idx` is the next block to read
                     # if this block is not ready,
                     # we need to wait until it is written
-                    if read_timeout.expired():
-                        raise TimeoutError
                     self._spin_condition.wait(timeout_ms=read_timeout.timeout_ms())
 
                     if self.shutting_down:
