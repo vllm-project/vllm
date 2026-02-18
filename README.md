@@ -82,8 +82,8 @@ set VLLM_FORCE_FA3_WINDOWS_BUILD=1
 ```
 6. Build & install:
 ```
-#With torch 2.7.1 cuda 12.6 (change cu126 with your installed CUDA version)
-pip install torch==2.7.1+cu126 torchaudio==2.7.1+cu126 torchvision==0.22.1+cu126 --index-url https://download.pytorch.org/whl/cu126
+#With torch 2.11 cuda 12.6 (change cu126 with your installed CUDA version)
+pip install --pre torch==2.11.0.dev20260216+cu126 torchvision==0.26.0.dev20260216+cu126 torchaudio==2.11.0.dev20260216+cu126 --index-url https://download.pytorch.org/whl/nightly/cu126
 
 #With your already installed torch cuda version (make sure you have torch cuda installed if you use a virtual environment)
 python use_existing_torch.py
