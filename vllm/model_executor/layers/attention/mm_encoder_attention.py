@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+import numpy as np
 import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.models.vision import get_vit_attn_backend
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
@@ -18,6 +20,34 @@ from vllm.v1.attention.ops.vit_attn_wrappers import (
 
 logger = init_logger(__name__)
 
+# Batch buckets for cuDNN graph caching.
+# Graphs use batch size and max sequence length as cache key.
+# This avoids creating a new graph for each unique set of
+# batch size and max sequence length at runtime.
+# From the cuDNN team's performance measurements, there
+# is no significant kernel performance difference between padding
+# to a smaller batch size/seq length and padding to larger
+# ones. The bucketing here is solely used to avoid memory
+# operation overhead, which won't be needed if we have CUDA
+# graph support in the future.
+# TODO: Remove buckets after issue #34763
+# (cuda graph support) is addressed.
+# TODO: When we have full CUDA graph support on
+# the mm encoder, we can remove these buckets
+# and only use a large enough padding size to
+# capture one large CUDA graph.
+FLASHINFER_BATCH_BUCKETS = [8, 16, 32, 64]
+FLASHINFER_MAX_SEQLEN_BUCKETS = [
+    1 * 1024,
+    2 * 1024,
+    4 * 1024,
+    8 * 1024,
+    16 * 1024,
+    32 * 1024,
+    64 * 1024,
+    128 * 1024,
+]
+
 
 # --8<-- [start:mm_encoder_attn]
 @CustomOp.register("mm_encoder_attn")
@@ -25,6 +55,103 @@ class MMEncoderAttention(CustomOp):
     """Multi-headed attention without any cache, used for multimodal encoder."""
 
     # --8<-- [end:mm_encoder_attn]
+    @classmethod
+    def maybe_bucket_max_seqlen(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        real_max_seqlen: int,
+    ) -> int:
+        if attn_backend != AttentionBackendEnum.FLASHINFER:
+            return real_max_seqlen
+
+        if real_max_seqlen <= 0:
+            return FLASHINFER_MAX_SEQLEN_BUCKETS[0]
+        return next(
+            (s for s in FLASHINFER_MAX_SEQLEN_BUCKETS if s >= real_max_seqlen),
+            round_up(real_max_seqlen, FLASHINFER_MAX_SEQLEN_BUCKETS[-1]),
+        )
+
+    @classmethod
+    def compute_max_seqlen(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        cu_seqlens: np.ndarray,
+    ) -> int:
+        max_seqlen = 0
+        if (
+            attn_backend
+            in (
+                AttentionBackendEnum.FLASH_ATTN,
+                AttentionBackendEnum.ROCM_AITER_FA,
+                AttentionBackendEnum.TRITON_ATTN,
+                AttentionBackendEnum.FLASHINFER,
+            )
+            and len(cu_seqlens) >= 2
+        ):
+            max_seqlen = int((cu_seqlens[1:] - cu_seqlens[:-1]).max())
+        if attn_backend == AttentionBackendEnum.FLASHINFER:
+            max_seqlen = cls.maybe_bucket_max_seqlen(attn_backend, max_seqlen)
+        return max_seqlen
+
+    @classmethod
+    def maybe_add_padding_to_seqlens(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        seq: np.ndarray,
+        batch_size: int,
+        padding_value: int,
+    ) -> np.ndarray:
+        if attn_backend != AttentionBackendEnum.FLASHINFER:
+            return seq
+
+        batch_size_padded = next(
+            (b for b in FLASHINFER_BATCH_BUCKETS if b >= batch_size),
+            round_up(batch_size, FLASHINFER_BATCH_BUCKETS[0]),
+        )
+        if batch_size_padded == batch_size:
+            return seq
+        return np.concatenate(
+            [
+                seq,
+                np.full(
+                    (batch_size_padded - batch_size,), padding_value, dtype=seq.dtype
+                ),
+            ]
+        )
+
+    @classmethod
+    def maybe_recompute_cu_seqlens(
+        cls,
+        attn_backend: AttentionBackendEnum,
+        cu_seqlens: np.ndarray,
+        hidden_size: int,
+        tp_size: int,
+        rotary_pos_emb_cos: torch.Tensor | None = None,
+        rotary_pos_emb_sin: torch.Tensor | None = None,
+    ) -> np.ndarray:
+        if attn_backend != AttentionBackendEnum.FLASHINFER:
+            return cu_seqlens
+
+        batch_size = len(cu_seqlens) - 1
+        scale = hidden_size // tp_size
+        cu_seqlens = cu_seqlens * scale
+        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
+            cu_seqlens_qk = cu_seqlens
+        else:
+            cu_seqlens_qk = cu_seqlens * 3
+        cu_seqlens_v = cu_seqlens * 3
+        cu_seqlens_o = cu_seqlens
+
+        cu_seqlens_qk = cls.maybe_add_padding_to_seqlens(
+            attn_backend, cu_seqlens_qk, batch_size, cu_seqlens_qk[-1]
+        )
+        cu_seqlens_v = cls.maybe_add_padding_to_seqlens(
+            attn_backend, cu_seqlens_v, batch_size, cu_seqlens_v[-1]
+        )
+        cu_seqlens_o = cls.maybe_add_padding_to_seqlens(
+            attn_backend, cu_seqlens_o, batch_size, cu_seqlens_o[-1]
+        )
+        return np.concatenate([cu_seqlens_qk, cu_seqlens_v, cu_seqlens_o])
 
     def __init__(
         self,
