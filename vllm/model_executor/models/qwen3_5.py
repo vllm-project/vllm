@@ -523,6 +523,9 @@ class Qwen3_5ForCausalLMBase(
             "v_proj",
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        # GDN fused projections.
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -542,10 +545,9 @@ class Qwen3_5ForCausalLMBase(
         super().__init__()
         self.config = config
         self.scheduler_config = scheduler_config
-        # Deal with the case where the prefix is already "language_model" since
-        # Qwen/Qwen3.5-397B-A17B has naming like: model.language_model.layers.0
-        model_prefix = prefix if "model" in prefix else "model"
-        self.model = Qwen3_5Model(vllm_config=vllm_config, prefix=model_prefix)
+        self.model = Qwen3_5Model(
+            vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
+        )
 
         if get_pp_group().is_last_rank:
             if config.tie_word_embeddings:
@@ -621,6 +623,11 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
+    packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    }
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
