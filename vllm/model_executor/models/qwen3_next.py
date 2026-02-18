@@ -498,7 +498,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             output_sizes=[sum((key_dim, key_dim, value_dim, value_dim))],
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.in_proj_qkvz",
+            prefix=prefix,
         )
 
     def fix_query_key_value_ordering(
