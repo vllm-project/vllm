@@ -11,6 +11,7 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_pp_group,
     prepare_communication_buffer_for_model,
 )
@@ -24,6 +25,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -31,6 +33,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     get_kv_cache_spec,
     init_attn_backend,
     init_kv_cache,
+    prepare_dcp_local_seq_lens,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
@@ -248,11 +251,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
             device=self.device,
+            cp_kv_cache_interleave_size=(
+                self.parallel_config.cp_kv_cache_interleave_size
+            ),
         )
 
         self.attn_backends, self.attn_metadata_builders = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        check_attention_cp_compatibility(self.vllm_config)
         if self.do_spec_decode:
             # HACK(woosuk)
             self.speculator.set_attn(
@@ -294,6 +301,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            dcp_local_seq_lens=self.input_buffers.dcp_local_seq_lens,
         )
         input_batch.attn_metadata = attn_metadata
         input_batch.slot_mappings = slot_mappings_by_layer
@@ -627,6 +635,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
 
+        dcp_size = self.parallel_config.decode_context_parallel_size
+        if dcp_size > 1:
+            prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
+                seq_lens,
+                num_reqs,
+                dcp_size=dcp_size,
+                dcp_rank=get_dcp_group().rank_in_group,
+                cp_kv_cache_interleave_size=(
+                    self.parallel_config.cp_kv_cache_interleave_size
+                ),
+            )
+
         # Prepare M-RoPE positions.
         if self.uses_mrope:
             self.mrope_states.prepare_mrope_positions(
@@ -674,6 +695,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            dcp_local_seq_lens=self.input_buffers.dcp_local_seq_lens,
         )
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
@@ -981,15 +1003,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, input_batch, kv_connector_output = self.execute_model_state
         self.execute_model_state = None  # type: ignore
 
-        # Non-last PP rank: hidden_states is None because this rank produced
-        # IntermediateTensors instead of final hidden states. Receive the
-        # sampled tokens broadcast by the last rank and update local state.
         if not self.is_last_pp_rank:
-            received = pp_receive(
+            # Non-last PP rank: hidden_states is None because this rank produced
+            # IntermediateTensors instead of final hidden states. Receive the
+            # sampled tokens broadcast from the last rank and update local state.
+            sampled, num_sampled, num_rejected = pp_receive(
                 input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
-            assert received is not None
-            sampled, num_sampled, num_rejected = received
             self.postprocess(input_batch, sampled, num_sampled, num_rejected)
             return None
 
@@ -998,8 +1018,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, input_batch, grammar_output
         )
 
-        # Broadcast to non-last PP ranks (handles spec decode multi-token).
         if self.use_pp:
+            # Broadcast to non-last PP ranks (handles spec decode multi-token).
             pp_broadcast(sampler_output.sampled_token_ids, num_sampled, num_rejected)
 
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(

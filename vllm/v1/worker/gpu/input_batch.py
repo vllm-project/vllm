@@ -27,6 +27,10 @@ class InputBuffers:
             max_num_reqs + 1, dtype=torch.int32, device=device
         )
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        # DCP: per-request local seq_lens buffer
+        self.dcp_local_seq_lens = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
 
 
 @dataclass
