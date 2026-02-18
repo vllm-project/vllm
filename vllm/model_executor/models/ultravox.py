@@ -42,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.ultravox import UltravoxConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -132,6 +133,9 @@ class UltravoxProcessingInfo(BaseProcessingInfo):
         feature_extractor = audio_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, WhisperFeatureExtractor)
         return feature_extractor
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_data_parser(self):
         feature_extractor = self.get_feature_extractor()
