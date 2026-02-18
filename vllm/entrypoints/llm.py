@@ -10,7 +10,7 @@ import cloudpickle
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing_extensions import TypeVar
+from typing_extensions import TypeVar, overload
 
 from vllm.beam_search import (
     BeamSearchInstance,
@@ -528,14 +528,27 @@ class LLM:
 
         return request_ids
 
+    @overload
     def wait_for_completion(
         self,
-        output_type: type[_O] | tuple[type[_O], ...] = (
-            RequestOutput,
-            PoolingRequestOutput,
-        ),
+        *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-    ) -> list[_O]:
+    ) -> list[RequestOutput | PoolingRequestOutput]: ...
+
+    @overload
+    def wait_for_completion(
+        self,
+        output_type: type[_O] | tuple[type[_O], ...],
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+    ) -> list[_O]: ...
+
+    def wait_for_completion(
+        self,
+        output_type: type[Any] | tuple[type[Any], ...] | None = None,
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+    ) -> list[Any]:
         """Wait for all enqueued requests to complete and return results.
 
         This method processes all requests currently in the engine queue
@@ -548,6 +561,9 @@ class LLM:
         Returns:
             A list of output objects for all completed requests.
         """
+        if output_type is None:
+            output_type = (RequestOutput, PoolingRequestOutput)
+
         return self._run_engine(output_type, use_tqdm=use_tqdm)
 
     def _resolve_mm_lora(
