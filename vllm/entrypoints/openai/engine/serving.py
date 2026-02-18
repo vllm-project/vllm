@@ -5,7 +5,7 @@ import json
 import sys
 import time
 import traceback
-from collections.abc import AsyncGenerator, Callable, Mapping
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any, ClassVar, Generic, Protocol, TypeAlias, TypeVar
@@ -96,17 +96,20 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import PromptType, SingletonPrompt, TokensPrompt
+from vllm.inputs.data import (
+    ProcessorInputs,
+    PromptType,
+    SingletonPrompt,
+    TokensPrompt,
+    token_inputs,
+)
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
 from vllm.lora.request import LoRARequest
-from vllm.multimodal import MultiModalDataDict
 from vllm.outputs import CompletionOutput, PoolingRequestOutput, RequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
-from vllm.renderers.inputs import TokPrompt
 from vllm.renderers.inputs.preprocess import (
-    SingletonDictPrompt,
     extract_prompt_components,
     extract_prompt_len,
     parse_model_prompt,
@@ -207,7 +210,7 @@ class ServeContext(Generic[RequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_prompts: list[TokPrompt] | None = None
+    engine_prompts: list[ProcessorInputs] | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None
@@ -243,15 +246,14 @@ class OpenAIServing:
 
         self.log_error_stack = log_error_stack
 
-        self.input_processor = self.models.input_processor
-        self.io_processor = self.models.io_processor
-        self.renderer = self.models.renderer
-        self.model_config = self.models.model_config
-        self.max_model_len = self.model_config.max_model_len
+        self.model_config = engine_client.model_config
+        self.renderer = engine_client.renderer
+        self.io_processor = engine_client.io_processor
+        self.input_processor = engine_client.input_processor
 
     async def beam_search(
         self,
-        prompt: TokPrompt,
+        prompt: ProcessorInputs,
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
@@ -264,86 +266,53 @@ class OpenAIServing:
         length_penalty = params.length_penalty
         include_stop_str_in_output = params.include_stop_str_in_output
 
-        input_processor = self.input_processor
-        tokenizer = input_processor.tokenizer
-        if tokenizer is None:
-            raise VLLMValidationError(
-                "You cannot use beam search when `skip_tokenizer_init=True`",
-                parameter="skip_tokenizer_init",
-                value=True,
-            )
-
-        eos_token_id: int = tokenizer.eos_token_id  # type: ignore
-
-        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
-            raise NotImplementedError("Encoder-decoder prompt not supported")
-
-        prompt_text: str | None = prompt.get("prompt")  # type: ignore
-        prompt_token_ids: list[int] = prompt.get("prompt_token_ids", [])  # type: ignore
-        multi_modal_data: MultiModalDataDict | None = prompt.get("multi_modal_data")  # type: ignore
-
-        mm_processor_kwargs: dict[str, Any] | None = None
-
-        # This is a workaround to fix multimodal beam search; this is a
-        # bandaid fix for 2 small problems:
-        # 1. Multi_modal_data on the processed_inputs currently resolves to
-        #    `None`.
-        # 2. preprocessing above expands the multimodal placeholders. However,
-        #    this happens again in generation, so the double expansion causes
-        #    a mismatch.
-        # TODO - would be ideal to handle this more gracefully.
-
-        tokenized_length = len(prompt_token_ids)
-
+        tokenizer = self.renderer.get_tokenizer()
+        eos_token_id = tokenizer.eos_token_id
         sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
+        if prompt["type"] == "embeds":
+            raise NotImplementedError("Embedding prompt not supported for beam search")
+        if prompt["type"] == "enc_dec":
+            raise NotImplementedError(
+                "Encoder-decoder prompt not supported for beam search"
+            )
+
+        prompt_text = prompt.get("prompt")
+        prompt_token_ids = prompt["prompt_token_ids"]
+        tokenized_length = len(prompt_token_ids)
+
         logprobs_num = 2 * beam_width
-        beam_search_params = SamplingParams(
+        sampling_params = SamplingParams(
             logprobs=logprobs_num,
             max_tokens=1,
             temperature=temperature,
         )
         all_beams = [
             BeamSearchSequence(
+                orig_prompt=prompt,
                 tokens=prompt_token_ids,
                 cum_logprob=0,
                 logprobs=[],
-                multi_modal_data=multi_modal_data,
-                mm_processor_kwargs=mm_processor_kwargs,
                 lora_request=lora_request,
             )
         ]
         completed = []
 
         for _ in range(max_tokens):
-            prompts_batch, lora_req_batch = zip(
-                *[
-                    (
-                        TokensPrompt(
-                            prompt_token_ids=beam.tokens,
-                            multi_modal_data=beam.multi_modal_data,
-                            mm_processor_kwargs=beam.mm_processor_kwargs,
-                        ),
-                        beam.lora_request,
-                    )
-                    for beam in all_beams
-                ]
-            )
-
             tasks = []
             request_id_batch = f"{request_id}-{random_uuid()}"
 
-            for i, (individual_prompt, lora_req) in enumerate(
-                zip(prompts_batch, lora_req_batch)
-            ):
+            for i, beam in enumerate(all_beams):
+                prompt_item = beam.get_prompt()
+                lora_request_item = beam.lora_request
                 request_id_item = f"{request_id_batch}-beam-{i}"
                 task = asyncio.create_task(
                     collect_from_async_generator(
                         self.engine_client.generate(
-                            individual_prompt,
-                            beam_search_params,
+                            prompt_item,
+                            sampling_params,
                             request_id_item,
-                            lora_request=lora_req,
+                            lora_request=lora_request_item,
                             trace_headers=trace_headers,
                         )
                     )
@@ -408,6 +377,7 @@ class OpenAIServing:
                     logprobs_entry = result.outputs[0].logprobs[0]
                     completed.append(
                         BeamSearchSequence(
+                            orig_prompt=prompt,
                             tokens=current_beam.tokens + [eos_token_id]
                             if include_stop_str_in_output
                             else current_beam.tokens,
@@ -435,12 +405,11 @@ class OpenAIServing:
                 logprobs_entry = result.outputs[0].logprobs[0]
                 new_beams.append(
                     BeamSearchSequence(
+                        orig_prompt=prompt,
                         tokens=current_beam.tokens + [token_id],
                         logprobs=current_beam.logprobs + [logprobs_entry],
                         lora_request=current_beam.lora_request,
                         cum_logprob=float(all_beams_logprob[idx]),
-                        multi_modal_data=current_beam.multi_modal_data,
-                        mm_processor_kwargs=current_beam.mm_processor_kwargs,
                     )
                 )
 
@@ -538,7 +507,7 @@ class OpenAIServing:
 
         if (
             truncate_prompt_tokens is not None
-            and truncate_prompt_tokens > self.max_model_len
+            and truncate_prompt_tokens > self.model_config.max_model_len
         ):
             return self.create_error_response(
                 "truncate_prompt_tokens value is "
@@ -845,6 +814,7 @@ class OpenAIServing:
         input_text: str,
     ) -> TokensPrompt:
         token_num = len(input_ids)
+        max_model_len = self.model_config.max_model_len
 
         # Note: EmbeddingRequest, ClassificationRequest,
         # and ScoreRequest doesn't have max_tokens
@@ -863,7 +833,7 @@ class OpenAIServing:
         ):
             # Note: input length can be up to the entire model context length
             # since these requests don't generate tokens.
-            if token_num > self.max_model_len:
+            if token_num > max_model_len:
                 operations: dict[type[AnyRequest], str] = {
                     ScoreDataRequest: "score",
                     ScoreTextRequest: "score",
@@ -874,7 +844,7 @@ class OpenAIServing:
                 operation = operations.get(type(request), "embedding generation")
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
-                    f"{self.max_model_len} tokens. However, you requested "
+                    f"{max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for {operation}. "
                     f"Please reduce the length of the input.",
                     parameter="input_tokens",
@@ -899,22 +869,22 @@ class OpenAIServing:
 
         # Note: input length can be up to model context length - 1 for
         # completion-like requests.
-        if token_num >= self.max_model_len:
+        if token_num >= max_model_len:
             raise VLLMValidationError(
                 f"This model's maximum context length is "
-                f"{self.max_model_len} tokens. However, your request has "
+                f"{max_model_len} tokens. However, your request has "
                 f"{token_num} input tokens. Please reduce the length of "
                 "the input messages.",
                 parameter="input_tokens",
                 value=token_num,
             )
 
-        if max_tokens is not None and token_num + max_tokens > self.max_model_len:
+        if max_tokens is not None and token_num + max_tokens > max_model_len:
             raise VLLMValidationError(
                 "'max_tokens' or 'max_completion_tokens' is too large: "
                 f"{max_tokens}. This model's maximum context length is "
-                f"{self.max_model_len} tokens and your request has "
-                f"{token_num} input tokens ({max_tokens} > {self.max_model_len}"
+                f"{max_model_len} tokens and your request has "
+                f"{token_num} input tokens ({max_tokens} > {max_model_len}"
                 f" - {token_num}).",
                 parameter="max_tokens",
                 value=max_tokens,
@@ -959,17 +929,22 @@ class OpenAIServing:
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[TokPrompt]:
-        renderer = self.renderer
-        model_config = self.model_config
-
-        tok_params = request.build_tok_params(model_config)
-
+    ) -> list[ProcessorInputs]:
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(prompt_to_seq(prompt_embeds))
         if prompt_input is not None:
             prompts.extend(prompt_to_seq(prompt_input))
+
+        return await self._preprocess_cmpl(request, prompts)
+
+    async def _preprocess_cmpl(
+        self,
+        request: RendererRequest,
+        prompts: Sequence[PromptType | bytes],
+    ) -> list[ProcessorInputs]:
+        renderer = self.renderer
+        model_config = self.model_config
 
         parsed_prompts = [
             (
@@ -979,22 +954,17 @@ class OpenAIServing:
             )
             for prompt in prompts
         ]
-        in_prompts = await renderer.render_prompts_async(parsed_prompts)
+        tok_params = request.build_tok_params(model_config)
 
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        for in_prompt in in_prompts:
-            target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
-                "encoder_prompt", in_prompt
-            )
-            target_prompt.update(extra_items)  # type: ignore
-
-        engine_prompts = await renderer.tokenize_prompts_async(in_prompts, tok_params)
-
-        return engine_prompts
+        return await renderer.render_cmpl_async(
+            parsed_prompts,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
+        )
 
     async def _preprocess_chat(
         self,
@@ -1005,7 +975,7 @@ class OpenAIServing:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[TokPrompt]]:
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
         from vllm.tokenizers.mistral import MistralTokenizer
 
         renderer = self.renderer
@@ -1023,21 +993,16 @@ class OpenAIServing:
             default_template, default_template_content_format
         ).with_defaults(default_template_kwargs)
 
-        conversation, in_prompt = await renderer.render_messages_async(
-            messages, chat_params
+        (conversation,), (engine_prompt,) = await renderer.render_chat_async(
+            [messages],
+            chat_params,
+            tok_params,
+            prompt_extras={
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := getattr(request, k, None)) is not None
+            },
         )
-        target_prompt: SingletonDictPrompt = in_prompt.get(  # type: ignore
-            "encoder_prompt", in_prompt
-        )
-
-        extra_items = {
-            k: v
-            for k in ("mm_processor_kwargs", "cache_salt")
-            if (v := getattr(request, k, None)) is not None
-        }
-        target_prompt.update(extra_items)  # type: ignore
-
-        engine_prompt = await renderer.tokenize_prompt_async(target_prompt, tok_params)
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
@@ -1058,13 +1023,13 @@ class OpenAIServing:
 
         return conversation, [engine_prompt]
 
-    def _extract_prompt_components(self, prompt: object):
+    def _extract_prompt_components(self, prompt: PromptType | ProcessorInputs):
         return extract_prompt_components(self.model_config, prompt)
 
-    def _extract_prompt_text(self, prompt: object):
+    def _extract_prompt_text(self, prompt: ProcessorInputs):
         return self._extract_prompt_components(prompt).text
 
-    def _extract_prompt_len(self, prompt: object):
+    def _extract_prompt_len(self, prompt: ProcessorInputs):
         return extract_prompt_len(self.model_config, prompt)
 
     async def _render_next_turn(
@@ -1094,15 +1059,14 @@ class OpenAIServing:
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
-        engine_prompt: TokPrompt,
+        engine_prompt: ProcessorInputs,
         sampling_params: SamplingParams,
-        tok_params: TokenizeParams,
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
         priority: int = 0,
         trace_headers: Mapping[str, str] | None = None,
     ):
-        prompt_text = self._extract_prompt_text(engine_prompt)
+        max_model_len = self.model_config.max_model_len
 
         orig_priority = priority
         sub_request = 0
@@ -1117,26 +1081,13 @@ class OpenAIServing:
                 lora_request=lora_request,
             )
 
-            tokenization_kwargs = tok_params.get_encode_kwargs()
-            engine_request = self.input_processor.process_inputs(
-                sub_request_id,
+            generator = self.engine_client.generate(
                 engine_prompt,
                 sampling_params,
-                lora_request=lora_request,
-                tokenization_kwargs=tokenization_kwargs,
-                trace_headers=trace_headers,
-                priority=priority,
-            )
-
-            generator = self.engine_client.generate(
-                engine_request,
-                sampling_params,
                 sub_request_id,
                 lora_request=lora_request,
                 trace_headers=trace_headers,
                 priority=priority,
-                prompt_text=prompt_text,
-                tokenization_kwargs=tokenization_kwargs,
             )
 
             async for res in generator:
@@ -1159,11 +1110,11 @@ class OpenAIServing:
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
                 token_ids = context.render_for_completion()
-                engine_prompt = TokensPrompt(prompt_token_ids=token_ids)
+                engine_prompt = token_inputs(token_ids)
 
-                sampling_params.max_tokens = self.max_model_len - len(token_ids)
+                sampling_params.max_tokens = max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
-                engine_prompts = await self._render_next_turn(
+                (engine_prompt,) = await self._render_next_turn(
                     context.request,
                     context.parser.response_messages,
                     context.tool_dicts,
@@ -1171,14 +1122,13 @@ class OpenAIServing:
                     context.chat_template,
                     context.chat_template_content_format,
                 )
-                engine_prompt = engine_prompts[0]
-                prompt_text = self._extract_prompt_text(engine_prompt)
 
                 sampling_params.max_tokens = get_max_tokens(
-                    self.max_model_len,
-                    context.request,
+                    max_model_len,
+                    context.request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,  # type: ignore
+                    self.override_max_tokens,  # type: ignore
                 )
 
             # OPTIMIZATION
@@ -1188,7 +1138,7 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType | TokPrompt,
+        inputs: PromptType | ProcessorInputs,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
