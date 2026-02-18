@@ -440,51 +440,49 @@ def test_register_kv_caches(mock_parallel_groups):
                 vllm_config, connector.engine_id, hand_shake_latency=0
             )
 
-            from mori.io import (
-                MemoryDesc,
-            )
+        from mori.io import (
+            MemoryDesc,
+        )
 
-            # Execute register_kv_caches
-            connector.register_kv_caches(kv_caches)
+        # Execute register_kv_caches
+        connector.register_kv_caches(kv_caches)
 
-            # Verify that the MemoryDesc stored in layer_name_to_local_kv_cache_metadata
-            assert (
-                shared_tensor.data_ptr()
-                == MemoryDesc.unpack(
-                    connector.connector_worker.layer_name_to_local_kv_cache_metadata[
-                        "layer0"
-                    ][0]
-                ).data
-            )
-            assert (
-                unique_tensor.data_ptr()
-                == MemoryDesc.unpack(
-                    connector.connector_worker.layer_name_to_local_kv_cache_metadata[
-                        "layer1"
-                    ][0]
-                ).data
-            )
-            assert (
-                shared_tensor.data_ptr()
-                == MemoryDesc.unpack(
-                    connector.connector_worker.layer_name_to_local_kv_cache_metadata[
-                        "layer2"
-                    ][0]
-                ).data
-            )
+        # Verify that the MemoryDesc stored in layer_name_to_local_kv_cache_metadata
+        assert (
+            shared_tensor.data_ptr()
+            == MemoryDesc.unpack(
+                connector.connector_worker.layer_name_to_local_kv_cache_metadata[
+                    "layer0"
+                ][0]
+            ).data
+        )
+        assert (
+            unique_tensor.data_ptr()
+            == MemoryDesc.unpack(
+                connector.connector_worker.layer_name_to_local_kv_cache_metadata[
+                    "layer1"
+                ][0]
+            ).data
+        )
+        assert (
+            shared_tensor.data_ptr()
+            == MemoryDesc.unpack(
+                connector.connector_worker.layer_name_to_local_kv_cache_metadata[
+                    "layer2"
+                ][0]
+            ).data
+        )
 
-            # Verify engine keys
-            expected_engine_key = (
-                f"{ROLE[3:]}:{IP}:{DEFAULT_PORT}:tp{TP_RANK}:dp{DP_RANK}"
-            )
-            assert (
-                MemoryDesc.unpack(
-                    connector.connector_worker.layer_name_to_local_kv_cache_metadata[
-                        "layer0"
-                    ][0]
-                ).engine_key
-                == expected_engine_key
-            )
+        # Verify engine keys
+        expected_engine_key = f"{ROLE[3:]}:{IP}:{DEFAULT_PORT}:tp{TP_RANK}:dp{DP_RANK}"
+        assert (
+            MemoryDesc.unpack(
+                connector.connector_worker.layer_name_to_local_kv_cache_metadata[
+                    "layer0"
+                ][0]
+            ).engine_key
+            == expected_engine_key
+        )
 
 
 @pytest.mark.skipif(
@@ -530,21 +528,21 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
         with set_current_vllm_config(vllm_config):
             connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
 
-            # Execute register_kv_caches
-            connector.register_kv_caches(kv_caches)
+        # Execute register_kv_caches
+        connector.register_kv_caches(kv_caches)
 
-            # Connect to handshake socket and request metadata
-            path = make_zmq_path("tcp", "127.0.0.1", handshake_port)
-            with zmq_ctx(zmq.DEALER, path) as sock:
-                sock.send(MoRIIOConstants.GET_META_MSG)
-                received_frame = sock.recv_multipart()
+        # Connect to handshake socket and request metadata
+        path = make_zmq_path("tcp", "127.0.0.1", handshake_port)
+        with zmq_ctx(zmq.DEALER, path) as sock:
+            sock.send(MoRIIOConstants.GET_META_MSG)
+            received_frame = sock.recv_multipart()
 
-                if len(received_frame) != 2 or received_frame[0] != b"":
-                    raise ValueError(f"Unexpected frame! {received_frame = }")
+            if len(received_frame) != 2 or received_frame[0] != b"":
+                raise ValueError(f"Unexpected frame! {received_frame = }")
 
-                metadata_bytes = received_frame[1]
-                decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
-                metadata = decoder.decode(metadata_bytes)
-                assert isinstance(metadata, MoRIIOAgentMetadata), (
-                    "Decoded metadata is not MoRIIOAgentMetadata"
-                )
+            metadata_bytes = received_frame[1]
+            decoder = msgspec.msgpack.Decoder(MoRIIOAgentMetadata)
+            metadata = decoder.decode(metadata_bytes)
+            assert isinstance(metadata, MoRIIOAgentMetadata), (
+                "Decoded metadata is not MoRIIOAgentMetadata"
+            )
