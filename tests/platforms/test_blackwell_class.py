@@ -65,6 +65,36 @@ def test_is_blackwell_class_none_capability():
     assert _FakePlatform.is_blackwell_class() is False
 
 
+# ── is_blackwell_capability staticmethod tests ─────────────────────
+
+
+@pytest.mark.parametrize(
+    ("major", "minor", "expected"),
+    [
+        (9, 0, False),
+        (10, 0, True),
+        (11, 0, True),
+        (12, 1, True),
+        (13, 0, False),
+    ],
+    ids=lambda v: str(v),
+)
+def test_is_blackwell_capability_static(major: int, minor: int, expected: bool):
+    """Staticmethod works directly on DeviceCapability without device query."""
+    cap = DeviceCapability(major=major, minor=minor)
+    assert Platform.is_blackwell_capability(cap) is expected
+
+
+def test_is_blackwell_capability_consistency():
+    """Staticmethod and classmethod agree for all Blackwell variants."""
+    for major in (10, 11, 12):
+        cap = DeviceCapability(major=major, minor=0)
+        _FakePlatform._capability = cap
+        assert (
+            Platform.is_blackwell_capability(cap) is _FakePlatform.is_blackwell_class()
+        )
+
+
 # ── is_device_capability_family consistency check ──────────────────
 
 

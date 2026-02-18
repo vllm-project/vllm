@@ -48,7 +48,9 @@ def _get_backend_priorities(
     num_heads: int | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
-    is_blackwell = device_capability.major in (10, 11, 12)
+    from vllm.platforms.interface import Platform
+
+    is_blackwell = Platform.is_blackwell_capability(device_capability)
     if use_mla:
         if is_blackwell:
             # Prefer FlashInfer at low head counts (FlashMLA uses padding)

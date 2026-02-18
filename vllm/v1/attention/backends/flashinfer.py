@@ -377,7 +377,9 @@ class FlashInferBackend(AttentionBackend):
         from vllm.platforms import current_platform
 
         capability = current_platform.get_device_capability()
-        if capability is not None and capability.major in (10, 11, 12):
+        if capability is not None and current_platform.is_blackwell_capability(
+            capability
+        ):
             return "HND"
         return None
 
