@@ -72,6 +72,8 @@ class ExpertsInt8Config(QuantizationConfig):
 
 
 class ExpertsInt8MoEMethod(FusedMoEMethodBase, MoeOnlineQuantizer):
+    uses_meta_device: bool = True
+    
     def __init__(
         self,
         quant_config: ExpertsInt8Config,
