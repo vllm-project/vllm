@@ -217,6 +217,19 @@ class BatchRequestOutput(OpenAIBaseModel):
 class BatchFrontendArgs(BaseFrontendArgs):
     """Arguments for the batch runner frontend."""
 
+    input_file: str | None = None
+    """The path or url to a single input file. Currently supports local file
+    paths, or the http protocol (http or https). If a URL is specified,
+    the file should be available via HTTP GET."""
+    output_file: str | None = None
+    """The path or url to a single output file. Currently supports
+    local file paths, or web (http or https) urls. If a URL is specified,
+    the file should be available via HTTP PUT."""
+    output_tmp_dir: str | None = None
+    """The directory to store the output file before uploading it
+    to the output URL."""
+    enable_metrics: bool = False
+    """Enable Prometheus metrics"""
     host: str | None = None
     """Host name for the Prometheus metrics server
     (only needed if enable-metrics is set)."""
@@ -239,6 +252,14 @@ class BatchFrontendArgs(BaseFrontendArgs):
         frontend_kwargs: dict[str, Any],
     ) -> dict[str, Any]:
         frontend_kwargs = super()._customize_cli_kwargs(frontend_kwargs)
+
+        frontend_kwargs["input_file"]["flags"] = ["-i"]
+        frontend_kwargs["input_file"]["required"] = True
+        frontend_kwargs["output_file"]["flags"] = ["-o"]
+        frontend_kwargs["output_file"]["required"] = True
+
+        frontend_kwargs["enable_metrics"]["action"] = "store_true"
+
         frontend_kwargs["url"]["deprecated"] = True
         frontend_kwargs["metrics_url"]["deprecated"] = True
         frontend_kwargs["metrics_port"]["deprecated"] = True
@@ -248,38 +269,6 @@ class BatchFrontendArgs(BaseFrontendArgs):
 def make_arg_parser(parser: FlexibleArgumentParser):
     parser = BatchFrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
-
-    parser.add_argument(
-        "-i",
-        "--input-file",
-        required=True,
-        type=str,
-        help="The path or url to a single input file. Currently supports local file "
-        "paths, or the http protocol (http or https). If a URL is specified, "
-        "the file should be available via HTTP GET.",
-    )
-    parser.add_argument(
-        "-o",
-        "--output-file",
-        required=True,
-        type=str,
-        help="The path or url to a single output file. Currently supports "
-        "local file paths, or web (http or https) urls. If a URL is specified,"
-        " the file should be available via HTTP PUT.",
-    )
-    parser.add_argument(
-        "--output-tmp-dir",
-        type=str,
-        default=None,
-        help="The directory to store the output file before uploading it "
-        "to the output URL.",
-    )
-    parser.add_argument(
-        "--enable-metrics",
-        action="store_true",
-        help="Enable Prometheus metrics",
-    )
-
     return parser
 
 

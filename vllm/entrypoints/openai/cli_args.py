@@ -200,7 +200,10 @@ class BaseFrontendArgs:
             description=cls.__doc__,
         )
         for key, value in frontend_kwargs.items():
-            frontend_group.add_argument(f"--{key.replace('_', '-')}", **value)
+            extra_flags = value.pop("flags", [])
+            frontend_group.add_argument(
+                *extra_flags, f"--{key.replace('_', '-')}", **value
+            )
 
         return parser
 
