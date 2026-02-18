@@ -689,7 +689,7 @@ class Qwen3_VisionTransformer(nn.Module):
         hidden_states = hidden_states.unsqueeze(1)
         max_seqlen = (
             torch.tensor(flashinfer_max_seqlen, device=self.device)
-            # setting to 128k to avoid cudnn recompilation
+            # setting to a bucket to avoid cudnn recompilation
             # TODO: use the real max_seqlen once cudnn compilation is optimized
             if self.attn_backend == AttentionBackendEnum.FLASHINFER
             else self.compute_attn_mask_seqlen(cu_seqlens)
