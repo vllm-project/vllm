@@ -5046,11 +5046,6 @@ class GPUModelRunner(
 
         kv_cache_spec = self.get_kv_cache_spec()
         kv_cache_groups = get_kv_cache_groups(self.vllm_config, kv_cache_spec)
-
-        # Allocate enough blocks to support the largest batch size that will
-        # be used during profiling. This is necessary for models with
-        # Mamba-style conv state (e.g., Qwen3-next) which require one cache
-        # line per sequence in the batch.
         min_blocks = self.compilation_config.max_cudagraph_capture_size or 1
         if kv_cache_groups:
             page_size = kv_cache_groups[0].kv_cache_spec.page_size_bytes
