@@ -218,13 +218,11 @@ class CudaGraphManager:
             batch_descriptor=batch_descriptor,
             slot_mapping=slot_mappings,
         ):
-            hidden_states = model(
+            model(
                 input_ids=input_ids,
                 positions=positions,
                 inputs_embeds=inputs_embeds,
             )
-            assert self.hidden_states is not None
-            self.hidden_states[:num_tokens] = hidden_states
 
     @torch.inference_mode()
     def capture(
