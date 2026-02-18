@@ -72,8 +72,6 @@ class EncoderCudaGraphManager:
 
     def capture(self):
         """Capture CUDA graphs for all token budgets."""
-        logger.info("Starting encoder CUDA graph capture...")
-
         for token_budget in self.token_budgets:
             self._capture_budget_graph(token_budget)
 
@@ -84,6 +82,10 @@ class EncoderCudaGraphManager:
 
     def _capture_budget_graph(self, token_budget: int):
         """Capture CUDA graph for a single token budget."""
+        logger.debug(
+            "Capturing encoder cudagraph for budget=%d, max_batch_size=%d",
+            token_budget, self.max_batch_size
+        )
         # Generate dummy grid config for capture only (not used for runtime batching).
         # This is just one arbitrary example configuration that produces token_budget tokens.
         # At runtime, actual images will be packed in any combination that fits the budget.
@@ -102,18 +104,22 @@ class EncoderCudaGraphManager:
         encoder_metadata['rotary_pos_emb_sin'] = rotary_sin
 
         from vllm.model_executor.models.vision import compute_encoder_metadata
-        spatial_merge_size = self.vision_model.spatial_merge_size
         seq_metadata = compute_encoder_metadata(
             dummy_grid_thw,
             device=self.device,
-            spatial_merge_size=spatial_merge_size,
             pad_to_batch_size=None,
             per_frame=True,
         )
         encoder_metadata['cu_seqlens'] = seq_metadata['cu_seqlens']
-        # Use CPU tensor from compute_encoder_metadata to avoid GPU sync
-        # when .item() is called during CUDA graph capture
-        encoder_metadata['max_seqlen'] = seq_metadata['max_seqlen']
+        # Override max_seqlen with a safe upper bound for capture.
+        # max_seqlen.item() gets baked into the CUDA graph (not replayed),
+        # so the capture value must cover any replay scenario.
+        # Worst case: 1 image consuming the full budget →
+        # seq_len = token_budget * spatial_merge_size^2.
+        spatial_merge_size = self.vision_model.spatial_merge_size
+        max_seqlen_safe = token_budget * (spatial_merge_size ** 2)
+        encoder_metadata['max_seqlen'] = torch.tensor(
+            max_seqlen_safe, dtype=torch.int32)
 
         with torch.inference_mode():
             output = self.vision_model(
@@ -201,7 +207,6 @@ class EncoderCudaGraphManager:
         for budget in self.token_budgets:
             if budget >= total_tokens:
                 return budget
-        return None
 
     def _run_budget_graph(
         self,
@@ -227,11 +232,30 @@ class EncoderCudaGraphManager:
 
         graph_meta = self.budget_graphs[token_budget]
 
-        graph_meta.input_buffers['pixel_values'].copy_(pixel_values)
+        # Buffers are sized for the full budget; actual inputs may be smaller.
+        # Zero then slice-copy so padded positions are invisible to attention
+        # (cu_seqlens masks them out).
+        buf = graph_meta.input_buffers['pixel_values']
+        n = pixel_values.shape[0]
+        buf.zero_()
+        buf[:n].copy_(pixel_values)
 
-        for key in ['pos_embeds', 'rotary_pos_emb_cos', 'rotary_pos_emb_sin',
-                    'cu_seqlens', 'max_seqlen']:
-            graph_meta.metadata_buffers[key].copy_(encoder_metadata[key])
+        for key in ['pos_embeds', 'rotary_pos_emb_cos', 'rotary_pos_emb_sin']:
+            buf = graph_meta.metadata_buffers[key]
+            src = encoder_metadata[key]
+            n = src.shape[0]
+            buf.zero_()
+            buf[:n].copy_(src)
+
+        # cu_seqlens: pad tail with last value → zero-length seqs for empty slots
+        buf = graph_meta.metadata_buffers['cu_seqlens']
+        src = encoder_metadata['cu_seqlens']
+        n = src.shape[0]
+        buf[:n].copy_(src)
+        buf[n:].fill_(src[-1])
+
+        graph_meta.metadata_buffers['max_seqlen'].copy_(
+            encoder_metadata['max_seqlen'])
 
         graph_meta.graph.replay()
 
@@ -277,7 +301,6 @@ class EncoderCudaGraphManager:
         seq_metadata = compute_encoder_metadata(
             grid_thw_list,
             device=self.device,
-            spatial_merge_size=spatial_merge_size,
             pad_to_batch_size=None,
             per_frame=True,
         )
