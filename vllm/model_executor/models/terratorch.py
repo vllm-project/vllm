@@ -46,7 +46,6 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
     PlaceholderRange,
     mm_inputs,
 )
@@ -55,6 +54,7 @@ from vllm.multimodal.parse import (
     ModalityDataItems,
     MultiModalDataItems,
     MultiModalDataParser,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -196,15 +196,19 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         self,
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        mm_uuid_items: MultiModalUUIDItems | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
         tokenization_kwargs: Mapping[str, object] | None = None,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
+        if hf_processor_mm_kwargs is None:
+            hf_processor_mm_kwargs = {}
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
 
         mm_hashes = self._hash_mm_items(
-            mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
+            mm_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
         )
 
         _, passthrough_data = self._get_hf_mm_data(mm_items)
