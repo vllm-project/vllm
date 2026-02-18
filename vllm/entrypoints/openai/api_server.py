@@ -400,10 +400,14 @@ def create_server_unix_socket(path: str) -> socket.socket:
 
 def validate_api_server_args(args):
     valid_tool_parses = ToolParserManager.list_registered()
-    if args.enable_auto_tool_choice and args.tool_call_parser not in valid_tool_parses:
+    if (
+        args.enable_auto_tool_choice
+        and args.tool_call_parser != "auto"
+        and args.tool_call_parser not in valid_tool_parses
+    ):
         raise KeyError(
             f"invalid tool call parser: {args.tool_call_parser} "
-            f"(chose from {{ {','.join(valid_tool_parses)} }})"
+            f"(chose from {{ auto,{','.join(valid_tool_parses)} }})"
         )
 
     valid_reasoning_parsers = ReasoningParserManager.list_registered()

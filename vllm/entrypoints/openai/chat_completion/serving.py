@@ -138,6 +138,7 @@ class OpenAIServingChat(OpenAIServing):
             tool_parser_name=tool_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
+            model_type=self.model_config.hf_config.model_type,
         )
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 

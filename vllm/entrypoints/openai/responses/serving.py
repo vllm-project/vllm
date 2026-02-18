@@ -223,6 +223,7 @@ class OpenAIServingResponses(OpenAIServing):
             reasoning_parser_name=reasoning_parser,
             enable_auto_tools=enable_auto_tools,
             model_name=self.model_config.model,
+            model_type=self.model_config.hf_config.model_type,
         )
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage

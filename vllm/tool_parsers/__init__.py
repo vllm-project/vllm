@@ -6,7 +6,7 @@ from vllm.tool_parsers.abstract_tool_parser import (
     ToolParserManager,
 )
 
-__all__ = ["ToolParser", "ToolParserManager"]
+__all__ = ["ToolParser", "ToolParserManager", "get_auto_tool_parser"]
 
 
 """
@@ -160,3 +160,99 @@ def register_lazy_tool_parsers():
 
 
 register_lazy_tool_parsers()
+
+# Mapping from HuggingFace model_type to the default tool parser name.
+# Used when --tool-call-parser=auto to select the correct parser based
+# on the model being served.
+_MODEL_TYPE_TO_TOOL_PARSER: dict[str, str] = {
+    # DeepSeek family
+    "deepseek_v3": "deepseek_v3",
+    "deepseek_v31": "deepseek_v31",
+    "deepseek_v32": "deepseek_v32",
+    # GLM family
+    "glm_moe_dsa": "glm45",
+    "glm4_moe": "glm45",
+    "glm4_moe_lite": "glm47",
+    # Granite family
+    "granite": "granite",
+    # InternLM family
+    "internlm2": "internlm",
+    # Jamba family
+    "jamba": "jamba",
+    # Mistral family
+    "mistral": "mistral",
+    # MiniMax family
+    "minimax_text_01": "minimax",
+    "minimax_m2": "minimax_m2",
+    # Hunyuan family
+    "hunyuan_moe": "hunyuan_a13b",
+    # OLMo family
+    "olmo3": "olmo3",
+}
+
+# Mapping from model name patterns to tool parser names.
+# Used as a fallback when model_type alone is ambiguous (e.g. "llama"
+# could map to several parsers). Patterns are matched as substrings
+# of the full model name in lowercase. Order matters: the first match
+# wins, so more specific patterns must come before generic ones.
+_MODEL_NAME_TO_TOOL_PARSER: list[tuple[str, str]] = [
+    # Llama 4 models prefer pythonic parser
+    ("llama-4", "llama4_pythonic"),
+    ("llama4", "llama4_pythonic"),
+    # Llama 3.x default to JSON parser
+    ("llama-3", "llama3_json"),
+    ("llama3", "llama3_json"),
+    # Hermes models
+    ("hermes-2", "hermes"),
+    ("hermes-3", "hermes"),
+    ("hermes2", "hermes"),
+    ("hermes3", "hermes"),
+    # Qwen3-Coder
+    ("qwen3-coder", "qwen3_coder"),
+    ("qwen3coder", "qwen3_coder"),
+    # Kimi K2
+    ("kimi-k2", "kimi_k2"),
+    ("kimi_k2", "kimi_k2"),
+    # FunctionGemma
+    ("functiongemma", "functiongemma"),
+    # xLAM
+    ("xlam", "xlam"),
+    # GigaChat
+    ("gigachat3", "gigachat3"),
+    ("gigachat-3", "gigachat3"),
+    # Step models
+    ("step-3.5", "step3p5"),
+    ("step3p5", "step3p5"),
+    ("step-3", "step3"),
+    ("step3-", "step3"),
+    # Longcat
+    ("longcat", "longcat"),
+    # Ernie
+    ("ernie", "ernie45"),
+    # Phi-4 Mini
+    ("phi-4-mini", "phi4_mini_json"),
+    ("phi4-mini", "phi4_mini_json"),
+    # Seed OSS
+    ("seed-oss", "seed_oss"),
+]
+
+
+def get_auto_tool_parser(model_type: str | None, model_name: str | None) -> str | None:
+    """Resolve the tool parser name automatically from model metadata.
+
+    Tries *model_type* first (exact match), then falls back to substring
+    matching on *model_name*.
+
+    Returns:
+        The parser name string, or ``None`` if no match is found.
+    """
+    if model_type and model_type in _MODEL_TYPE_TO_TOOL_PARSER:
+        return _MODEL_TYPE_TO_TOOL_PARSER[model_type]
+
+    if model_name:
+        lower_name = model_name.lower()
+        for pattern, parser_name in _MODEL_NAME_TO_TOOL_PARSER:
+            if pattern in lower_name:
+                return parser_name
+
+    return None
