@@ -48,10 +48,8 @@ class StructuredOutputsParams:
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         # CAUTION: Should only be set by Processor._validate_structured_output
-        if not hasattr(self, "_backend"):
-            self._backend: str | None = None
-        if not hasattr(self, "_backend_was_auto"):
-            self._backend_was_auto: bool = False
+        self._backend: str | None = None
+        self._backend_was_auto: bool = False
 
         count = sum(
             [
@@ -73,6 +71,17 @@ class StructuredOutputsParams:
                 "You must use one kind of structured outputs constraint "
                 f"but none are specified: {self.__dict__}"
             )
+
+    def __replace__(self, **changes):
+        """Custom replace that preserves instance attributes not in dataclass fields."""
+        from dataclasses import replace
+
+        new_obj = replace(self, **changes)
+        # Preserve _backend and _backend_was_auto which are set in __post_init__
+        # but not part of the dataclass fields, so replace() doesn't copy them
+        new_obj._backend = self._backend
+        new_obj._backend_was_auto = self._backend_was_auto
+        return new_obj
 
     def all_constraints_none(self) -> bool:
         """
