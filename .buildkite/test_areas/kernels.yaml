@@ -75,6 +75,49 @@ steps:
     - pytest -v -s kernels/moe/test_batched_deepgemm.py
     - pytest -v -s kernels/attention/test_deepgemm_attention.py
 
+- label: Kernels Sonic MoE Test (H100)
+  timeout_in_minutes: 10
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/sonic_moe.py
+  - tests/kernels/moe/test_sonic_moe.py
+  commands:
+    # SonicMoE is not on PyPI. Follow upstream install: install requirements.txt
+    # then install editable from a pinned commit for reproducibility.
+    - rm -rf /tmp/sonic-moe
+    - git clone https://github.com/Dao-AILab/sonic-moe.git /tmp/sonic-moe
+    - git -C /tmp/sonic-moe checkout 11c3c7d0f075390ff711c5bdf0c6d8188b7b89dc
+    - git -C /tmp/sonic-moe submodule update --init --recursive
+    - python -c "from pathlib import Path; p=Path('/tmp/sonic-moe/sonicmoe/functional/reduction_over_k_gather.py'); t=p.read_text(); ls=t.splitlines(); (any(l.strip()=='from __future__ import annotations' for l in ls[:8]) or p.write_text('from __future__ import annotations\\n'+t))"
+    - pip install -r /tmp/sonic-moe/requirements.txt
+    # Override SonicMoE pins: older CUTLASS DSL can generate invalid LLVM IR on H100;
+    # newer CUTLASS DSL triggers import-time annotation evaluation errors in SonicMoE.
+    - pip install -U nvidia-cutlass-dsl==4.3.5
+    - pip install -U --force-reinstall --no-deps git+https://github.com/Dao-AILab/quack.git@4210c0abcb20a7126775661640e79de425a55206
+    - pip install -e /tmp/sonic-moe --no-deps
+    - pytest -v -s kernels/moe/test_sonic_moe.py
+
+- label: Kernels Sonic MoE Benchmark (H100)
+  timeout_in_minutes: 15
+  working_dir: "/vllm-workspace/"
+  device: h100
+  num_devices: 1
+  source_file_dependencies:
+  - vllm/model_executor/layers/fused_moe/sonic_moe.py
+  - benchmarks/kernels/benchmark_sonic_moe.py
+  commands:
+    - rm -rf /tmp/sonic-moe
+    - git clone https://github.com/Dao-AILab/sonic-moe.git /tmp/sonic-moe
+    - git -C /tmp/sonic-moe checkout 11c3c7d0f075390ff711c5bdf0c6d8188b7b89dc
+    - git -C /tmp/sonic-moe submodule update --init --recursive
+    - python -c "from pathlib import Path; p=Path('/tmp/sonic-moe/sonicmoe/functional/reduction_over_k_gather.py'); t=p.read_text(); ls=t.splitlines(); (any(l.strip()=='from __future__ import annotations' for l in ls[:8]) or p.write_text('from __future__ import annotations\\n'+t))"
+    - pip install -r /tmp/sonic-moe/requirements.txt
+    - pip install -U nvidia-cutlass-dsl==4.3.5
+    - pip install -U --force-reinstall --no-deps git+https://github.com/Dao-AILab/quack.git@4210c0abcb20a7126775661640e79de425a55206
+    - pip install -e /tmp/sonic-moe --no-deps
+    - python3 benchmarks/kernels/benchmark_sonic_moe.py --output-json benchmark_sonic_moe.json
+
 - label: Kernels (B200)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
