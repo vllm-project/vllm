@@ -614,16 +614,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         max_query_len = num_scheduled_tokens.max().item()
 
-        # Get prefill tokens.
-        prepare_prefill_inputs(
-            self.input_buffers.input_ids,
-            self.req_states.next_prefill_tokens,
-            idx_mapping,
-            query_start_loc,
-            self.req_states.all_token_ids.gpu,
-            self.req_states.prefill_len.gpu,
-            self.req_states.num_computed_tokens.gpu,
-        )
+        # Get prefill tokens if any.
+        if self.req_states.any_prefills(idx_mapping_np):
+            prepare_prefill_inputs(
+                self.input_buffers.input_ids,
+                self.req_states.next_prefill_tokens,
+                idx_mapping,
+                query_start_loc,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prefill_len.gpu,
+                self.req_states.num_computed_tokens.gpu,
+            )
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
