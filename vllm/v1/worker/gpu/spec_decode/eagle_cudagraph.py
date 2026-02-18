@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Callable
+from typing import Any
 
 import torch
 
@@ -31,16 +32,17 @@ class EagleCudaGraphManager:
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
 
-        self.cudagraph_mode = self.compilation_config.cudagraph_mode
-        if self.cudagraph_mode == CUDAGraphMode.FULL:
-            # NOTE(woosuk): For Eagle, we only use CUDA graphs for decode.
-            self.cudagraph_mode = CUDAGraphMode.FULL_DECODE_ONLY
+        # NOTE(woosuk): For Eagle, we only use CUDA graphs for decode.
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode.decode_mode()
 
-        self.cudagraph_sizes = get_cudagraph_sizes(
+        # only need to capture uniform decode cudagraph sizes (the 2nd return value)
+        _, self.cudagraph_sizes = get_cudagraph_sizes(
             self.compilation_config.cudagraph_capture_sizes,
             self.max_num_reqs,
             self.max_num_tokens,
             self.cudagraph_mode,
+            uniform_decode_query_len=1,
+            uniform_decode_cudagraph=True,
         )
 
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
@@ -54,12 +56,21 @@ class EagleCudaGraphManager:
     def capture_graph(
         self,
         num_tokens: int,
+        capture_cg_mode: CUDAGraphMode,
         generate_fn: Callable,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
     ) -> None:
+        assert capture_cg_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], (
+            f"Invalid capture_cudagraph_mode for capture: {capture_cg_mode}"
+        )
+        if capture_cg_mode == CUDAGraphMode.PIECEWISE:
+            capture_fn = self._capture_piecewise_graph
+        else:
+            capture_fn = self._capture_full_graph
+
         num_reqs = min(num_tokens, self.max_num_reqs)
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
@@ -69,18 +80,69 @@ class EagleCudaGraphManager:
             attn_metadata_builders,
             self.max_model_len,
             kv_cache_config,
+            uniform_decode_query_len=1,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)
 
         # Warm up.
-        generate_fn(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp)
+        generate_fn(
+            num_reqs,
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            CUDAGraphMode.NONE,
+        )
 
         # Capture the graph.
+        capture_fn(
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            generate_fn=generate_fn,
+            attn_metadata=attn_metadata,
+            slot_mappings=slot_mappings,
+            num_tokens_across_dp=num_tokens_across_dp,
+        )
+
+    def _capture_full_graph(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        generate_fn: Callable,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        num_tokens_across_dp: torch.Tensor,
+    ) -> None:
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, self.pool):
-            generate_fn(num_tokens, attn_metadata, slot_mappings, num_tokens_across_dp)
+            generate_fn(
+                num_reqs,
+                num_tokens,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                CUDAGraphMode.NONE,
+            )
         self.graphs[num_tokens] = graph
+
+    def _capture_piecewise_graph(
+        self,
+        num_reqs: int,
+        num_tokens: int,
+        generate_fn: Callable,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
+        num_tokens_across_dp: torch.Tensor,
+    ) -> None:
+        generate_fn(
+            num_reqs,
+            num_tokens,
+            attn_metadata,
+            slot_mappings,
+            num_tokens_across_dp,
+            CUDAGraphMode.PIECEWISE,
+        )
 
     @torch.inference_mode()
     def capture(
@@ -91,10 +153,15 @@ class EagleCudaGraphManager:
         attn_metadata_builders: list[AttentionMetadataBuilder],
         kv_cache_config: KVCacheConfig,
     ) -> None:
+        if self.cudagraph_mode == CUDAGraphMode.NONE:
+            return
+
         capture_graphs(
             self.cudagraph_sizes,
             self.device,
             self.capture_graph,
+            capture_cudagraph_mode=self.cudagraph_mode,
+            desc=f"Capturing eagle CUDA graphs ({self.cudagraph_mode.name})",
             generate_fn=generate_fn,
             input_buffers=input_buffers,
             block_tables=block_tables,
@@ -102,6 +169,6 @@ class EagleCudaGraphManager:
             kv_cache_config=kv_cache_config,
         )
 
-    def run(self, num_tokens: int) -> None:
+    def run_fullgraph(self, num_tokens: int) -> None:
         assert num_tokens in self.graphs
         self.graphs[num_tokens].replay()
