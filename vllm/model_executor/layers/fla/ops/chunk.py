@@ -123,7 +123,7 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         intermediate_states = None
         if return_intermediate_states:
             assert h is not None
-            # Convert into chunk-major form, i.e. shape (num_total_chunks, H, K, V)
+            # Convert into chunk-major form, i.e. shape (num_total_chunks, H, V, K)
             intermediate_states = h.reshape(-1, *h.shape[-3:])
         return o.to(q.dtype), final_state, intermediate_states
 
@@ -176,10 +176,10 @@ def chunk_gated_delta_rule(
         o (torch.Tensor):
             Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
         final_state (torch.Tensor):
-            Final state of shape `[N, H, K, V]` if `output_final_state=True` else `None`.
+            Final state of shape `[N, H, V, K]` if `output_final_state=True` else `None`.
         intermediate_states (Optional[torch.Tensor]):
             When ``return_intermediate_states`` is ``True`` a tensor containing
-            the per-chunk state snapshots shaped ``[num_chunks_total, H, K, V]``.
+            the per-chunk state snapshots shaped ``[num_chunks_total, H, V, K]``.
             Otherwise ``None``.
 
     Examples::
@@ -194,7 +194,7 @@ def chunk_gated_delta_rule(
         >>> v = torch.randn(B, T, H, V, dtype=torch.bfloat16, device='cuda')
         >>> beta = torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda').sigmoid()
         >>> g = F.logsigmoid(torch.rand(B, T, H, dtype=torch.bfloat16, device='cuda'))
-        >>> h0 = torch.randn(B, H, K, V, dtype=torch.bfloat16, device='cuda')
+        >>> h0 = torch.randn(B, H, V, K, dtype=torch.bfloat16, device='cuda')
         >>> o, ht, _ = chunk_gated_delta_rule(
             q, k, v, g, beta,
             initial_state=h0,
