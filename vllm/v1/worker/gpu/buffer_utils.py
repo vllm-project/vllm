@@ -12,6 +12,7 @@ from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )
+from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 def async_copy_to_gpu(
@@ -174,7 +175,8 @@ class StagedWriteTensor:
         )
 
         # Write diffs to the GPU buffer
-        _apply_write_kernel[(n,)](
+        _apply_write_cached(
+            (n,),
             self.gpu,
             self.gpu.stride(0),
             indices_uva,
@@ -218,3 +220,6 @@ def _apply_write_kernel(
         tl.store(
             output_ptr + row_idx * output_stride + start_idx + block, content, mask=mask
         )
+
+
+_apply_write_cached = CachedKernel(_apply_write_kernel)

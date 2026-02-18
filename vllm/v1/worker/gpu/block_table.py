@@ -8,6 +8,7 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 class BlockTables:
@@ -107,7 +108,8 @@ class BlockTables:
         self, idx_mapping: torch.Tensor
     ) -> tuple[torch.Tensor, ...]:
         num_reqs = idx_mapping.shape[0]
-        _gather_block_tables_kernel[(self.num_kv_cache_groups, num_reqs)](
+        _gather_block_tables_cached(
+            (self.num_kv_cache_groups, num_reqs),
             idx_mapping,
             self.block_table_ptrs,
             self.input_block_table_ptrs,
@@ -130,7 +132,8 @@ class BlockTables:
         num_reqs = idx_mapping.shape[0]
         num_tokens = positions.shape[0]
         num_groups = self.num_kv_cache_groups
-        _compute_slot_mappings_kernel[(num_groups, num_reqs + 1)](
+        _compute_slot_mappings_cached(
+            (num_groups, num_reqs + 1),
             num_tokens,
             self.max_num_batched_tokens,
             idx_mapping,
@@ -251,3 +254,7 @@ def _load_ptr(ptr_to_ptr, elem_dtype):
     ptr = tl.load(ptr_to_ptr)
     ptr = tl.cast(ptr, tl.pointer_type(elem_dtype))
     return tl.multiple_of(ptr, 16)
+
+
+_gather_block_tables_cached = CachedKernel(_gather_block_tables_kernel)
+_compute_slot_mappings_cached = CachedKernel(_compute_slot_mappings_kernel)

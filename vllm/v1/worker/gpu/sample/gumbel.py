@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 @triton.jit
@@ -31,6 +32,9 @@ def _temperature_kernel(
     tl.store(logits_ptr + batch_idx * logits_stride + block, logits, mask=mask)
 
 
+_temperature_cached = CachedKernel(_temperature_kernel)
+
+
 def apply_temperature(
     logits: torch.Tensor,
     idx_mapping: torch.Tensor,
@@ -39,7 +43,8 @@ def apply_temperature(
     num_reqs, vocab_size = logits.shape
     BLOCK_SIZE = 8192
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
-    _temperature_kernel[(num_reqs, num_blocks)](
+    _temperature_cached(
+        (num_reqs, num_blocks),
         logits,
         logits.stride(0),
         idx_mapping,
@@ -105,6 +110,12 @@ def _gumbel_sample_kernel(
     tl.store(local_max_ptr + batch_idx * local_max_stride + block_idx, value)
 
 
+_gumbel_sample_cached = {
+    False: CachedKernel(_gumbel_sample_kernel),
+    True: CachedKernel(_gumbel_sample_kernel),
+}
+
+
 def gumbel_sample(
     logits: torch.Tensor,  # [num_reqs, vocab_size]
     idx_mapping: torch.Tensor,  # [max_num_reqs]
@@ -128,7 +139,8 @@ def gumbel_sample(
         dtype=torch.float32,
         device=logits.device,
     )
-    _gumbel_sample_kernel[(num_reqs, num_blocks)](
+    _gumbel_sample_cached[apply_temperature](
+        (num_reqs, num_blocks),
         local_argmax,
         local_argmax.stride(0),
         local_max,
