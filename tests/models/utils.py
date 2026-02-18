@@ -457,6 +457,9 @@ def dummy_hf_overrides(
     # Kimi uses `num_expert_group` instead of `n_group`.
     if n_group is None:
         n_group = getattr(text_config, "num_expert_group", None)
+    # InternS1Pro uses `router_n_groups` instead of `n_group`.
+    if n_group is None:
+        n_group = getattr(text_config, "router_n_groups", None)
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
