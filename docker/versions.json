@@ -31,6 +31,15 @@
     "TORCH_CUDA_ARCH_LIST": {
       "default": "7.0 7.5 8.0 8.9 9.0 10.0 12.0"
     },
+    "MIN_NVCC_TOOLCHAIN_VERSION": {
+      "default": "12.9.86"
+    },
+    "NVCC_TOOLCHAIN_SHA256_X86_64": {
+      "default": "7a1a5b652e5ef85c82b721d10672fc9a2dbaab44e9bd3c65a69517bf53998c35"
+    },
+    "NVCC_TOOLCHAIN_SHA256_AARCH64": {
+      "default": "2432ef8a7c12d0a9ce3332a8af42b123c07f256390b3390802b1b2c6254c6c74"
+    },
     "MAX_JOBS": {
       "default": "2"
     },

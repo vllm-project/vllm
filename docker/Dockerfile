@@ -183,6 +183,50 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # From versions.json: .torch.cuda_arch_list
 ARG torch_cuda_arch_list='7.0 7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
+
+# Download newer CUDA compiler toolchain for better GPU code generation
+# while keeping CUDA 12.8 headers/libs for runtime compatibility with PyTorch cu128.
+# We replace nvcc, ptxas, and cicc so that setup.py's get_nvcc_cuda_version() reports
+# the newer version (required for FlashMLA registration which gates on >= 12.9).
+# PyTorch's CMake checks nvcc version vs CUDA header version; that check is patched
+# to a warning in the csrc-build and build stages (after torch is pip-installed).
+# Skipped if system nvcc is already >= this version (e.g. when building with CUDA 13+).
+# Set MIN_NVCC_TOOLCHAIN_VERSION="" to disable.
+ARG MIN_NVCC_TOOLCHAIN_VERSION=12.9.86
+# SHA256 checksums from https://developer.download.nvidia.com/compute/cuda/redist/redistrib_<cuda_version>.json
+ARG NVCC_TOOLCHAIN_SHA256_X86_64=7a1a5b652e5ef85c82b721d10672fc9a2dbaab44e9bd3c65a69517bf53998c35
+ARG NVCC_TOOLCHAIN_SHA256_AARCH64=2432ef8a7c12d0a9ce3332a8af42b123c07f256390b3390802b1b2c6254c6c74
+RUN if [ -n "${MIN_NVCC_TOOLCHAIN_VERSION}" ]; then \
+        CURRENT_VERSION=$(nvcc --version | sed -n 's/.*V\([0-9.]*\).*/\1/p') && \
+        SMALLEST=$(printf '%s\n' "${MIN_NVCC_TOOLCHAIN_VERSION}" "${CURRENT_VERSION}" | sort -V | head -n1) && \
+        if [ "${SMALLEST}" = "${MIN_NVCC_TOOLCHAIN_VERSION}" ]; then \
+            echo "System nvcc ${CURRENT_VERSION} >= ${MIN_NVCC_TOOLCHAIN_VERSION}, skipping toolchain download"; \
+        else \
+            ARCH=$(uname -m) && \
+            case "${ARCH}" in \
+                x86_64)  EXPECTED_SHA256="${NVCC_TOOLCHAIN_SHA256_X86_64}" ;; \
+                aarch64) EXPECTED_SHA256="${NVCC_TOOLCHAIN_SHA256_AARCH64}" ;; \
+                *) echo "Unsupported architecture: ${ARCH}" >&2; exit 1 ;; \
+            esac && \
+            curl -sL -o cuda_nvcc.tar.xz \
+                "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-${ARCH}/cuda_nvcc-linux-${ARCH}-${MIN_NVCC_TOOLCHAIN_VERSION}-archive.tar.xz" && \
+            echo "${EXPECTED_SHA256}  cuda_nvcc.tar.xz" | sha256sum -c && \
+            tar xJf cuda_nvcc.tar.xz && \
+            cp -f cuda_nvcc-linux-${ARCH}-${MIN_NVCC_TOOLCHAIN_VERSION}-archive/bin/nvcc /usr/local/cuda/bin/nvcc && \
+            cp -f cuda_nvcc-linux-${ARCH}-${MIN_NVCC_TOOLCHAIN_VERSION}-archive/bin/ptxas /usr/local/cuda/bin/ptxas && \
+            cp -f cuda_nvcc-linux-${ARCH}-${MIN_NVCC_TOOLCHAIN_VERSION}-archive/nvvm/bin/cicc /usr/local/cuda/nvvm/bin/cicc && \
+            rm -rf cuda_nvcc-linux-${ARCH}-${MIN_NVCC_TOOLCHAIN_VERSION}-archive cuda_nvcc.tar.xz && \
+            echo "Upgraded nvcc/ptxas/cicc from ${CURRENT_VERSION} to ${MIN_NVCC_TOOLCHAIN_VERSION}"; \
+        fi; \
+    fi
+
+# Patch PyTorch cmake to allow nvcc/header version mismatch (for newer nvcc toolchain).
+# Stages that reinstall torch (csrc-build, build) must re-apply this patch.
+RUN python3 -c "\
+import pathlib; \
+files = list(pathlib.Path('/opt/venv').rglob('Caffe2/public/cuda.cmake')); \
+assert files, 'ERROR: Caffe2/public/cuda.cmake not found under /opt/venv'; \
+[print(f'Patching {f}') or f.write_text(f.read_text().replace('FATAL_ERROR \"FindCUDA says', 'WARNING \"FindCUDA says')) for f in files]"
 #################### BUILD BASE IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
@@ -221,6 +265,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
+
+# Patch PyTorch cmake to allow nvcc/header version mismatch (for newer nvcc toolchain).
+# This must run after pip install since torch reinstall overwrites the cmake files.
+RUN python3 -c "\
+import pathlib; \
+files = list(pathlib.Path('/opt/venv').rglob('Caffe2/public/cuda.cmake')); \
+assert files, 'ERROR: Caffe2/public/cuda.cmake not found under /opt/venv'; \
+[print(f'Patching {f}') or f.write_text(f.read_text().replace('FATAL_ERROR \"FindCUDA says', 'WARNING \"FindCUDA says')) for f in files]"
 
 WORKDIR /workspace
 
@@ -387,6 +439,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi
+
+# Patch PyTorch cmake to allow nvcc/header version mismatch (for newer nvcc toolchain).
+# This must run after pip install since torch reinstall overwrites the cmake files.
+RUN python3 -c "\
+import pathlib; \
+files = list(pathlib.Path('/opt/venv').rglob('Caffe2/public/cuda.cmake')); \
+assert files, 'ERROR: Caffe2/public/cuda.cmake not found under /opt/venv'; \
+[print(f'Patching {f}') or f.write_text(f.read_text().replace('FATAL_ERROR \"FindCUDA says', 'WARNING \"FindCUDA says')) for f in files]"
 
 WORKDIR /workspace
 
