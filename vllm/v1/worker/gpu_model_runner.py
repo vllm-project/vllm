@@ -4997,14 +4997,6 @@ class GPUModelRunner(
         gc.collect()
 
     def _get_decode_cudagraph_batch_sizes(self) -> list[int]:
-        """Get the batch sizes for decode-only CUDA graphs.
-
-        This is used when cudagraph_mode.separate_routine() is True,
-        meaning decode batches use separate graphs from mixed batches.
-
-        Returns:
-            List of batch sizes for decode graphs, or empty list if not applicable.
-        """
         max_num_tokens = (
             self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
         )
@@ -5017,13 +5009,6 @@ class GPUModelRunner(
     def _get_cudagraph_profiling_info(
         self,
     ) -> tuple[int | None, int, int | None, int]:
-        """Get info about CUDA graphs for memory profiling.
-
-        Returns:
-            Tuple of (full_largest_batch, full_count, piecewise_largest_batch,
-                      piecewise_count).
-            Batch sizes are None if that graph type won't be captured.
-        """
         cudagraph_mode = self.compilation_config.cudagraph_mode
 
         if cudagraph_mode == CUDAGraphMode.NONE or not self.cudagraph_batch_sizes:
@@ -5063,12 +5048,6 @@ class GPUModelRunner(
         return full_largest, full_count, piecewise_largest, piecewise_count
 
     def _init_minimal_kv_cache_for_profiling(self) -> None:
-        """Initialize a minimal KV cache for CUDA graph memory profiling.
-
-        This creates a small KV cache just to enable attention metadata
-        building during graph profiling. The actual KV cache will be
-        allocated later with the correct size.
-        """
         from vllm.v1.core.kv_cache_utils import (
             get_kv_cache_config_from_groups,
             get_kv_cache_groups,
@@ -5101,12 +5080,6 @@ class GPUModelRunner(
     @staticmethod
     @contextmanager
     def _freeze_gc():
-        """Freeze garbage collection during CUDA graph capture.
-
-        This prevents GC from interfering with graph capture and memory
-        measurements. Objects are collected before freezing, then GC is
-        disabled until the context exits.
-        """
         gc.collect()
         should_freeze = not envs.VLLM_ENABLE_CUDAGRAPH_GC
         if should_freeze:
@@ -5119,16 +5092,6 @@ class GPUModelRunner(
                 gc.collect()
 
     def _cleanup_profiling_kv_cache(self) -> None:
-        """Clean up the minimal KV cache used for profiling.
-
-        This frees the KV cache tensors and resets the state so that
-        the actual KV cache can be allocated later.
-
-        Note: We don't need to clean up CUDA graphs here because profiling
-        now uses a private pool (not the global shared pool). The temporary
-        graphs from profiling are deleted after measurement and their private
-        pool is automatically cleaned up.
-        """
         current_platform.synchronize()
         if hasattr(self, "kv_caches") and self.kv_caches:
             for i in range(len(self.kv_caches)):
@@ -5154,19 +5117,6 @@ class GPUModelRunner(
 
     @torch.inference_mode()
     def profile_cudagraph_memory(self) -> tuple[int, int]:
-        """Profile CUDA graph memory by capturing representative graphs.
-
-        This method estimates the memory that will be consumed by CUDA graphs.
-        It returns two values:
-        1. First-capture memory: Includes workspace allocated only in CUDA graph mode
-           (e.g., FA3 split buffers). Must be reserved in main allocator
-           because FA3 may allocate from there if graph replay fails.
-        2. Graph memory: Overhead per captured graph × number of graphs.
-           This goes to the CUDA graph pool.
-
-        Returns:
-            Tuple of (first_capture_memory, graph_memory) in bytes.
-        """
         # Setup: minimal KV cache and private graph pool
         # NOTE: This must be called BEFORE _get_cudagraph_profiling_info()
         # because initialize_kv_cache() may update cudagraph_mode based on
@@ -5334,11 +5284,6 @@ class GPUModelRunner(
         return int(full_first_capture_memory), int(graph_estimate)
 
     def capture_model(self) -> int:
-        """Capture CUDA graphs for the model.
-
-        Returns:
-            Tuple of (total_cuda_graph_memory, full_cuda_graph_memory) in bytes.
-        """
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
@@ -5410,10 +5355,6 @@ class GPUModelRunner(
         sync_and_empty_cache_before_capture: bool = False,
         num_warmups: int | None = None,
     ) -> int:
-        """Run warmups then capture a CUDA graph for a single batch size.
-
-        Returns free GPU memory (bytes) just before capture begins.
-        """
         if num_warmups is None:
             num_warmups = self.compilation_config.cudagraph_num_of_warmups
         force_attention = cudagraph_runtime_mode == CUDAGraphMode.FULL
