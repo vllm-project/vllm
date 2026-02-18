@@ -318,10 +318,7 @@ class BatchProgressTracker:
 
 async def read_file(path_or_url: str) -> str:
     if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        async with (
-            aiohttp.ClientSession() as session,
-            session.get(path_or_url) as resp,
-        ):
+        async with aiohttp.ClientSession() as session, session.get(path_or_url) as resp:
             return await resp.text()
     else:
         with open(path_or_url, encoding="utf-8") as f:
@@ -397,9 +394,7 @@ async def upload_data(output_url: str, data_or_file: str, from_file: bool) -> No
 
 
 async def write_file(
-    path_or_url: str,
-    batch_outputs: list[BatchRequestOutput],
-    output_tmp_dir: str,
+    path_or_url: str, batch_outputs: list[BatchRequestOutput], output_tmp_dir: str
 ) -> None:
     """
     Write batch_outputs to a file or upload to a URL.
