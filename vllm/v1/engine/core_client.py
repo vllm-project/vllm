@@ -390,9 +390,9 @@ class BackgroundResources:
 
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.close()
+            self.engine_manager.shutdown()
         if self.coordinator is not None:
-            self.coordinator.close()
+            self.coordinator.shutdown()
 
         if isinstance(self.output_socket, zmq.asyncio.Socket):
             # Async case.

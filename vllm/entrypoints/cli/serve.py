@@ -223,7 +223,7 @@ def run_headless(args: argparse.Namespace):
         engine_manager.join_first()
     finally:
         logger.info("Shutting down.")
-        engine_manager.close()
+        engine_manager.shutdown()
 
 
 def run_multi_api_server(args: argparse.Namespace):

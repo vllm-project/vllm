@@ -146,11 +146,12 @@ class CoreEngineProcManager:
         finally:
             # Kill other procs if not all are running.
             if self.finished_procs():
-                self.close()
+                self.shutdown()
 
-    def close(self):
-        """Shutdown all procs."""
-        self._finalizer()
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown engine core processes with configurable timeout."""
+        if self._finalizer.detach() is not None:
+            shutdown(self.processes, timeout=timeout)
 
     def join_first(self):
         """Wait for any process to exit."""
@@ -763,7 +764,7 @@ class CoreEngineActorManager:
     def get_run_refs(self):
         return self.run_refs
 
-    def close(self):
+    def shutdown(self, timeout: float | None = None) -> None:
         import ray
 
         for actor in self.local_engine_actors + self.remote_engine_actors:
