@@ -775,15 +775,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if output_dim is not None:
             shard_offset = sum(self.output_sizes[:loaded_shard_id])
             shard_size = self.output_sizes[loaded_shard_id]
+            shard_offset //= self.tp_size
+            shard_size //= self.tp_size
 
             if isinstance(param, BlockQuantScaleParameter):
                 weight_block_size = getattr(self, "weight_block_size", None)
                 shard_size, shard_offset = adjust_block_scale_shard(
                     weight_block_size, shard_size, shard_offset
                 )
-
-            shard_offset //= self.tp_size
-            shard_size //= self.tp_size
 
             # Special case for quantization.
             # If quantized, we need to adjust the offset and size to account
@@ -903,15 +902,14 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
 
         shard_offset = sum(self.output_sizes[:loaded_shard_id])
         shard_size = self.output_sizes[loaded_shard_id]
+        shard_offset //= self.tp_size
+        shard_size //= self.tp_size
 
         if isinstance(param, BlockQuantScaleParameter):
             weight_block_size = getattr(self, "weight_block_size", None)
             shard_size, shard_offset = adjust_block_scale_shard(
                 weight_block_size, shard_size, shard_offset
             )
-
-        shard_offset //= self.tp_size
-        shard_size //= self.tp_size
 
         param.load_merged_column_weight(
             loaded_weight=loaded_weight,
