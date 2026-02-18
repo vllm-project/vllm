@@ -55,9 +55,11 @@ steps:
   grade: Blocking
   source_file_dependencies:
   - vllm/
+  - tests/detokenizer
   - tests/multimodal
   - tests/utils_
   commands:
+  - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
@@ -547,7 +549,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s -m 'not skip_v1' samplers
+    - pytest -v -s -m samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
@@ -2213,7 +2215,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s -m 'not skip_v1' samplers
+    - pytest -v -s -m samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
