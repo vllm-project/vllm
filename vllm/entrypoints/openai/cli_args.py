@@ -180,15 +180,16 @@ class BaseFrontendArgs:
     @staticmethod
     def add_group_with_arguments(
         parser: FlexibleArgumentParser,
-        cls: type,
-        kwargs: dict[str, Any],
+        group_name: str,
+        group_cls: type,
+        group_kwargs: dict[str, Any],
     ) -> argparse._ArgumentGroup:
         frontend_group = parser.add_argument_group(
-            title="Frontend",
-            description=cls.__doc__,
+            title=group_name,
+            description=group_cls.__doc__,
         )
 
-        for key, value in kwargs.items():
+        for key, value in group_kwargs.items():
             frontend_group.add_argument(f"--{key.replace('_', '-')}", **value)
 
         return frontend_group
@@ -293,7 +294,9 @@ class FrontendArgs(BaseFrontendArgs):
         if "nargs" in frontend_kwargs["disable_access_log_for_endpoints"]:
             del frontend_kwargs["disable_access_log_for_endpoints"]["nargs"]
 
-        BaseFrontendArgs.add_group_with_arguments(parser, FrontendArgs, frontend_kwargs)
+        BaseFrontendArgs.add_group_with_arguments(
+            parser, "Frontend", FrontendArgs, frontend_kwargs
+        )
 
         return parser
 

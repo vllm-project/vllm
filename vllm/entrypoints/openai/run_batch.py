@@ -62,57 +62,6 @@ from vllm.version import __version__ as VLLM_VERSION
 logger = init_logger(__name__)
 
 
-@config
-class BatchFrontendArgs(BaseFrontendArgs):
-    """Arguments for the batch runner frontend."""
-
-    host: str | None = None
-    """Host name for the Prometheus metrics server
-    (only needed if enable-metrics is set)."""
-    port: int = 8000
-    """Port number for the Prometheus metrics server
-    (only needed if enable-metrics is set)."""
-
-    @staticmethod
-    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
-        from vllm.engine.arg_utils import get_kwargs
-
-        frontend_kwargs = get_kwargs(BatchFrontendArgs)
-        frontend_kwargs = BaseFrontendArgs._postprocess_base_args(frontend_kwargs)
-
-        batch_frontend_group = BaseFrontendArgs.add_group_with_arguments(
-            parser, BatchFrontendArgs, frontend_kwargs
-        )
-
-        # Add deprecated arguments for backward compatibility
-        batch_frontend_group.add_argument(
-            "--url",
-            type=str,
-            default="0.0.0.0",
-            help="[DEPRECATED] Host name for the Prometheus metrics server "
-            "(only needed if enable-metrics is set). Use --host instead.",
-            deprecated=True,
-        )
-        batch_frontend_group.add_argument(
-            "--metrics-url",
-            type=str,
-            default="0.0.0.0",
-            help="[DEPRECATED] URL to the Prometheus metrics server "
-            "(only needed if enable-metrics is set). Use --host instead.",
-            deprecated=True,
-        )
-        batch_frontend_group.add_argument(
-            "--metrics-port",
-            type=int,
-            default=8000,
-            help="[DEPRECATED] Port number for the Prometheus metrics server "
-            "(only needed if enable-metrics is set). Use --port instead.",
-            deprecated=True,
-        )
-
-        return parser
-
-
 class BatchTranscriptionRequest(TranscriptionRequest):
     """
     Batch transcription request that uses file_url instead of file.
@@ -262,6 +211,57 @@ class BatchRequestOutput(OpenAIBaseModel):
     # For requests that failed with a non-HTTP error, this will contain more
     # information on the cause of the failure.
     error: Any | None
+
+
+@config
+class BatchFrontendArgs(BaseFrontendArgs):
+    """Arguments for the batch runner frontend."""
+
+    host: str | None = None
+    """Host name for the Prometheus metrics server
+    (only needed if enable-metrics is set)."""
+    port: int = 8000
+    """Port number for the Prometheus metrics server
+    (only needed if enable-metrics is set)."""
+
+    @staticmethod
+    def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
+        from vllm.engine.arg_utils import get_kwargs
+
+        frontend_kwargs = get_kwargs(BatchFrontendArgs)
+        frontend_kwargs = BaseFrontendArgs._postprocess_base_args(frontend_kwargs)
+
+        batch_frontend_group = BaseFrontendArgs.add_group_with_arguments(
+            parser, "BatchFrontend", BatchFrontendArgs, frontend_kwargs
+        )
+
+        # Add deprecated arguments for backward compatibility
+        batch_frontend_group.add_argument(
+            "--url",
+            type=str,
+            default="0.0.0.0",
+            help="[DEPRECATED] Host name for the Prometheus metrics server "
+            "(only needed if enable-metrics is set). Use --host instead.",
+            deprecated=True,
+        )
+        batch_frontend_group.add_argument(
+            "--metrics-url",
+            type=str,
+            default="0.0.0.0",
+            help="[DEPRECATED] URL to the Prometheus metrics server "
+            "(only needed if enable-metrics is set). Use --host instead.",
+            deprecated=True,
+        )
+        batch_frontend_group.add_argument(
+            "--metrics-port",
+            type=int,
+            default=8000,
+            help="[DEPRECATED] Port number for the Prometheus metrics server "
+            "(only needed if enable-metrics is set). Use --port instead.",
+            deprecated=True,
+        )
+
+        return parser
 
 
 def make_arg_parser(parser: FlexibleArgumentParser):
