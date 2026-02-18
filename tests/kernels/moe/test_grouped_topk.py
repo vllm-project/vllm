@@ -32,7 +32,8 @@ from vllm.utils.torch_utils import set_random_seed
     "n_expert,topk,num_expert_group,topk_group",
     [
         (16, 2, 8, 2),
-        (256, 8, 8, 2),
+        (128, 2, 8, 2),
+        (256, 8, 8, 4),
         (384, 8, 1, 1),
         (512, 22, 1, 1),
     ],
