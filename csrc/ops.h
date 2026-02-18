@@ -315,7 +315,9 @@ void silu_and_mul_scaled_fp4_experts_quant(
 void per_token_group_quant_fp8(const torch::Tensor& input,
                                torch::Tensor& output_q, torch::Tensor& output_s,
                                int64_t group_size, double eps, double fp8_min,
-                               double fp8_max, bool scale_ue8m0);
+                               double fp8_max, bool scale_ue8m0,
+                               bool dummy_is_scale_transposed,
+                               bool dummy_is_tma_aligned);
 
 void per_token_group_quant_int8(const torch::Tensor& input,
                                 torch::Tensor& output_q,
