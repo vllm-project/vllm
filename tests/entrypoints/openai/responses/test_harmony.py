@@ -6,7 +6,6 @@ import time
 
 import pytest
 import pytest_asyncio
-import requests
 from openai import BadRequestError, NotFoundError, OpenAI
 from openai_harmony import (
     Message,
@@ -62,7 +61,7 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
     )
     assert response is not None
     print("response: ", response)
@@ -74,7 +73,7 @@ async def test_basic(client: OpenAI, model_name: str):
 async def test_basic_with_instructions(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
         instructions="Respond in Korean.",
     )
     assert response is not None
@@ -116,7 +115,7 @@ async def test_chat(client: OpenAI, model_name: str):
             {"role": "system", "content": "Respond in Korean."},
             {"role": "user", "content": "Hello!"},
             {"role": "assistant", "content": "Hello! How can I help you today?"},
-            {"role": "user", "content": "What is 13 * 24? Explain your answer."},
+            {"role": "user", "content": "What is 123 * 456? Explain your answer."},
         ],
     )
     assert response is not None
@@ -131,7 +130,7 @@ async def test_chat_with_input_type(client: OpenAI, model_name: str):
         input=[
             {
                 "role": "user",
-                "content": [{"type": "input_text", "text": "What is 13*24?"}],
+                "content": [{"type": "input_text", "text": "What is 123 * 456?"}],
             },
         ],
     )
@@ -200,7 +199,7 @@ async def test_store(client: OpenAI, model_name: str):
     for store in [True, False]:
         response = await client.responses.create(
             model=model_name,
-            input="What is 13 * 24?",
+            input="What is 123 * 456?",
             store=store,
         )
         assert response is not None
@@ -219,7 +218,7 @@ async def test_store(client: OpenAI, model_name: str):
 async def test_background(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
         background=True,
     )
     assert response is not None
@@ -256,7 +255,7 @@ async def test_background_cancel(client: OpenAI, model_name: str):
 async def test_stateful_multi_turn(client: OpenAI, model_name: str):
     response1 = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
     )
     assert response1 is not None
     assert response1.status == "completed"
@@ -361,7 +360,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
     # TODO: Add back when web search and code interpreter are available in CI
     prompts = [
         "tell me a story about a cat in 20 words",
-        "What is 13 * 24? Use python to calculate the result.",
+        "What is 123 * 456? Use python to calculate the result.",
         # "When did Jensen found NVIDIA? Search it and answer the year only.",
     ]
 
@@ -513,11 +512,9 @@ async def test_code_interpreter(client: OpenAI, model_name: str):
 
 
 def get_weather(latitude, longitude):
-    response = requests.get(
-        f"https://api.open-meteo.com/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,wind_speed_10m&hourly=temperature_2m,relative_humidity_2m,wind_speed_10m"  # noqa
-    )
-    data = response.json()
-    return data["current"]["temperature_2m"]
+    # Return a static temperature value to avoid flaky SSL/network errors
+    # from calling the external api.open-meteo.com API in CI.
+    return 15.0
 
 
 def get_place_to_travel():
@@ -976,6 +973,9 @@ async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, s
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.dependency(
+    depends=["test_mcp_code_interpreter_streaming[openai/gpt-oss-20b]"]
+)
 async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     """Test MCP tool calling across multiple turns.
 
@@ -992,7 +992,7 @@ async def test_mcp_tool_multi_turn(client: OpenAI, model_name: str, server):
     # First turn - make a calculation
     response1 = await client.responses.create(
         model=model_name,
-        input="Calculate 123 * 456 using python and print the result.",
+        input="Calculate 1234 * 4567 using python tool and print the result.",
         tools=tools,
         temperature=0.0,
         instructions=(
@@ -1117,8 +1117,10 @@ async def test_function_call_with_previous_input_messages(
         model=model_name,
         input="What is the horoscope for Aquarius today?",
         tools=tools,
+        temperature=0.0,
         extra_body={"enable_response_messages": True},
         stream=True,
+        max_output_tokens=1000,
     )
 
     response = None
@@ -1170,6 +1172,7 @@ async def test_function_call_with_previous_input_messages(
     stream_response_2 = await client.responses.create(
         model=model_name,
         tools=tools,
+        temperature=0.0,
         input="",
         extra_body={
             "previous_input_messages": previous_messages,
@@ -1296,16 +1299,17 @@ async def test_system_prompt_override(client: OpenAI, model_name: str):
         # Message structure may vary, skip this specific check
         pass
 
+    custom_system_prompt_2 = (
+        "You are a helpful assistant that always responds in exactly 5 words."
+    )
+
     # Test 3: Test with different custom system prompt
     response_2 = await client.responses.create(
         model=model_name,
         input=[
             {
                 "role": "system",
-                "content": (
-                    "You are a helpful assistant that always "
-                    "responds in exactly 5 words."
-                ),
+                "content": custom_system_prompt_2,
             },
             {"role": "user", "content": "What is the weather like?"},
         ],
@@ -1321,4 +1325,28 @@ async def test_system_prompt_override(client: OpenAI, model_name: str):
     # Allow some flexibility (4-7 words) since the model might not be perfectly precise
     assert 3 <= word_count <= 8, (
         f"Expected around 5 words, got {word_count} words: {response_2.output_text}"
+    )
+
+    # Test 4: Test with structured content
+    response_3 = await client.responses.create(
+        model=model_name,
+        input=[
+            {
+                "role": "system",
+                "content": [{"type": "input_text", "text": custom_system_prompt_2}],
+            },
+            {"role": "user", "content": "What is the weather like?"},
+        ],
+        temperature=0.0,
+    )
+
+    assert response_3 is not None
+    assert response_3.status == "completed"
+    assert response_3.output_text is not None
+
+    # Count words in response (approximately, allowing for punctuation)
+    word_count = len(response_3.output_text.split())
+    # Allow some flexibility (4-7 words) since the model might not be perfectly precise
+    assert 3 <= word_count <= 8, (
+        f"Expected around 5 words, got {word_count} words: {response_3.output_text}"
     )

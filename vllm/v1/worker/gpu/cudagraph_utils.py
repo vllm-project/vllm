@@ -10,23 +10,23 @@ from tqdm import tqdm
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed import get_dcp_group
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import set_forward_context
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
+    build_slot_mappings_by_layer,
+    prepare_dcp_local_seq_lens,
+)
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
 
 
 class CudaGraphManager:
-    def __init__(
-        self,
-        vllm_config: VllmConfig,
-        uses_mrope: bool,
-        device: torch.device,
-    ):
+    def __init__(self, vllm_config: VllmConfig, uses_mrope: bool, device: torch.device):
         self.vllm_config = vllm_config
         self.scheduler_config = vllm_config.scheduler_config
         self.uses_mrope = uses_mrope
@@ -38,11 +38,7 @@ class CudaGraphManager:
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
-        self.cudagraph_mode: CUDAGraphMode
-        if self.compilation_config.cudagraph_mode is None:
-            self.cudagraph_mode = CUDAGraphMode.NONE
-        else:
-            self.cudagraph_mode = self.compilation_config.cudagraph_mode
+        self.cudagraph_mode = self.compilation_config.cudagraph_mode
         self.cudagraph_sizes = get_cudagraph_sizes(
             self.compilation_config.cudagraph_capture_sizes,
             self.max_num_reqs,
@@ -51,7 +47,9 @@ class CudaGraphManager:
         )
 
         self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.pool = torch.cuda.graph_pool_handle()
+        self.pool = None
+        if self.cudagraph_mode != CUDAGraphMode.NONE:
+            self.pool = torch.cuda.graph_pool_handle()
         self.hidden_states: torch.Tensor | None = None
 
     def needs_capture(self) -> bool:
@@ -88,7 +86,7 @@ class CudaGraphManager:
             positions = mrope_positions[:, :num_tokens]
         if inputs_embeds is not None:
             inputs_embeds = inputs_embeds[:num_tokens]
-        attn_metadata = prepare_inputs_to_capture(
+        attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
             input_buffers,
@@ -106,6 +104,7 @@ class CudaGraphManager:
             num_tokens=num_tokens,
             cudagraph_runtime_mode=CUDAGraphMode.NONE,
             num_tokens_across_dp=num_tokens_across_dp,
+            slot_mapping=slot_mappings,
         ):
             hidden_states = model(
                 input_ids=input_ids,
@@ -125,6 +124,7 @@ class CudaGraphManager:
                 num_tokens=num_tokens,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
                 num_tokens_across_dp=num_tokens_across_dp,
+                slot_mapping=slot_mappings,
             ),
             torch.cuda.graph(graph, self.pool),
         ):
@@ -244,7 +244,7 @@ def prepare_inputs_to_capture(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     num_tokens_per_req = num_tokens // num_reqs
 
     query_start_loc_np = np.arange(num_reqs + 1, dtype=np.int32) * num_tokens_per_req
@@ -259,8 +259,28 @@ def prepare_inputs_to_capture(
     input_buffers.seq_lens[:num_reqs] = num_tokens
     input_buffers.seq_lens[num_reqs:] = 0
 
+    try:
+        dcp_group = get_dcp_group()
+        dcp_world_size = dcp_group.world_size
+        dcp_rank = dcp_group.rank_in_group
+    except AssertionError:
+        dcp_world_size = 1
+        dcp_rank = 0
+    if dcp_world_size > 1:
+        prepare_dcp_local_seq_lens(
+            input_buffers.dcp_local_seq_lens,
+            input_buffers.seq_lens,
+            num_reqs,
+            dcp_size=dcp_world_size,
+            dcp_rank=dcp_rank,
+            cp_kv_cache_interleave_size=block_tables.cp_kv_cache_interleave_size,
+        )
+
     input_block_tables = [x[:num_reqs] for x in block_tables.input_block_tables]
     slot_mappings = block_tables.slot_mappings[:, :num_tokens]
+    slot_mappings_by_layer = build_slot_mappings_by_layer(
+        slot_mappings, kv_cache_config
+    )
 
     attn_metadata = build_attn_metadata(
         attn_metadata_builders=attn_metadata_builders,
@@ -268,10 +288,12 @@ def prepare_inputs_to_capture(
         num_tokens=num_tokens,
         query_start_loc_gpu=query_start_loc,
         query_start_loc_cpu=query_start_loc_cpu,
+        max_query_len=num_tokens_per_req,
         seq_lens=input_buffers.seq_lens,
         max_seq_len=max_model_len,
         block_tables=input_block_tables,
         slot_mappings=slot_mappings,
         kv_cache_config=kv_cache_config,
+        dcp_local_seq_lens=input_buffers.dcp_local_seq_lens,
     )
-    return attn_metadata
+    return attn_metadata, slot_mappings_by_layer

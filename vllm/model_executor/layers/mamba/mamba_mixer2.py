@@ -14,7 +14,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -40,7 +40,9 @@ from vllm.model_executor.model_loader.weight_utils import (
     composed_weight_loader,
     sharded_weight_loader,
 )
+from vllm.model_executor.parameter import BasevLLMParameter
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
@@ -218,8 +220,8 @@ def mamba_v2_sharded_weight_loader(
 
 # Adapted from transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:mamba_mixer2]
-@CustomOp.register("mamba_mixer2")
-class MambaMixer2(MambaBase, CustomOp):
+@PluggableLayer.register("mamba_mixer2")
+class MambaMixer2(MambaBase, PluggableLayer):
     """
     Compute ∆, A, B, C, and D the state space parameters and compute
     the `contextualized_states`. A, D are input independent
@@ -277,13 +279,6 @@ class MambaMixer2(MambaBase, CustomOp):
         assert (n_groups % self.tp_size) == 0 or n_groups == 1, (
             "If tensor parallel world size does not divide num_groups, "
             "then num_groups must equal 1."
-        )
-
-        assert (
-            (n_groups % self.tp_size == 0) or self.tp_size == 1 or quant_config is None
-        ), (
-            "Tensor parallel currently supported for quantized models only "
-            "if tensor parallel world size divides num groups."
         )
 
         self.ssm_state_size = ssm_state_size
@@ -403,25 +398,31 @@ class MambaMixer2(MambaBase, CustomOp):
                 },
             )
 
-            if quant_config is None:
-                # - quant layers do not have a weight loader
+            # Create the custom weight loader for Mamba sharding with group
+            # replication. This handles the interleaved projections correctly.
+            mamba_loader = mamba_v2_sharded_weight_loader(
+                [
+                    intermediate_settings,  # for gate
+                    intermediate_settings,
+                    group_shard_settings,
+                    group_shard_settings,
+                    head_settings,  # for dt
+                ],
+                self.tp_size,
+                tp_rank,
+            )
+
+            # Apply the custom weight loader to in_proj.weight
+            # Works for both non-quantized (Parameter) and quantized
+            # (ModelWeightParameter which extends BasevLLMParameter)
+            if isinstance(self.in_proj.weight, BasevLLMParameter):
+                # For BasevLLMParameter subclasses (quantized layers like FP8)
+                # These have a weight_loader property that can be directly set
+                self.in_proj.weight.weight_loader = mamba_loader
+            else:
+                # For standard Parameter (non-quantized layers)
                 delattr(self.in_proj.weight, "weight_loader")
-                set_weight_attrs(
-                    self.in_proj.weight,
-                    {
-                        "weight_loader": mamba_v2_sharded_weight_loader(
-                            [
-                                intermediate_settings,  # for gate
-                                intermediate_settings,
-                                group_shard_settings,
-                                group_shard_settings,
-                                head_settings,  # for dt
-                            ],
-                            self.tp_size,
-                            tp_rank,
-                        )
-                    },
-                )
+                set_weight_attrs(self.in_proj.weight, {"weight_loader": mamba_loader})
 
         # unsqueeze to fit conv1d weights shape into the linear weights shape.
         # Can't do this in `weight_loader` since it already exists in
@@ -502,12 +503,8 @@ class MambaMixer2(MambaBase, CustomOp):
             dim=-1,
         )
 
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        mup_vector: torch.Tensor | None = None,
-    ):
-        pass
+        # Check if running on Blackwell (SM100+) for kernel tuning
+        self.is_blackwell = current_platform.is_device_capability_family(100)
 
     def forward(
         self,
@@ -883,6 +880,7 @@ class MambaMixer2(MambaBase, CustomOp):
                 state_batch_indices=state_indices_tensor_d_input,
                 dst_state_batch_indices=state_indices_tensor_d_output,
                 out=preallocated_ssm_out_d.view(num_decodes, -1, self.head_dim),
+                is_blackwell=self.is_blackwell,
             )
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:

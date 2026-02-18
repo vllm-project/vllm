@@ -114,6 +114,9 @@ class WorkerLoRAManager:
             model = self._adapter_manager.model
             hf_to_vllm_mapper = getattr(model, "hf_to_vllm_mapper", None)
 
+            # Get model-defined prefixes to skip during LoRA loading.
+            lora_skip_prefixes = getattr(model, "lora_skip_prefixes", None)
+
             lora = self._lora_model_cls.from_local_checkpoint(
                 lora_path,
                 expected_lora_modules,
@@ -124,6 +127,7 @@ class WorkerLoRAManager:
                 model_vocab_size=self.vocab_size,
                 tensorizer_config_dict=lora_request.tensorizer_config_dict,
                 weights_mapper=hf_to_vllm_mapper,
+                skip_prefixes=lora_skip_prefixes,
             )
 
         except FileNotFoundError as e:

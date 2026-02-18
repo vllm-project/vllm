@@ -192,6 +192,7 @@ class AyaVisionDummyInputsBuilder(BaseDummyInputsBuilder[AyaVisionProcessingInfo
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         image_size = self.info.get_image_size_with_most_features()
@@ -227,11 +228,8 @@ class AyaVisionMultiModalProcessor(BaseMultiModalProcessor[AyaVisionProcessingIn
 
         # HF processor pops the `num_patches` kwarg, which is needed by vLLM
         if (images := mm_data.get("images")) is not None:
-            parsed_images = (
-                self._get_data_parser()
-                .parse_mm_data({"image": images})
-                .get_items("image", ImageProcessorItems)
-            )
+            mm_items = self.info.parse_mm_data({"image": images}, validate=False)
+            parsed_images = mm_items.get_items("image", ImageProcessorItems)
             image_sizes = [
                 parsed_images.get_image_size(i) for i in range(len(parsed_images))
             ]
@@ -420,7 +418,7 @@ class AyaVisionForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

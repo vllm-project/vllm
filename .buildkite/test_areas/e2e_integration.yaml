@@ -4,27 +4,27 @@ depends_on:
 steps:
 - label: DeepSeek V2-Lite Accuracy
   timeout_in_minutes: 60
-  gpu: h100
+  device: h100
   optional: true
-  num_gpus: 4
+  num_devices: 4
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy
   timeout_in_minutes: 60
-  gpu: h100
+  device: h100
   optional: true
-  num_gpus: 4
+  num_devices: 4
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
   timeout_in_minutes: 60
-  gpu: b200
+  device: b200
   optional: true
-  num_gpus: 2
+  num_devices: 2
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
@@ -33,10 +33,11 @@ steps:
   timeout_in_minutes: 30
   optional: true
   soft_fail: true
-  num_gpus: 2
+  num_devices: 2
   working_dir: "/vllm-workspace"
   source_file_dependencies:
   - vllm/
   - .buildkite/scripts/run-prime-rl-test.sh
   commands:
+    - nvidia-smi
     - bash .buildkite/scripts/run-prime-rl-test.sh

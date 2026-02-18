@@ -7,16 +7,21 @@ from abc import abstractmethod
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    overload,
-)
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, overload
 
 import torch
 from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
+from vllm.multimodal.inputs import MultiModalDataDict
+from vllm.multimodal.parse import (
+    DictEmbeddingItems,
+    EmbeddingItems,
+    MultiModalDataItems,
+    MultiModalDataParser,
+)
+from vllm.renderers import TokenizeParams
 from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -75,8 +80,8 @@ class MultiModalProcessorTimingStats:
     prompt_update_time: float = 0.0
     """Time spent applying prompt updates and finding placeholders (seconds)."""
 
-    total_time: float = 0.0
-    """Total processing time (seconds)."""
+    preprocessor_total_time: float = 0.0
+    """Total preprocessing time (seconds)."""
 
     def to_dict(self) -> dict[str, float]:
         """Convert stats to a dictionary for JSON serialization."""
@@ -85,45 +90,12 @@ class MultiModalProcessorTimingStats:
             "hashing_time": self.hashing_time,
             "cache_lookup_time": self.cache_lookup_time,
             "prompt_update_time": self.prompt_update_time,
-            "total_time": self.total_time,
+            "preprocessor_total_time": self.preprocessor_total_time,
         }
 
 
-def get_timing_stats_from_engine_client(
-    engine_client: Any,
-) -> dict[str, dict[str, float]]:
-    """
-    Get all timing stats from the context associated with the engine client.
-
-    Args:
-        engine_client: The engine client that has input_processor.
-
-    Returns:
-        A dictionary mapping request_id to stats dict.
-    """
-    try:
-        if not engine_client.vllm_config.observability_config.enable_mm_processor_stats:
-            return {}
-    except (AttributeError, RuntimeError):
-        return {}
-
-    try:
-        input_processor = engine_client.input_processor
-        input_preprocessor = input_processor.input_preprocessor
-
-        if hasattr(input_preprocessor, "_get_mm_processor"):
-            mm_processor = input_preprocessor._get_mm_processor()
-            if mm_processor is not None and hasattr(mm_processor, "info"):
-                ctx = mm_processor.info.ctx
-                return ctx.get_all_timing_stats()
-    except (AttributeError, RuntimeError):
-        pass
-
-    return {}
-
-
 @contextmanager
-def timed_operation(ctx: "InputProcessingContext", stage_name: str):
+def timed_preprocessor_operation(ctx: "InputProcessingContext", stage_name: str):
     """
     Context manager to time an operation using the context's timing stats.
 
@@ -157,7 +129,7 @@ def timed_operation(ctx: "InputProcessingContext", stage_name: str):
             stats.cache_lookup_time += elapsed
         elif stage_name == "prompt_update":
             stats.prompt_update_time += elapsed
-        stats.total_time += elapsed
+        stats.preprocessor_total_time += elapsed
 
 
 _T = TypeVar("_T")
@@ -334,6 +306,10 @@ class InputProcessingContext:
 
         return json_map_leaves(_postprocess_one, output)
 
+    def get_merged_mm_kwargs(self, kwargs: Mapping[str, object]):
+        mm_config = self.model_config.get_multimodal_config()
+        return mm_config.merge_mm_processor_kwargs(kwargs)
+
     def call_hf_processor(
         self,
         hf_processor: ProcessorMixin,
@@ -349,8 +325,7 @@ class InputProcessingContext:
         """
         assert callable(hf_processor)
 
-        mm_config = self.model_config.get_multimodal_config()
-        merged_kwargs = mm_config.merge_mm_processor_kwargs(kwargs)
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
 
         allowed_kwargs = get_allowed_kwarg_only_overrides(
             hf_processor,
@@ -498,6 +473,54 @@ class BaseProcessingInfo:
         """
         return self.ctx.get_hf_processor(**kwargs)
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        """Construct the default parameters for tokenization."""
+        model_config = self.ctx.model_config
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=True,
+        )
+
+    @cached_property
+    def default_tok_params(self) -> TokenizeParams:
+        return self.get_default_tok_params()
+
+    def _get_expected_hidden_size(self) -> int | None:
+        """
+        Get expected hidden size for embedding validation if `mm_embeds` are enabled.
+
+        This validates hidden dimensions to prevent a vulnerability where embeddings
+        with correct `ndim` but wrong `shape` could cause crashes at inference time.
+        """
+        model_config = self.ctx.model_config
+        mm_config = model_config.get_multimodal_config()
+
+        if mm_config.enable_mm_embeds:
+            return model_config.get_inputs_embeds_size()
+
+        return None
+
+    def get_data_parser(self) -> MultiModalDataParser:
+        """
+        Constructs a parser to preprocess multi-modal data items
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+
+        You can support additional modalities by creating a subclass
+        of [`MultiModalDataParser`][vllm.multimodal.parse.MultiModalDataParser]
+        that has additional subparsers.
+        """
+        return MultiModalDataParser(
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
+    @cached_property
+    def data_parser(self) -> MultiModalDataParser:
+        return self.get_data_parser()
+
     @property
     def skip_prompt_length_check(self) -> bool:
         return False
@@ -514,13 +537,18 @@ class BaseProcessingInfo:
         """
         raise NotImplementedError
 
-    def get_allowed_mm_limits(self) -> Mapping[str, int]:
-        """Return the maximum allowed number of items for each modality."""
-        supported_mm_limits = self.get_supported_mm_limits()
+    @cached_property
+    def supported_mm_limits(self) -> Mapping[str, int | None]:
+        """The maximum supported number of items for each modality."""
+        return self.get_supported_mm_limits()
+
+    @cached_property
+    def allowed_mm_limits(self) -> Mapping[str, int]:
+        """The maximum allowed number of items for each modality."""
         mm_config = self.ctx.get_mm_config()
 
         allowed_limits = dict[str, int]()
-        for modality, supported_limit in supported_mm_limits.items():
+        for modality, supported_limit in self.supported_mm_limits.items():
             user_limit = mm_config.get_limit_per_prompt(modality)
 
             allowed_limits[modality] = (
@@ -530,6 +558,63 @@ class BaseProcessingInfo:
             )
 
         return allowed_limits
+
+    def validate_num_items(self, modality: str, num_items: int) -> None:
+        """
+        Raise `ValueError` if the number of input items for the given modality
+        is invalid.
+        """
+        supported_limit = self.supported_mm_limits.get(modality, 0)
+        allowed_limit = self.allowed_mm_limits.get(modality, 0)
+
+        if supported_limit is None:
+            supported_limit = allowed_limit
+
+        limit = min(supported_limit, allowed_limit)
+
+        if num_items > limit:
+            msg = f"At most {limit} {modality}(s) may be provided in one prompt."
+
+            if num_items <= supported_limit:
+                msg += " Set `--limit-mm-per-prompt` to increase this limit."
+
+            raise ValueError(msg)
+
+    def parse_mm_data(
+        self,
+        mm_data: MultiModalDataDict,
+        *,
+        validate: bool = True,
+    ) -> MultiModalDataItems:
+        """
+        Normalize
+        [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+        to [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems]
+        before passing them to
+        [`_get_hf_mm_data`][vllm.multimodal.processing.BaseMultiModalProcessor._get_hf_mm_data].
+        """
+        mm_items = self.data_parser.parse_mm_data(mm_data)
+
+        if validate:
+            mm_config = self.ctx.get_mm_config()
+
+            for modality, items in mm_items.items():
+                if isinstance(items, (EmbeddingItems, DictEmbeddingItems)):
+                    if not mm_config.enable_mm_embeds:
+                        raise ValueError(
+                            f"You must set `--enable-mm-embeds` to input "
+                            f"`{modality}_embeds`"
+                        )
+                    if mm_config.get_limit_per_prompt(modality) == 0:
+                        logger.debug(
+                            "Skipping count validation for modality "
+                            "'%s' (embeddings with limit=0)",
+                            modality,
+                        )
+                        continue
+                self.validate_num_items(modality, len(items))
+
+        return mm_items
 
     def get_mm_max_tokens_per_item(
         self,
