@@ -448,7 +448,7 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl", "symm_mem"])
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
     num_layers,
@@ -541,7 +541,7 @@ def _test_rearrange_expert_weights_no_change(
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl", "symm_mem"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
@@ -565,7 +565,7 @@ def test_async_transfer_layer_without_mtp(
 
 
 @pytest.mark.parametrize("world_size", [2, 4])
-@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl"])
+@pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl", "symm_mem"])
 def test_rearrange_expert_weights_no_change(world_size, eplb_communicator):
     """
     Test that when the indices do not change, the weights should remain

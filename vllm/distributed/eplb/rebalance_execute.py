@@ -29,6 +29,13 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+try:
+    import torch.distributed._symmetric_memory as torch_symm_mem
+
+    symm_mem_available = True
+except ImportError:
+    symm_mem_available = False
+
 
 @dataclass
 class RecvMetadata:
@@ -149,6 +156,357 @@ class PyNcclEplbCommunicator(EplbCommunicator):
             self._group_started = False
 
 
+class SymmMemEplbCommunicator(EplbCommunicator):
+    """EPLB communicator backed by symmetric-memory all_to_all_vdev."""
+
+    def __init__(
+        self,
+        ep_group: ProcessGroup,
+        expert_weights: Sequence[torch.Tensor],
+        cuda_stream: torch.cuda.Stream | None = None,
+    ) -> None:
+        self._ep_group = ep_group
+        self._cuda_stream = cuda_stream
+        self._world_size = ep_group.size()
+        self._send_tensors: dict[torch.dtype, list[list[torch.Tensor]]] = {}
+        self._recv_tensors: dict[torch.dtype, list[list[torch.Tensor]]] = {}
+        self._ordered_dtypes: list[torch.dtype] = []
+        self._dtype_to_device: dict[torch.dtype, torch.device] = {}
+        self._symm_send_buffers: dict[torch.dtype, torch.Tensor] = {}
+        self._symm_recv_buffers: dict[torch.dtype, torch.Tensor] = {}
+        self._symm_in_splits: dict[torch.dtype, torch.Tensor] = {}
+        self._symm_out_splits_offsets: dict[torch.dtype, torch.Tensor] = {}
+        # Keep rendezvous handles alive with their tensors.
+        self._symm_send_handles: dict[torch.dtype, object] = {}
+        self._symm_recv_handles: dict[torch.dtype, object] = {}
+        self._symm_in_splits_handles: dict[torch.dtype, object] = {}
+        self._symm_out_splits_offsets_handles: dict[torch.dtype, object] = {}
+        self._chunk_numel_per_peer: dict[torch.dtype, int] = {}
+        for tensor in expert_weights:
+            if tensor.dtype not in self._dtype_to_device:
+                self._ordered_dtypes.append(tensor.dtype)
+            self._dtype_to_device[tensor.dtype] = tensor.device
+        for dtype in self._ordered_dtypes:
+            local_dtype_numel = sum(
+                tensor.numel() for tensor in expert_weights if tensor.dtype == dtype
+            )
+            # Preallocate one symmetric buffer per dtype and chunk sends/recvs
+            # when a round exceeds this capacity.
+            buffer_numel = max(local_dtype_numel, self._world_size)
+            self._chunk_numel_per_peer[dtype] = max(1, buffer_numel // self._world_size)
+            self._ensure_symmetric_buffer(
+                dtype=dtype,
+                device=self._dtype_to_device[dtype],
+                min_numel=buffer_numel,
+                is_send=True,
+            )
+            self._ensure_symmetric_buffer(
+                dtype=dtype,
+                device=self._dtype_to_device[dtype],
+                min_numel=buffer_numel,
+                is_send=False,
+            )
+            self._ensure_split_buffers(
+                dtype=dtype,
+                device=self._dtype_to_device[dtype],
+            )
+
+    def _get_peer_buckets(
+        self,
+        bucket_map: dict[torch.dtype, list[list[torch.Tensor]]],
+        dtype: torch.dtype,
+    ) -> list[list[torch.Tensor]]:
+        peer_buckets = bucket_map.get(dtype)
+        if peer_buckets is None:
+            peer_buckets = [[] for _ in range(self._world_size)]
+            bucket_map[dtype] = peer_buckets
+        return peer_buckets
+
+    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
+        self._get_peer_buckets(self._send_tensors, tensor.dtype)[dst_rank].append(
+            tensor
+        )
+
+    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
+        self._get_peer_buckets(self._recv_tensors, tensor.dtype)[src_rank].append(
+            tensor
+        )
+
+    def _all_to_all_vdev(
+        self,
+        *,
+        dtype: torch.dtype,
+        input_tensor: torch.Tensor,
+        output_tensor: torch.Tensor,
+        in_splits_list: list[int],
+        out_splits_list: list[int],
+    ) -> None:
+        in_splits = self._symm_in_splits[dtype]
+        out_splits_offsets = self._symm_out_splits_offsets[dtype]
+
+        in_splits.copy_(
+            torch.tensor(in_splits_list, device=input_tensor.device, dtype=torch.int64),
+            non_blocking=True,
+        )
+        out_splits = torch.tensor(
+            out_splits_list, device=input_tensor.device, dtype=torch.int64
+        )
+        out_offsets = torch.cumsum(
+            torch.nn.functional.pad(out_splits[:-1], (1, 0)),
+            dim=0,
+        )
+        out_splits_offsets[:, 0].copy_(out_splits, non_blocking=True)
+        out_splits_offsets[:, 1].copy_(out_offsets, non_blocking=True)
+
+        torch.ops.symm_mem.all_to_all_vdev(
+            input_tensor,
+            output_tensor,
+            in_splits,
+            out_splits_offsets,
+            self._ep_group.group_name,
+        )
+
+    @staticmethod
+    def _pack_send_buffer(
+        send_per_peer: list[list[torch.Tensor]],
+        input_buffer: torch.Tensor,
+        in_splits: list[int],
+        send_state: list[tuple[int, int]],
+    ) -> None:
+        assert len(in_splits) == len(send_per_peer)
+        offset = 0
+        for peer_rank, peer_tensors in enumerate(send_per_peer):
+            split = in_splits[peer_rank]
+            if split == 0:
+                continue
+            tensor_idx, elem_offset = send_state[peer_rank]
+            written = 0
+            while written < split:
+                flat = peer_tensors[tensor_idx].reshape(-1)
+                available = flat.numel() - elem_offset
+                to_copy = min(available, split - written)
+                input_buffer[offset + written : offset + written + to_copy].copy_(
+                    flat[elem_offset : elem_offset + to_copy], non_blocking=True
+                )
+                written += to_copy
+                elem_offset += to_copy
+                if elem_offset == flat.numel():
+                    tensor_idx += 1
+                    elem_offset = 0
+            send_state[peer_rank] = (tensor_idx, elem_offset)
+            offset += split
+
+    @staticmethod
+    def _unpack_recv_buffer(
+        output_buffer: torch.Tensor,
+        recv_per_peer: list[list[torch.Tensor]],
+        out_splits: list[int],
+        recv_state: list[tuple[int, int]],
+    ) -> None:
+        assert len(out_splits) == len(recv_per_peer)
+        offset = 0
+        for peer_rank, peer_tensors in enumerate(recv_per_peer):
+            split = out_splits[peer_rank]
+            if split == 0:
+                continue
+            tensor_idx, elem_offset = recv_state[peer_rank]
+            consumed = 0
+            while consumed < split:
+                flat = peer_tensors[tensor_idx].reshape(-1)
+                available = flat.numel() - elem_offset
+                to_copy = min(available, split - consumed)
+                flat[elem_offset : elem_offset + to_copy].copy_(
+                    output_buffer[offset + consumed : offset + consumed + to_copy],
+                    non_blocking=True,
+                )
+                consumed += to_copy
+                elem_offset += to_copy
+                if elem_offset == flat.numel():
+                    tensor_idx += 1
+                    elem_offset = 0
+            recv_state[peer_rank] = (tensor_idx, elem_offset)
+            offset += split
+
+    def _ensure_symmetric_buffer(
+        self,
+        *,
+        dtype: torch.dtype,
+        device: torch.device,
+        min_numel: int,
+        is_send: bool,
+    ) -> torch.Tensor:
+        if is_send:
+            buffers = self._symm_send_buffers
+            handles = self._symm_send_handles
+        else:
+            buffers = self._symm_recv_buffers
+            handles = self._symm_recv_handles
+        buf = buffers.get(dtype)
+        if buf is not None and buf.numel() >= min_numel:
+            return buf
+        # all_to_all_vdev requires symmetric tensors, so allocate through
+        # torch symmetric-memory allocator and rendezvous collectively.
+        buf = torch_symm_mem.empty(min_numel, device=device, dtype=dtype)
+        handle = torch_symm_mem.rendezvous(buf, self._ep_group.group_name)
+        buffers[dtype] = buf
+        handles[dtype] = handle
+        return buf
+
+    def _ensure_split_buffers(
+        self, *, dtype: torch.dtype, device: torch.device
+    ) -> None:
+        if dtype not in self._symm_in_splits:
+            in_splits = torch_symm_mem.empty(
+                self._world_size, device=device, dtype=torch.int64
+            )
+            self._symm_in_splits[dtype] = in_splits
+            self._symm_in_splits_handles[dtype] = torch_symm_mem.rendezvous(
+                in_splits, self._ep_group.group_name
+            )
+        if dtype not in self._symm_out_splits_offsets:
+            out_splits_offsets = torch_symm_mem.empty(
+                (self._world_size, 2), device=device, dtype=torch.int64
+            )
+            self._symm_out_splits_offsets[dtype] = out_splits_offsets
+            self._symm_out_splits_offsets_handles[dtype] = torch_symm_mem.rendezvous(
+                out_splits_offsets, self._ep_group.group_name
+            )
+
+    def _run_chunk_round(
+        self,
+        *,
+        dtype: torch.dtype,
+        per_peer_chunk: int,
+        send_per_peer: list[list[torch.Tensor]],
+        recv_per_peer: list[list[torch.Tensor]],
+        input_buffer: torch.Tensor,
+        output_buffer: torch.Tensor,
+        remaining_send: list[int],
+        remaining_recv: list[int],
+        send_state: list[tuple[int, int]],
+        recv_state: list[tuple[int, int]],
+    ) -> bool:
+        in_splits = [
+            min(remaining_send[peer], per_peer_chunk)
+            for peer in range(self._world_size)
+        ]
+        out_splits = [
+            min(remaining_recv[peer], per_peer_chunk)
+            for peer in range(self._world_size)
+        ]
+        if sum(in_splits) == 0 and sum(out_splits) == 0:
+            return False
+        if sum(in_splits) != sum(out_splits):
+            raise RuntimeError(
+                "EPLB symm_mem chunk mismatch: total in_splits "
+                f"{sum(in_splits)} != total out_splits {sum(out_splits)}"
+            )
+        self._pack_send_buffer(
+            send_per_peer,
+            input_buffer,
+            in_splits,
+            send_state,
+        )
+        self._all_to_all_vdev(
+            dtype=dtype,
+            input_tensor=input_buffer,
+            output_tensor=output_buffer,
+            in_splits_list=in_splits,
+            out_splits_list=out_splits,
+        )
+        self._unpack_recv_buffer(
+            output_buffer,
+            recv_per_peer,
+            out_splits,
+            recv_state,
+        )
+        for peer in range(self._world_size):
+            remaining_send[peer] -= in_splits[peer]
+            remaining_recv[peer] -= out_splits[peer]
+        return True
+
+    def execute(self) -> None:
+        try:
+            for dtype in self._ordered_dtypes:
+                send_per_peer = self._send_tensors.get(
+                    dtype, [[] for _ in range(self._world_size)]
+                )
+                recv_per_peer = self._recv_tensors.get(
+                    dtype, [[] for _ in range(self._world_size)]
+                )
+                sample_tensor = None
+                for peer_tensors in send_per_peer:
+                    if peer_tensors:
+                        sample_tensor = peer_tensors[0]
+                        break
+                if sample_tensor is None:
+                    for peer_tensors in recv_per_peer:
+                        if peer_tensors:
+                            sample_tensor = peer_tensors[0]
+                            break
+                device = (
+                    sample_tensor.device
+                    if sample_tensor is not None
+                    else self._dtype_to_device[dtype]
+                )
+                input_buffer = self._ensure_symmetric_buffer(
+                    dtype=dtype,
+                    device=device,
+                    min_numel=self._chunk_numel_per_peer[dtype] * self._world_size,
+                    is_send=True,
+                )
+                output_buffer = self._ensure_symmetric_buffer(
+                    dtype=dtype,
+                    device=device,
+                    min_numel=self._chunk_numel_per_peer[dtype] * self._world_size,
+                    is_send=False,
+                )
+                self._ensure_split_buffers(dtype=dtype, device=device)
+                per_peer_chunk = self._chunk_numel_per_peer[dtype]
+                full_in_splits = [
+                    sum(t.numel() for t in peer) for peer in send_per_peer
+                ]
+                remaining_send = full_in_splits.copy()
+                remaining_recv = [
+                    sum(t.numel() for t in peer) for peer in recv_per_peer
+                ]
+                send_state = [(0, 0) for _ in range(self._world_size)]
+                recv_state = [(0, 0) for _ in range(self._world_size)]
+
+                if self._cuda_stream is not None:
+                    with torch.cuda.stream(self._cuda_stream):
+                        while self._run_chunk_round(
+                            dtype=dtype,
+                            per_peer_chunk=per_peer_chunk,
+                            send_per_peer=send_per_peer,
+                            recv_per_peer=recv_per_peer,
+                            input_buffer=input_buffer,
+                            output_buffer=output_buffer,
+                            remaining_send=remaining_send,
+                            remaining_recv=remaining_recv,
+                            send_state=send_state,
+                            recv_state=recv_state,
+                        ):
+                            pass
+                else:
+                    while self._run_chunk_round(
+                        dtype=dtype,
+                        per_peer_chunk=per_peer_chunk,
+                        send_per_peer=send_per_peer,
+                        recv_per_peer=recv_per_peer,
+                        input_buffer=input_buffer,
+                        output_buffer=output_buffer,
+                        remaining_send=remaining_send,
+                        remaining_recv=remaining_recv,
+                        send_state=send_state,
+                        recv_state=recv_state,
+                    ):
+                        pass
+        finally:
+            self._send_tensors.clear()
+            self._recv_tensors.clear()
+
+
 def create_eplb_communicator(
     ep_group: ProcessGroup,
     backend: str,
@@ -189,6 +547,40 @@ def create_eplb_communicator(
                     "falling back to torch.distributed.",
                     exc,
                 )
+    elif backend == "symm_mem":
+        if not symm_mem_available:
+            logger.warning(
+                "EPLB communicator 'symm_mem' requested but torch symmetric memory "
+                "is unavailable; falling back to torch.distributed."
+            )
+            return TorchDistributedEplbCommunicator(ep_group=ep_group)
+        if not hasattr(torch.ops.symm_mem, "all_to_all_vdev"):
+            logger.warning(
+                "EPLB communicator 'symm_mem' requested but symm_mem all_to_all_vdev "
+                "is unavailable; falling back to torch.distributed."
+            )
+            return TorchDistributedEplbCommunicator(ep_group=ep_group)
+        try:
+            if torch_symm_mem.is_nvshmem_available():
+                torch_symm_mem.set_backend("NVSHMEM")
+        except Exception as exc:
+            logger.warning(
+                "Failed to configure NVSHMEM backend for EPLB symm_mem (%s). "
+                "Proceeding with default symmetric-memory backend.",
+                exc,
+            )
+        try:
+            torch_symm_mem.enable_symm_mem_for_group(ep_group.group_name)
+            return SymmMemEplbCommunicator(
+                ep_group=ep_group,
+                expert_weights=expert_weights,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to initialize SymmMemEplbCommunicator (%s); "
+                "falling back to torch.distributed.",
+                exc,
+            )
     return TorchDistributedEplbCommunicator(ep_group=ep_group)
 
 

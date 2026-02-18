@@ -36,7 +36,7 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
-EPLBCommunicatorBackend = Literal["torch", "pynccl"]
+EPLBCommunicatorBackend = Literal["torch", "pynccl", "symm_mem"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -87,6 +87,7 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch": Use torch.distributed
     - "pynccl": Use PyNccl send/recv
+    - "symm_mem": Use torch symmetric-memory all_to_all_vdev
     """
 
     @model_validator(mode="after")
