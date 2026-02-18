@@ -323,10 +323,7 @@ class RequestRunner:
             assert kv_connector_metadata is not None
             assert isinstance(kv_connector_metadata, OffloadingConnectorMetadata)
 
-            if scheduler_output.preempted_req_ids:
-                self.worker_connector.handle_preemptions(
-                    scheduler_output.preempted_req_ids
-                )
+            self.worker_connector.handle_preemptions(kv_connector_metadata)
 
             self.worker_connector.bind_connector_metadata(kv_connector_metadata)
             self.worker_connector.start_load_kv(self._dummy_ctx)
