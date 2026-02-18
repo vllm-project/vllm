@@ -196,14 +196,47 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
         state.pop("optimized_call")
         state.pop("shape_env")
         state.pop("vllm_backend", None)
-        for node in state["graph_module"].graph.nodes:
-            node.meta.pop("source_fn_stack", None)
-            node.meta.pop("nn_module_stack", None)
-        for name, submod in state["graph_module"].named_children():
-            if hasattr(submod, "graph"):
-                for node in submod.graph.nodes:
-                    node.meta.pop("source_fn_stack", None)
-                    node.meta.pop("nn_module_stack", None)
+
+        def _strip_unpicklable_node_meta(graph_module: torch.fx.GraphModule) -> None:
+            """Remove metadata containing raw torch.fx.Node references.
+
+            GraphPickler raises "Unexpected raw Node during pickling" when
+            node.meta contains raw Node objects.  The default key filter
+            already strips source_fn_stack / nn_module_stack /
+            fwd_source_fn_stack, but other keys (e.g. from_node on newer
+            PyTorch nightlies, or custom keys injected by passes) can
+            also carry Node references.  Walk every value and drop any
+            key whose value tree contains a raw Node.
+            """
+            def _has_node_ref(obj: Any, depth: int = 0) -> bool:
+                if depth > 8:
+                    return False
+                if isinstance(obj, torch.fx.Node):
+                    return True
+                if isinstance(obj, dict):
+                    return any(_has_node_ref(v, depth + 1) for v in obj.values())
+                if isinstance(obj, (list, tuple)):
+                    return any(_has_node_ref(v, depth + 1) for v in obj)
+                return False
+
+            for node in graph_module.graph.nodes:
+                keys_to_remove = [
+                    k for k, v in node.meta.items()
+                    if _has_node_ref(v)
+                ]
+                for k in keys_to_remove:
+                    del node.meta[k]
+            for _name, submod in graph_module.named_children():
+                if hasattr(submod, "graph"):
+                    for node in submod.graph.nodes:
+                        keys_to_remove = [
+                            k for k, v in node.meta.items()
+                            if _has_node_ref(v)
+                        ]
+                        for k in keys_to_remove:
+                            del node.meta[k]
+
+        _strip_unpicklable_node_meta(state["graph_module"])
 
         graph_reducer_override = GraphPickler.reducer_override
 
@@ -217,6 +250,11 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
             ):
                 return obj._torch_unpickler, (obj._torch_handler_name,)
             if isinstance(obj, FakeTensorMode):
+                return type(None), ()
+            # Handle raw torch.fx.Node references that survived metadata
+            # stripping (e.g. nested inside complex structures).  Serialize
+            # as None to avoid GraphPickler's "Unexpected raw Node" assertion.
+            if isinstance(obj, torch.fx.Node):
                 return type(None), ()
             return graph_reducer_override(self, obj)
 
