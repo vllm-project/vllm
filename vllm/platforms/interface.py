@@ -346,6 +346,14 @@ class Platform:
         return (current_capability.to_int() // 10) == (capability // 10)
 
     @classmethod
+    def is_blackwell_class(cls, device_id: int = 0) -> bool:
+        """Check if device is a Blackwell-class GPU (SM10x, SM11x, SM12x)."""
+        capability = cls.get_device_capability(device_id=device_id)
+        if capability is None:
+            return False
+        return capability.major in (10, 11, 12)
+
+    @classmethod
     def get_device_name(cls, device_id: int = 0) -> str:
         """Get the name of a device."""
         raise NotImplementedError
