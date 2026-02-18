@@ -102,8 +102,8 @@ Priority is **1 = highest** (tried first).
 
 | Priority | Backend |
 |----------|---------|
-| 1 | `FLASHINFER` |
-| 2 | `FLASH_ATTN` |
+| 1 | `FLASH_ATTN` |
+| 2 | `FLASHINFER` |
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 
@@ -111,14 +111,24 @@ Priority is **1 = highest** (tried first).
 
 | Priority | Backend |
 |----------|---------|
-| 1 | `FLASH_ATTN` |
-| 2 | `FLASHINFER` |
+| 1 | `FLASHINFER` |
+| 2 | `FLASH_ATTN` |
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 
 ### MLA Attention (DeepSeek-style)
 
 **Blackwell (SM 10.x):**
+
+| Priority | Backend |
+|----------|---------|
+| 1 | `FLASH_ATTN_MLA` |
+| 2 | `FLASHMLA` |
+| 3 | `FLASHINFER_MLA` |
+| 4 | `TRITON_MLA` |
+| 5 | `FLASHMLA_SPARSE` |
+
+**Ampere/Hopper (SM 8.x-9.x):**
 
 | Priority | Backend |
 |----------|---------|
@@ -129,16 +139,6 @@ Priority is **1 = highest** (tried first).
 | 5 | `TRITON_MLA` |
 | 6 | `FLASHMLA_SPARSE` |
 | 7 | `FLASHINFER_MLA_SPARSE` |
-
-**Ampere/Hopper (SM 8.x-9.x):**
-
-| Priority | Backend |
-|----------|---------|
-| 1 | `FLASH_ATTN_MLA` |
-| 2 | `FLASHMLA` |
-| 3 | `FLASHINFER_MLA` |
-| 4 | `TRITON_MLA` |
-| 5 | `FLASHMLA_SPARSE` |
 
 > **Note:** ROCm and CPU platforms have their own selection logic. See the platform-specific documentation for details.
 

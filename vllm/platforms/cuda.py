@@ -48,8 +48,9 @@ def _get_backend_priorities(
     num_heads: int | None = None,
 ) -> list[AttentionBackendEnum]:
     """Get backend priorities with lazy import to avoid circular dependency."""
+    is_blackwell = device_capability.major in (10, 11, 12)
     if use_mla:
-        if device_capability.major == 10:
+        if is_blackwell:
             # Prefer FlashInfer at low head counts (FlashMLA uses padding)
             if num_heads is not None and num_heads <= 16:
                 sparse_backends = [
@@ -78,7 +79,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
-        if device_capability.major == 10:
+        if is_blackwell:
             return [
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.FLASH_ATTN,
