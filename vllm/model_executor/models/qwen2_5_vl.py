@@ -305,7 +305,6 @@ class Qwen2_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
-        workspace_buffer: torch.Tensor | None = None,  # Only used for FlashInfer
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -347,7 +346,6 @@ class Qwen2_5_VisionAttention(nn.Module):
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
-            workspace_buffer=workspace_buffer,
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)

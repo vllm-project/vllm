@@ -244,8 +244,8 @@ def test_mha_attn_varlen_forward_flashinfer(
     """Test MMEncoderAttention varlen forward with FLASHINFER backend (head_size=72).
 
     Exercises the path that uses --mm-encoder-attn-backend=FLASHINFER with
-    workspace_buffer, recomputed cu_seqlens, max_seqlen, and sequence_lengths
-    as in qwen3_vl vision encoder.
+    recomputed cu_seqlens, max_seqlen, and sequence_lengths as in qwen3_vl
+    vision encoder.
     """
     pytest.importorskip("flashinfer")
 
@@ -310,18 +310,12 @@ def test_mha_attn_varlen_forward_flashinfer(
             device, dtype=torch.int32, non_blocking=True
         )
 
-        workspace_buffer = torch.zeros(
-            128 * 1024 * 1024,
-            dtype=torch.uint8,
-            device=device,
-        )
         scale = 1.0 / head_size**0.5
         attn = MMEncoderAttention(
             num_heads,
             head_size,
             scale=scale,
             num_kv_heads=num_heads,
-            workspace_buffer=workspace_buffer,
         )
         assert attn.attn_backend == AttentionBackendEnum.FLASHINFER
 
