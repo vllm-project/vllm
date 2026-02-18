@@ -239,12 +239,6 @@ class BatchFrontendArgs(BaseFrontendArgs):
     url: str = "0.0.0.0"
     """[DEPRECATED] Host name for the Prometheus metrics server
     (only needed if enable-metrics is set). Use --host instead."""
-    metrics_url: str = "0.0.0.0"
-    """[DEPRECATED] URL to the Prometheus metrics server
-    (only needed if enable-metrics is set). Use --host instead."""
-    metrics_port: int = 8000
-    """[DEPRECATED] Port number for the Prometheus metrics server
-    (only needed if enable-metrics is set). Use --port instead."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -261,8 +255,6 @@ class BatchFrontendArgs(BaseFrontendArgs):
         frontend_kwargs["enable_metrics"]["action"] = "store_true"
 
         frontend_kwargs["url"]["deprecated"] = True
-        frontend_kwargs["metrics_url"]["deprecated"] = True
-        frontend_kwargs["metrics_port"]["deprecated"] = True
         return frontend_kwargs
 
 
