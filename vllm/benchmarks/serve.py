@@ -26,6 +26,7 @@ import json
 import os
 import random
 import shutil
+import ssl
 import time
 import uuid
 import warnings
@@ -60,11 +61,14 @@ TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) a
 
 
 async def get_first_model_from_server(
-    base_url: str, headers: dict | None = None
+    base_url: str,
+    headers: dict | None = None,
+    ssl_context: ssl.SSLContext | bool | None = None,
 ) -> tuple[str, str]:
     """Fetch the first model from the server's /v1/models endpoint."""
     models_url = f"{base_url}/v1/models"
-    async with aiohttp.ClientSession() as session:
+    connector = aiohttp.TCPConnector(ssl=ssl_context)
+    async with aiohttp.ClientSession(connector=connector) as session:
         try:
             async with session.get(models_url, headers=headers) as response:
                 response.raise_for_status()
@@ -419,16 +423,19 @@ def calculate_metrics(
             output_len = outputs[i].output_tokens
 
             if not output_len:
-                # We use the tokenizer to count the number of output tokens
-                # for some serving backends instead of looking at
-                # len(outputs[i].itl) since multiple output tokens may be
-                # bundled together
-                # Note : this may inflate the output token count slightly
-                output_len = len(
-                    tokenizer(
-                        outputs[i].generated_text, add_special_tokens=False
-                    ).input_ids
-                )
+                if tokenizer is None:
+                    output_len = 1
+                else:
+                    # We use the tokenizer to count the number of output tokens
+                    # for some serving backends instead of looking at
+                    # len(outputs[i].itl) since multiple output tokens may be
+                    # bundled together
+                    # Note : this may inflate the output token count slightly
+                    output_len = len(
+                        tokenizer(
+                            outputs[i].generated_text, add_special_tokens=False
+                        ).input_ids
+                    )
             actual_output_lens.append(output_len)
             total_input += input_requests[i].prompt_len
             tpot = 0
@@ -619,6 +626,7 @@ async def benchmark(
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
+    ssl_context: ssl.SSLContext | bool | None = None,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -626,6 +634,8 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {endpoint_type}") from None
 
     # Reuses connections across requests to reduce TLS handshake overhead.
+    # Use ssl_context if provided, otherwise default to True for https URLs
+    ssl_setting = ssl_context if ssl_context is not None else ("https://" in api_url)
     connector = aiohttp.TCPConnector(
         limit=max_concurrency or 0,
         limit_per_host=max_concurrency or 0,
@@ -634,7 +644,7 @@ async def benchmark(
         keepalive_timeout=60,
         enable_cleanup_closed=True,
         force_close=False,
-        ssl=("https://" in api_url),
+        ssl=ssl_setting,
     )
 
     session = aiohttp.ClientSession(
@@ -912,7 +922,7 @@ async def benchmark(
         print("{:<40} {:<10.2f}".format("Request rate configured (RPS):", request_rate))
     print("{:<40} {:<10.2f}".format("Benchmark duration (s):", benchmark_duration))
     print("{:<40} {:<10}".format("Total input tokens:", metrics.total_input))
-    if isinstance(metrics, BenchmarkMetrics):
+    if isinstance(metrics, BenchmarkMetrics) and tokenizer:
         print("{:<40} {:<10}".format("Total generated tokens:", metrics.total_output))
     print(
         "{:<40} {:<10.2f}".format(
@@ -926,16 +936,18 @@ async def benchmark(
             )
         )
     if isinstance(metrics, BenchmarkMetrics):
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Output token throughput (tok/s):", metrics.output_throughput
+        if tokenizer:
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Output token throughput (tok/s):", metrics.output_throughput
+                )
             )
-        )
-        print(
-            "{:<40} {:<10.2f}".format(
-                "Peak output token throughput (tok/s):", metrics.max_output_tokens_per_s
+            print(
+                "{:<40} {:<10.2f}".format(
+                    "Peak output token throughput (tok/s):",
+                    metrics.max_output_tokens_per_s,
+                )
             )
-        )
         print(
             "{:<40} {:<10.2f}".format(
                 "Peak concurrent requests:", metrics.max_concurrent_requests
@@ -947,11 +959,12 @@ async def benchmark(
                     "RTFx (Inverse Real-Time Factor):", metrics.rtfx
                 )
             )
-    print(
-        "{:<40} {:<10.2f}".format(
-            "Total token throughput (tok/s):", metrics.total_token_throughput
+    if tokenizer:
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Total token throughput (tok/s):", metrics.total_token_throughput
+            )
         )
-    )
 
     if isinstance(metrics, BenchmarkMetrics):
         result = {
@@ -1040,7 +1053,7 @@ async def benchmark(
             print("{:<40} {:<10.2f}".format(f"P{p_word} {metric_name} (ms):", value))
             result[f"p{p_word}_{metric_attribute_name}_ms"] = value
 
-    if task_type == TaskType.GENERATION:
+    if task_type == TaskType.GENERATION and tokenizer:
         process_one_metric("ttft", "TTFT", "Time to First Token")
         process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
         process_one_metric("itl", "ITL", "Inter-token Latency")
@@ -1301,11 +1314,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "results in a more uniform arrival of requests.",
     )
     parser.add_argument(
-        "--trust-remote-code",
-        action="store_true",
-        help="Trust remote code from huggingface",
-    )
-    parser.add_argument(
         "--disable-tqdm",
         action="store_true",
         help="Specify to disable tqdm progress bar.",
@@ -1512,6 +1520,20 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=json.loads,
         default=None,
     )
+    parser.add_argument(
+        "--skip-tokenizer-init",
+        action="store_true",
+        default=False,
+        help="Skip initialization of tokenizer and detokenizer",
+    )
+
+    parser.add_argument(
+        "--insecure",
+        action="store_true",
+        default=False,
+        help="Disable SSL certificate verification. Use this option when "
+        "connecting to servers with self-signed certificates.",
+    )
 
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
@@ -1564,23 +1586,38 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 raise ValueError("Invalid header format. Please use KEY=VALUE format.")
 
+    # SSL context configuration
+    ssl_context: ssl.SSLContext | bool | None = None
+    if args.insecure:
+        # Disable SSL certificate verification
+        ssl_context = False
+    elif "https://" in base_url:
+        # Use default SSL context for HTTPS
+        ssl_context = True
+
     # Fetch model from server if not specified
     if args.model is None:
         print("Model not specified, fetching first model from server...")
-        model_name, model_id = await get_first_model_from_server(base_url, headers)
+        model_name, model_id = await get_first_model_from_server(
+            base_url, headers, ssl_context
+        )
         print(f"First model name: {model_name}, first model id: {model_id}")
     else:
         model_name = args.served_model_name
         model_id = args.model
 
-    tokenizer_id = args.tokenizer if args.tokenizer is not None else model_id
-    tokenizer_mode = args.tokenizer_mode
-
-    tokenizer = get_tokenizer(
-        tokenizer_id,
-        tokenizer_mode=tokenizer_mode,
-        trust_remote_code=args.trust_remote_code,
-    )
+    if args.skip_tokenizer_init:
+        tokenizer_id = None
+        tokenizer_mode = None
+        tokenizer = None
+    else:
+        tokenizer_id = args.tokenizer if args.tokenizer is not None else model_id
+        tokenizer_mode = args.tokenizer_mode
+        tokenizer = get_tokenizer(
+            tokenizer_id,
+            tokenizer_mode=tokenizer_mode,
+            trust_remote_code=args.trust_remote_code,
+        )
 
     if args.dataset_name is None:
         raise ValueError(
@@ -1691,6 +1728,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_start_rps=args.ramp_up_start_rps,
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
+        ssl_context=ssl_context,
     )
 
     # Save config and results to json

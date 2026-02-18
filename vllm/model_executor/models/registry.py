@@ -208,6 +208,8 @@ _EMBEDDING_MODELS = {
     "BertModel": ("bert", "BertEmbeddingModel"),
     "BertSpladeSparseEmbeddingModel": ("bert", "BertSpladeSparseEmbeddingModel"),
     "HF_ColBERT": ("colbert", "ColBERTModel"),
+    "ColBERTModernBertModel": ("colbert", "ColBERTModernBertModel"),
+    "ColBERTJinaRobertaModel": ("colbert", "ColBERTJinaRobertaModel"),
     "DeciLMForCausalLM": ("nemotron_nas", "DeciLMForCausalLM"),
     "Gemma2Model": ("gemma2", "Gemma2ForCausalLM"),
     "Gemma3TextModel": ("gemma3", "Gemma3Model"),
@@ -252,6 +254,8 @@ _EMBEDDING_MODELS = {
     ),
     "Phi3VForCausalLM": ("phi3v", "Phi3VForCausalLM"),
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
+    "ColQwen3": ("colqwen3", "ColQwen3Model"),
+    "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
@@ -325,6 +329,7 @@ _MULTIMODAL_MODELS = {
         "ernie45_vl",
         "Ernie4_5_VLMoeForConditionalGeneration",
     ),
+    "FunASRForConditionalGeneration": ("funasr", "FunASRForConditionalGeneration"),  # noqa: E501
     "FunAudioChatForConditionalGeneration": (
         "funaudiochat",
         "FunAudioChatForConditionalGeneration",
@@ -424,6 +429,8 @@ _MULTIMODAL_MODELS = {
     ),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
+    "Ovis2_6ForCausalLM": ("ovis2_5", "Ovis2_5"),
+    "Ovis2_6_MoeForCausalLM": ("ovis2_5", "Ovis2_5"),
     "PaddleOCRVLForConditionalGeneration": (
         "paddleocr_vl",
         "PaddleOCRVLForConditionalGeneration",
