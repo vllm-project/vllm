@@ -115,7 +115,7 @@ class SchedulerConfig:
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
-    scheduler_cls: str | type[object] = Field(default=None)
+    scheduler_cls: str | type[object] | None = Field(default=None)
     """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
@@ -128,7 +128,7 @@ class SchedulerConfig:
     and starting configuration.
     """
 
-    async_scheduling: bool = Field(default=None)
+    async_scheduling: bool | None = Field(default=None)
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
     """
