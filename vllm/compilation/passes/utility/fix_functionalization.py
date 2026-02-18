@@ -282,11 +282,10 @@ class FixFunctionalizationPass(VllmInductorPass):
                 )
                 fn_node = graph.call_function(function, args=args)
 
-        # TODO (Rohan138): make this a separate function maybe?
-        # TODO (Rohan138): does this handle multiple getitem[0] nodes?
-        # do we know for sure that those have been deduplicated?
-        # Replace result at getitem[0] of the auto-functionalized node
-        # with the result of the new node if the getitem[0] node exists
+        # If the function returns a value as well as mutating args inplace,
+        # the functionalized node will have a getitem[0] user that holds this value
+        # Replace getitem[0] user of the auto-functionalized node
+        # with the new defunctionalized node directly if it exists
         users = self.getitem_users(node)
         if 0 in users:
             user = users[0]

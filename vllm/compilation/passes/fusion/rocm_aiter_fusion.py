@@ -587,12 +587,6 @@ def _rocm_aiter_triton_qk_rope_reshape_and_cache_impl(
         if is_fp8_kv_cache:
             key_cache = key_cache.view(key_cache_og_dtype)
             value_cache = value_cache.view(value_cache_og_dtype)
-    # TODO (Rohan138): do I need an else here? To do RoPE during the dummy forward
-    # when the slot_mappings haven't been initialized yet?
-    # I assume not, because this will return the original qkv anyway,
-    # and this is all inside a custom op so Inductor shouldn't
-    # know what we're doing to the tensors inside the custom op
-    # especially since the RoPE would be inplace as well
 
     dummy = torch.empty(0, device=kv_cache.device, dtype=kv_cache.dtype)
     return dummy
@@ -682,8 +676,6 @@ class RopeReshapeKVCachePattern:
             k = k.view(-1, self.num_kv_heads, self.head_size)
             v = v.view(-1, self.num_kv_heads, self.head_size_v)
             dummy = torch.ops.vllm.unified_kv_cache_update(k, v, self.layer_name)
-            # Note: dummy needs to be the first output due to an Inductor bug,
-            # see https://github.com/vllm-project/vllm/issues/33666
             return dummy, q, k, v
 
         def replacement(
