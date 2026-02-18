@@ -523,6 +523,11 @@ class FusedMoE(CustomOp):
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
+        self.model_type = (
+            self.vllm_config.model_config.hf_config.model_type
+            if self.vllm_config.model_config is not None
+            else None
+        )
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
         hidden_size = maybe_roundup_hidden_size(
@@ -530,11 +535,7 @@ class FusedMoE(CustomOp):
             act_dtype=moe_in_dtype,
             moe_parallel_config=self.moe_parallel_config,
             is_lora_enabled=vllm_config.lora_config is not None,
-            model_type=(
-                self.vllm_config.model_config.hf_config.model_type
-                if self.vllm_config.model_config is not None
-                else None
-            ),
+            model_type=self.model_type,
             is_mxfp4_quant=(
                 quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
             ),
@@ -1060,8 +1061,12 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
-        if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
+        # for gpt-oss all experts are combined
+        if (
+            self.quant_config
+            and self.quant_config.get_name() == "mxfp4"
+            and self.model_type == "gpt_oss"
+        ):
             if "bias" in weight_name:
                 dim1 = loaded_weight.shape[1]
                 param.data[:, :dim1].copy_(loaded_weight)

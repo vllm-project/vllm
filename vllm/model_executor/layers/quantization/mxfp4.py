@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoeWeightScaleSupported,
     MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
@@ -357,7 +358,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
-        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        # Add the quantization method to ensure the weight scales are loaded in properly
+        set_weight_attrs(
+            w13_weight_scale,
+            {
+                **extra_weight_attrs,
+                "quant_method": FusedMoeWeightScaleSupported.BLOCK.value,
+            },
+        )
 
         w13_bias = torch.nn.Parameter(
             torch.zeros(
@@ -393,7 +401,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
-        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        # Add the quantization method to ensure the weight scales are loaded in properly
+        set_weight_attrs(
+            w2_weight_scale,
+            {
+                **extra_weight_attrs,
+                "quant_method": FusedMoeWeightScaleSupported.BLOCK.value,
+            },
+        )
 
         w2_bias = torch.nn.Parameter(
             torch.zeros(
