@@ -621,6 +621,8 @@ class Qwen3NextForCausalLMConfig(VerifyAndUpdateConfig):
                 cache_config.mamba_ssm_cache_dtype,
             )
             cache_config.mamba_ssm_cache_dtype = "float32"
+        else:
+            Qwen3_5ForConditionalGenerationConfig.verify_and_update_config(vllm_config)
 
 
 class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
