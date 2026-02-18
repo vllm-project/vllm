@@ -159,10 +159,12 @@ class StructuredOutputManager:
         #
         # TODO: we still need to handle xgrammar compilation failures,
         # though it should be unlikely as we test that up front as well.
-        request_type, grammar_spec = key
+        request_type, grammar_spec, whitespace_pattern = key
 
         assert self.backend is not None
-        return self.backend.compile_grammar(request_type, grammar_spec)
+        return self.backend.compile_grammar(
+            request_type, grammar_spec, whitespace_pattern=whitespace_pattern
+        )
 
     def _fill_bitmasks(
         self, batch: Iterable[tuple[StructuredOutputGrammar, int, bool]]
