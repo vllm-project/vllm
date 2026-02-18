@@ -1879,17 +1879,31 @@ def create_standby_groups(
         )
 
 
-def switch_to_standby_groups() -> None:
-    global _WORLD, _STANDBY_WORLD, _NODE_COUNT, _STANDBY_WORLD_NODE_COUNT
-    global _DP, _EP, _STANDBY_DP, _STANDBY_EP, _EPLB, _STANDBY_EPLB
-    assert _DP is not None
-    assert _EP is not None
-    assert _WORLD is not None
-    _DP.destroy()
-    _EP.destroy()
-    _WORLD.destroy()
+def destroy_old_comm_groups() -> None:
+    """Destroy old communication groups.
+
+    Some group resources require collective teardown across all ranks.
+    All ranks in the old groups must call this function, and it may block
+    until every rank has entered.
+    """
+    global _DP, _EP, _WORLD, _EPLB
+    if _DP is not None:
+        _DP.destroy()
+    if _EP is not None:
+        _EP.destroy()
+    if _WORLD is not None:
+        _WORLD.destroy()
     if _EPLB is not None:
         _EPLB.destroy()
+
+
+def switch_to_standby_groups() -> None:
+    """Switch active groups to the previously created standby groups.
+
+    Callers must call destroy_old_comm_groups() before this function.
+    """
+    global _WORLD, _STANDBY_WORLD, _NODE_COUNT, _STANDBY_WORLD_NODE_COUNT
+    global _DP, _EP, _STANDBY_DP, _STANDBY_EP, _EPLB, _STANDBY_EPLB
     _DP = _STANDBY_DP
     _EP = _STANDBY_EP
     _EPLB = _STANDBY_EPLB
