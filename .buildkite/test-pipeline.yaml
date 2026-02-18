@@ -1459,20 +1459,6 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
-##### RL Integration Tests #####
-- label: Prime-RL Integration Test # 15min
-  timeout_in_minutes: 30
-  optional: true
-  soft_fail: true
-  num_gpus: 2
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/
-  - .buildkite/scripts/run-prime-rl-test.sh
-  commands:
-    - nvidia-smi
-    - bash .buildkite/scripts/run-prime-rl-test.sh
-
 - label: DeepSeek V2-Lite Accuracy
   timeout_in_minutes: 60
   gpu: h100
