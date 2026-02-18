@@ -4627,8 +4627,8 @@ class GPUModelRunner(
         create_mixed_batch: bool = False,
         remove_lora: bool = True,
         is_graph_capturing: bool = False,
-        profile_seq_lens: int | None = None,
         num_active_loras: int = 0,
+        profile_seq_lens: int | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Run a dummy forward pass to warm up/profile run or capture the
@@ -4651,11 +4651,11 @@ class GPUModelRunner(
             create_mixed_batch: If True, create a mixed batch with both decode
                 (1 token) and prefill (multiple tokens) requests.
             remove_lora: If False, dummy LoRAs are not destroyed after the run
+            num_active_loras: Number of distinct active LoRAs to capture for.
+                LoRA is activated when num_active_loras > 0.
             profile_seq_lens: If provided, use this value for seq_lens instead
                 of max_query_len. Used to profile attention workspace that
                 scales with context length.
-            num_active_loras: Number of distinct active LoRAs to capture for.
-                LoRA is activated when num_active_loras > 0.
         """
         mm_config = self.vllm_config.model_config.multimodal_config
         if mm_config and mm_config.mm_encoder_only:
