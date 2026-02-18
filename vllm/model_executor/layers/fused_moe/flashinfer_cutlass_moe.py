@@ -77,7 +77,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
             "Only mxfp4, nvfp4, fp8, bfloat16 and"
             " float16 quantization are currently supported."
         )
-        self.device = torch.cuda.current_device()
+        self.device = moe_config.device
         self.num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
         self.ep_size = moe_config.moe_parallel_config.ep_size
