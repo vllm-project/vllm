@@ -123,7 +123,7 @@ class Qwen2VLTester:
             for output_text, expected_text in zip(output_texts, expected_texts):
                 # NOTE beam search .text contains the whole text including inputs
                 assert output_text.endswith(expected_text), (
-                    f"Generated {output_text} does not match expected {output_text}"
+                    f"Generated {output_text} does not match expected {expected_text}"
                 )
 
 
