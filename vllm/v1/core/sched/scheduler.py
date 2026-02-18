@@ -874,14 +874,23 @@ class Scheduler(SchedulerInterface):
                     nrd_copy = replace(nrd)
                     nrd_copy.req_id = nrd_copy.req_id + "." + str(start)
                     nrd_copy.num_computed_tokens = start
+                    nrd_copy.is_gap_recompute = True
                     req_copy_num_sched_tokens = end - start
                     num_scheduled_tokens[nrd_copy.req_id] = req_copy_num_sched_tokens
                     total_num_scheduled_tokens += req_copy_num_sched_tokens
+                    block_size = self.block_size
+                    start_block_idx = start // block_size
+                    print(f"Start block idx: {start_block_idx}")
+                    end_block_idx = (end - 1) // block_size + 1
+                    print(f"End block idx: {end_block_idx}")
+                    gap_block_ids = tuple(block_group[start_block_idx:end_block_idx+1] for block_group in nrd.block_ids)
                     nrd_copy.prompt_token_ids = (
                         nrd.prompt_token_ids[:end]
                         if nrd.prompt_token_ids is not None
                         else None
                     )
+                    nrd_copy.block_ids = gap_block_ids
+                    print(f" === AFTER, nrd_copy.block_ids = {nrd_copy.block_ids} ===")
                     new_reqs_data.append(nrd_copy)
                 
 
