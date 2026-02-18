@@ -526,7 +526,7 @@ class LLM:
 
     def wait_for_completion(
         self,
-        output_type: type[_O] = RequestOutput,
+        output_type: type[_O] | tuple[_O, ...] = (RequestOutput, PoolingRequestOutput),  # type: ignore[assignment]
         use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> list[_O]:
         """Wait for all enqueued requests to complete and return results.
@@ -1931,7 +1931,7 @@ class LLM:
 
     def _run_engine(
         self,
-        output_type: type[_O],
+        output_type: type[_O] | tuple[_O, ...],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ) -> list[_O]:
