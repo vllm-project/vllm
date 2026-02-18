@@ -676,6 +676,7 @@ class GPUModelRunner(
         )
         self.arange_np = np.arange(arange_size, dtype=np.int64)
         self.query_pos = self._make_buffer(arange_size, dtype=torch.int64)
+        self._arange_scratch = np.empty(arange_size, dtype=np.int64)
 
         # Layer pairings for cross-layer KV sharing.
         # If an Attention layer `layer_name` is in the keys of this dict, it
@@ -2372,32 +2373,32 @@ class GPUModelRunner(
 
         # Step 1.
         # cu_num_sampled_tokens: [4, 5, 8, 9, 11]
-        # self.query_pos.np[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
+        # _arange_scratch[:11]: [0, 1, 2, 3, 0, 0, 1, 2, 0, 0, 1]
         cu_num_sampled_tokens = self._get_cumsum_and_arange(
-            num_sampled_tokens, self.query_pos.np, cumsum_dtype=np.int32
+            num_sampled_tokens, self._arange_scratch, cumsum_dtype=np.int32
         )
         # Step 2. [0, 0, 0, 0, 103, 104, 104, 104, 206, 207, 207]
         logits_indices = np.repeat(
             cu_num_scheduled_tokens - num_sampled_tokens, num_sampled_tokens
         )
         # Step 3. [0, 1, 2, 3, 103, 104, 105, 106, 206, 207, 208]
-        logits_indices += self.query_pos.np[: cu_num_sampled_tokens[-1]]
+        logits_indices += self._arange_scratch[: cu_num_sampled_tokens[-1]]
 
         # Compute the bonus logits indices.
         bonus_logits_indices = cu_num_sampled_tokens - 1
 
         # Compute the draft logits indices.
         # cu_num_draft_tokens: [3, 3, 5, 5, 6]
-        # self.query_pos.np[:6]: [0, 1, 2, 0, 1, 0]
+        # _arange_scratch[:6]: [0, 1, 2, 0, 1, 0]
         cu_num_draft_tokens = self._get_cumsum_and_arange(
-            num_draft_tokens, self.query_pos.np, cumsum_dtype=np.int32
+            num_draft_tokens, self._arange_scratch, cumsum_dtype=np.int32
         )
         # [0, 0, 0, 5, 5, 9]
         target_logits_indices = np.repeat(
             cu_num_sampled_tokens - num_sampled_tokens, num_draft_tokens
         )
         # [0, 1, 2, 5, 6, 9]
-        target_logits_indices += self.query_pos.np[: cu_num_draft_tokens[-1]]
+        target_logits_indices += self._arange_scratch[: cu_num_draft_tokens[-1]]
 
         # TODO: Optimize the CPU -> GPU copy.
         cu_num_draft_tokens = torch.from_numpy(cu_num_draft_tokens).to(
