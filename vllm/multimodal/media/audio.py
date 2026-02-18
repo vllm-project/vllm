@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
+import os
+import tempfile
 from io import BytesIO
 from pathlib import Path
 
@@ -22,6 +24,39 @@ try:
     import soundfile
 except ImportError:
     soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
+
+
+def extract_audio_from_video_bytes(
+    data: bytes,
+    sr: float | None = None,
+    max_duration: float | None = None,
+) -> tuple[npt.NDArray, float]:
+    """Extract the audio track from raw video bytes using librosa.
+
+    Args:
+        data: Raw video file bytes (e.g. from an mp4 file).
+        sr: Target sampling rate. If ``None``, the native rate is used.
+        max_duration: If set, only load the first *max_duration* seconds
+            of audio.
+
+    Returns:
+        A tuple of ``(waveform, sample_rate)`` suitable for use as an
+        :class:`AudioItem`.
+    """
+    # MP4 containers require file-path access (soundfile can't read them
+    # from BytesIO).  Write to a temp file and let librosa's audioread
+    # backend handle the container -- no subprocess is spawned, which is
+    # critical to avoid crashing CUDA-active vLLM worker processes.
+    tmp_dir = os.environ.get("TMPDIR", "/tmp")
+    with tempfile.NamedTemporaryFile(
+        suffix=".mp4", delete=False, dir=tmp_dir
+    ) as tmp:
+        tmp.write(data)
+        tmp_path = tmp.name
+    try:
+        return librosa.load(tmp_path, sr=sr, duration=max_duration)
+    finally:
+        os.unlink(tmp_path)
 
 
 class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):

@@ -40,13 +40,25 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
         video_loader_backend = (
             kwargs.pop("video_backend", None) or envs.VLLM_VIDEO_LOADER_BACKEND
         )
+
+        # When True, the raw video bytes are retained in metadata under
+        # the key ``"original_video_bytes"`` so that downstream processors
+        # can extract additional information (e.g. audio tracks) without
+        # requiring a second read. Opt-in via:
+        #   --media-io-kwargs '{"video": {"keep_video_bytes": true}}'
+        self.keep_video_bytes: bool = bool(kwargs.pop("keep_video_bytes", False))
+
         self.kwargs = kwargs
         self.video_loader = VIDEO_LOADER_REGISTRY.load(video_loader_backend)
 
     def load_bytes(self, data: bytes) -> tuple[npt.NDArray, dict[str, Any]]:
-        return self.video_loader.load_bytes(
+        video, metadata = self.video_loader.load_bytes(
             data, num_frames=self.num_frames, **self.kwargs
         )
+        if self.keep_video_bytes:
+            metadata = dict(metadata)
+            metadata["original_video_bytes"] = data
+        return video, metadata
 
     def load_base64(
         self, media_type: str, data: str
