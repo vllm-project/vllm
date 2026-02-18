@@ -419,7 +419,7 @@ class Qwen3_5Model(Qwen3NextModel):
                 if name not in params_dict:
                     continue
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
@@ -473,7 +473,7 @@ class Qwen3_5Model(Qwen3NextModel):
                         ) and name_mapped not in params_dict:
                             continue
                         param = params_dict[name_mapped]
-                        weight_loader = param.weight_loader
+                        weight_loader = getattr(param, "weight_loader", default_weight_loader)
                         success = weight_loader(
                             param,
                             loaded_weight,

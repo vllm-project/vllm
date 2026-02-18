@@ -1118,7 +1118,7 @@ class OpenPanguModel(nn.Module):
                 continue
 
             param = params_dict[weight_name]
-            weight_loader = param.weight_loader
+            weight_loader = getattr(param, "weight_loader", default_weight_loader)
             weight_loader(param, loaded_weight, shard_id)
             loaded_params.add(weight_name)
             return True
