@@ -305,6 +305,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        workspace_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         # Per attention head and per partition values.
@@ -346,6 +347,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
             prefix=f"{prefix}.attn",
+            workspace_buffer=workspace_buffer,
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
@@ -357,6 +359,7 @@ class Qwen2_5_VisionAttention(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
         x, _ = self.qkv(x)
@@ -398,6 +401,7 @@ class Qwen2_5_VisionAttention(nn.Module):
             value=v,
             cu_seqlens=cu_seqlens,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         context_layer = einops.rearrange(
