@@ -22,13 +22,13 @@ RUN microdnf install -y dnf && dnf install -y gcc-toolset-14 make wget unzip \
 ###############################################################
 FROM registry.access.redhat.com/ubi9/ubi-minimal:${BASE_UBI_IMAGE_TAG} AS centos-deps-builder
 RUN  microdnf install -y dnf && \ 
-     dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-26.el9.noarch.rpm \
-        https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-26.el9.noarch.rpm \
+     dnf install -y https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-gpg-keys-9.0-28.el9.noarch.rpm \
+        https://mirror.stream.centos.org/9-stream/BaseOS/`arch`/os/Packages/centos-stream-repos-9.0-28.el9.noarch.rpm \
         https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
         dnf config-manager --set-enabled crb
 
-RUN dnf install -y openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel yajl-devel && \
-    dnf remove -y centos-gpg-keys-9.0-24.el9.noarch centos-stream-repos-9.0-26.el9.noarch 
+RUN dnf install -y yajl-devel && \
+    dnf remove -y centos-gpg-keys-9.0-24.el9.noarch centos-stream-repos-9.0-28.el9.noarch 
 
 
 ###############################################################
@@ -61,6 +61,7 @@ RUN --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,
        pkgconfig xsimd zeromq-devel kmod findutils protobuf* \
        libtiff-devel libjpeg-devel zlib-devel freetype-devel libwebp-devel \
        harfbuzz-devel libraqm-devel libimagequant-devel libxcb-devel \
+       openjpeg2-devel lcms2-devel tcl-devel tk-devel fribidi-devel \
        python${PYTHON_VERSION}-devel python${PYTHON_VERSION}-pip clang-devel \
     && dnf clean all \
     && PREFIX=/usr/local make -C /openblas install \
@@ -79,7 +80,7 @@ RUN --mount=type=bind,from=openblas-builder,source=/OpenBLAS-$OPENBLAS_VERSION/,
 FROM base-builder AS torch-builder
 
 ARG MAX_JOBS
-ARG TORCH_VERSION=2.7.0
+ARG TORCH_VERSION=2.10.0
 ARG _GLIBCXX_USE_CXX11_ABI=1
 ARG OPENBLAS_VERSION=0.3.30
 
@@ -87,24 +88,27 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-14/enable &&  \
     git clone --recursive https://github.com/pytorch/pytorch.git -b v${TORCH_VERSION} && \
     cd pytorch && \
+    pip install uv==0.5.9 && \
     uv pip install -r requirements.txt && \
+    pip install -U uv && \
     python setup.py develop && \
     rm -f dist/torch*+git*whl && \
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
     PYTORCH_BUILD_VERSION=${TORCH_VERSION} PYTORCH_BUILD_NUMBER=1 uv build --wheel --out-dir /torchwheels/
 
-ARG TORCHVISION_VERSION=0.22.0
+ARG TORCHVISION_VERSION=0.25.0
 ARG TORCHVISION_USE_NVJPEG=0
 ARG TORCHVISION_USE_FFMPEG=0
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-14/enable && \
     git clone --recursive https://github.com/pytorch/vision.git -b v${TORCHVISION_VERSION} && \
     cd vision && \
+    uv pip install 'setuptools<70' && \
     MAX_JOBS=${MAX_JOBS:-$(nproc)} \
     BUILD_VERSION=${TORCHVISION_VERSION} \
     uv build --wheel --out-dir /torchwheels/ --no-build-isolation
 
-ARG TORCHAUDIO_VERSION=2.7.0
+ARG TORCHAUDIO_VERSION=2.10.0
 ARG BUILD_SOX=1
 ARG BUILD_KALDI=1
 ARG BUILD_RNNT=1
@@ -157,9 +161,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 FROM base-builder AS cv-builder
 
 ARG MAX_JOBS
-ARG OPENCV_VERSION=86
-# patch for version 4.11.0.86
-ARG OPENCV_PATCH=97f3f39
+ARG OPENCV_VERSION=92
+# patch for version 4.11.0.92
+ARG OPENCV_PATCH=13c8ec3
 ARG ENABLE_HEADLESS=1
 RUN --mount=type=cache,target=/root/.cache/uv \
     source /opt/rh/gcc-toolset-14/enable && \
@@ -182,6 +186,7 @@ ARG MAX_JOBS
 ARG NUMACTL_VERSION=2.0.19
 RUN git clone --recursive https://github.com/numactl/numactl.git -b v${NUMACTL_VERSION} \
     && cd numactl \
+    && source /opt/rh/gcc-toolset-14/enable \
     && autoreconf -i && ./configure \
     && make -j ${MAX_JOBS:-$(nproc)}
 
@@ -244,14 +249,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,src=.,dst=/src/,rw \
     source /opt/rh/gcc-toolset-14/enable && \
     export PATH=$PATH:/usr/lib64/llvm15/bin && \
-    uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl /numbawheels/*.whl && \
+    echo "setuptools<70.0.0" > build_constraints.txt && \
+    uv pip install /numbawheels/*.whl --build-constraint build_constraints.txt && \
+    uv pip install /opencvwheels/*.whl /arrowwheels/*.whl /torchwheels/*.whl && \
     sed -i -e 's/.*torch.*//g' /src/pyproject.toml /src/requirements/*.txt && \
     sed -i -e 's/.*sentencepiece.*//g' /src/pyproject.toml /src/requirements/*.txt && \
     uv pip install sentencepiece==0.2.0 pandas pythran nanobind pybind11 /hf_wheels/*.whl && \
     make -C /numactl install && \
     # sentencepiece.pc is in some pkgconfig inside uv cache
     export PKG_CONFIG_PATH=$(find / -type d -name "pkgconfig" 2>/dev/null | tr '\n' ':') && \
-    nanobind_DIR=$(uv pip show nanobind | grep Location | sed 's/^Location: //;s/$/\/nanobind\/cmake/') && uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation && \
+    uv pip install -U setuptools && \
+    nanobind_DIR=$(uv pip show nanobind | grep Location | sed 's/^Location: //;s/$/\/nanobind\/cmake/') && uv pip install -r /src/requirements/common.txt -r /src/requirements/cpu.txt -r /src/requirements/build.txt --no-build-isolation --build-constraint build_constraints.txt && \
+    rm -f build_constraints.txt && \
     cd /src/ && \
     uv build --wheel --out-dir /vllmwheel/ --no-build-isolation && \
     uv pip install /vllmwheel/*.whl
@@ -282,9 +291,10 @@ ARG OPENBLAS_VERSION=0.3.30
 
 # Set Environment Variables for venv & openblas
 ENV VIRTUAL_ENV=/opt/vllm
-ENV PATH=${VIRTUAL_ENV}/bin:$PATH
-ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig/
-ENV LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib
+ENV PCP_DIR=/opt/rh/gcc-toolset-14/root
+ENV PATH=${VIRTUAL_ENV}/bin:${PCP_DIR}/usr/bin:$PATH:/usr/lib64/llvm15/bin
+ENV PKG_CONFIG_PATH=${PCP_DIR}/usr/lib64/pkgconfig:/usr/local/lib/pkgconfig/
+ENV LD_LIBRARY_PATH=${PCP_DIR}/usr/lib64:${PCP_DIR}/usr/lib:$LD_LIBRARY_PATH:/usr/local/lib64:/usr/local/lib:/usr/lib64:/usr/lib
 ENV UV_LINK_MODE=copy
 ENV OMP_NUM_THREADS=16
 
@@ -306,7 +316,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     rpm -ivh https://dl.fedoraproject.org/pub/epel/epel-release-latest-9.noarch.rpm && \
     microdnf install --nodocs -y \
     libomp libicu tar findutils openssl llvm15 llvm15-devel \
-    pkgconfig xsimd g++ gcc-fortran libsndfile \
+    pkgconfig xsimd gcc-toolset-14 libsndfile \
     libtiff libjpeg openjpeg2 zlib zeromq \
     freetype lcms2 libwebp tcl tk utf8proc \
     harfbuzz fribidi libraqm libimagequant libxcb util-linux \
