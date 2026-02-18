@@ -483,7 +483,7 @@ def run_benchmarks(
                 "_custom_rms_norm" if "+" in rms_norm_custom_op else "_native_rms_norm"
             )
             for quant_fp8_custom_op in ["-quant_fp8", "+quant_fp8"]:
-                suffix += (
+                op_suffix = suffix + (
                     "_custom_quant_fp8"
                     if "+" in quant_fp8_custom_op
                     else "_native_quant_fp8"
@@ -503,10 +503,10 @@ def run_benchmarks(
                             residual=residual,
                             scale_factor=scale_fp8,
                         )
-                        results[f"standard_allreduce{suffix}"] = time_ms
+                        results[f"standard_allreduce{op_suffix}"] = time_ms
                     except Exception as e:
                         logger.error("Standard AllReduce+RMSNorm+FP8 failed: %s", e)
-                        results[f"standard_allreduce{suffix}"] = float("inf")
+                        results[f"standard_allreduce{op_suffix}"] = float("inf")
 
         # Standard AllReduce + RMSNorm + FP8 Quant Native Compiled
         with set_current_vllm_config(
