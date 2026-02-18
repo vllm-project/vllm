@@ -182,23 +182,6 @@ class BaseFrontendArgs:
         )
         return frontend_kwargs
 
-    @staticmethod
-    def _add_group_with_arguments(
-        parser: FlexibleArgumentParser,
-        group_name: str,
-        group_cls: type,
-        group_kwargs: dict[str, Any],
-    ) -> argparse._ArgumentGroup:
-        frontend_group = parser.add_argument_group(
-            title=group_name,
-            description=group_cls.__doc__,
-        )
-
-        for key, value in group_kwargs.items():
-            frontend_group.add_argument(f"--{key.replace('_', '-')}", **value)
-
-        return frontend_group
-
     @classmethod
     def add_cli_args(cls, parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         """Register CLI arguments for this frontend class.
@@ -212,9 +195,12 @@ class BaseFrontendArgs:
         frontend_kwargs = cls._customize_cli_kwargs(frontend_kwargs)
 
         group_name = cls.__name__.replace("Args", "")
-        BaseFrontendArgs._add_group_with_arguments(
-            parser, group_name, cls, frontend_kwargs
+        frontend_group = parser.add_argument_group(
+            title=group_name,
+            description=cls.__doc__,
         )
+        for key, value in frontend_kwargs.items():
+            frontend_group.add_argument(f"--{key.replace('_', '-')}", **value)
 
         return parser
 
