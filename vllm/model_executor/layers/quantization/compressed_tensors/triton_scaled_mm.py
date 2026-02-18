@@ -4,7 +4,6 @@
 
 import torch
 
-from vllm.platforms.rocm import on_gfx11
 from vllm.triton_utils import tl, triton
 
 
@@ -140,20 +139,26 @@ def scaled_mm_kernel(
 def _get_tile_config(M: int, N: int) -> tuple[int, int, int]:
     """Heuristic to select BLOCK_SIZE_M/N/K based on problem dimensions
     and target architecture."""
+    from vllm.platforms import current_platform
+
     is_small_N = N < 8192
     next_power_of_2_M = max(32, triton.next_power_of_2(M))
 
-    if on_gfx11():
-        if next_power_of_2_M <= 32:
-            return (32, 64, 128) if is_small_N else (16, 256, 64)
-        elif next_power_of_2_M <= 64:
-            return (64, 128, 128) if is_small_N else (64, 128, 64)
-        elif next_power_of_2_M <= 128:
-            return (128, 64, 128)
-        elif next_power_of_2_M <= 512:
-            return (128, 64, 128) if is_small_N else (256, 64, 32)
-        else:
-            return (256, 64, 32)
+    # RDNA3-specific heuristic (only on ROCm + gfx11)
+    if current_platform.is_rocm():
+        from vllm.platforms.rocm import on_gfx11
+
+        if on_gfx11():
+            if next_power_of_2_M <= 32:
+                return (32, 64, 128) if is_small_N else (16, 256, 64)
+            elif next_power_of_2_M <= 64:
+                return (64, 128, 128) if is_small_N else (64, 128, 64)
+            elif next_power_of_2_M <= 128:
+                return (128, 64, 128)
+            elif next_power_of_2_M <= 512:
+                return (128, 64, 128) if is_small_N else (256, 64, 32)
+            else:
+                return (256, 64, 32)
 
     # Default
     if next_power_of_2_M <= 32:
