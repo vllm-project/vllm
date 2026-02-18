@@ -10,7 +10,7 @@ from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
-NUM_HEADS = [(4, 4), (8, 2), (40, 8)]
+NUM_HEADS = [(4, 4), (8, 2), (5, 1)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16]
 
