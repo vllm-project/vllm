@@ -9,6 +9,10 @@ import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
+from vllm.model_executor.model_loader.reload.layerwise import (
+    finalize_layerwise_reload,
+    initialize_layerwise_reload,
+)
 from vllm.model_executor.model_loader.utils import (
     initialize_model,
     process_weights_after_loading,
@@ -55,11 +59,17 @@ class BaseModelLoader(ABC):
                     vllm_config=vllm_config, model_config=model_config, prefix=prefix
                 )
 
-            log_model_inspection(model)
+                log_model_inspection(model)
 
-            logger.debug("Loading weights on %s ...", load_device)
-            # Quantization does not happen in `load_weights` but after it
-            self.load_weights(model, model_config)
+                logger.debug("Loading weights on %s ...", load_device)
+                if not _is_online_quant(vllm_config, model_config):
+                    # load weights eagerly, which may lead to excess memory usage
+                    self.load_weights(model, model_config)
+                else:
+                    # load weights layerwise, which minimizes peak memory usage
+                    initialize_layerwise_reload(model, is_reloading=False)
+                    self.load_weights(model, model_config)
+                    finalize_layerwise_reload(model, model_config)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
@@ -84,3 +94,14 @@ def log_model_inspection(model: nn.Module) -> None:
     from vllm.model_inspection import format_model_inspection
 
     logger.info("vLLM model structure:\n%s", format_model_inspection(model))
+
+
+def _is_online_quant(vllm_config: VllmConfig, model_config: ModelConfig) -> bool:
+    quant_config = vllm_config.quant_config
+    return (
+        # TODO(future): add other online quant paths here
+        model_config.quantization == "fp8"
+        and quant_config is not None
+        and hasattr(quant_config, "is_checkpoint_fp8_serialized")
+        and not quant_config.is_checkpoint_fp8_serialized
+    )
