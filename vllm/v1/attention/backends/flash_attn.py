@@ -4,6 +4,7 @@
 
 import copy
 from dataclasses import dataclass
+from collections.abc import Callable
 from typing import ClassVar
 
 import numpy as np
@@ -610,7 +611,9 @@ class FlashAttentionImpl(AttentionImpl):
             )
         except AttributeError:
             dcp_a2a = False
-        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+        self.dcp_combine: Callable[..., object] = (
+            dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+        )
 
     def forward(
         self,

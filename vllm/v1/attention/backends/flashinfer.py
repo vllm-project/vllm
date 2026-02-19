@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
@@ -174,7 +175,7 @@ class BatchDCPPrefillWrapper:
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
     ):
-        self._dcp_combine = (
+        self._dcp_combine: Callable[..., object] = (
             dcp_a2a_lse_reduce
             if dcp_a2a
             else partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
@@ -1249,13 +1250,14 @@ class FlashInferImpl(AttentionImpl):
             )
         except AttributeError:
             dcp_a2a = False
-        self.dcp_combine = (
+        self.dcp_combine: Callable[..., object] = (
             dcp_a2a_lse_reduce
             if dcp_a2a
             else partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
         )
         # TODO(#34018): --dcp-replicate-q-proj to make Q replication
         # configurable at weight level, removing runtime allgather.
+        self._dcp_prepare_query: Callable[[torch.Tensor], torch.Tensor]
         if dcp_a2a:
             self._dcp_prepare_query = lambda q: q
         else:
