@@ -115,9 +115,9 @@ class EngineCore:
             vllm_config
         )
         if kv_cache_config.kv_cache_groups:
-            vllm_config.cache_config.block_size = kv_cache_config.kv_cache_groups[
-                0
-            ].kv_cache_spec.block_size
+            vllm_config.cache_config.block_size = min(
+                g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+            )
         elif vllm_config.cache_config.block_size is None:
             # Attention-free models (encoder-only, SSM) — use default.
             vllm_config.cache_config.block_size = 16
