@@ -14,9 +14,7 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-from vllm.config.vllm import get_layers_from_vllm_config
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -199,6 +197,11 @@ class CudaPlatformBase(Platform):
         if model_config is None or model_config.is_hybrid:
             cache_config.block_size = 16
             return
+
+        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
 
         attn_layers = get_layers_from_vllm_config(
             vllm_config,
