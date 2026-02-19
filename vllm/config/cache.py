@@ -101,6 +101,12 @@ class CacheConfig:
     DEPRECATED: This field is deprecated and will be removed in a future
     release. Please use OffloadConfig.cpu_offload_gb instead.
     """
+    cpu_offload_params: set[str] = Field(default_factory=set)
+    """The set of parameter name segments to target for CPU offloading.
+
+    DEPRECATED: This field is deprecated and will be removed in a future
+    release. Please use OffloadConfig.cpu_offload_params instead.
+    """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
