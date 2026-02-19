@@ -285,7 +285,7 @@ class CompilerManager:
         with self.compile_context(compile_range):
             # There is a compilation time optimization here.
             #
-            # If the (input metdata, graph, compiler config) are the same, then
+            # If the (input metadata, graph, compiler config) are the same, then
             # we want to avoid compiling the same artifact again. If we didn't
             # do this optimization, the backend compilation (InductorAdaptor or
             # InductorStandaloneAdaptor)
@@ -570,7 +570,9 @@ class PiecewiseCompileInterpreter(torch.fx.Interpreter):  # type: ignore[misc]
     ) -> Any:
         assert isinstance(target, str)
 
-        output = super().call_module(target, args, kwargs)
+        gm = getattr(self.module, target)
+        outputs = gm.graph.output_node().args[0]
+        output = fx.map_arg(outputs, lambda node: node.meta["example_value"])
 
         if target in self.compile_submod_names:
             index = self.compile_submod_names.index(target)
