@@ -448,6 +448,10 @@ class Glm4MoeModelToolParser(ToolParser):
         self.current_tool_id -= 1
 
     def _emit_tool_name_delta(self, tool_name: str) -> DeltaMessage:
+        self.prev_tool_call_arr[self.current_tool_id] = {
+            "name": self._current_tool_name,
+            "arguments": {},
+        }
         return DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
@@ -463,6 +467,16 @@ class Glm4MoeModelToolParser(ToolParser):
         )
 
     def _emit_tool_args_delta(self, fragment: str) -> DeltaMessage:
+        try:
+            # Try to update the prev_tool_call_arr by closing the args dict.
+            # N.B. this updates the array when a key-value pair is complete.
+            #      It does not trigger an update on the final closing "}" delta.
+            args_dict = json.loads(
+                self.streamed_args_for_tool[self.current_tool_id] + "}"
+            )
+            self.prev_tool_call_arr[self.current_tool_id]["arguments"] = args_dict
+        except json.decoder.JSONDecodeError:
+            pass
         return DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
