@@ -2,7 +2,10 @@ regex # Replace re for higher-performance regex matching
 cachetools
 psutil
 sentencepiece  # Required for LLaMA tokenizer.
-numpy
+# NumPy 2.x needs all binary deps compiled against NumPy 2.
+# Python 3.13 requires NumPy 2.x wheels.
+numpy<2; python_version < "3.13"
+numpy>=2; python_version >= "3.13"
 requests >= 2.26.0
 tqdm
 blake3
