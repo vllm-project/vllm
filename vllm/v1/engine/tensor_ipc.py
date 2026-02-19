@@ -38,20 +38,16 @@ class TensorIpcData:
 class TensorIpcSender:
     """Send-side logic for tensor IPC via torch.multiprocessing.Queue.
 
-    Wraps the queue send logic previously embedded in MsgpackEncoder.
+    Uses a single queue targeting rank 0 (the only rank that consumes
+    multimodal tensors during TP>1 / PP>1).
     """
 
-    def __init__(self, queues: list[Any]):
-        self.queues = queues
-        self.target_engine_index: int | None = None
-
-    def set_target_engine(self, index: int | None) -> None:
-        """Set the target engine index for routing tensors to IPC queues."""
-        self.target_engine_index = index
+    def __init__(self, queue: Any):
+        self.queue = queue
 
     def is_ready(self) -> bool:
-        """True when target engine is set and queues available."""
-        return self.target_engine_index is not None and self.queues is not None
+        """Always ready — single queue is set at construction time."""
+        return True
 
     def send_tensor(
         self,
@@ -63,30 +59,26 @@ class TensorIpcSender:
 
         Contains: share_memory_(), queue.put(), TensorIpcHandle creation.
         """
-        assert self.target_engine_index is not None, "Target engine index is not set"
-
         # Move tensor to shared memory for IPC
         # This is required for proper inter-process communication
         if not tensor.is_shared():
             tensor = tensor.share_memory_()
 
-        target_queue = self.queues[self.target_engine_index]
         ipc_data = TensorIpcData(
             request_id=request_id,
             tensor_id=tensor_id,
             tensor=tensor,
         )
         # Use a timeout to avoid blocking indefinitely
-        target_queue.put(ipc_data, timeout=10.0)
+        self.queue.put(ipc_data, timeout=10.0)
 
         logger.debug(
-            "Sent tensor %s for request %s (shape=%s, device=%s) to engine %d "
+            "Sent tensor %s for request %s (shape=%s, device=%s) "
             "via IPC queue (shared memory)",
             tensor_id,
             request_id,
             tensor.shape,
             tensor.device,
-            self.target_engine_index,
         )
 
         return TensorIpcHandle(

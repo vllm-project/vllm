@@ -820,12 +820,11 @@ def launch_core_engines(
         offline_mode or local_engines_only or (local_engine_count == dp_size)
     )
 
-    # Create tensor IPC queues for sharing multimodal tensors between API servers
-    # and engine cores. One queue per engine core.
-    # Use torch.multiprocessing for tensor sharing via IPC/shared memory.
-    # Set start method to 'spawn' for compatibility with multiprocessing.
+    # Create a single tensor IPC queue for sharing multimodal tensors between
+    # API servers and rank 0 engine core. Only rank 0 consumes multimodal
+    # tensors during TP>1 and PP>1, so one queue is sufficient.
     torch_mp.set_start_method("spawn", force=True)
-    tensor_queues: list[torch_mp.Queue] = [torch_mp.Queue() for _ in range(dp_size)]
+    tensor_queues: list[torch_mp.Queue] = [torch_mp.Queue()]
 
     # Set up input and output addresses.
     addresses = EngineZmqAddresses(
@@ -1070,7 +1069,7 @@ def wait_for_engine_startup(
                     }
                     if coordinated_dp
                     else {},
-                    tensor_queue_index=eng_index,
+                    tensor_queue_index=0 if eng_index == 0 else None,
                 )
             )
             handshake_socket.send_multipart((eng_identity, init_message), copy=False)

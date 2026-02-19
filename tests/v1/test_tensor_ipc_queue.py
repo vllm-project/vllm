@@ -31,17 +31,15 @@ def setup_multiprocessing():
 
 
 def encoder_process(
-    tensor_queues: list[torch_mp.Queue],
+    tensor_queue: torch_mp.Queue,
     result_queue: mp.Queue,
-    target_engine: int,
     tensor_data: dict[str, Any],
     ready_event: EventType,
 ):
     """Process that encodes and sends CUDA tensors via queue."""
     try:
         # Create encoder with tensor IPC sender
-        sender = TensorIpcSender(tensor_queues)
-        sender.set_target_engine(target_engine)
+        sender = TensorIpcSender(tensor_queue)
         encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
         # Create a CUDA tensor if available
@@ -113,13 +111,11 @@ def decoder_process(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_cuda_tensor_queue_basic():
     """Test basic CUDA tensor sharing via queue."""
-    # Set up queues and synchronization
-    num_engines = 2
-    tensor_queues = [torch_mp.Queue() for _ in range(num_engines)]
+    # Set up single queue and synchronization
+    tensor_queue = torch_mp.Queue()
     result_queue: mp.Queue = mp.Queue()
     encoder_ready = mp.Event()
 
-    target_engine = 0
     tensor_shape = (4, 8, 16)
     tensor_dtype = torch.float32
 
@@ -127,9 +123,8 @@ def test_cuda_tensor_queue_basic():
     encoder_proc = mp.Process(
         target=encoder_process,
         args=(
-            tensor_queues,
+            tensor_queue,
             result_queue,
-            target_engine,
             {"shape": tensor_shape, "dtype": tensor_dtype},
             encoder_ready,
         ),
@@ -139,7 +134,7 @@ def test_cuda_tensor_queue_basic():
     # Start decoder process
     decoder_proc = mp.Process(
         target=decoder_process,
-        args=(tensor_queues[target_engine], result_queue, tensor_shape, encoder_ready),
+        args=(tensor_queue, result_queue, tensor_shape, encoder_ready),
     )
     decoder_proc.start()
 
@@ -181,19 +176,20 @@ def test_cpu_tensor_fallback():
     # This is mainly to ensure no exceptions are raised
 
 
-def test_encoder_without_target_engine():
-    """Test that encoder handles missing target engine gracefully."""
-    tensor_queues = [torch_mp.Queue()]
-    sender = TensorIpcSender(tensor_queues)
+def test_encoder_with_sender():
+    """Test that encoder works with a sender (always ready)."""
+    tensor_queue = torch_mp.Queue()
+    sender = TensorIpcSender(tensor_queue)
     encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
-    # Don't set target engine on sender
+    # Sender is always ready with single queue
+    assert sender.is_ready()
+
     if torch.cuda.is_available():
         tensor = torch.randn(2, 3, device="cuda:0")
     else:
         tensor = torch.randn(2, 3)
 
-    # Should fall back to standard serialization
     encoded = encoder.encode({"test_tensor": tensor})
     assert len(encoded) > 0
 
@@ -340,15 +336,14 @@ def test_multiple_api_servers_to_engine():
 
 
 def mixed_tensor_encoder_process(
-    tensor_queues: list[torch_mp.Queue],
+    tensor_queue: torch_mp.Queue,
     result_queue: mp.Queue,
     ready_event: EventType,
     retrieval_done: EventType,
 ):
     """Process that encodes mixed CPU/CUDA tensors."""
     try:
-        sender = TensorIpcSender(tensor_queues)
-        sender.set_target_engine(0)
+        sender = TensorIpcSender(tensor_queue)
         _encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
         # Create only CUDA tensor for IPC (CPU will be serialized)
@@ -362,7 +357,7 @@ def mixed_tensor_encoder_process(
         ipc_data = TensorIpcData(
             request_id=None, tensor_id=tensor_id, tensor=cuda_tensor_shared
         )
-        tensor_queues[0].put(ipc_data, timeout=10.0)
+        tensor_queue.put(ipc_data, timeout=10.0)
 
         ready_event.set()
 
@@ -421,7 +416,7 @@ def mixed_tensor_decoder_process(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 def test_mixed_cpu_cuda_tensors():
     """Test encoding with mixed CPU and CUDA tensors using multiprocessing."""
-    tensor_queues = [torch_mp.Queue()]
+    tensor_queue = torch_mp.Queue()
     result_queue: mp.Queue = mp.Queue()
     encoder_ready = mp.Event()
     retrieval_done = mp.Event()
@@ -429,14 +424,14 @@ def test_mixed_cpu_cuda_tensors():
     # Start encoder process
     encoder_proc = mp.Process(
         target=mixed_tensor_encoder_process,
-        args=(tensor_queues, result_queue, encoder_ready, retrieval_done),
+        args=(tensor_queue, result_queue, encoder_ready, retrieval_done),
     )
     encoder_proc.start()
 
     # Start decoder process
     decoder_proc = mp.Process(
         target=mixed_tensor_decoder_process,
-        args=(tensor_queues[0], result_queue, encoder_ready, retrieval_done),
+        args=(tensor_queue, result_queue, encoder_ready, retrieval_done),
     )
     decoder_proc.start()
 
@@ -465,9 +460,8 @@ def test_mixed_cpu_cuda_tensors():
 
 
 def cpu_tensor_ipc_encoder_process(
-    tensor_queues: list[torch_mp.Queue],
+    tensor_queue: torch_mp.Queue,
     result_queue: mp.Queue,
-    target_engine: int,
     tensor_shape: tuple,
     ready_event: EventType,
     retrieval_done: EventType,
@@ -475,8 +469,7 @@ def cpu_tensor_ipc_encoder_process(
     """Process that encodes and sends CPU tensors via IPC queue."""
     try:
         # Create encoder with IPC enabled for all tensors
-        sender = TensorIpcSender(tensor_queues)
-        sender.set_target_engine(target_engine)
+        sender = TensorIpcSender(tensor_queue)
         encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
         # Create a CPU tensor
@@ -549,23 +542,20 @@ def cpu_tensor_ipc_decoder_process(
 
 def test_cpu_tensor_ipc():
     """Test CPU tensor sharing via IPC queue when multimodal_tensor_ipc is enabled."""
-    # Set up queues and synchronization
-    num_engines = 2
-    tensor_queues = [torch_mp.Queue() for _ in range(num_engines)]
+    # Set up single queue and synchronization
+    tensor_queue = torch_mp.Queue()
     result_queue: mp.Queue = mp.Queue()
     encoder_ready = mp.Event()
     retrieval_done = mp.Event()
 
-    target_engine = 0
     tensor_shape = (3, 5, 7)
 
     # Start encoder process
     encoder_proc = mp.Process(
         target=cpu_tensor_ipc_encoder_process,
         args=(
-            tensor_queues,
+            tensor_queue,
             result_queue,
-            target_engine,
             tensor_shape,
             encoder_ready,
             retrieval_done,
@@ -577,7 +567,7 @@ def test_cpu_tensor_ipc():
     decoder_proc = mp.Process(
         target=cpu_tensor_ipc_decoder_process,
         args=(
-            tensor_queues[target_engine],
+            tensor_queue,
             result_queue,
             tensor_shape,
             encoder_ready,
@@ -641,17 +631,15 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
     if not torch.cuda.is_available():
         pytest.skip("CUDA not available")
 
-    tensor_queues = [torch_mp.Queue()]
+    tensor_queue = torch_mp.Queue()
 
-    # Create sender and encoder with IPC enabled for all tensors
-    sender = TensorIpcSender(tensor_queues)
-    sender.set_target_engine(0)
+    # Create sender and encoder with IPC enabled
+    sender = TensorIpcSender(tensor_queue)
     encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
     # Verify sender configuration
     assert encoder.tensor_ipc_sender is not None, "Sender should be set"
     assert sender.is_ready(), "Sender should be ready"
-    assert sender.target_engine_index == 0, "Target engine should be set"
 
     # Note: Actual IPC transfer only works across processes
     # (tested in test_cpu_tensor_ipc)

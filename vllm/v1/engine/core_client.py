@@ -72,17 +72,15 @@ def encoder_request_context(
 ):
     """Context manager for setting encoder state during request encoding.
 
-    When tensor IPC is in use, sets the target engine and request context
-    (for ADD requests) on entry and clears the request context on exit.
-    When tensor IPC is not in use, does nothing so the hot path has no extra ops.
+    When tensor IPC is in use, sets the request context (for ADD requests)
+    on entry and clears it on exit. The single IPC queue always targets
+    rank 0, so no per-request engine routing is needed.
+    When tensor IPC is not in use, does nothing so the hot path has no
+    extra ops.
     """
     if encoder.tensor_ipc_sender is None:
         yield encoder
         return
-
-    # Set target engine index for tensor routing
-    engine_index = int.from_bytes(engine, "little")
-    encoder.tensor_ipc_sender.set_target_engine(engine_index)
 
     # Set request context if this is an ADD request with a request_id
     if request_type == EngineCoreRequestType.ADD and hasattr(request, "request_id"):
@@ -552,7 +550,7 @@ class MPClient(EngineCoreClient):
             # Create TensorIpcSender when IPC is enabled and queues available
             tensor_ipc_sender: TensorIpcSender | None = None
             if multimodal_tensor_ipc == "torch_shm" and tensor_queues:
-                tensor_ipc_sender = TensorIpcSender(tensor_queues)
+                tensor_ipc_sender = TensorIpcSender(tensor_queues[0])
 
             self.encoder = MsgpackEncoder(
                 tensor_ipc_sender=tensor_ipc_sender,
