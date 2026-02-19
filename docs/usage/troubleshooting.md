@@ -155,7 +155,7 @@ If you are testing with a single node, adjust `--nproc-per-node` to the number o
 NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
 ```
 
-If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address of the master node, reachable from all nodes. Then, run:
+If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address and port of the master node (e.g., `10.0.0.1:29400`), reachable from all nodes. Then, run:
 
 ```bash
 NCCL_DEBUG=TRACE torchrun --nnodes 2 \
@@ -165,7 +165,7 @@ NCCL_DEBUG=TRACE torchrun --nnodes 2 \
     --node-rank $NODE_RANK test.py
 ```
 
-Set `MASTER_ADDR` to the IP address of the master node (reachable from all nodes) and `NODE_RANK` to `0` on the master node and `1`, `2`, ... on the workers. Adjust `--nproc-per-node` and `--nnodes` according to your setup.
+Set `MASTER_ADDR` to the IP address and port of the master node (e.g., `10.0.0.1:29400`), reachable from all nodes. Set `NODE_RANK` to `0` on the master node and `1`, `2`, ... on the workers. Adjust `--nproc-per-node` and `--nnodes` according to your setup.
 
 !!! note
     We use `--rdzv_backend=static` instead of `c10d` because the `c10d` rendezvous backend can fail with DNS resolution errors in multi-node setups (see [pytorch/pytorch#85300](https://github.com/pytorch/pytorch/issues/85300)). The `static` backend avoids this by requiring explicit node ranks.
