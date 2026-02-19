@@ -140,15 +140,16 @@ def test_parse_language_detection_output():
     )
 
     # Unsupported language code
-    assert (
-        cls.parse_language_detection_output([99999], make_tokenizer("<|xx|>")) is None
-    )
+    with pytest.raises(AssertionError):
+        cls.parse_language_detection_output([99999], make_tokenizer("<|xx|>"))
 
     # No special token format
-    assert cls.parse_language_detection_output([1], make_tokenizer("hello")) is None
+    with pytest.raises(AssertionError):
+        cls.parse_language_detection_output([1], make_tokenizer("hello"))
 
     # Empty token_ids
-    assert cls.parse_language_detection_output([], make_tokenizer("anything")) is None
+    with pytest.raises((AssertionError, IndexError)):
+        cls.parse_language_detection_output([], make_tokenizer("anything"))
 
 
 @pytest.mark.core_model

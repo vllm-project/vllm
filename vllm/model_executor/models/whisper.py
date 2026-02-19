@@ -894,28 +894,18 @@ class WhisperForConditionalGeneration(
         """Parse the language token predicted by Whisper.
 
         Decodes the first token ID and extracts the language code from the
-        ``<|xx|>`` format.  Returns ``None`` if the token cannot be parsed
-        or the language is not in :attr:`supported_languages`.
+        ``<|xx|>`` format. Expects a valid language token from constrained generation.
         """
-        if not token_ids:
-            return None
 
         decoded = tokenizer.decode(
             [token_ids[0]],
             skip_special_tokens=False,
         )
         # Whisper language tokens have the form <|xx|>
-        if decoded.startswith("<|") and decoded.endswith("|>"):
-            lang_code = decoded[2:-2]
-            if lang_code in cls.supported_languages:
-                return lang_code
-            logger.warning(
-                "Detected language token '%s' not in supported languages", decoded
-            )
-            return None
-
-        logger.warning("Unexpected language token format: '%s'", decoded)
-        return None
+        assert decoded.startswith("<|") and decoded.endswith("|>")
+        lang_code = decoded[2:-2]
+        assert lang_code in cls.supported_languages
+        return lang_code
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
