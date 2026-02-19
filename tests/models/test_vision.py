@@ -13,6 +13,7 @@ from vllm.distributed.parallel_state import (
     initialize_model_parallel,
 )
 from vllm.model_executor.models.vision import (
+    compute_encoder_metadata,
     get_load_balance_assignment,
     resolve_visual_encoder_outputs,
     run_dp_sharded_mrope_vision_model,
@@ -492,3 +493,66 @@ def test_simple_mrope_vision_model_spatial_merge(spatial_merge_size: int):
 
     assert output.shape[0] == expected_output_patches
     assert output.shape[1] == vision_model.out_hidden_size
+
+
+# ---------------------------------------------------------------------------
+# compute_encoder_metadata tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    "grid_thw,spatial_merge_size,per_frame,expected_cu_seqlens,expected_max_seqlen",
+    [
+        # Single image, merge=2: patches = 1 * (14//2) * (14//2) = 49
+        ([[1, 14, 14]], 2, False, [0, 49], 49),
+        # Two images, different sizes: 49 + 196 = 245
+        ([[1, 14, 14], [1, 28, 28]], 2, False, [0, 49, 245], 196),
+        # No spatial merge: patches = T * H * W
+        ([[1, 14, 14]], 1, False, [0, 196], 196),
+        # Video: T=2, whole-sequence mode: 2 * 7 * 7 = 98
+        ([[2, 14, 14]], 2, False, [0, 98], 98),
+        # per_frame mode, T=2: each frame is a separate 7*7=49 sequence
+        ([[2, 14, 14]], 2, True, [0, 49, 98], 49),
+        # per_frame, single-frame images (same as per_frame=False)
+        ([[1, 14, 14], [1, 28, 28]], 2, True, [0, 49, 245], 196),
+    ],
+)
+def test_compute_encoder_metadata(
+    grid_thw,
+    spatial_merge_size,
+    per_frame,
+    expected_cu_seqlens,
+    expected_max_seqlen,
+):
+    metadata = compute_encoder_metadata(
+        grid_thw,
+        torch.device("cpu"),
+        spatial_merge_size=spatial_merge_size,
+        per_frame=per_frame,
+    )
+
+    assert metadata["cu_seqlens"].tolist() == expected_cu_seqlens
+    assert metadata["max_seqlen"].item() == expected_max_seqlen
+    # sequence_lengths sum must equal total tokens
+    assert metadata["sequence_lengths"].sum().item() == expected_cu_seqlens[-1]
+    # max_seqlen must stay on CPU (avoids GPU sync during CUDA graph replay)
+    assert metadata["max_seqlen"].device.type == "cpu"
+
+
+def test_compute_encoder_metadata_padding():
+    """pad_to_batch_size pads cu_seqlens with the last value (zero-length seqs)."""
+    metadata = compute_encoder_metadata(
+        [[1, 14, 14]],
+        torch.device("cpu"),
+        spatial_merge_size=2,
+        pad_to_batch_size=4,
+    )
+    # 1 real image padded to 4: cu_seqlens has 5 entries
+    assert len(metadata["cu_seqlens"]) == 5
+    # Padding repeats the last cumulative value (total = 49)
+    last = metadata["cu_seqlens"][-1].item()
+    assert last == 49
+    assert all(v.item() == last for v in metadata["cu_seqlens"][2:])
+    # sequence_lengths has 4 entries; last 3 are zero
+    assert len(metadata["sequence_lengths"]) == 4
+    assert metadata["sequence_lengths"][0].item() == 49
+    assert metadata["sequence_lengths"][1:].sum().item() == 0
