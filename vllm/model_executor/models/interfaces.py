@@ -1230,7 +1230,7 @@ class SupportsTranscription(Protocol):
         cls,
         token_ids: list[int],
         tokenizer: object,
-    ) -> str | None:
+    ) -> str:
         """Parse the detected language from model output token IDs.
 
         Only needs to be implemented when
