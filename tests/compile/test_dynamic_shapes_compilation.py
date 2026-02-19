@@ -39,6 +39,7 @@ def get_test_models():
 @pytest.mark.parametrize("use_aot_compile", ["0", "1"])
 @pytest.mark.parametrize("use_bytecode_hook", [True, False])
 @pytest.mark.parametrize("evaluate_guards", [False, True])
+@pytest.mark.parametrize("autotune_batch_hint", [None, 256])
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_dynamic_shapes_compilation(
     monkeypatch,
@@ -47,6 +48,7 @@ def test_dynamic_shapes_compilation(
     use_aot_compile,
     use_bytecode_hook,
     evaluate_guards,
+    autotune_batch_hint,
 ):
     """Test that all dynamic shapes types compile successfully"""
     if use_bytecode_hook and shapes_type == DynamicShapesType.UNBACKED:
@@ -73,6 +75,7 @@ def test_dynamic_shapes_compilation(
             "dynamic_shapes_config": {
                 "type": shapes_type.value,
                 "evaluate_guards": evaluate_guards,
+                "autotune_batch_hint": autotune_batch_hint,
             },
         },
         max_model_len=1024,
@@ -215,4 +218,99 @@ def test_model_specialization_with_evaluate_guards(
         torch.randn(20, 10).cuda(),
         torch.randn(1, 10).cuda(),
         is_01_specialization=True,
+    )
+
+
+@pytest.mark.parametrize(
+    "shapes_type",
+    [DynamicShapesType.BACKED, DynamicShapesType.UNBACKED],
+)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
+def test_autotune_batch_hint_override(monkeypatch, shapes_type):
+    """Verify that changing autotune_batch_hint produces different Inductor
+    output even when sharing the same cache directory (no stale cache hits)."""
+    from unittest.mock import patch
+
+    from torch._inductor.graph import GraphLowering
+    from torch._inductor.utils import fresh_inductor_cache
+
+    monkeypatch.setenv("VLLM_USE_BYTECODE_HOOK", "0")
+
+    HINT_A = 48
+    HINT_B = 99
+    ACTUAL_BATCH = 256
+    HIDDEN = 32
+
+    @support_torch_compile
+    class ToyModel(torch.nn.Module):
+        def __init__(self, **kwargs):
+            super().__init__()
+            self.linear = torch.nn.Linear(HIDDEN, HIDDEN)
+
+        def forward(self, x: torch.Tensor):
+            return self.linear(x)
+
+    @contextmanager
+    def use_vllm_config(vllm_config: VllmConfig):
+        with set_forward_context({}, vllm_config), set_current_vllm_config(vllm_config):
+            yield
+
+    def compile_and_capture(hint: int, cache_dir: str) -> str:
+        """Compile with the given hint and return the Inductor output code."""
+        torch._dynamo.reset()
+
+        vllm_config = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+                dynamic_shapes_config=DynamicShapesConfig(
+                    type=shapes_type,
+                    autotune_batch_hint=hint,
+                ),
+            ),
+        )
+
+        source_codes: list[str] = []
+
+        def capturing_save(code: str) -> None:
+            source_codes.append(code)
+
+        x = torch.randn(ACTUAL_BATCH, HIDDEN).cuda()
+
+        with (
+            torch.no_grad(),
+            use_vllm_config(vllm_config),
+            patch.object(
+                GraphLowering,
+                "save_output_code",
+                staticmethod(capturing_save),
+            ),
+        ):
+            monkeypatch.setenv("VLLM_CACHE_ROOT", cache_dir)
+            model = ToyModel(vllm_config=vllm_config).eval().cuda()
+            model(x)
+
+        assert len(source_codes) > 0, "No Inductor output code was captured"
+        return "\n".join(source_codes)
+
+    # Use a single shared inductor cache for both compilations so that
+    # a stale cache hit (identical cache keys) would surface as a failure.
+    with fresh_inductor_cache(), tempfile.TemporaryDirectory() as cache_dir:
+        code_a = compile_and_capture(HINT_A, cache_dir)
+        code_b = compile_and_capture(HINT_B, cache_dir)
+
+    def has_rand_strided(code: str, batch: int) -> bool:
+        return f"rand_strided(({batch}," in code or f"rand_strided(({batch}, " in code
+
+    assert has_rand_strided(code_a, HINT_A), (
+        f"Expected rand_strided with batch dim {HINT_A} in first compilation"
+    )
+    assert has_rand_strided(code_b, HINT_B), (
+        f"Expected rand_strided with batch dim {HINT_B} in second compilation"
+    )
+    assert not has_rand_strided(code_a, HINT_B), (
+        f"First compilation (hint={HINT_A}) should not contain batch dim {HINT_B}"
+    )
+    assert not has_rand_strided(code_b, HINT_A), (
+        f"Second compilation (hint={HINT_B}) should not contain batch dim {HINT_A}; "
+        f"likely a stale cache hit"
     )
