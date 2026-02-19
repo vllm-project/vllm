@@ -24,7 +24,6 @@ from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
 )
 from vllm.model_executor.layers.fused_moe.fused_moe import (
     TritonExperts,
-    try_get_optimal_moe_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
@@ -39,7 +38,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
 
-from .utils import _get_lora_device
+from .utils import _get_lora_device, try_get_optimal_moe_lora_config
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
@@ -53,7 +52,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.device = _get_lora_device(base_layer)
-        self._w13_slices = 2
+        # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
+        # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
+        self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
         self._inject_lora_into_fused_moe()
 
     def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
@@ -103,15 +104,21 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             )
         else:  # fall back to the default config
             get_config_func = functools.partial(
-                try_get_optimal_moe_config,
-                layer.w13_weight.size(),
-                layer.w2_weight.size(),
-                top_k,
-                config_dtype,
+                try_get_optimal_moe_lora_config,
+                w1_shape=layer.w13_weight.size(),
+                w2_shape=layer.w2_weight.size(),
+                rank=rank,
+                top_k=top_k,
+                dtype=config_dtype,
+                M=M,
                 block_shape=layer.quant_method.moe_quant_config.block_shape,
             )
-            shrink_config = get_config_func(M)
-            expand_config = get_config_func(M)
+            shrink_config = get_config_func(
+                op_type=f"fused_moe_lora_{op_prefix}_shrink"
+            )
+            expand_config = get_config_func(
+                op_type=f"fused_moe_lora_{op_prefix}_expand"
+            )
         shrink_config = self._normalize_keys(shrink_config)
         expand_config = self._normalize_keys(expand_config)
         return shrink_config, expand_config
@@ -123,22 +130,26 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.base_layer.ensure_moe_quant_config_init()
         quant_config = self.base_layer.quant_method.moe_quant_config
 
-        prepare_finalize = MoEPrepareAndFinalizeNoEP()
-        m_fused_moe_fn = FusedMoEModularKernel(
-            prepare_finalize,
-            self.base_layer.quant_method.select_gemm_impl(
-                prepare_finalize, self.base_layer
-            ),
-            self.base_layer.shared_experts,
-        )
+        if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
+            # Use the existing modular kernel from the quant method
+            m_fused_moe_fn = self.base_layer.quant_method.moe_mk
+        else:
+            # Create a new modular kernel via select_gemm_impl
+            prepare_finalize = MoEPrepareAndFinalizeNoEP()
+            m_fused_moe_fn = FusedMoEModularKernel(
+                prepare_finalize,
+                self.base_layer.quant_method.select_gemm_impl(
+                    prepare_finalize, self.base_layer
+                ),
+                self.base_layer.shared_experts,
+            )
+
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
                 m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
             )
         else:
-            assert isinstance(
-                m_fused_moe_fn.fused_experts, (MarlinExperts, TritonExperts)
-            )
+            assert isinstance(m_fused_moe_fn.fused_experts, TritonExperts)
 
         def fwd_decorator(layer, func):
             def wrapper(*args, **kwargs):
@@ -185,8 +196,18 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     config_dtype=config_dtype,
                 )
 
+                # SPARSITY_FACTOR is a heuristic margin ensuring tokens * top_k
+                # activates only a small fraction of total experts * loras.
+                SPARSITY_FACTOR = 8
+                naive_block_assignment = (
+                    expert_map is None
+                    and num_tokens * top_k * SPARSITY_FACTOR
+                    <= self.base_layer.local_num_experts * self.max_loras
+                )
+
                 # get the block size of m from customized config or default config
                 (
+                    token_lora_mapping,
                     sorted_token_ids_lora,
                     expert_ids_lora,
                     num_tokens_post_padded_lora,
@@ -198,6 +219,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.max_loras,
                     self.adapter_enabled,
                     expert_map,
+                    naive_block_assignment=naive_block_assignment,
                 )
 
                 moe_state_dict["sorted_token_ids_lora"] = sorted_token_ids_lora
@@ -205,9 +227,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["num_tokens_post_padded_lora"] = (
                     num_tokens_post_padded_lora
                 )
+                moe_state_dict["token_lora_mapping"] = token_lora_mapping
 
-                expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(self.max_loras, -1)
+                if sorted_token_ids_lora is not None:
+                    expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
+                    sorted_token_ids_lora = sorted_token_ids_lora.view(
+                        self.max_loras, -1
+                    )
                 #
 
                 self.punica_wrapper.add_lora_fused_moe(
@@ -225,6 +251,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     expand_config,  ## pass the expand config
                     self.adapter_enabled,
                     fully_sharded=self.fully_sharded,
+                    token_lora_mapping=token_lora_mapping,
                 )
 
                 result = func(*args, **kwargs)
@@ -265,9 +292,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 num_tokens_post_padded_lora = moe_state_dict[
                     "num_tokens_post_padded_lora"
                 ]
+                token_lora_mapping = moe_state_dict.get("token_lora_mapping")
 
-                expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                sorted_token_ids_lora = sorted_token_ids_lora.view(self.max_loras, -1)
+                if sorted_token_ids_lora is not None:
+                    expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
+                    sorted_token_ids_lora = sorted_token_ids_lora.view(
+                        self.max_loras, -1
+                    )
                 intermediate_cache2 = moe_state_dict["intermediate_cache2"]
                 intermediate_cache3 = args[0]
 
@@ -290,6 +321,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     True,
                     fully_sharded=self.fully_sharded,
                     offset=shard_size_w2 * self.tp_rank if self.fully_sharded else 0,
+                    token_lora_mapping=token_lora_mapping,
                 )
 
                 result = func(*args, **kwargs)
@@ -306,8 +338,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         fused_experts.moe_sum = moe_sum_decorator(
             self.base_layer, fused_experts.moe_sum
         )
-        self.base_layer.quant_method = FusedMoEModularMethod(
-            self.base_layer.quant_method, m_fused_moe_fn
+        # TODO(bnell): find a less intrusive way to handle this.
+        self.base_layer._replace_quant_method(
+            FusedMoEModularMethod(self.base_layer.quant_method, m_fused_moe_fn)
         )
 
     def _create_lora_a_weights(
@@ -395,7 +428,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.lora_b_stacked = []
         for lora_id in range(max_loras):
             for experts_id in range(self.base_layer.local_num_experts):
-                # gate_proj,down_proj,up_proj
+                # For gated MoE: gate_proj (w1), down_proj (w2), up_proj (w3)
+                # For non-gated MoE: up_proj (w1), down_proj (w2)
                 self.lora_a_stacked.append(
                     self.w13_lora_a_stacked[0][lora_id][experts_id]
                 )
@@ -410,12 +444,14 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     self.w2_lora_b_stacked[0][lora_id][experts_id]
                 )
 
-                self.lora_a_stacked.append(
-                    self.w13_lora_a_stacked[1][lora_id][experts_id]
-                )
-                self.lora_b_stacked.append(
-                    self.w13_lora_b_stacked[1][lora_id][experts_id]
-                )
+                # Only add w3 (up_proj) for gated MoE (_w13_slices == 2)
+                if self._w13_slices == 2:
+                    self.lora_a_stacked.append(
+                        self.w13_lora_a_stacked[1][lora_id][experts_id]
+                    )
+                    self.lora_b_stacked.append(
+                        self.w13_lora_b_stacked[1][lora_id][experts_id]
+                    )
 
     def _slice_w13_a(self, w13_lora_a: torch.Tensor) -> torch.Tensor:
         """
@@ -510,8 +546,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         slliced_w1_lora_a = self._slice_w13_a(w1_lora_a)
         slliced_w1_lora_b = self._slice_w13_b(w1_lora_b)
-        slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
-        slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
 
         sliced_w2_lora_a = self._slice_w2_a(w2_lora_a)
         sliced_w2_lora_b = self._slice_w2_b(w2_lora_b)
@@ -520,17 +554,22 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             index, :, : slliced_w1_lora_a.shape[1], : slliced_w1_lora_a.shape[2]
         ].copy_(slliced_w1_lora_a, non_blocking=True)
 
-        self.w13_lora_a_stacked[1][
-            index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
-        ].copy_(slliced_w3_lora_a, non_blocking=True)
-
         self.w13_lora_b_stacked[0][
             index, :, : slliced_w1_lora_b.shape[1], : slliced_w1_lora_b.shape[2]
         ].copy_(slliced_w1_lora_b, non_blocking=True)
 
-        self.w13_lora_b_stacked[1][
-            index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
-        ].copy_(slliced_w3_lora_b, non_blocking=True)
+        # Only copy w3 (up_proj) for gated MoE (_w13_slices == 2)
+        if self._w13_slices == 2:
+            slliced_w3_lora_a = self._slice_w13_a(w3_lora_a)
+            slliced_w3_lora_b = self._slice_w13_b(w3_lora_b)
+
+            self.w13_lora_a_stacked[1][
+                index, :, : slliced_w3_lora_a.shape[1], : slliced_w3_lora_a.shape[2]
+            ].copy_(slliced_w3_lora_a, non_blocking=True)
+
+            self.w13_lora_b_stacked[1][
+                index, :, : slliced_w3_lora_b.shape[1], : slliced_w3_lora_b.shape[2]
+            ].copy_(slliced_w3_lora_b, non_blocking=True)
 
         self.w2_lora_a_stacked[0][
             index, :, : sliced_w2_lora_a.shape[1], : sliced_w2_lora_a.shape[2]

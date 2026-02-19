@@ -12,7 +12,6 @@ from tests.v1.attention.utils import (
     create_standard_kv_cache_spec,
     try_get_attention_backend,
 )
-from vllm.attention.backends.registry import AttentionBackendEnum
 from vllm.config import (
     CacheConfig,
     DeviceConfig,
@@ -25,6 +24,7 @@ from vllm.config import (
 from vllm.config.load import LoadConfig
 from vllm.model_executor.models.llama import LlamaForCausalLM
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.spec_decode.eagle import EagleProposer
 
 mimo_7b_dir = "XiaomiMiMo/MiMo-7B-Base"
@@ -204,7 +204,7 @@ def test_mtp_propose(num_speculative_tokens, monkeypatch):
         target_positions=target_positions,
         target_hidden_states=target_hidden_states,
         next_token_ids=next_token_ids,
-        last_token_indices=None,
+        token_indices_to_sample=None,
         common_attn_metadata=common_attn_metadata,
         sampling_metadata=sampling_metadata,
     )

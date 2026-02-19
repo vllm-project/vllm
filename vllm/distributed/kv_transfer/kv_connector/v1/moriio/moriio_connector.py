@@ -7,7 +7,7 @@ import threading
 import time
 from collections import defaultdict
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import msgpack
 import msgspec
@@ -15,7 +15,6 @@ import numpy as np
 import torch
 import zmq
 
-from vllm.attention.selector import get_attn_backend
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -56,11 +55,12 @@ from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
 )
+from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.request import RequestStatus
 
 if TYPE_CHECKING:
-    from vllm.attention.backends.abstract import AttentionMetadata
+    from vllm.v1.attention.backend import AttentionMetadata
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -90,7 +90,7 @@ class MoRIIOConnector(KVConnectorBase_V1):
         self,
         vllm_config: VllmConfig,
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(vllm_config, role)
         assert vllm_config.kv_transfer_config is not None, (
@@ -333,7 +333,7 @@ class MoRIIOConnectorScheduler:
         request: "Request",
         blocks: "KVCacheBlocks",
         num_external_tokens: int,
-        connector_worker: Optional["MoRIIOConnectorWorker"] = None,
+        connector_worker: "MoRIIOConnectorWorker | None" = None,
     ):
         params = request.kv_transfer_params
         if not params:

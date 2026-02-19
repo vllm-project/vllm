@@ -13,14 +13,15 @@ from openai.types.responses.tool import (
     Tool,
 )
 
-from vllm.entrypoints.context import ConversationContext
-from vllm.entrypoints.openai.protocol import ErrorResponse, ResponsesRequest
-from vllm.entrypoints.openai.serving_responses import (
+from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.responses.context import ConversationContext
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
-from vllm.entrypoints.tool_server import ToolServer
 from vllm.inputs.data import TokensPrompt
 
 
@@ -124,12 +125,14 @@ class TestInitializeToolSessions:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -210,12 +213,14 @@ class TestValidateGeneratorInput:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
 
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -227,9 +232,6 @@ class TestValidateGeneratorInput:
             chat_template=None,
             chat_template_content_format="auto",
         )
-
-        # Set max_model_len for testing
-        instance.max_model_len = 100
 
         return instance
 

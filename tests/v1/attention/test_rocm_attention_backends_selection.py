@@ -7,9 +7,9 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.attention.backends.registry import AttentionBackendEnum
-from vllm.attention.selector import AttentionSelectorConfig
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.selector import AttentionSelectorConfig
 
 # ROCm-specific attention backend selection tests
 pytestmark = pytest.mark.skipif(

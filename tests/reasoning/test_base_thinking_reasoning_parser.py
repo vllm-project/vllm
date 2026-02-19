@@ -5,7 +5,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 

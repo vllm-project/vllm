@@ -66,7 +66,7 @@ def apply_fp8_marlin_linear(
         # inputs, a_scales = marlin_quant_input(inputs, torch.float8_e4m3fn)
         raise RuntimeError("Marlin W8A8 is not supported.")
 
-    output = ops.gptq_marlin_gemm(
+    output = ops.marlin_gemm(
         a=inputs,
         c=None,
         b_q_weight=weight,
@@ -226,6 +226,7 @@ def prepare_fp8_moe_layer_for_marlin(
     e = layer.num_experts
     k = layer.hidden_size
     n = layer.intermediate_size_per_partition
+    w13_n = w13_weight.size(1)
     weight_block_size = getattr(layer, "weight_block_size", None)
 
     # WORKSPACE
@@ -240,7 +241,7 @@ def prepare_fp8_moe_layer_for_marlin(
     def repack_weight(name: str, weight: torch.Tensor) -> torch.Tensor:
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = w13_n, k
         else:
             size_n, size_k = k, n
 
@@ -268,7 +269,7 @@ def prepare_fp8_moe_layer_for_marlin(
         scales = scales.to(layer.orig_dtype)
         tensor_list = []
         if "w13" in name:
-            size_n, size_k = n * 2, k
+            size_n, size_k = w13_n, k
         else:
             size_n, size_k = k, n
 

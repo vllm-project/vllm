@@ -26,7 +26,7 @@ RERANK_MODELS = [
             "method": "no_post_processing",
         },
         mteb_score=0.33757,
-        pooling_type="LAST",
+        seq_pooling_type="LAST",
         attn_type="decoder",
         is_prefix_caching_supported=True,
         is_chunked_prefill_supported=True,

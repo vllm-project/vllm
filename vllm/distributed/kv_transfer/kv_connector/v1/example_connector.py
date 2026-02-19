@@ -2,12 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import safetensors
 import torch
 
-from vllm.attention.backends.abstract import AttentionMetadata
 from vllm.config import VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
@@ -15,8 +14,9 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorRole,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.hashing import safe_hash
-from vllm.v1.attention.backends.mla.common import MLACommonMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -91,7 +91,7 @@ class ExampleConnector(KVConnectorBase_V1):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ):
         super().__init__(
             vllm_config=vllm_config,
@@ -145,7 +145,6 @@ class ExampleConnector(KVConnectorBase_V1):
                     num_pages * page_size, -1
                 )
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
-                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
             else:
                 num_pages = dst_kv_cache_layer_shape[1]
                 page_size = dst_kv_cache_layer_shape[2]
@@ -153,17 +152,10 @@ class ExampleConnector(KVConnectorBase_V1):
                     2, num_pages * page_size, -1
                 )
                 dst_kv_cache_layer[:, slot_mapping, ...] = src_kv_cache
-                dst_kv_cache_layer.reshape(dst_kv_cache_layer_shape)
 
         # Get the metadata
         metadata: KVConnectorMetadata = self._get_connector_metadata()
         assert isinstance(metadata, ExampleConnectorMetadata)
-
-        if metadata is None:
-            logger.warning(
-                "In connector.start_load_kv, but the connector metadata is None"
-            )
-            return
 
         attn_metadata = forward_context.attn_metadata
         if attn_metadata is None:

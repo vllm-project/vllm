@@ -46,8 +46,9 @@ def test_model_loading_with_params(vllm_runner, monkeypatch):
         assert model_config.encoder_config["do_lower_case"]
 
         # asserts on the pooling config files
-        assert model_config.pooler_config.pooling_type == "CLS"
-        assert model_config.pooler_config.normalize
+        assert model_config.pooler_config.seq_pooling_type == "CLS"
+        assert model_config.pooler_config.tok_pooling_type == "ALL"
+        assert model_config.pooler_config.use_activation
 
         # asserts on the tokenizer loaded
         assert model_config.tokenizer == "BAAI/bge-base-en-v1.5"
@@ -90,8 +91,9 @@ def test_roberta_model_loading_with_params(vllm_runner, monkeypatch):
         assert not model_config.encoder_config["do_lower_case"]
 
         # asserts on the pooling config files
-        assert model_config.pooler_config.pooling_type == "MEAN"
-        assert model_config.pooler_config.normalize
+        assert model_config.pooler_config.seq_pooling_type == "MEAN"
+        assert model_config.pooler_config.tok_pooling_type == "ALL"
+        assert model_config.pooler_config.use_activation
 
         # asserts on the tokenizer loaded
         assert model_config.tokenizer == "intfloat/multilingual-e5-base"

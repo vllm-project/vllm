@@ -95,7 +95,7 @@ def memory_plan_reuse_patched(self):
 # ===================================================
 # This change monkeypatches get_graph_partition_signature in pytorch 2.9.0 to
 # fix inductor partition + attention-nvfp4 quant fusion, tested in
-# `tests/compile/distributed/test_fusions_e2e.py::test_attn_quant`.
+# `tests/compile/test_fusion_attn.py::test_attn_quant`.
 # For more context, see https://github.com/pytorch/pytorch/pull/165815.
 
 
@@ -382,7 +382,7 @@ def _patch_get_raw_stream_if_needed():
         if hasattr(torch._C, "_cuda_getCurrentRawStream"):
             from torch._C import _cuda_getCurrentRawStream as _get_raw_stream
 
-            builtins.get_raw_stream = _get_raw_stream
+            builtins.get_raw_stream = _get_raw_stream  # type: ignore[attr-defined]
 
 
 _patch_get_raw_stream_if_needed()

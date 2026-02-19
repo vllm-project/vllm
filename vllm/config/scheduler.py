@@ -6,7 +6,6 @@ from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
 
 from pydantic import Field, field_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
 from vllm.config.utils import config
@@ -24,7 +23,6 @@ SchedulerPolicy = Literal["fcfs", "priority"]
 
 
 @config
-@dataclass
 class SchedulerConfig:
     """Scheduler configuration."""
 
@@ -117,7 +115,7 @@ class SchedulerConfig:
 
     # scheduler class or path. "vllm.v1.core.sched.scheduler.Scheduler"
     # (default) or "mod.custom_class".
-    scheduler_cls: str | type[object] = Field(default=None)
+    scheduler_cls: str | type[object] | None = Field(default=None)
     """The scheduler class to use. "vllm.v1.core.sched.scheduler.Scheduler" is
     the default scheduler. Can be a class directly or the path to a class of
     form "mod.custom_class"."""
@@ -130,12 +128,9 @@ class SchedulerConfig:
     and starting configuration.
     """
 
-    async_scheduling: bool = Field(default=None)
+    async_scheduling: bool | None = Field(default=None)
     """If set to False, disable async scheduling. Async scheduling helps to
     avoid gaps in GPU utilization, leading to better latency and throughput.
-    It is currently not supported with some features such as
-    speculative decoding and pipeline parallelism, and will be automatically
-    disabled in those cases.
     """
 
     stream_interval: int = Field(default=1, ge=1)
@@ -209,9 +204,7 @@ class SchedulerConfig:
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
         """Skip validation if the value is `None` when initialisation is delayed."""
-        if value is None:
-            return value
-        return handler(value)
+        return None if value is None else handler(value)
 
     def __post_init__(self, max_model_len: int, is_encoder_decoder: bool) -> None:
         if is_encoder_decoder:
