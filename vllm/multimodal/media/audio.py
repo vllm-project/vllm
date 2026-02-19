@@ -48,7 +48,19 @@ def extract_audio_from_video_bytes(
         A tuple of ``(waveform, sample_rate)`` suitable for use as an
         :class:`AudioItem`.
     """
-    container = av.open(BytesIO(data))
+    if data is None or len(data) == 0:
+        raise ValueError(
+            "Cannot extract audio: video bytes are missing or empty. "
+            "Ensure video was loaded with keep_video_bytes=True for "
+            "audio-in-video extraction."
+        )
+    try:
+        container = av.open(BytesIO(data))
+    except Exception as e:
+        raise ValueError(
+            "Invalid or corrupted video data when extracting audio. "
+            "Ensure the input is valid video bytes (e.g. a complete MP4)."
+        ) from e
     stream = container.streams.audio[0]
     native_sr = stream.rate
 
