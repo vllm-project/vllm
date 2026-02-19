@@ -78,7 +78,7 @@ def _create_proposer(
     device = current_platform.device_type
     vllm_config = VllmConfig(
         model_config=model_config,
-        cache_config=CacheConfig(),
+        cache_config=CacheConfig(block_size=16),
         speculative_config=speculative_config,
         device_config=DeviceConfig(device=device),
         parallel_config=ParallelConfig(),

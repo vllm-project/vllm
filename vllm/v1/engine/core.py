@@ -114,7 +114,14 @@ class EngineCore:
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
             vllm_config
         )
-
+        if kv_cache_config.kv_cache_groups:
+            vllm_config.cache_config.block_size = min(
+                g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+            )
+        elif vllm_config.cache_config.block_size is None:
+            # Attention-free models (encoder-only, SSM) — use default.
+            vllm_config.cache_config.block_size = 16
+        vllm_config.validate_block_size()
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
         self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))
