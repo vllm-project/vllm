@@ -244,6 +244,29 @@ def dynamo_reset():
     torch._dynamo.reset()
 
 
+@pytest.fixture(autouse=True)
+def isolate_vllm_cache_root(monkeypatch: pytest.MonkeyPatch, tmp_path_factory):
+    """
+    Optionally isolate VLLM cache per test by redirecting VLLM_CACHE_ROOT
+    to a temporary directory.
+
+    Controlled by the environment variable VLLM_TEST_ISOLATE_CACHE_ROOT.
+    If unset or set to a truthy value ("1", "true", "yes", "on"), we
+    point VLLM_CACHE_ROOT at a fresh temp dir for this test. If set to
+    a falsy value ("0", "false", "no", "off"), we leave the cache root
+    unchanged.
+    """
+    flag = os.getenv("VLLM_TEST_ISOLATE_CACHE_ROOT", "1").lower()
+    if flag in ("0", "false", "no", "off"):
+        # Do not override cache root.
+        yield
+        return
+
+    tmp_cache_root = tmp_path_factory.mktemp("vllm_cache")
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_cache_root))
+    yield
+
+
 @pytest.fixture
 def example_prompts() -> list[str]:
     return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]
