@@ -620,9 +620,9 @@ class MessageQueue:
                 return self.warning_wait_timeout_ms
             else:
                 time_left = self.deadline - time.monotonic()
-                if time_left <= 0:
-                    raise TimeoutError
                 time_left_ms = int(time_left * 1000)
+                if time_left_ms <= 0:
+                    raise TimeoutError
 
                 return (
                     time_left_ms

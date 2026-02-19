@@ -25,7 +25,18 @@ def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
     return [np.random.randint(1, 100, i) for i in sizes]
 
 
-def distributed_run(fn, world_size):
+def distributed_run(fn, world_size, timeout=5):
+    """Run a function in multiple processes with proper error handling.
+
+    Args:
+        fn: Function to run in each process
+        world_size: Number of processes to spawn
+        timeout: Maximum time in seconds to wait for processes (default: 60)
+    """
+    # Use spawn method for better macOS compatibility
+    # Get the context for spawn method
+    # ctx = mp.get_context('spawn')
+
     number_of_processes = world_size
     processes = []
     for i in range(number_of_processes):
@@ -40,11 +51,40 @@ def distributed_run(fn, world_size):
         processes.append(p)
         p.start()
 
-    for p in processes:
-        p.join()
+    # Join with timeout to detect hangs (parallel timeout for all processes)
+    start_time = time.time()
+    failed_processes = []
 
-    for p in processes:
-        assert p.exitcode == 0
+    # Wait for all processes with a shared timeout
+    while time.time() - start_time < timeout:
+        all_done = True
+        for p in processes:
+            if p.is_alive():
+                all_done = False
+                break
+        if all_done:
+            break
+        time.sleep(0.1)  # Check every 100ms
+
+    # Check final status of all processes
+    for i, p in enumerate(processes):
+        if p.is_alive():
+            # Process is still running after timeout - likely hung at barrier
+            failed_processes.append((i, "timeout"))
+            p.kill()
+            p.join()
+        elif p.exitcode != 0:
+            failed_processes.append((i, p.exitcode))
+
+    # Report failures
+    if failed_processes:
+        error_msg = "Distributed test failed:\n"
+        for rank, status in failed_processes:
+            if status == "timeout":
+                error_msg += f"  Rank {rank}: Timeout (likely hung at barrier)\n"
+            else:
+                error_msg += f"  Rank {rank}: Exit code {status}\n"
+        raise AssertionError(error_msg)
 
 
 def worker_fn_wrapper(fn):
