@@ -1960,7 +1960,7 @@ class GPUModelRunner(
 
         if (
             spec_decode_common_attn_metadata is not None
-            and num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
+            and (num_reqs != num_reqs_padded or num_tokens != num_tokens_padded)
             and not self.supports_sd_full_graph
         ):
             # Currently the drafter still only uses piecewise cudagraphs (except for
@@ -4858,15 +4858,17 @@ class GPUModelRunner(
                 self.query_start_loc.copy_to_gpu()
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                attn_metadata, spec_decode_common_attn_metadata = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded,
-                    num_tokens_padded=num_tokens_padded if pad_attn else None,
-                    num_reqs=num_reqs_padded,
-                    max_query_len=max_query_len,
-                    ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
-                    for_cudagraph_capture=is_graph_capturing,
-                    slot_mappings=slot_mappings_by_group,
-                    use_spec_decode=self.speculative_config is not None,
+                attn_metadata, spec_decode_common_attn_metadata = (
+                    self._build_attention_metadata(
+                            num_tokens=num_tokens_unpadded,
+                            num_tokens_padded=num_tokens_padded if pad_attn else None,
+                            num_reqs=num_reqs_padded,
+                            max_query_len=max_query_len,
+                            ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
+                            for_cudagraph_capture=is_graph_capturing,
+                            slot_mappings=slot_mappings_by_group,
+                            use_spec_decode=self.speculative_config is not None,
+                    )
                 )
 
         with self.maybe_dummy_run_with_lora(
@@ -5353,10 +5355,9 @@ class GPUModelRunner(
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
             logger.info(
-                "Capturing CUDA graphs for %d batches (%s) with runtime mode %s. This may take a while...",
+                "Capturing CUDA graphs for %d batches (%s)",
                 len(batch_descriptors),
                 ", ".join(str(desc.num_tokens) for desc in batch_descriptors),
-                cudagraph_runtime_mode,
             )
             batch_descriptors = tqdm(
                 batch_descriptors,

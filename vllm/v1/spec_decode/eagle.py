@@ -9,12 +9,12 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.config import (
     CUDAGraphMode,
     VllmConfig,
     get_layers_from_vllm_config,
 )
-from vllm.compilation.cuda_graph import CUDAGraphWrapper
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -374,7 +374,11 @@ class SpecDecodeBaseProposer:
             # This is a temprary mapping open to discussions
             # FULL_AND_PIECEWISE -> PIECEWISE, FULL_DECODE_ONLY -> FULL
             # PIECEWISE -> PIECEWISE, FULL -> FULL
-            eagle_cudagraph_mode = CUDAGraphMode.PIECEWISE if cudagraph_mode.has_piecewise_cudagraphs() else cudagraph_mode.decode_mode()
+            eagle_cudagraph_mode = (
+                CUDAGraphMode.PIECEWISE
+                if cudagraph_mode.has_piecewise_cudagraphs()
+                else cudagraph_mode.decode_mode()
+            )
         else:
             eagle_cudagraph_mode = CUDAGraphMode.NONE
 
@@ -570,7 +574,9 @@ class SpecDecodeBaseProposer:
 
         common_attn_metadata.num_actual_tokens = batch_size
         common_attn_metadata.max_query_len = 1
-        common_attn_metadata.query_start_loc[: batch_size + 1] = self.arange[: batch_size + 1]
+        common_attn_metadata.query_start_loc[: batch_size + 1] = self.arange[
+            : batch_size + 1
+        ]
         common_attn_metadata.query_start_loc_cpu[: batch_size + 1] = torch.from_numpy(
             self.token_arange_np[: batch_size + 1]
         ).clone()
@@ -646,7 +652,9 @@ class SpecDecodeBaseProposer:
             )
             block_ids = block_ids.view(-1)
             if self.uses_mrope:
-                slot_mapping = block_ids * block_size + clamped_positions[0] % block_size
+                slot_mapping = (
+                    block_ids * block_size + clamped_positions[0] % block_size
+                )
             else:
                 slot_mapping = block_ids * block_size + clamped_positions % block_size
             common_attn_metadata.slot_mapping[:batch_size] = slot_mapping
@@ -1324,8 +1332,8 @@ class SpecDecodeBaseProposer:
             and not self.vllm_config.parallel_config.use_ubatching
             and not self.speculative_config.disable_padded_drafter_batch
         ):
-            # Currently Ubatch does not support FULL in speculative decoding,
-            # and padded drafter batch also does not support FULL due to the dynamic number of tokens.
+            # Currently Ubatch does not support FULL in speculative decoding, and the
+            # same goes for disable_padded_drafter_batch due to the dynamic num_tokens.
             # We can consider supporting FULL for these cases in the future if needed.
             self.model = CUDAGraphWrapper(
                 self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
@@ -1619,7 +1627,7 @@ class SpecDecodeBaseProposer:
                     attn_metadata_builder = self._get_attention_metadata_builder()
                 else:
                     attn_metadata_builder = self.attn_metadata_builder
-                
+
                 attn_metadata = attn_metadata_builder.build_for_drafting(
                     common_attn_metadata=common_attn_metadata, draft_index=0
                 )
