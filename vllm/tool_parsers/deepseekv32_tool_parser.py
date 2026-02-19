@@ -8,8 +8,10 @@ from typing import Any
 
 import regex as re
 
-from vllm.entrypoints.openai.protocol import (
+from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
+)
+from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -107,6 +109,18 @@ class DeepSeekV32ToolParser(ToolParser):
     def _generate_tool_call_id(self) -> str:
         """Generate a unique tool call ID."""
         return f"call_{uuid.uuid4().hex[:24]}"
+
+    def adjust_request(self, request):
+        request = super().adjust_request(request)
+        if request.tools and request.tool_choice != "none":
+            # Ensure tool call tokens
+            # (<｜DSML｜function_calls>, </｜DSML｜function_calls>)
+            # are not skippedduring decoding.
+            # Even though they are not marked as special tokens,
+            # setting skip_special_tokens=False ensures proper handling in
+            # transformers 5.x where decoding behavior may have changed.
+            request.skip_special_tokens = False
+        return request
 
     def _reset_streaming_state(self):
         """Reset all streaming state."""

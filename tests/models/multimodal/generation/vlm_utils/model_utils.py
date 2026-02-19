@@ -5,7 +5,9 @@ for manipulating the input / output of HF & vLLM test runners, which are
 typically specific to a small subset of models.
 """
 
+import logging
 import types
+import warnings
 from pathlib import PosixPath
 
 import numpy as np
@@ -30,6 +32,8 @@ from vllm.utils.collection_utils import is_list_of
 
 from .....conftest import HfRunner, ImageAsset, ImageTestAssets
 from .types import RunnerOutput
+
+logger = logging.getLogger(__name__)
 
 
 ####### vLLM output processors functions
@@ -120,8 +124,10 @@ def _llava_vllm_to_hf_output(
         if token_id != mm_token_id or output_ids[idx - 1] != mm_token_id
     ]
 
-    assert output_str[0] == " "
-    hf_output_str = output_str[1:]
+    # output_str[0] is not " " in some cases, e.g., Granite Vision,
+    # but for most llava based models, this is the case
+    hf_output_str = output_str[1:] if output_str[0] == " " else output_str
+
     if hf_output_ids[-1] == eos_token_id:
         hf_output_str = hf_output_str + tokenizer.decode(eos_token_id)
 
@@ -575,6 +581,32 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     # 2) Patch IsaacModel.forward: add hidden_states to the output
     # ----------------------------
     isaac_model = hf_model.model.model
+
+    # [ROCm] Disable Flash/MemEfficient SDP on ROCm to avoid HF Transformers
+    # accuracy issues: https://github.com/vllm-project/vllm/issues/30167
+    # TODO: Remove once ROCm SDP accuracy issues are resolved on HuggingFace
+    # ----------------------------
+    from ...conftest import patch_hf_vision_attn_for_rocm
+
+    try:
+        patch_hf_vision_attn_for_rocm(hf_model.model)
+    except AttributeError as e:
+        if "vision_config" in str(e):
+            warnings.warn(
+                f"Skipping ROCm vision attention patch for Isaac model: {e}. "
+                "This is expected for models without vision_config in "
+                "attention layers (e.g., Siglip2VariableLengthAttention).",
+                stacklevel=2,
+            )
+        else:
+            logger.error(
+                "Unexpected AttributeError during ROCm vision attention patch: %s. "
+                "Model type: %s. Inner model type: %s.",
+                e,
+                type(hf_model.model).__name__,
+                type(getattr(hf_model.model, "model", None)).__name__,
+            )
+            raise
 
     def patched_forward(
         self,
@@ -1182,4 +1214,92 @@ def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     if hf_processor.patch_size is None:
         hf_processor.patch_size = vision_encoder_info.get_patch_size()
 
+    return hf_model
+
+
+def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
+    """Patch HfRunner for Voxtral's conversation-based processor.
+
+    Two issues in HfRunner require patching:
+
+    1. VoxtralProcessor requires ``apply_chat_template()`` with conversation
+       dicts (accepting ``url``, ``path``, or ``base64`` audio) rather than
+       the standard ``processor(text=, audio=, sampling_rate=)`` interface.
+    2. HfRunner.get_inputs cannot handle multi-audio per prompt because it
+       mis-unpacks ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
+
+    We override ``get_inputs`` to build conversation dicts and call
+    ``apply_chat_template`` directly, bypassing both issues. We also wrap
+    ``model.generate`` to strip prompt tokens before decoding, since
+    HfRunner.generate calls batch_decode on the full sequence (prompt +
+    generated).
+    """
+
+    import base64
+    import io
+
+    import soundfile as sf
+
+    processor = hf_model.processor
+
+    def _audio_to_base64(audio_array, sample_rate: int) -> str:
+        """Encode a numpy audio array as a base64 WAV string."""
+        buf = io.BytesIO()
+        sf.write(buf, audio_array, int(sample_rate), format="WAV")
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+
+    def patched_get_inputs(prompts, images=None, videos=None, audios=None, **kwargs):
+        all_inputs = []
+        for i, prompt in enumerate(prompts):
+            content: list[dict] = []
+
+            if audios is not None and audios[i] is not None:
+                items = audios[i]
+                if not isinstance(items, list):
+                    items = [items]
+                for item in items:
+                    if isinstance(item, (list, tuple)) and len(item) == 2:
+                        arr, sr = item
+                    else:
+                        arr, sr = item, 16_000
+                    content.append(
+                        {
+                            "type": "audio",
+                            "base64": _audio_to_base64(arr, sr),
+                        }
+                    )
+
+            content.append({"type": "text", "text": prompt})
+
+            inputs = processor.apply_chat_template(
+                [{"role": "user", "content": content}]
+            )
+            if hasattr(inputs, "to"):
+                inputs = inputs.to(dtype=hf_model.dtype)
+            all_inputs.append(inputs)
+
+        return all_inputs
+
+    _orig_generate = hf_model.model.generate
+
+    def patched_generate(*args, **kwargs):
+        """Strip prompt tokens so only generated tokens are decoded."""
+        input_ids = kwargs.get("input_ids")
+        if input_ids is None and args:
+            input_ids = args[0]
+        prompt_len = input_ids.shape[1] if input_ids is not None else 0
+
+        output = _orig_generate(*args, **kwargs)
+        if prompt_len:
+            if isinstance(output, torch.Tensor):
+                output = output[:, prompt_len:]
+            else:
+                # GenerateDecoderOnlyOutput - trim sequences but preserve
+                # scores/logits so generate_greedy_logprobs_limit can
+                # extract per-token logprobs.
+                output.sequences = output.sequences[:, prompt_len:]
+        return output
+
+    hf_model.get_inputs = patched_get_inputs  # type: ignore[method-assign, assignment]
+    hf_model.model.generate = patched_generate  # type: ignore[method-assign]
     return hf_model

@@ -454,6 +454,9 @@ def dummy_hf_overrides(
     # Ensure at least 2 expert per group
     # Since `grouped_topk` assumes top-2
     n_group = getattr(text_config, "n_group", None)
+    # Kimi uses `num_expert_group` instead of `n_group`.
+    if n_group is None:
+        n_group = getattr(text_config, "num_expert_group", None)
     num_experts = n_group * 2 if n_group is not None else 2
 
     # we use three layers for Gemma-3n to check
@@ -487,6 +490,8 @@ def dummy_hf_overrides(
             {
                 "num_experts": num_experts,
                 "num_experts_per_tok": 2,
+                # Kimi uses `num_experts_per_token`.
+                "num_experts_per_token": 2,
                 "num_local_experts": num_experts,
                 # Otherwise there will not be any expert layers
                 "first_k_dense_replace": 0,

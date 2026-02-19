@@ -130,26 +130,6 @@ inline void launch_compute_problem_sizes(const torch::Tensor& topk_ids,
 }
 }  // namespace
 
-void get_cutlass_moe_mm_problem_sizes_caller(
-    const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
-    torch::Tensor& problem_sizes2, const int64_t num_experts, const int64_t n,
-    const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets,
-    std::optional<bool> force_swap_ab = std::nullopt) {
-  auto stream = at::cuda::getCurrentCUDAStream(topk_ids.device().index());
-  auto options_int32 =
-      torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
-  torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
-
-  // Swap-AB should be disabled for FP4 path
-  bool may_swap_ab =
-      force_swap_ab.value_or((!blockscale_offsets.has_value()) &&
-                             (topk_ids.numel() <= SWAP_AB_THRESHOLD));
-
-  launch_compute_problem_sizes(topk_ids, problem_sizes1, problem_sizes2,
-                               atomic_buffer, num_experts, n, k, stream,
-                               may_swap_ab);
-}
-
 template <bool SWAP_AB>
 __global__ void compute_problem_sizes_from_expert_offsets(
     const int64_t* __restrict__ expert_first_token_offset,

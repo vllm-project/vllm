@@ -11,9 +11,11 @@ pytest -s -v tests/evals/gsm8k/test_gsm8k_correctness.py \
 
 import shlex
 
+import pytest
 import yaml
 
 from tests.utils import RemoteOpenAIServer
+from vllm.platforms import current_platform
 
 from .gsm8k_eval import evaluate_gsm8k
 
@@ -52,6 +54,15 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
 def test_gsm8k_correctness(config_filename):
     """Test GSM8K correctness for a given model configuration."""
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
+
+    if (
+        not current_platform.is_cuda()
+        and "Qwen3-30B-A3B-MXFP4A16" in eval_config["model_name"]
+    ):
+        pytest.skip(
+            "Skipping Qwen3-30B-A3B-MXFP4A16 on non-CUDA platforms. "
+            "Marlin kernels are not supported."
+        )
 
     # Parse server arguments from config (use shlex to handle quoted strings)
     server_args_str = eval_config.get("server_args", "")

@@ -96,14 +96,14 @@ echo ""
 echo "🔧 Starting server with enhanced chunked processing configuration..."
 
 # Build pooler config JSON
-POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"normalize\": true, \"enable_chunked_processing\": ${VLLM_ENABLE_CHUNKED_PROCESSING}, \"max_embed_len\": ${MAX_EMBED_LEN}}"
+POOLER_CONFIG="{\"pooling_type\": \"$POOLING_TYPE\", \"use_activation\": true, \"enable_chunked_processing\": ${VLLM_ENABLE_CHUNKED_PROCESSING}, \"max_embed_len\": ${MAX_EMBED_LEN}}"
 
 # Start vLLM server with enhanced chunked processing
 vllm serve "$MODEL_NAME" \
   --tensor-parallel-size "$GPU_COUNT" \
   --enforce-eager \
   --pooler-config "$POOLER_CONFIG" \
-  --served-model-name ${MODEL_CODE} \
+  --served-model-name "${MODEL_CODE}" \
   --api-key "$API_KEY" \
   --trust-remote-code \
   --port "$PORT" \

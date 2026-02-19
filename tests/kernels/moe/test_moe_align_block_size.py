@@ -12,7 +12,6 @@ from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     batched_moe_align_block_size,
     moe_align_block_size,
 )
-from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import set_random_seed
 
@@ -185,7 +184,6 @@ def torch_moe_align_block_size(
 @pytest.mark.parametrize("num_experts", NUM_EXPERTS)
 @pytest.mark.parametrize("block_size", BLOCK_SIZES)
 @pytest.mark.parametrize("pad_sorted_ids", [False, True])
-@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_moe_align_block_size(
     m: int, topk: int, num_experts: int, block_size: int, pad_sorted_ids: bool
 ):
@@ -245,7 +243,6 @@ def test_moe_align_block_size(
 @pytest.mark.parametrize("topk", [2, 4])
 @pytest.mark.parametrize("num_experts", [8, 64])
 @pytest.mark.parametrize("block_size", [64])
-@pytest.mark.skipif(current_platform.is_rocm(), reason="Skip for rocm")
 def test_moe_align_block_size_with_expert_map(
     m: int, topk: int, num_experts: int, block_size: int
 ):
@@ -337,7 +334,7 @@ def test_batched_moe_align_block_size(
         ref_expert_ids = torch.empty((Msum // block_size,), dtype=torch.int32)
         ref_num_tokens_post_pad = torch.empty((1,), dtype=torch.int32)
 
-        # Intialize
+        # Initialize
         sentinel = E * max_tokens_per_batch
         ref_sorted_ids.fill_(sentinel)
         ref_expert_ids.fill_(-1)

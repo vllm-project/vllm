@@ -10,7 +10,7 @@ from transformers.activations import ACT2FN
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, VllmConfig
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.linear import QKVParallelLinear, RowParallelLinear
@@ -54,12 +54,11 @@ class ModernBertEmbeddings(nn.Module):
         input_ids: torch.Tensor,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            return self.norm(inputs_embeds)
-        else:
+        if inputs_embeds is None:
             inputs_embeds = self.tok_embeddings(input_ids)
-            embeddings = self.norm(inputs_embeds)
-            return embeddings
+
+        embeddings = self.norm(inputs_embeds)
+        return embeddings
 
 
 class ModernBertAttention(nn.Module):
@@ -309,12 +308,13 @@ class ModernBertPooler(SequencePooler):
             config.hidden_size,
             eps=config.norm_eps,
             bias=config.norm_bias,
+            dtype=head_dtype,
         )
 
         # Use lambdas so that weights are not registered under `self.head`
         self.head = EmbeddingPoolerHead(
-            projector=lambda x: self.dense(x),
             head_dtype=head_dtype,
+            projector=lambda x: self.dense(x),
             activation=LambdaPoolerActivation(lambda x: self.norm(self.act(x))),
         )
 

@@ -66,7 +66,7 @@ def test_embed_models_using_normalize(
         model,
         max_model_len=512,
         dtype=dtype,
-        pooler_config=PoolerConfig(normalize=False),
+        pooler_config=PoolerConfig(use_activation=False),
     ) as vllm_model:
         wo_normalize = torch.tensor(vllm_model.embed(example_prompts))
 
@@ -74,7 +74,7 @@ def test_embed_models_using_normalize(
         model,
         max_model_len=512,
         dtype=dtype,
-        pooler_config=PoolerConfig(normalize=True),
+        pooler_config=PoolerConfig(use_activation=True),
     ) as vllm_model:
         w_normalize = torch.tensor(vllm_model.embed(example_prompts))
 
@@ -146,7 +146,7 @@ def test_multi_vector_retrieval_models_using_normalize(
         model,
         max_model_len=512,
         dtype=dtype,
-        pooler_config=PoolerConfig(normalize=False),
+        pooler_config=PoolerConfig(use_activation=False),
     ) as vllm_model:
         wo_normalize = vllm_model.token_embed(example_prompts)
 
@@ -154,7 +154,7 @@ def test_multi_vector_retrieval_models_using_normalize(
         model,
         max_model_len=512,
         dtype=dtype,
-        pooler_config=PoolerConfig(normalize=True),
+        pooler_config=PoolerConfig(use_activation=True),
     ) as vllm_model:
         w_normalize = vllm_model.token_embed(example_prompts)
 
