@@ -822,6 +822,8 @@ class VllmConfig:
                 self.speculative_config is None
             )
 
+        self._extend_max_num_batched_tokens_for_drafting()
+
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
             if model_config := self.model_config:
@@ -1185,6 +1187,25 @@ class VllmConfig:
             if size % self.parallel_config.tensor_parallel_size == 0
         ]
 
+    def _extend_max_num_batched_tokens_for_drafting(self):
+        """
+        For some speculative decoding methods, the drafter model may insert additional
+        slots into the batch when drafting. To account for this, we need to extend the
+        max_num_batched_tokens by an upper bound on the number of slots that can be
+        added.
+
+        We need to avoid the scenario where the scheduler issues a full batch of tokens
+        and the drafter tries to insert additional tokens but exceeds
+        the limit, leading to buffer overflows. We both extend the value on the config
+        and also modify the value when initializing the scheduler to make the scheduling
+        consistent with the actual limit.
+        """
+        if self.speculative_config is not None:
+            self.scheduler_config.max_num_batched_tokens += (
+                self.speculative_config.max_num_new_slots_for_drafting
+                * self.scheduler_config.max_num_seqs
+            )
+
     def _set_cudagraph_sizes(self):
         """
         vLLM defines the default candidate list of batch sizes for CUDA graph
@@ -1347,22 +1368,8 @@ class VllmConfig:
         computed_compile_ranges_split_points = []
 
         # The upper bound of the compile ranges is the max_num_batched_tokens.
-        # For speculative decoding, the compile range must be extended
-        # - Sequential: + 1 * max_num_seqs (one draft token per iteration)
-        # - Parallel draft: + num_speculative_tokens * max_num_seqs
         compile_range_end = self.scheduler_config.max_num_batched_tokens
         if compile_range_end is not None:
-            if self.speculative_config is not None and (
-                self.speculative_config.uses_draft_model()
-                or self.speculative_config.use_eagle()
-            ):
-                multiplier = (
-                    self.speculative_config.num_speculative_tokens
-                    if self.speculative_config.parallel_drafting
-                    else 1
-                )
-                compile_range_end += multiplier * self.scheduler_config.max_num_seqs
-
             computed_compile_ranges_split_points.append(compile_range_end)
 
         # Add the compile ranges for flashinfer
