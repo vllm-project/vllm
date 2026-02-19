@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast, overload
 
+import llguidance as llg
+import regex as re
 from mistral_common.protocol.instruct.request import (
     ChatCompletionRequest as MistralChatCompletionRequest,
 )
@@ -11,8 +13,15 @@ from mistral_common.protocol.instruct.validator import ValidationMode
 from mistral_common.tokens.tokenizers.base import (
     SpecialTokenPolicy,
     SpecialTokens,
+    Tokenizer,
 )
-from mistral_common.tokens.tokenizers.instruct import InstructTokenizerV13
+from mistral_common.tokens.tokenizers.instruct import (
+    InstructTokenizerBase,
+    InstructTokenizerV13,
+)
+from mistral_common.tokens.tokenizers.mistral import (
+    MistralTokenizer as MistralCommonTokenizer,
+)
 from mistral_common.tokens.tokenizers.sentencepiece import (
     SentencePieceTokenizer,
 )
@@ -22,20 +31,21 @@ from pydantic import ValidationError
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
+from vllm.tokenizers.protocol import TokenizerLike
 
-from .protocol import TokenizerLike
+try:
+    # Transformers v5
+    from transformers.tokenization_mistral_common import MistralCommonBackend
+except ImportError:
+    # Transformers v4
+    from transformers.tokenization_mistral_common import (
+        MistralCommonTokenizer as MistralCommonBackend,
+    )
+
 
 if TYPE_CHECKING:
     from transformers import BatchEncoding
 
-    try:
-        # Transformers v5
-        from transformers.tokenization_mistral_common import MistralCommonBackend
-    except ImportError:
-        # Transformers v4
-        from transformers.tokenization_mistral_common import (
-            MistralCommonTokenizer as MistralCommonBackend,
-        )
 
 logger = init_logger(__name__)
 
@@ -220,15 +230,6 @@ class MistralTokenizer(TokenizerLike):
         download_dir: str | None = None,
         **kwargs,
     ) -> "MistralTokenizer":
-        try:
-            # Transformers v5
-            from transformers.tokenization_mistral_common import MistralCommonBackend
-        except ImportError:
-            # Transformers v4
-            from transformers.tokenization_mistral_common import (
-                MistralCommonTokenizer as MistralCommonBackend,
-            )
-
         tokenizer = MistralCommonBackend.from_pretrained(
             path_or_repo_id,
             *args,
@@ -243,10 +244,10 @@ class MistralTokenizer(TokenizerLike):
     def __init__(self, tokenizer: "MistralCommonBackend") -> None:
         super().__init__()
 
-        self.transformers_tokenizer = tokenizer
-        self.mistral = tokenizer.tokenizer
-        self.instruct = self.mistral.instruct_tokenizer
-        self.tokenizer = self.instruct.tokenizer
+        self.transformers_tokenizer: MistralCommonBackend = tokenizer
+        self.mistral: MistralCommonTokenizer = tokenizer.tokenizer
+        self.instruct: InstructTokenizerBase = self.mistral.instruct_tokenizer
+        self.tokenizer: Tokenizer = self.instruct.tokenizer
 
         mode = self.mistral._chat_completion_request_validator._mode
         if mode != ValidationMode.test:
@@ -549,3 +550,66 @@ class MistralTokenizer(TokenizerLike):
             ]
 
         return tokens
+
+
+class MistralLLGTokenizer:
+    """Wraps a mistral tokenizer for use with llguidance."""
+
+    eos_token_id: int
+    bos_token_id: int
+    tokens: list[bytes]
+    special_token_ids: list[int]
+
+    def __init__(self, tokenizer: MistralTokenizer) -> None:
+        self._tokenizer = tokenizer.tokenizer
+        self.eos_token_id = self._tokenizer.eos_id
+        self.bos_token_id = self._tokenizer.bos_id
+
+        self.tokens: list[bytes] = []
+        self.special_token_ids: list[int] = []
+
+        seen_special_tokens: set[str] = set()
+        for i in range(self._tokenizer.n_words):
+            # Convert square brackets to angle brackets for special tokens,
+            # since llg only recognizes the latter.
+            if self._tokenizer.is_special(i):
+                token_rep = self._tokenizer.id_to_piece(i)
+                if match := re.fullmatch(r"\[(.*)\]", token_rep):
+                    token_rep_llg = f"<{match.group(1)}>"
+                else:
+                    token_rep_llg = token_rep
+
+                if not re.fullmatch(r"<.*>", token_rep_llg):
+                    raise ValueError(
+                        f"Invalid special token: {token_rep_llg} ({token_rep})"
+                    )
+                assert token_rep_llg not in seen_special_tokens, (
+                    token_rep_llg,
+                    seen_special_tokens,
+                )
+                seen_special_tokens.add(token_rep_llg)
+                self.special_token_ids.append(i)
+                self.tokens.append(token_rep_llg.encode("utf-8"))
+            else:
+                token = self._tokenizer.id_to_byte_piece(i, SpecialTokenPolicy.RAISE)
+                self.tokens.append(token)
+
+        assert len(self.special_token_ids) == self._tokenizer.num_special_tokens, (
+            len(self.special_token_ids),
+            self._tokenizer.num_special_tokens,
+        )
+
+    def __call__(self, s: str, *args, **kwds) -> list[int]:
+        # HACK: add a null byte to the start of the string to avoid the tokenizer
+        # absorbing the first character of tokens that start with "▁".
+        # we then ignore the first two tokens the "▁" and the null byte.
+        # This gives us the pure tokenized text without SP shit.
+        if isinstance(self._tokenizer, SentencePieceTokenizer):
+            return self._tokenizer.encode("\00" + s, bos=False, eos=False)[2:]
+        else:
+            return self._tokenizer.encode(s, bos=False, eos=False)
+
+
+def guidance_tokenizer_from_mistral_tokenizer(tokenizer: Tokenizer) -> llg.LLTokenizer:
+    tokenizer_data = MistralLLGTokenizer(tokenizer)
+    return llg.LLTokenizer(llg.TokenizerWrapper(tokenizer_data))
