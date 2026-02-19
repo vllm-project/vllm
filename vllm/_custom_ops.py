@@ -450,21 +450,40 @@ def rms_norm_per_block_quant(
     scale_ub: torch.Tensor | None = None,
     residual: torch.Tensor | None = None,
     is_scale_transposed: bool = False,
+    tma_alignment: int = 0,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert len(group_size) == 2
     output = torch.empty_like(input, dtype=quant_dtype)
     if is_scale_transposed:
-        scales = torch.empty(
-            (input.shape[-1] // group_size[1], input.numel() // input.shape[-1]),
-            device=input.device,
-            dtype=torch.float32,
-        ).transpose(0, 1)
+        if tma_alignment == 0:
+            scales = torch.empty(
+                (input.shape[-1] // group_size[1], input.numel() // input.shape[-1]),
+                device=input.device,
+                dtype=torch.float32,
+            ).transpose(0, 1)
+        else:
+            m = input.shape[-2]
+            sf_k = input.shape[-1] // group_size[1]
+            tma_aligned_m = (m + tma_alignment - 1) // tma_alignment * tma_alignment
+            shape = input.shape[:-2] + (m, sf_k)
+            stride = (
+                (1, tma_aligned_m)
+                if input.dim() == 2
+                else (tma_aligned_m * sf_k, 1, tma_aligned_m)
+            )
+            scales = torch.empty_strided(
+                shape, stride, device=input.device, dtype=torch.float32
+            )
     else:
         scales = torch.empty(
             (input.numel() // input.shape[-1], input.shape[-1] // group_size[1]),
             device=input.device,
             dtype=torch.float32,
         )
+
+    assert tma_alignment in [0, 4], "Expected TMA alignment 0 or 4, but got " + str(
+        tma_alignment
+    )
 
     torch.ops._C.rms_norm_per_block_quant(
         output,
@@ -2768,6 +2787,24 @@ def sm100_cutlass_mla_get_workspace_size(
     return torch.ops._C.sm100_cutlass_mla_get_workspace_size(
         max_seq_len, num_batches, sm_count, num_kv_splits
     )
+
+
+def dsv3_fused_a_gemm(
+    output: torch.Tensor,
+    mat_a: torch.Tensor,
+    mat_b: torch.Tensor,
+) -> None:
+    """DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+
+    Computes output = mat_a @ mat_b.T where:
+      mat_a: [num_tokens, 7168] row-major bf16 (hidden states)
+      mat_b: [7168, 2112] column-major bf16 (weight transposed)
+      output: [num_tokens, 2112] row-major bf16
+
+    Optimized for the DeepSeek V2/V3 QKV A-projection at small batch sizes.
+    Requires SM 9.0+ (Hopper).
+    """
+    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
 
 
 if hasattr(torch.ops._C, "weight_packed_linear"):
