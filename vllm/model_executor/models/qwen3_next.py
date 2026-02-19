@@ -725,7 +725,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 conv_state_indices=non_spec_state_indices_tensor[
                     : attn_metadata.num_actual_tokens
                 ],
-                validate_data=True,
+                validate_data=False,
             )
         else:
             mixed_qkv_non_spec = None
