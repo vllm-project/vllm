@@ -155,9 +155,7 @@ class SupportsMultiModal(Protocol):
         """
         ...
 
-    def configure_mm_token_handling(
-        self, vocab_size: int, mm_token_ids: list[int]
-    ) -> bool:
+    def configure_mm_token_handling(self, vocab_size: int, mm_token_ids: list[int]):
         """Check if any multimodal tokens are out of vocabulary. If so, we will
         explicitly mask all multimodal tokens out when computing text embeddings,
         since the multimodal embeddings will be scattered over the results.
