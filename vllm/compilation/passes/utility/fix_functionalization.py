@@ -65,13 +65,58 @@ class FixFunctionalizationPass(VllmInductorPass):
                     # back into mm_node. So after de-functionalization, we can
                     # just use mm_node directly.
 
-                    mm_node = query.args[0].args[0]
+                    original_split = query.args[0]
+                    mm_node = original_split.args[0]
+
+                    # Collect existing getitems from the original split
+                    original_getitems: dict[int, torch.fx.Node] = {}
+                    for split_user in original_split.users:
+                        if is_func(split_user, operator.getitem):
+                            original_getitems[split_user.args[1]] = split_user
+
                     for user in getitem_nodes.values():
                         for user_of_getitem in user.users:
                             if is_func(
                                 user_of_getitem, torch.ops.aten.slice_scatter.default
                             ):
                                 user_of_getitem.replace_all_uses_with(mm_node)
+
+                                # After replacing a slice_scatter with mm_node, some
+                                # users that were on the slice_scatter are now on
+                                # mm_node. If any of them are split_with_sizes matching
+                                # the original split, they are redundant. Redirect
+                                # their getitem users to original split's getitems.
+                                for mm_user in mm_node.users:
+                                    if (
+                                        mm_user is not original_split
+                                        and is_func(
+                                            mm_user,
+                                            torch.ops.aten.split_with_sizes.default,
+                                        )
+                                        and mm_user.args == original_split.args
+                                    ):
+                                        for dup_split_user in mm_user.users:
+                                            if is_func(
+                                                dup_split_user, operator.getitem
+                                            ):
+                                                idx = dup_split_user.args[1]
+                                                if idx not in original_getitems:
+                                                    with graph.inserting_after(
+                                                        original_split
+                                                    ):
+                                                        new_getitem = (
+                                                            graph.call_function(
+                                                                operator.getitem,
+                                                                (original_split, idx),
+                                                            )
+                                                        )
+                                                    original_getitems[idx] = new_getitem
+                                                dup_split_user.replace_all_uses_with(
+                                                    original_getitems[idx]
+                                                )
+                                                self._remove(dup_split_user)
+                                        self._remove(mm_user)
+
                                 self._remove(user_of_getitem)
                         self._remove(user)
 
