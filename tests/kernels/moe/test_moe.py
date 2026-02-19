@@ -61,6 +61,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize,
     marlin_quantize,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    dequantize_to_dtype,
+)
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import swizzle_blockscale
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
 from vllm.model_executor.model_loader.weight_utils import (
     get_quant_config,
@@ -770,7 +774,7 @@ def test_mixtral_moe(
     "model_name",
     [
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
     ],
 )
 @pytest.mark.parametrize(
@@ -782,7 +786,7 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
     if not current_platform.has_device_capability(100):
         pytest.skip("Test is only supported for sm >= 100")
     if (
-        model_name == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+        model_name == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4"
         and flashinfer_backend != "throughput"
     ):
         pytest.skip("BF16 model only supported with throughput backend")
@@ -790,8 +794,8 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     if model_name.endswith("FP8"):
         monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
-    if model_name.endswith("BF16"):
-        monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
+    if model_name.endswith("NVFP4"):
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", flashinfer_backend)
     init_distributed_environment(world_size=1, rank=0, local_rank=0)
     init_workspace_manager(torch.cuda.current_device())
@@ -846,7 +850,10 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
 
         # Load weights from our layer to the reference hf layer before
         # post-processing, since some of the weights get padded and size changes.
-        _load_nemotron_vllm_weights_to_hf_model(vllm_layer, ref_hf_layer)
+        if model_name.endswith("NVFP4"):
+            _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, ref_hf_layer)
+        else:
+            _load_nemotron_vllm_weights_to_hf_model_fp8(vllm_layer, ref_hf_layer)
 
         vllm_layer.gate.quant_method.process_weights_after_loading(vllm_layer.gate)
         vllm_layer.experts.quant_method.process_weights_after_loading(
@@ -865,7 +872,7 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
         torch.testing.assert_close(ref_output, actaul_output, rtol=1e-2, atol=1e-1)
 
 
-def _load_nemotron_vllm_weights_to_hf_model(vllm_layer, hf_layer):
+def _load_nemotron_vllm_weights_to_hf_model_fp8(vllm_layer, hf_layer):
     hf_layer.gate.weight.data[:] = vllm_layer.gate.weight.data
     hf_layer.gate.e_score_correction_bias.data[:] = (
         vllm_layer.gate.e_score_correction_bias.data
@@ -887,6 +894,61 @@ def _load_nemotron_vllm_weights_to_hf_model(vllm_layer, hf_layer):
         up_proj = up_proj * vllm_layer.shared_experts.up_proj.weight_scale
     if hasattr(vllm_layer.shared_experts.down_proj, "weight_scale"):
         down_proj = down_proj * vllm_layer.shared_experts.down_proj.weight_scale
+    hf_layer.shared_experts.up_proj.weight.data[:] = up_proj
+    hf_layer.shared_experts.down_proj.weight.data[:] = down_proj
+
+
+def _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, hf_layer):
+    def _inv(x: torch.Tensor) -> torch.Tensor:
+        return torch.where(
+            x == 0,
+            torch.full_like(x, torch.inf, dtype=torch.float32),
+            1.0 / x.to(torch.float32),
+        )
+
+    hf_layer.gate.weight.data[:] = vllm_layer.gate.weight.data
+    hf_layer.gate.e_score_correction_bias.data[:] = (
+        vllm_layer.gate.e_score_correction_bias.data
+    )
+
+    for i in range(vllm_layer.experts.w13_weight.shape[0]):
+        w13 = dequantize_to_dtype(
+            tensor_fp4=vllm_layer.experts.w13_weight[i],
+            tensor_sf=swizzle_blockscale(vllm_layer.experts.w13_weight_scale[i]),
+            global_scale=_inv(vllm_layer.experts.w13_weight_scale_2[i].reshape(-1)[0]),
+            dtype=torch.float32,
+            device=vllm_layer.experts.w13_weight.device,
+        )
+        w2 = dequantize_to_dtype(
+            tensor_fp4=vllm_layer.experts.w2_weight[i],
+            tensor_sf=swizzle_blockscale(vllm_layer.experts.w2_weight_scale[i]),
+            global_scale=_inv(vllm_layer.experts.w2_weight_scale_2[i].reshape(-1)[0]),
+            dtype=torch.float32,
+            device=vllm_layer.experts.w2_weight.device,
+        )
+        hf_layer.experts[i].up_proj.weight.data[:] = w13
+        hf_layer.experts[i].down_proj.weight.data[:] = w2
+
+    up_proj = dequantize_to_dtype(
+        tensor_fp4=vllm_layer.shared_experts.up_proj.weight.data,
+        tensor_sf=swizzle_blockscale(
+            vllm_layer.shared_experts.up_proj.weight_scale.data
+        ),
+        global_scale=_inv(vllm_layer.shared_experts.up_proj.weight_scale_2.data.max()),
+        dtype=torch.float32,
+        device=vllm_layer.shared_experts.up_proj.weight.device,
+    )
+    down_proj = dequantize_to_dtype(
+        tensor_fp4=vllm_layer.shared_experts.down_proj.weight.data,
+        tensor_sf=swizzle_blockscale(
+            vllm_layer.shared_experts.down_proj.weight_scale.data
+        ),
+        global_scale=_inv(
+            vllm_layer.shared_experts.down_proj.weight_scale_2.data.max()
+        ),
+        dtype=torch.float32,
+        device=vllm_layer.shared_experts.down_proj.weight.device,
+    )
     hf_layer.shared_experts.up_proj.weight.data[:] = up_proj
     hf_layer.shared_experts.down_proj.weight.data[:] = down_proj
 
