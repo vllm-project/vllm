@@ -5352,6 +5352,12 @@ class GPUModelRunner(
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
+            logger.info(
+                "Capturing CUDA graphs for %d batches (%s) with runtime mode %s. This may take a while...",
+                len(batch_descriptors),
+                ", ".join(str(desc.num_tokens) for desc in batch_descriptors),
+                cudagraph_runtime_mode,
+            )
             batch_descriptors = tqdm(
                 batch_descriptors,
                 disable=not self.load_config.use_tqdm_on_load,
@@ -5645,7 +5651,6 @@ class GPUModelRunner(
         # sizes for decode and mixed prefill-decode.
         if (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and cudagraph_mode.separate_routine()
             and self.uniform_decode_query_len > 1
         ):
             self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
