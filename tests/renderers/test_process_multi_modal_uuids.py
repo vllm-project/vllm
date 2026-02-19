@@ -6,6 +6,7 @@ import pytest
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
+from vllm.multimodal.parse import parse_mm_uuids
 from vllm.renderers.hf import HfRenderer
 from vllm.tokenizers.registry import tokenizer_args_from_config
 
@@ -41,14 +42,25 @@ def test_multi_modal_uuids_length_mismatch_raises():
 
     mm_data = {"image": [cherry_pil_image, stop_pil_image]}
 
+    # Mismatch: 2 items but only 0 uuids provided
+    mm_uuids = {"image": []}  # type: ignore[var-annotated]
+
+    mm_processor = renderer.get_mm_processor()
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids(mm_uuids)
+
+    with pytest.raises(ValueError, match="must have same length as"):
+        renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1a")
+
     # Mismatch: 2 items but only 1 uuid provided
     mm_uuids = {"image": ["hash_cherry"]}
 
     mm_processor = renderer.get_mm_processor()
-    mm_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids(mm_uuids)
 
     with pytest.raises(ValueError, match="must have same length as"):
-        renderer._process_mm_uuids(mm_data, mm_items, mm_uuids, "req-1")
+        renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-1b")
 
 
 def test_multi_modal_uuids_missing_modality_raises():
@@ -63,10 +75,11 @@ def test_multi_modal_uuids_missing_modality_raises():
     mm_uuids = {"image": ["hash_cherry"]}
 
     mm_processor = renderer.get_mm_processor()
-    mm_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids(mm_uuids)
 
     with pytest.raises(ValueError, match="is empty but .* is missing"):
-        renderer._process_mm_uuids(mm_data, mm_items, mm_uuids, "req-2")
+        renderer._process_mm_uuids(mm_data, mm_data_items, mm_uuid_items, "req-2")
 
 
 @pytest.mark.parametrize(
@@ -78,7 +91,7 @@ def test_multi_modal_uuids_missing_modality_raises():
     ],
 )
 def test_multi_modal_uuids_accepts_none_and_passes_through(
-    monkeypatch, mm_cache_gb: float, enable_prefix_caching: bool
+    mm_cache_gb: float, enable_prefix_caching: bool
 ):
     renderer = _build_renderer(
         mm_cache_gb=mm_cache_gb,
@@ -94,9 +107,11 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
     mm_uuids = {"image": [None, "hash_stop"], "video": None}
 
     mm_processor = renderer.get_mm_processor()
-    mm_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids(mm_uuids)
+
     processed_mm_uuids = renderer._process_mm_uuids(
-        mm_data, mm_items, mm_uuids, "req-3"
+        mm_data, mm_data_items, mm_uuid_items, "req-3"
     )
 
     assert processed_mm_uuids == mm_uuids
@@ -111,7 +126,7 @@ def test_multi_modal_uuids_accepts_none_and_passes_through(
     ],
 )
 def test_multi_modal_uuids_accepts_empty(
-    monkeypatch, mm_cache_gb: float, enable_prefix_caching: bool
+    mm_cache_gb: float, enable_prefix_caching: bool
 ):
     renderer = _build_renderer(
         mm_cache_gb=mm_cache_gb,
@@ -120,19 +135,21 @@ def test_multi_modal_uuids_accepts_empty(
 
     # While None means cached multi-modal input requiring UUIDs
     # an empty list means no multi-modal input
-    mm_data = {"image": [], "video": []}  # type: ignore[var-annotated]
-    mm_uuids = {"image": [], "video": None}  # type: ignore[var-annotated]
+    mm_data = {"image": [], "video": [], "audio": None}  # type: ignore[var-annotated]
+    mm_uuids = {"image": [], "video": None, "audio": []}  # type: ignore[var-annotated]
 
     mm_processor = renderer.get_mm_processor()
-    mm_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids(mm_uuids)
+
     processed_mm_uuids = renderer._process_mm_uuids(
-        mm_data, mm_items, mm_uuids, "req-4"
+        mm_data, mm_data_items, mm_uuid_items, "req-4"
     )
 
     assert processed_mm_uuids == mm_uuids
 
 
-def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
+def test_multi_modal_uuids_ignored_when_caching_disabled():
     # When both processor cache is 0 and prefix caching disabled, the
     # processor builds overrides from request id instead of using user UUIDs.
     renderer = _build_renderer(mm_cache_gb=0.0, enable_prefix_caching=False)
@@ -145,9 +162,11 @@ def test_multi_modal_uuids_ignored_when_caching_disabled(monkeypatch):
     mm_uuids = {"image": ["hash_cherry", "hash_stop"], "video": ["hash_video"]}
 
     mm_processor = renderer.get_mm_processor()
-    mm_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+    mm_uuid_items = parse_mm_uuids(mm_uuids)
+
     processed_mm_uuids = renderer._process_mm_uuids(
-        mm_data, mm_items, mm_uuids, request_id
+        mm_data, mm_data_items, mm_uuid_items, request_id
     )
 
     # Expect request-id-based overrides are passed through

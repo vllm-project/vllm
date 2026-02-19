@@ -139,7 +139,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             openai_messages.append(
                                 {
                                     "role": "tool",
-                                    "tool_call_id": block.id or "",
+                                    "tool_call_id": block.tool_use_id or "",
                                     "content": str(block.content)
                                     if block.content
                                     else "",
