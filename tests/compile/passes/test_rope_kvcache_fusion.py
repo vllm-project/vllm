@@ -185,7 +185,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             ops.append(ROTARY_OP)
         else:
             ops.append(INDEX_SELECT_OP)
-        ops.append(torch.ops.vllm.unified_kv_cache_update)
+        ops.append(torch.ops.vllm.unified_kv_cache_update.default)
         return ops
 
     def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
