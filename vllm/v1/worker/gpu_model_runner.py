@@ -485,6 +485,7 @@ class GPUModelRunner(
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
         self.use_aux_hidden_state_outputs = False
+        self.supports_sd_full_graph = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -498,6 +499,12 @@ class GPUModelRunner(
                 | MedusaProposer
                 | ExtractHiddenStatesProposer
             )
+
+            self.supports_sd_full_graph = (
+                self.speculative_config.use_eagle()
+                and not self.speculative_config.disable_padded_drafter_batch
+            )
+
             if self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
@@ -1969,11 +1976,13 @@ class GPUModelRunner(
                 for _metadata in attn_metadata.values():
                     _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
 
-        if spec_decode_common_attn_metadata is not None and (
-            num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
+        if (
+            spec_decode_common_attn_metadata is not None
+            and num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
+            and not self.supports_sd_full_graph
         ):
-            # Currently the drafter still only uses piecewise cudagraphs (and modifies
-            # the attention metadata in directly), and therefore does not want to use
+            # Currently the drafter still only uses piecewise cudagraphs (except for
+            # Eagle, which supports FULL now), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = (
                 spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
@@ -4872,6 +4881,7 @@ class GPUModelRunner(
         )
 
         attn_metadata: PerLayerAttnMetadata | None = None
+        spec_decode_common_attn_metadata: CommonAttentionMetadata | None = None
 
         slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
             num_tokens_padded=num_tokens,
@@ -4904,7 +4914,7 @@ class GPUModelRunner(
                 self.query_start_loc.copy_to_gpu()
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                attn_metadata, _ = self._build_attention_metadata(
+                attn_metadata, spec_decode_common_attn_metadata = self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
                     num_tokens_padded=num_tokens_padded if pad_attn else None,
                     num_reqs=num_reqs_padded,
@@ -5007,14 +5017,13 @@ class GPUModelRunner(
                     EagleProposer | DraftModelProposer | ExtractHiddenStatesProposer,
                 )
                 assert self.speculative_config is not None
-                # Eagle currently only supports PIECEWISE cudagraphs.
-                # Therefore only use cudagraphs if the main model uses PIECEWISE
                 # NOTE(lucas): this is a hack, need to clean up.
                 use_cudagraphs = (
                     (
                         is_graph_capturing
                         and cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
                     )
+                    or (is_graph_capturing and self.supports_sd_full_graph)
                     or (
                         not is_graph_capturing
                         and cudagraph_runtime_mode != CUDAGraphMode.NONE
@@ -5033,6 +5042,7 @@ class GPUModelRunner(
 
                 self.drafter.dummy_run(
                     num_tokens,
+                    common_attn_metadata=spec_decode_common_attn_metadata,
                     use_cudagraphs=use_cudagraphs,
                     is_graph_capturing=is_graph_capturing,
                     slot_mappings=slot_mappings,
