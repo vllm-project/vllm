@@ -592,6 +592,12 @@ def test_streaming_prev_tool_call_arr_finalization(glm4_moe_tool_parser, mock_re
     assert isinstance(args, dict), f"Expected dict, got {type(args)}"
     assert args.get("city") == "Beijing"
 
+    # Test equivalence of prev_tool_call_arr and streamed_args_for_tool
+    # Simulates logic in chat_completion/serving.py:chat_completion_stream_generator
+    tool_call_json = json.dumps(tool_entry.get("arguments", {}))
+    streamed_content = glm4_moe_tool_parser.streamed_args_for_tool[0]
+    assert tool_call_json.startswith(streamed_content)
+
 
 def test_streaming_multiple_tool_calls_sequential(glm4_moe_tool_parser, mock_request):
     """Test streaming multiple sequential tool calls."""
