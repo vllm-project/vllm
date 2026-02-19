@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
 from itertools import accumulate
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 import numpy as np
 import torch
@@ -613,7 +613,6 @@ class HCXVisionForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        **kwargs: Any | None,
     ) -> None:
         super().__init__()
 

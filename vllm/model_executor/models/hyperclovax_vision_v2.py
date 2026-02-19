@@ -13,7 +13,7 @@ Supports:
 
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 import torch
 import torch.nn as nn
@@ -23,7 +23,6 @@ from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
@@ -34,7 +33,6 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
-    InputProcessingContext,
     ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
@@ -431,28 +429,9 @@ class HCXVisionV2MultiModalProcessor(
         )
 
 
-def _build_hcxvision_v2_hf_info(
-    ctx: InputProcessingContext,
-) -> HCXVisionV2ProcessingInfo:
-    return HCXVisionV2ProcessingInfo(ctx)
-
-
-def _build_hcxvision_v2_hf_processor(
-    info: HCXVisionV2ProcessingInfo,
-    dummy_inputs: BaseDummyInputsBuilder[HCXVisionV2ProcessingInfo],
-    *,
-    cache: BaseMultiModalProcessorCache | None = None,
-) -> BaseMultiModalProcessor:
-    return HCXVisionV2MultiModalProcessor(
-        info,
-        dummy_inputs,  # type: ignore
-        cache=cache,
-    )
-
-
 @MULTIMODAL_REGISTRY.register_processor(
-    _build_hcxvision_v2_hf_processor,
-    info=_build_hcxvision_v2_hf_info,
+    HCXVisionV2MultiModalProcessor,
+    info=HCXVisionV2ProcessingInfo,
     dummy_inputs=HCXVisionV2DummyInputsBuilder,
 )
 class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
@@ -491,7 +470,6 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         *,
         vllm_config: VllmConfig,
         prefix: str = "",
-        **kwargs: Any | None,
     ) -> None:
         super().__init__()
 
