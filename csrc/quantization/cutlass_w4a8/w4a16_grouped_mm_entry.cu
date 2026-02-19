@@ -17,7 +17,6 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <torch/all.h>
-#include "cuda_utils.h"
 #include "cutlass_extensions/torch_utils.hpp"
 #include "cutlass_extensions/common.hpp"
 
@@ -381,23 +380,19 @@ void mm(torch::Tensor& out_tensors, const torch::Tensor& a_tensors,
   int n = b_tensors.size(1);
   int k = b_tensors.size(2) * PackFactor;  // logical k
   int num_experts = b_tensors.size(0);
-
-  int const device = a_tensors.device().index();
-  cudaDeviceProp prop;
-  cudaGetDeviceProperties(&prop, device);
-  int const sm_num = prop.multiProcessorCount;
+  // per-expert batch size assuming uniform distribution
+  int m_expert = m_full / num_experts;
 
   std::string schedule;
-  if (cuda_utils::ceil_div(m_full, 16) * cuda_utils::ceil_div(n, 128) <=
-      sm_num) {
+  if (m_expert <= 16) {
     schedule = "Kernel_128x16_2x1x1_Coop";
-  } else if (cuda_utils::ceil_div(m_full, 32) * cuda_utils::ceil_div(n, 256) <=
-             sm_num) {
+  } else if (m_expert <= 32) {
     schedule = "Kernel_256x32_1x1x1_Coop";
-  } else if (cuda_utils::ceil_div(m_full, 64) * cuda_utils::ceil_div(n, 256) <=
-             sm_num) {
+  } else if (m_expert <= 64) {
     schedule = "Kernel_256x64_1x1x1_Coop";
-  } else {
+  } else if (m_expert <= 128) {
+    schedule = "Kernel_256x128_2x1x1_Coop";
+  } else {  // m_expert > 128
     schedule = "Kernel_128x256_2x1x1_Coop";
   }
 
