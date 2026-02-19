@@ -421,6 +421,7 @@ def test_cudagraph_sizes_post_init(
                 fuse_norm_quant=True,
                 fuse_act_quant=True,
                 eliminate_noops=True,
+                sp_min_token_num=512 if enable_sp else None,
             ),
             cudagraph_mode=cudagraph_mode,
         )
