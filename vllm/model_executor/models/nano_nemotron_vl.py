@@ -1417,11 +1417,10 @@ class NanoNemotronVLMultiModalProcessor(
 
         target_sr = None
         if extractor := self.info.audio_extractor:
-            assert extractor is not None
             target_sr = extractor.sampling_rate
 
         audio_items: list[AudioItem] = []
-        for _, metadata in enumerate(metadata_list):
+        for metadata in metadata_list:
             video_bytes = metadata.get("original_video_bytes")
             if video_bytes is None or len(video_bytes) == 0:
                 raise ValueError(
