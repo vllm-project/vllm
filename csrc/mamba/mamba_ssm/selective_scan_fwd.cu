@@ -81,7 +81,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
     constexpr bool kIsVariableC = Ktraits::kIsVariableC;
     constexpr bool kHasZ = Ktraits::kHasZ;
     constexpr bool kVarlen = Ktraits::kVarlen;
-    constexpr int kNThreads = Ktraits::kNThreads;
     constexpr int kNItems = Ktraits::kNItems;
     constexpr int kNRows = Ktraits::kNRows;
     constexpr bool kDirectIO = Ktraits::kDirectIO;
