@@ -43,6 +43,13 @@ STR_DTYPE_TO_TORCH_DTYPE = {
     "fp8_ds_mla": torch.uint8,
 }
 
+TORCH_DTYPE_TO_STR_DTYPE = {
+    torch.half: "float16",
+    torch.float16: "float16",
+    torch.bfloat16: "bfloat16",
+    torch.float32: "float32",
+}
+
 TORCH_DTYPE_TO_NUMPY_DTYPE = {
     torch.float16: np.float16,
     torch.float32: np.float32,
@@ -329,9 +336,7 @@ def resolve_kv_cache_dtype_string(
     Returns the resolved cache_dtype string:
     - If kv_cache_dtype != "auto": returns unchanged
     - If model has FP8 KV cache config: returns the FP8 dtype string
-    - If model dtype is bfloat16: returns "bfloat16"
-    - If model dtype is float16/half: returns "float16"
-    - Otherwise: returns "auto"
+    - Otherwise: returns the model dtype via TORCH_DTYPE_TO_STR_DTYPE mapping
     """
     if kv_cache_dtype != "auto":
         return kv_cache_dtype
@@ -345,16 +350,8 @@ def resolve_kv_cache_dtype_string(
             if kv_algo_str is not None and kv_algo_str != "auto":
                 return kv_algo_str
 
-    # Check model dtype and return explicit type
-    dtype = model_config.dtype if model_config else torch.half
-    if dtype == torch.bfloat16:
-        return "bfloat16"
-
-    # For float16/half, we now have explicit support
-    if dtype == torch.float16 or dtype == torch.half:
-        return "float16"
-
-    return "auto"
+    # Return model's dtype as a string
+    return TORCH_DTYPE_TO_STR_DTYPE[model_config.dtype]
 
 
 def kv_cache_dtype_str_to_dtype(

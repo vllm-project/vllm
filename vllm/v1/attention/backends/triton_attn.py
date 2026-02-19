@@ -264,6 +264,7 @@ class TritonAttentionBackend(AttentionBackend):
         "auto",
         "bfloat16",
         "float16",
+        "float32",
         "fp8",
         "fp8_e4m3",
         "fp8_e5m2",

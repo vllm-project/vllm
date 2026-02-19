@@ -84,6 +84,7 @@ class FlexAttentionBackend(AttentionBackend):
         "auto",
         "bfloat16",
         "float16",
+        "float32",
     ]
 
     @staticmethod

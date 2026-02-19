@@ -169,12 +169,12 @@ Priority is **1 = highest** (tried first).
 | `FLASH_ATTN` | FA2* | fp16, bf16 | `auto`, `bfloat16`, `float16` | %16 | Any | ❌ | ❌ | ✅ | All | ≥8.0 |
 | `FLASH_ATTN` | FA3* | fp16, bf16 | `auto`, `bfloat16`, `float16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | %16 | Any | ✅ | ❌ | ✅ | All | 9.x |
 | `FLASH_ATTN_DIFFKV` |  | fp16, bf16 | `auto` | Any | Any | ❌ | ❌ | ✅ | Decoder | Any |
-| `FLEX_ATTENTION` |  | fp16, bf16, fp32 | `auto`, `bfloat16`, `float16` | Any | Any | ❌ | ✅ | ❌ | Decoder, Encoder Only | Any |
+| `FLEX_ATTENTION` |  | fp16, bf16, fp32 | `auto`, `bfloat16`, `float16`, `float32` | Any | Any | ❌ | ✅ | ❌ | Decoder, Encoder Only | Any |
 | `ROCM_AITER_FA` |  | fp16, bf16 | `auto` | 16, 32 | 64, 128, 256 | ❌ | ❌ | ❌ | Decoder | N/A |
 | `ROCM_AITER_UNIFIED_ATTN` |  | fp16, bf16 | `auto` | Any | Any | ❌ | ❌ | ❌ | Decoder | N/A |
 | `ROCM_ATTN` |  | fp16, bf16, fp32 | `auto` | 16, 32, 544 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | ❌ | Decoder | N/A |
 | `TREE_ATTN` |  | fp16, bf16 | `auto` | %16 | 32, 64, 96, 128, 160, 192, 224, 256 | ❌ | ❌ | ❌ | Decoder | Any |
-| `TRITON_ATTN` |  | fp16, bf16, fp32 | `auto`, `bfloat16`, `float16`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | %16 | Any | ✅ | ✅ | ❌ | All | Any |
+| `TRITON_ATTN` |  | fp16, bf16, fp32 | `auto`, `bfloat16`, `float16`, `float32`, `fp8`, `fp8_e4m3`, `fp8_e5m2` | %16 | Any | ✅ | ✅ | ❌ | All | Any |
 
 > **†** FlashInfer uses TRTLLM attention on Blackwell (SM100), which supports sinks. Disable via `--attention-config.use_trtllm_attention=0`.
 >
