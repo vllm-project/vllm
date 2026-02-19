@@ -671,17 +671,35 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return engine_prompt
 
+    @staticmethod
+    def _has_multimodal(prompt: TokPrompt) -> bool:
+        """Check if a tokenized prompt contains multimodal data."""
+        if "encoder_prompt" in prompt:
+            enc = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
+            dec = prompt.get("decoder_prompt")  # type: ignore[union-attr]
+            return bool(enc.get("multi_modal_data")) or bool(
+                dec and dec.get("multi_modal_data")
+            )
+        return bool(prompt.get("multi_modal_data"))  # type: ignore[union-attr]
+
     async def _process_for_engine_async(
         self,
         tok_prompts: list[TokPrompt],
         arrival_time: float,
     ) -> list[ProcessorInputs]:
         """Offload process_for_engine to the shared executor to avoid
-        blocking the event loop during multimodal preprocessing."""
-        return await make_async(
-            lambda: [self.process_for_engine(p, arrival_time) for p in tok_prompts],
-            executor=self._executor,
-        )()
+        blocking the event loop during multimodal preprocessing.
+
+        Text-only prompts are processed directly on the event loop since
+        they only do lightweight dict creation.
+        """
+        if any(self._has_multimodal(p) for p in tok_prompts):
+            return await make_async(
+                lambda: [self.process_for_engine(p, arrival_time) for p in tok_prompts],
+                executor=self._executor,
+            )()
+
+        return [self.process_for_engine(p, arrival_time) for p in tok_prompts]
 
     # Top-level methods
     def render_cmpl(
