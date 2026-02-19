@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import atexit
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -145,6 +146,9 @@ class XgrammarGrammar(StructuredOutputGrammar):
     )
     _is_terminated: bool = field(default=False, repr=False, hash=False)
 
+    def __post_init__(self):
+        atexit.register(self.clean)
+
     def accept_tokens(self, request_id: str, tokens: list[int]) -> bool:
         """Accepts a list of tokens and advances the FSM.
 
@@ -197,6 +201,12 @@ class XgrammarGrammar(StructuredOutputGrammar):
     def reset(self):
         self.num_processed_tokens = 0
         self.matcher.reset()
+
+    def clean(self):
+        if hasattr(self, "matcher"):
+            self.matcher = None
+        if hasattr(self, "ctx"):
+            self.ctx = None
 
 
 # cf https://github.com/mlc-ai/xgrammar/blob/a32ac892676d2eedc0327416105b9b06edfb94b2/cpp/json_schema_converter.cc
