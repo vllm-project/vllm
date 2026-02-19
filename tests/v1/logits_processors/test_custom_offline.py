@@ -19,6 +19,7 @@ from tests.v1.logits_processors.utils import (
 )
 from tests.v1.logits_processors.utils import entry_points as fake_entry_points
 from vllm import LLM, SamplingParams
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.sample.logits_processor import (
     STR_POOLING_REJECTS_LOGITSPROCS,
     STR_SPEC_DEC_REJECTS_LOGITSPROCS,
@@ -158,7 +159,10 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
 
         # fork is required for workers to see entrypoint patch
         monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-        _run_test({"attention_backend": "TRITON_ATTN"}, logitproc_loaded=True)
+        _run_test(
+            {"attention_backend": AttentionBackendEnum.TRITON_ATTN},
+            logitproc_loaded=True,
+        )
         return
 
     kwargs: dict[str, list[str | type[LogitsProcessor]]] = {}
