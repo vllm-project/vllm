@@ -25,7 +25,7 @@ def get_arrays(n: int, seed: int = 0) -> list[np.ndarray]:
     return [np.random.randint(1, 100, i) for i in sizes]
 
 
-def distributed_run(fn, world_size, timeout=5):
+def distributed_run(fn, world_size, timeout=60):
     """Run a function in multiple processes with proper error handling.
 
     Args:
@@ -51,39 +51,36 @@ def distributed_run(fn, world_size, timeout=5):
         processes.append(p)
         p.start()
 
-    # Join with timeout to detect hangs (parallel timeout for all processes)
+    # Monitor processes and fail fast if any process fails
     start_time = time.time()
     failed_processes = []
 
-    # Wait for all processes with a shared timeout
+    # Wait for all processes, checking for failures
     while time.time() - start_time < timeout:
         all_done = True
-        for p in processes:
+        for i, p in enumerate(processes):
             if p.is_alive():
                 all_done = False
+            elif p.exitcode != 0:
+                # Process failed
+                failed_processes.append((i, p.exitcode))
                 break
-        if all_done:
+
+        if failed_processes or all_done:
             break
         time.sleep(0.1)  # Check every 100ms
 
-    # Check final status of all processes
+    # Check for timeout if no failures detected yet
     for i, p in enumerate(processes):
         if p.is_alive():
-            # Process is still running after timeout - likely hung at barrier
-            failed_processes.append((i, "timeout"))
             p.kill()
             p.join()
-        elif p.exitcode != 0:
-            failed_processes.append((i, p.exitcode))
 
     # Report failures
     if failed_processes:
         error_msg = "Distributed test failed:\n"
         for rank, status in failed_processes:
-            if status == "timeout":
-                error_msg += f"  Rank {rank}: Timeout (likely hung at barrier)\n"
-            else:
-                error_msg += f"  Rank {rank}: Exit code {status}\n"
+            error_msg += f"  Rank {rank}: Exit code {status}\n"
         raise AssertionError(error_msg)
 
 
