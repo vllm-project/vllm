@@ -972,7 +972,9 @@ class EngineCoreProc(EngineCore):
             nonlocal shutdown_requested
             if not shutdown_requested:
                 shutdown_requested = True
-                raise SystemExit()
+                if engine_core is not None:
+                    # Set PAUSED_SHUTDOWN to reject new requests
+                    engine_core.scheduler.set_pause_state(PauseState.PAUSED_SHUTDOWN)
 
         # Either SIGTERM or SIGINT will terminate the engine_core
         signal.signal(signal.SIGTERM, signal_handler)
@@ -1048,14 +1050,65 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
+        # Loop until shutdown signal received
+        while self.scheduler.pause_state != PauseState.PAUSED_SHUTDOWN:
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
             # 3) Run any per-step hooks.
             self._process_per_step_hooks()
+
+        # Handle shutdown before exiting
+        self._handle_shutdown()
+
+        # Now exit cleanly
+        raise SystemExit()
+
+    def _handle_shutdown(self) -> None:
+        """Handle shutdown based on shutdown config."""
+        shutdown_config = self.vllm_config.shutdown_config
+
+        logger.info(
+            "Shutdown initiated (mode=%s, timeout=%d)",
+            shutdown_config.mode,
+            shutdown_config.wait_timeout,
+        )
+
+        # Note: PAUSED_SHUTDOWN already set by signal handler,
+        # rejecting new requests from this point forward
+
+        if shutdown_config.mode == "abort":
+            # Abort all in-flight requests
+            aborted_reqs = self.scheduler.finish_requests(
+                None, RequestStatus.FINISHED_ABORTED
+            )
+            self._send_abort_outputs(aborted_reqs)
+            # Give ZMQ time to send abort outputs before process exits
+            time.sleep(0.5)
+
+        elif shutdown_config.mode == "wait":
+            # Wait for in-flight requests to complete
+            logger.info(
+                "Draining %d in-flight requests",
+                self.scheduler.get_num_unfinished_requests(),
+            )
+
+            # PAUSED_SHUTDOWN already set, which:
+            # - Rejects new ADD requests (not queued)
+            # - Sets token_budget=0 to prevent scheduling new work
+            # - Allows running requests to continue
+
+            # Keep stepping until all requests complete
+            while self.scheduler.has_requests() or (
+                self.batch_queue and len(self.batch_queue) > 0
+            ):
+                self._process_engine_step()
+                time.sleep(0.001)
+
+            logger.info("All in-flight requests completed")
+
+        logger.info("Shutdown complete")
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1119,6 +1172,19 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
+
+            # Reject new requests during shutdown
+            if self.scheduler.pause_state == PauseState.PAUSED_SHUTDOWN:
+                logger.info(
+                    "Rejecting request %s (server shutting down)", req.request_id
+                )
+                self._send_error_output(
+                    req.request_id,
+                    req.client_index,
+                    FinishReason.ERROR,
+                )
+                return
+
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
@@ -1341,6 +1407,30 @@ class EngineCoreProc(EngineCore):
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
 
+    def _send_error_output(
+        self,
+        request_id: str,
+        client_index: int,
+        finish_reason: FinishReason = FinishReason.ERROR,
+    ) -> None:
+        """Send error output for a request."""
+        self.output_queue.put_nowait(
+            (
+                client_index,
+                EngineCoreOutputs(
+                    engine_index=self.engine_index,
+                    finished_requests={request_id},
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=request_id,
+                            new_token_ids=[],
+                            finish_reason=finish_reason,
+                        )
+                    ],
+                ),
+            )
+        )
+
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
         from the add request preprocessing in the input socket processing thread.
@@ -1348,21 +1438,10 @@ class EngineCoreProc(EngineCore):
         logger.exception(
             "Unexpected error pre-processing request %s", request.request_id
         )
-        self.output_queue.put_nowait(
-            (
-                request.client_index,
-                EngineCoreOutputs(
-                    engine_index=self.engine_index,
-                    finished_requests={request.request_id},
-                    outputs=[
-                        EngineCoreOutput(
-                            request_id=request.request_id,
-                            new_token_ids=[],
-                            finish_reason=FinishReason.ERROR,
-                        )
-                    ],
-                ),
-            )
+        self._send_error_output(
+            request.request_id,
+            request.client_index,
+            FinishReason.ERROR,
         )
 
     def pause_scheduler(
@@ -1370,16 +1449,20 @@ class EngineCoreProc(EngineCore):
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
-        All pause states queue new adds. PAUSE_ABORT and PAUSE_KEEP skip step();
-        PAUSE_WAIT allows step() so in-flight requests can drain.
+        All pause modes queue new ADD requests (except PAUSED_SHUTDOWN, which
+        is set internally during shutdown). PAUSE_ABORT and PAUSE_KEEP skip
+        step(); PAUSE_WAIT allows step() so in-flight requests can drain.
 
-        - ``abort``: Set PAUSE_ABORT, abort all requests, wait for abort
+        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
           outputs to be sent (when running with output_queue), clear caches,
           then complete the returned Future.
-        - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
-          set PAUSE_KEEP, clear caches, complete the returned Future.
-        - ``keep``: Set PAUSE_KEEP; return a Future that completes when the
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+          set PAUSED_ALL, clear caches, complete the returned Future.
+        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
+
+        Note: During shutdown, PAUSED_SHUTDOWN is used instead, which rejects
+        (not queues) new ADD requests.
         """
         if mode not in ("keep", "abort", "wait"):
             raise ValueError(f"Invalid pause mode: {mode}")
@@ -1427,6 +1510,10 @@ class EngineCoreProc(EngineCore):
 
     def resume_scheduler(self) -> None:
         """Resume the scheduler and flush any requests queued while paused."""
+        # Cannot resume from shutdown state
+        if self.scheduler.pause_state == PauseState.PAUSED_SHUTDOWN:
+            logger.warning("Cannot resume scheduler from PAUSED_SHUTDOWN state")
+            return
         self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:

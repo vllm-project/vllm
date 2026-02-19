@@ -2,7 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import os
 import signal
+import time
+from contextlib import suppress
 
 import uvloop
 
@@ -223,6 +226,17 @@ def run_multi_api_server(args: argparse.Namespace):
     if num_api_servers > 1:
         setup_multiprocess_prometheus()
 
+    shutdown_requested = False
+
+    def signal_handler(signum, frame):
+        nonlocal shutdown_requested
+        if not shutdown_requested:
+            shutdown_requested = True
+            logger.info("Received signal %d, initiating shutdown", signum)
+
+    signal.signal(signal.SIGTERM, signal_handler)
+    signal.signal(signal.SIGINT, signal_handler)
+
     listen_address, sock = setup_server(args)
 
     engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
@@ -279,12 +293,55 @@ def run_multi_api_server(args: argparse.Namespace):
         )
         api_server_manager = APIServerProcessManager(**api_server_manager_kwargs)
 
-    # Wait for API servers
-    wait_for_completion_or_failure(
-        api_server_manager=api_server_manager,
-        engine_manager=local_engine_manager,
-        coordinator=coordinator,
-    )
+    # Collect all child processes for shutdown
+    all_procs = list(api_server_manager.processes)
+    if local_engine_manager and hasattr(local_engine_manager, "processes"):
+        all_procs.extend(local_engine_manager.processes)
+    if coordinator and hasattr(coordinator, "proc"):
+        all_procs.append(coordinator.proc)
+
+    try:
+        # Wait for API servers
+        wait_for_completion_or_failure(
+            api_server_manager=api_server_manager,
+            engine_manager=local_engine_manager,
+            coordinator=coordinator,
+        )
+    except KeyboardInterrupt:
+        shutdown_requested = True
+
+    if shutdown_requested:
+        # Send SIGTERM to all children
+        logger.info("Sending SIGTERM to all child processes")
+        for proc in all_procs:
+            if proc.is_alive():
+                with suppress(ProcessLookupError):
+                    os.kill(proc.pid, signal.SIGTERM)
+
+        # Wait for shutdown with timeout
+        timeout = getattr(args, "shutdown_wait_timeout", 120)
+        deadline = time.time() + timeout
+
+        logger.info("Waiting up to %d seconds for processes to exit", timeout)
+
+        for proc in all_procs:
+            remaining = max(0, deadline - time.time())
+            proc.join(timeout=remaining)
+
+            if proc.is_alive():
+                logger.warning(
+                    "Process %d did not exit within timeout, sending SIGTERM",
+                    proc.pid,
+                )
+                proc.terminate()
+                proc.join(timeout=5)
+
+                if proc.is_alive():
+                    logger.error("Process %d still alive, sending SIGKILL", proc.pid)
+                    proc.kill()
+                    proc.join(timeout=1)
+
+        logger.info("All processes terminated")
 
 
 def run_api_server_worker_proc(

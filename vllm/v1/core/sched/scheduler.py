@@ -335,7 +335,7 @@ class Scheduler(SchedulerInterface):
         req_to_new_blocks: dict[str, KVCacheBlocks] = {}
         num_scheduled_tokens: dict[str, int] = {}
         token_budget = self.max_num_scheduled_tokens
-        if self._pause_state == PauseState.PAUSED_ALL:
+        if self._pause_state in (PauseState.PAUSED_ALL, PauseState.PAUSED_SHUTDOWN):
             # Do not schedule any requests when paused.
             token_budget = 0
 
@@ -1771,7 +1771,8 @@ class Scheduler(SchedulerInterface):
     def get_num_unfinished_requests(self) -> int:
         if self._pause_state == PauseState.PAUSED_ALL:
             return 0
-        if self._pause_state == PauseState.PAUSED_NEW:
+        if self._pause_state in (PauseState.PAUSED_NEW, PauseState.PAUSED_SHUTDOWN):
+            # Only count running requests when paused for new or during shutdown
             return len(self.running)
         num_waiting = len(self.waiting) - self.num_waiting_for_streaming_input
         return num_waiting + len(self.running)

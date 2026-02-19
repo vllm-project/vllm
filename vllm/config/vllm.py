@@ -40,6 +40,7 @@ from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
+from .shutdown import ShutdownConfig
 from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
@@ -294,6 +295,9 @@ class VllmConfig:
 
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
+
+    shutdown_config: ShutdownConfig = Field(default_factory=ShutdownConfig)
+    """Configuration for shutdown behavior."""
 
     def compute_hash(self) -> str:
         """

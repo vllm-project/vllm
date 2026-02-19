@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import os
 import signal
 import socket
+import time
+from contextlib import suppress
 from http import HTTPStatus
 from typing import Any
 
@@ -93,18 +96,29 @@ async def serve_http(
         )
     )
 
+    shutdown_event = asyncio.Event()
+
     def signal_handler() -> None:
-        # prevents the uvicorn signal handler to exit early
-        server_task.cancel()
-        watchdog_task.cancel()
-        if ssl_cert_refresher:
-            ssl_cert_refresher.stop()
+        """Minimal signal handler - just set event."""
+        shutdown_event.set()
 
     async def dummy_shutdown() -> None:
         pass
 
     loop.add_signal_handler(signal.SIGINT, signal_handler)
     loop.add_signal_handler(signal.SIGTERM, signal_handler)
+
+    shutdown_task = loop.create_task(
+        _handle_shutdown(
+            shutdown_event,
+            server,
+            server_task,
+            watchdog_task,
+            ssl_cert_refresher,
+            app.state.engine_client,
+            uvicorn_kwargs.get("args"),
+        )
+    )
 
     try:
         await server_task
@@ -122,7 +136,67 @@ async def serve_http(
         logger.info("Shutting down FastAPI HTTP server.")
         return server.shutdown()
     finally:
+        shutdown_task.cancel()
         watchdog_task.cancel()
+
+
+async def _handle_shutdown(
+    shutdown_event: asyncio.Event,
+    server: uvicorn.Server,
+    server_task: asyncio.Task,
+    watchdog_task: asyncio.Task,
+    ssl_cert_refresher,
+    engine_client: EngineClient,
+    args,
+) -> None:
+    """Handle shutdown for single API server."""
+    await shutdown_event.wait()
+
+    logger.info("Shutdown signal received")
+
+    # Get shutdown configuration timeout
+    timeout = getattr(args, "shutdown_wait_timeout", 120) if args else 120
+    deadline = time.time() + timeout
+
+    # Send SIGTERM to engine core processes to trigger shutdown
+    # The signal handler will set PAUSED_SHUTDOWN to reject new requests
+    # and handle abort/wait based on shutdown_config
+    engine_procs = []
+    if hasattr(engine_client, "resources") and hasattr(
+        engine_client.resources, "engine_manager"
+    ):
+        engine_manager = engine_client.resources.engine_manager
+        if engine_manager and hasattr(engine_manager, "processes"):
+            engine_procs = engine_manager.processes
+
+    for proc in engine_procs:
+        if proc.is_alive():
+            with suppress(ProcessLookupError):
+                os.kill(proc.pid, signal.SIGTERM)
+
+    # Give a moment for final responses to be sent to clients
+    await asyncio.sleep(0.5)
+
+    # Wait for engine cores to exit
+    for proc in engine_procs:
+        remaining = max(0, deadline - time.time())
+        proc.join(timeout=min(remaining, 5))  # Max 5s per process
+        if proc.is_alive():
+            logger.warning("Engine core process %d did not exit, terminating", proc.pid)
+            proc.terminate()
+            proc.join(timeout=2)
+            if proc.is_alive():
+                logger.error("Force killing engine core process %d", proc.pid)
+                proc.kill()
+
+    # Finally shutdown the HTTP server
+    server.should_exit = True
+    server_task.cancel()
+    watchdog_task.cancel()
+    if ssl_cert_refresher:
+        ssl_cert_refresher.stop()
+
+    logger.info("Shutdown complete")
 
 
 async def watchdog_loop(server: uvicorn.Server, engine: EngineClient):
