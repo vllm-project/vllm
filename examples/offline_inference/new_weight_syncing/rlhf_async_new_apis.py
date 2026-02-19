@@ -26,13 +26,14 @@ workloads. Residual GPU activity interferes with vLLM memory profiling and
 causes unexpected behavior.
 """
 
-import asyncio
 import os
 import uuid
 from dataclasses import asdict
 
 import ray
 import torch
+from ray.util.placement_group import placement_group
+from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
 import vllm
@@ -50,20 +51,14 @@ from vllm.distributed.weight_transfer.nccl_engine import (
 from vllm.utils.network_utils import get_ip, get_open_port
 from vllm.v1.executor import Executor
 
-MODEL_NAME_V1 = "Qwen/Qwen3-1.7B-Base"
-MODEL_NAME_V2 = "Qwen/Qwen3-1.7B"
+MODEL_NAME = "facebook/opt-125m"
 
 
 class MyLLM(vllm.AsyncLLMEngine):
     """Configure the vLLM worker for Ray placement group execution."""
 
     def __init__(self, **kwargs):
-        # This actor runs with num_gpus=0, so Ray sets CUDA_VISIBLE_DEVICES=""
-        # to hide all GPUs. Remove it so it doesn't propagate (via runtime_env
-        # inheritance) to the DP engine core actors and their RayWorkerWrapper
-        # children, which need full GPU visibility.
-        if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
-            del os.environ["CUDA_VISIBLE_DEVICES"]
+        os.environ["VLLM_RAY_BUNDLE_INDICES"] = "0,1"
         engine_args = vllm.AsyncEngineArgs(**kwargs)
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
@@ -73,44 +68,26 @@ class MyLLM(vllm.AsyncLLMEngine):
             log_requests=engine_args.enable_log_requests,
             log_stats=not engine_args.disable_log_stats,
         )
-        self._generation_paused = False
-        self._current_token_count = 0
 
-    async def pause_generation(self, **kwargs):
-        await super().pause_generation(**kwargs)
-        await asyncio.sleep(0.2)
-        self._generation_paused = True
-
-    async def do_generate(
+    async def generate_with_retry(
         self, prompt_token_ids: list[int], sampling_params: vllm.SamplingParams
-    ) -> tuple[vllm.RequestOutput, int]:
-        """Generate a single request, updating _current_token_count as we go.
-
-        Returns (output, pause_token_index). pause_token_index is the number
-        of tokens generated before the weight change, or -1 if no pause.
-        """
-        self._current_token_count = 0
-        self._generation_paused = False
-        pause_token_index = -1
-        prev_token_count = 0
-        async for request_output in self.generate(
-            {"prompt_token_ids": prompt_token_ids},
-            sampling_params,
-            request_id=str(uuid.uuid4()),
-        ):
-            output = request_output
-            cur_token_count = len(output.outputs[0].token_ids)
-            self._current_token_count = cur_token_count
-            if self._generation_paused and pause_token_index == -1:
-                pause_token_index = prev_token_count
-            prev_token_count = cur_token_count
-        return output, pause_token_index
-
-    async def pause_after_n_tokens(self, n: int):
-        """Poll until at least n tokens generated, then pause."""
-        while self._current_token_count < n:
-            await asyncio.sleep(0)
-        await self.pause_generation(mode="keep")
+    ) -> vllm.RequestOutput:
+        finish_reason = "abort"
+        while finish_reason == "abort":
+            async for request_output in self.generate(
+                {"prompt_token_ids": prompt_token_ids},
+                sampling_params,
+                request_id=str(uuid.uuid4()),
+            ):
+                output = request_output
+            finish_reason = output.outputs[0].finish_reason
+            if finish_reason == "abort":
+                print(
+                    f"ABORT, prompt_token_ids: {prompt_token_ids}, "
+                    f"generated token_ids: {list(output.outputs[0].token_ids)}"
+                )
+            prompt_token_ids = prompt_token_ids + list(output.outputs[0].token_ids)
+        return output
 
 
 @ray.remote(num_gpus=1)
@@ -156,55 +133,70 @@ class TrainModel:
             packed=packed,
         )
 
-    @torch.inference_mode()
-    def generate(self, token_ids: list[int], max_new_tokens: int) -> list[int]:
-        """Greedy-decode max_new_tokens from the given context."""
-        input_ids = torch.tensor([token_ids], device="cuda:0")
-        output = self.model.generate(
-            input_ids,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-        )
-        new_token_ids = output[0, len(token_ids) :].tolist()
-        return new_token_ids
 
-
-# Initialize Ray and set the visible devices.
+# Initialize Ray and set the visible devices. The vLLM engine will
+# be placed on GPUs 1 and 2.
 ray.init()
 
 # Launch the training model actor. Ray's resource scheduler will allocate
 # 1 GPU (via num_gpus=1 in the decorator), ensuring pg_inference gets different GPUs.
-train_model = TrainModel.remote(MODEL_NAME_V2)
+train_model = TrainModel.remote(MODEL_NAME)
+
+# Create a placement group that reserves GPU 1–2 for the vLLM inference engine.
+# Learn more about Ray placement groups:
+# https://docs.ray.io/en/latest/placement-groups.html
+
+pg_inference = placement_group([{"GPU": 1, "CPU": 0}] * 2)
+ray.get(pg_inference.ready())
+scheduling_inference = PlacementGroupSchedulingStrategy(
+    placement_group=pg_inference,
+    placement_group_capture_child_tasks=True,
+    placement_group_bundle_index=0,
+)
 
 # Launch the vLLM inference engine. The `enforce_eager` flag reduces
 # start-up latency.
-# With data_parallel_backend="ray", vLLM's CoreEngineActorManager creates
-# its own placement groups internally for each DP rank, so we must NOT
-# create an outer placement group (it would reserve GPUs and hide them
-# from the internal DP resource check).
+# Note: Weight transfer APIs (init_weight_transfer_engine, update_weights)
+# are now native to vLLM workers.
 llm = ray.remote(
     num_cpus=0,
     num_gpus=0,
+    scheduling_strategy=scheduling_inference,
 )(MyLLM).remote(
-    model=MODEL_NAME_V1,
+    model=MODEL_NAME,
     enforce_eager=True,
-    max_model_len=8192,
+    tensor_parallel_size=2,
     distributed_executor_backend="ray",
-    enable_prefix_caching=False,
+    load_format="dummy",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 
-PROMPT = "The president of the United States is"
+# Generate text from the prompts.
+prompts = [
+    "My name is",
+    "The president of the United States is",
+    "The capital of France is",
+    "The future of AI is",
+]
 
-tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME_V1)
-prompt_token_ids = tokenizer.encode(PROMPT, add_special_tokens=False)
+# Tokenize prompts to token IDs
+tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+prompt_token_ids_list = [
+    tokenizer.encode(prompt, add_special_tokens=False) for prompt in prompts
+]
 
+sampling_params = [
+    SamplingParams(temperature=0, max_tokens=2),
+    SamplingParams(temperature=0, max_tokens=32),
+    SamplingParams(temperature=0, max_tokens=32),
+    SamplingParams(temperature=0, max_tokens=32),
+]
 
 # Set up the communication channel between the training process and the
 # inference engine.
 master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
 
-world_size = 2  # 1 trainer + 1 inference worker
+world_size = 3  # 1 trainer + 2 inference workers (tensor_parallel_size=2)
 inference_handle = llm.init_weight_transfer_engine.remote(
     WeightTransferInitRequest(
         init_info=asdict(
@@ -223,24 +215,22 @@ train_handle = train_model.init_weight_transfer_group.remote(world_size)
 ray.get([train_handle, inference_handle])
 
 
-PAUSE_AFTER_N_TOKENS = 8
-N_NEW_TOKENS = 100
+generation_futures = [
+    llm.generate_with_retry.remote(prompt_token_ids, params)
+    for prompt_token_ids, params in zip(prompt_token_ids_list, sampling_params)
+]
 
-# Collect weight metadata once
+finished, pending = ray.wait(generation_futures, num_returns=1)
+
+# Pause generation in preparation for weight sync
+ray.get(llm.pause_generation.remote(wait_for_inflight_requests=False))
+
+# Synchronize the updated weights to the inference engine using batched API.
+# Collect all weight metadata from the training actor
 names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
 
-# ── Phase 1: single request with weight sync ───────────────────────
-print(f"\n{'=' * 50}")
-print(f"Prompt: {PROMPT!r}")
-print(f"{'=' * 50}")
-
-gen_future = llm.do_generate.remote(
-    prompt_token_ids,
-    SamplingParams(temperature=0, max_tokens=PAUSE_AFTER_N_TOKENS + N_NEW_TOKENS),
-)
-
-ray.get(llm.pause_after_n_tokens.remote(PAUSE_AFTER_N_TOKENS))
-
+# Issue update_weights call with NCCL-specific update info
+# packed=True enables efficient batched tensor broadcasting
 inference_handle = llm.update_weights.remote(
     WeightTransferUpdateRequest(
         update_info=asdict(
@@ -253,47 +243,41 @@ inference_handle = llm.update_weights.remote(
         )
     )
 )
+
+# Broadcast all weights from trainer using the weight transfer API
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
 
+# Resume generation since weight sync is complete
 ray.get(llm.resume_generation.remote())
-output, pause_idx = ray.get(gen_future)
 
-all_token_ids = list(output.outputs[0].token_ids)
-before_text = tokenizer.decode(all_token_ids[:pause_idx])
-after_text = tokenizer.decode(all_token_ids[pause_idx:])
-print(f"  Old weights ({pause_idx} tokens): {before_text!r}")
-n_after = len(all_token_ids) - pause_idx
-print(f"  New weights ({n_after} tokens): {after_text!r}")
+# Get outputs separately - finished completed before pause, pending were paused/resumed
+finished_outputs = ray.get(finished)
+pending_outputs = ray.get(pending)
 
-context = list(output.prompt_token_ids) + all_token_ids[:pause_idx]
-expected = all_token_ids[pause_idx:]
+# Requests that finished before the pause: all generation used original weights
+print("-" * 50)
+print("Requests that completed BEFORE weight change:")
+print("-" * 50)
+for output in finished_outputs:
+    prompt_text = tokenizer.decode(output.prompt_token_ids)
+    print(f"Prompt: {prompt_text!r}")
+    print(f"Generated (with original weights): {output.outputs[0].text!r}")
+    print("-" * 50)
 
-# ── Phase 2: validate with huggingface model ───────────────────────
-print(f"\n{'=' * 50}")
-print("VALIDATION: comparing weight-synced vLLM with Hugging Face model")
-print(f"{'=' * 50}")
-
-ray.get(llm.shutdown.remote())
-ray.kill(llm)
-
-actual = ray.get(train_model.generate.remote(context, len(expected)))
-match = actual == expected
-
-print(f"  context token_ids ({len(context)}): {context}")
-print()
-if match:
-    print(f"  [PASS] {PROMPT!r}")
-else:
-    print(f"  [FAIL] {PROMPT!r}")
-    print(f"         weight-synced vLLM: {tokenizer.decode(expected)!r}")
-    print(f"         HF train model:    {tokenizer.decode(actual)!r}")
-    for j, (e, a) in enumerate(zip(expected, actual)):
-        if e != a:
-            print(
-                f"         first divergence at output token {j}: "
-                f"expected {e} ({tokenizer.decode([e])!r}) vs "
-                f"actual {a} ({tokenizer.decode([a])!r})"
-            )
-            break
-print("=" * 50)
+# Requests that were paused mid-generation: some text before, some after weight change
+print("Requests that were PAUSED and RESUMED after weight change:")
+print("-" * 50)
+for output in pending_outputs:
+    # Decode the full prompt token IDs (original + generated before pause)
+    full_prompt_text = tokenizer.decode(output.prompt_token_ids)
+    # Find the original prompt by checking which one this output started with
+    original_prompt = next(p for p in prompts if full_prompt_text.startswith(p))
+    # output.prompt_token_ids contains original prompt + tokens generated before pause
+    # output.outputs[0].text is what was generated after resuming with new weights
+    text_before_pause = full_prompt_text[len(original_prompt) :]
+    text_after_pause = output.outputs[0].text
+    print(f"Original prompt: {original_prompt!r}")
+    print(f"Generated before weight change: {text_before_pause!r}")
+    print(f"Generated after weight change: {text_after_pause!r}")
+    print("-" * 50)
