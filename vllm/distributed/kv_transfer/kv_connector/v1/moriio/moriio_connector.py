@@ -31,8 +31,8 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOConstants,
     MoRIIOMode,
     ReqId,
-    TransferId,
     ReqMeta,
+    TransferId,
     WriteTask,
     get_moriio_mode,
     get_port_offset,
@@ -69,7 +69,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 once = False
-once_get_finished=False
+once_get_finished = False
 try:
     from mori.io import (
         BackendType,
@@ -280,8 +280,8 @@ class MoRIIOConnectorScheduler:
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
         self.paths: dict[str, zmq.Socket] = {}
-        self.transfer_id_to_request_id : dict[TransferId, ReqId] = {}
-        self.request_id_to_transfer_id:dict[ReqId,TransferId] = {}
+        self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.request_id_to_transfer_id: dict[ReqId, TransferId] = {}
 
     def get_num_new_matched_tokens(
         self,
@@ -352,7 +352,7 @@ class MoRIIOConnectorScheduler:
         transfer_id = params["transfer_id"]
         request_id = request.request_id
         self.transfer_id_to_request_id[transfer_id] = request_id
-        self.request_id_to_transfer_id[request_id] = transfer_id 
+        self.request_id_to_transfer_id[request_id] = transfer_id
         if params.get("do_remote_decode"):
             local_block_ids = blocks.get_block_ids()[0]
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
@@ -416,7 +416,7 @@ class MoRIIOConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = MoRIIOConnectorMetadata()
-        meta.transfer_id_to_request_id=self.transfer_id_to_request_id
+        meta.transfer_id_to_request_id = self.transfer_id_to_request_id
 
         if self.mode == MoRIIOMode.WRITE:
             # when async_load_kv finished,
@@ -751,7 +751,7 @@ class MoRIIOConnectorWorker:
             self.block_size,
             use_mla=self.use_mla,
         )
-        self.transfer_id_to_request_id:dict[TransferId,ReqId] = {}
+        self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
 
         # TODO: consider the integration of flashinfer or other backends.
         self.backend_name = backend.get_name()
@@ -1217,7 +1217,9 @@ class MoRIIOConnectorWorker:
             else:
                 done_recving = self._pop_done_transfers()
 
-        done_recving = set(map(lambda id: self.transfer_id_to_request_id[id], done_recving))
+        done_recving = set(
+            map(lambda id: self.transfer_id_to_request_id[id], done_recving)
+        )
 
         return done_sending, done_recving
 
@@ -1299,7 +1301,7 @@ class MoRIIOConnectorWorker:
         Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
         """
-        self.transfer_id_to_request_id=metadata.transfer_id_to_request_id
+        self.transfer_id_to_request_id = metadata.transfer_id_to_request_id
         if self.is_producer:
             self.moriio_wrapper.async_wait_reqid()
             return
@@ -1364,7 +1366,6 @@ class MoRIIOConnectorWorker:
         )
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
-
         self.schedule_write_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
