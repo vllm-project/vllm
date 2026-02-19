@@ -196,14 +196,20 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     config_dtype=config_dtype,
                 )
 
-                # SPARSITY_FACTOR is a heuristic margin ensuring tokens * top_k
-                # activates only a small fraction of total experts * loras.
-                SPARSITY_FACTOR = 8
-                naive_block_assignment = (
-                    expert_map is None
-                    and num_tokens * top_k * SPARSITY_FACTOR
-                    <= self.base_layer.local_num_experts * self.max_loras
-                )
+                shrink_naive = shrink_config.pop("naive_block_assignment", None)
+                expand_naive = expand_config.pop("naive_block_assignment", None)
+
+                if shrink_naive is not None and expand_naive is not None:
+                    # Both configs specify it — use True only if both True
+                    naive_block_assignment = bool(shrink_naive and expand_naive)
+                else:
+                    # Not in configs — fall back to heuristic
+                    SPARSITY_FACTOR = 8
+                    naive_block_assignment = (
+                        expert_map is None
+                        and num_tokens * top_k * SPARSITY_FACTOR
+                        <= self.base_layer.local_num_experts * self.max_loras
+                    )
 
                 # get the block size of m from customized config or default config
                 (
@@ -286,6 +292,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                     top_k=top_k,
                     config_dtype=config_dtype,
                 )
+                shrink_config.pop("naive_block_assignment", None)
+                expand_config.pop("naive_block_assignment", None)
 
                 sorted_token_ids_lora = moe_state_dict["sorted_token_ids_lora"]
                 expert_ids_lora = moe_state_dict["expert_ids_lora"]
