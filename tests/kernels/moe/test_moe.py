@@ -14,7 +14,7 @@ import pytest
 import torch
 from torch.nn import Parameter
 from torch.nn import functional as F
-from transformers import MixtralConfig
+from transformers import AutoConfig, AutoModelForCausalLM, MixtralConfig
 from transformers.models.mixtral.modeling_mixtral import MixtralSparseMoeBlock
 
 import vllm.model_executor.layers.fused_moe  # noqa
@@ -26,7 +26,13 @@ from tests.kernels.moe.utils import (
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.parallel_state import init_distributed_environment
+from vllm.config.load import LoadConfig
+from vllm.config.model import ModelConfig
+from vllm.config.parallel import ParallelConfig
+from vllm.distributed.parallel_state import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
@@ -56,10 +62,15 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     marlin_quantize,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
+from vllm.model_executor.model_loader.weight_utils import (
+    get_quant_config,
+    initialize_single_dummy_weight,
+)
 from vllm.model_executor.models.mixtral import MixtralMoE
+from vllm.model_executor.models.nemotron_h import NemotronHMoE
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
-from vllm.utils.torch_utils import set_random_seed
+from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
@@ -753,6 +764,131 @@ def test_mixtral_moe(
             rtol=mixtral_moe_tol[dtype],
             atol=mixtral_moe_tol[dtype],
         )
+
+
+@pytest.mark.parametrize(
+    "model_name",
+    [
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+    ],
+)
+@pytest.mark.parametrize(
+    "flashinfer_backend", ["latency", "throughput"], ids=["trtllm", "cutlass"]
+)
+def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
+    batch_size = 256
+
+    if not current_platform.has_device_capability(100):
+        pytest.skip("Test is only supported for sm >= 100")
+    if (
+        model_name == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+        and flashinfer_backend != "throughput"
+    ):
+        pytest.skip("BF16 model only supported with throughput backend")
+    set_random_seed(7)
+    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
+    if model_name.endswith("FP8"):
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
+    if model_name.endswith("BF16"):
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
+    monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", flashinfer_backend)
+    init_distributed_environment(world_size=1, rank=0, local_rank=0)
+    init_workspace_manager(torch.cuda.current_device())
+    ensure_model_parallel_initialized(
+        tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+    )
+
+    model_config = ModelConfig(
+        model=model_name,
+        trust_remote_code=True,
+    )
+    nemotron_config = model_config.hf_config
+    load_config = LoadConfig(load_format="dummy")
+    layer_quant_config = None
+    if model_config.quantization is not None:
+        layer_quant_config = get_quant_config(model_config, load_config)
+
+    inner_vllm_config = VllmConfig(
+        model_config=model_config,
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=1, tensor_parallel_size=1
+        ),
+        load_config=load_config,
+        quant_config=layer_quant_config,
+    )
+    inner_vllm_config.compilation_config.fast_moe_cold_start = False
+    with (
+        set_forward_context({}, inner_vllm_config),
+        set_current_vllm_config(inner_vllm_config),
+    ):
+        hidden_states = (
+            torch.randn(
+                (batch_size, nemotron_config.hidden_size),
+                device="cuda",
+                dtype=torch.bfloat16,
+            )
+            / 10
+        )
+
+        with set_default_torch_dtype(torch.bfloat16):
+            vllm_layer = NemotronHMoE(
+                nemotron_config,
+                quant_config=inner_vllm_config.quant_config,
+                parallel_config=inner_vllm_config.parallel_config,
+            ).cuda()
+        for param in vllm_layer.state_dict().values():
+            initialize_single_dummy_weight(param, low=-3e-1, high=3e-1)
+
+        hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
+        hf_model = AutoModelForCausalLM.from_config(hf_config, trust_remote_code=True)
+        ref_hf_layer = hf_model.backbone.layers[1].mixer.cuda()
+
+        # Load weights from our layer to the reference hf layer before
+        # post-processing, since some of the weights get padded and size changes.
+        _load_nemotron_vllm_weights_to_hf_model(vllm_layer, ref_hf_layer)
+
+        vllm_layer.gate.quant_method.process_weights_after_loading(vllm_layer.gate)
+        vllm_layer.experts.quant_method.process_weights_after_loading(
+            vllm_layer.experts
+        )
+        vllm_layer.shared_experts.up_proj.quant_method.process_weights_after_loading(
+            vllm_layer.shared_experts.up_proj
+        )
+        vllm_layer.shared_experts.down_proj.quant_method.process_weights_after_loading(
+            vllm_layer.shared_experts.down_proj
+        )
+
+        actaul_output = vllm_layer(hidden_states)
+
+        ref_output = ref_hf_layer(hidden_states)
+        torch.testing.assert_close(ref_output, actaul_output, rtol=1e-2, atol=1e-1)
+
+
+def _load_nemotron_vllm_weights_to_hf_model(vllm_layer, hf_layer):
+    hf_layer.gate.weight.data[:] = vllm_layer.gate.weight.data
+    hf_layer.gate.e_score_correction_bias.data[:] = (
+        vllm_layer.gate.e_score_correction_bias.data
+    )
+
+    for i in range(vllm_layer.experts.w13_weight.shape[0]):
+        w13 = vllm_layer.experts.w13_weight[i].to(torch.float)
+        w2 = vllm_layer.experts.w2_weight[i].to(torch.float)
+        if hasattr(vllm_layer.experts, "w13_weight_scale"):
+            w13 = w13 * vllm_layer.experts.w13_weight_scale[i]
+        if hasattr(vllm_layer.experts, "w2_weight_scale"):
+            w2 = w2 * vllm_layer.experts.w2_weight_scale[i]
+        hf_layer.experts[i].up_proj.weight.data[:] = w13
+        hf_layer.experts[i].down_proj.weight.data[:] = w2
+
+    up_proj = vllm_layer.shared_experts.up_proj.weight.data.to(torch.float)
+    down_proj = vllm_layer.shared_experts.down_proj.weight.data.to(torch.float)
+    if hasattr(vllm_layer.shared_experts.up_proj, "weight_scale"):
+        up_proj = up_proj * vllm_layer.shared_experts.up_proj.weight_scale
+    if hasattr(vllm_layer.shared_experts.down_proj, "weight_scale"):
+        down_proj = down_proj * vllm_layer.shared_experts.down_proj.weight_scale
+    hf_layer.shared_experts.up_proj.weight.data[:] = up_proj
+    hf_layer.shared_experts.down_proj.weight.data[:] = down_proj
 
 
 def marlin_moe_generate_valid_test_cases():
