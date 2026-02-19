@@ -410,3 +410,8 @@ void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
 #endif
+
+#ifndef USE_ROCM
+void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
+                       torch::Tensor const& mat_b);
+#endif
