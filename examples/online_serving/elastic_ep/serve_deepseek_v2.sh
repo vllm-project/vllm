@@ -57,15 +57,15 @@ echo "Starting vLLM server for $MODEL_NAME with data parallel size: $DATA_PARALL
 export RAY_DEDUP_LOGS=0
 export VLLM_USE_DEEP_GEMM=1
 
-vllm serve $MODEL_NAME \
-    --data-parallel-size $DATA_PARALLEL_SIZE \
-    --data-parallel-size-local $DATA_PARALLEL_SIZE \
+vllm serve "$MODEL_NAME" \
+    --data-parallel-size "$DATA_PARALLEL_SIZE" \
+    --data-parallel-size-local "$DATA_PARALLEL_SIZE" \
     --data-parallel-backend ray \
     --enforce-eager \
     --enable-expert-parallel \
     --enable-eplb \
     --all2all-backend pplx \
-    --num-redundant-experts $REDUNDANT_EXPERTS \
+    --num-redundant-experts "$REDUNDANT_EXPERTS" \
     --trust-remote-code \
-    --host $HOST \
-    --port $PORT
+    --host "$HOST" \
+    --port "$PORT"
