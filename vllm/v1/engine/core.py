@@ -400,11 +400,13 @@ class EngineCore:
             return {}, False
         scheduler_output = self.scheduler.schedule()
         future = self.model_executor.execute_model(scheduler_output, non_block=True)
-        kv_cache_usage = self.scheduler.get_kv_cache_usage()
         grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
         with (
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output, kv_cache_usage),
+            self.log_iteration_details(
+                scheduler_output,
+                self.scheduler.get_kv_cache_usage(),
+            ),
         ):
             model_output = future.result()
             if model_output is None:
@@ -458,12 +460,13 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            kv_cache_usage = self.scheduler.get_kv_cache_usage()
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
-
-            with self.log_iteration_details(scheduler_output, kv_cache_usage):
+            with self.log_iteration_details(
+                scheduler_output,
+                self.scheduler.get_kv_cache_usage(),
+            ):
                 if not self.is_ec_producer:
                     model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
