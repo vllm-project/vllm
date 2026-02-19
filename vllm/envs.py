@@ -237,6 +237,7 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
+    VLLM_USE_ASYNC_DP_SYNC: bool = False
 
 
 def get_default_cache_root():
@@ -1578,6 +1579,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
+    # Enable async DP sync with overlap in execute_model.
+    # When enabled, DP rank synchronization runs with async_op=True on Gloo's
+    # background thread, allowing overlap with _prepare_inputs CPU work.
+    "VLLM_USE_ASYNC_DP_SYNC": lambda: bool(
+        int(os.getenv("VLLM_USE_ASYNC_DP_SYNC", "0"))
+    ),
 }
 
 
