@@ -1521,7 +1521,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 ##### FP8 test #####
-- label: LM Eval Large Models (H100) # optional
+- label: LM Eval Large Models (H100) # optional, still use H100 for consistency
   gpu: h100
   optional: true
   mirror_hardwares: [amdexperimental]
