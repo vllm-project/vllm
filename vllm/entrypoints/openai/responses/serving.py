@@ -115,7 +115,6 @@ from vllm.utils import random_uuid
 logger = init_logger(__name__)
 
 
-
 def _extract_allowed_tools_from_mcp_requests(
     tools: list[Tool],
 ) -> dict[str, list[str] | None]:
@@ -768,7 +767,6 @@ class OpenAIServingResponses(OpenAIServing):
                 if stored_response is None or stored_response.status != "cancelled":
                     self.response_store[response.id] = response
         return response
-
 
     def _topk_logprobs(
         self,
@@ -1563,9 +1561,7 @@ class OpenAIServingResponses(OpenAIServing):
             if ctx.is_expecting_start():
                 if len(ctx.parser.messages) > 0:
                     previous_item = ctx.parser.messages[-1]
-                    for event in emit_previous_item_done_events(
-                        previous_item, state
-                    ):
+                    for event in emit_previous_item_done_events(previous_item, state):
                         yield _increment_sequence_number_and_return(event)
                 state.reset_for_new_item()
 
@@ -1574,9 +1570,7 @@ class OpenAIServingResponses(OpenAIServing):
                 yield _increment_sequence_number_and_return(event)
 
             # Stream tool call outputs
-            for event in emit_tool_action_events(
-                ctx, state, self.tool_server
-            ):
+            for event in emit_tool_action_events(ctx, state, self.tool_server):
                 yield _increment_sequence_number_and_return(event)
 
     async def responses_stream_generator(

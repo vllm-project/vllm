@@ -64,7 +64,6 @@ TOOL_NAME_TO_MCP_SERVER_LABEL: Final[dict[str, str]] = {
 }
 
 
-
 @dataclass
 class HarmonyStreamingState:
     """Mutable state for harmony streaming event processing."""
@@ -82,7 +81,6 @@ class HarmonyStreamingState:
         self.is_first_function_call_delta = False
 
 
-
 def is_mcp_tool_by_namespace(recipient: str | None) -> bool:
     """
     Determine if a tool call is an MCP tool based on recipient prefix.
@@ -98,13 +96,12 @@ def is_mcp_tool_by_namespace(recipient: str | None) -> bool:
     return not recipient.startswith("functions.")
 
 
-
 def emit_function_call_done_events(
     previous_item,
     state: HarmonyStreamingState,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when a function call completes."""
-    function_name = previous_item.recipient[len("functions."):]
+    function_name = previous_item.recipient[len("functions.") :]
     events: list[StreamingResponsesResponse] = []
     events.append(
         ResponseFunctionCallArgumentsDoneEvent(
@@ -299,7 +296,6 @@ def emit_previous_item_done_events(
     elif previous_item.channel == "final":
         return emit_text_output_done_events(previous_item, state)
     return []
-
 
 
 def emit_final_channel_delta_events(
@@ -504,7 +500,7 @@ def emit_mcp_prefix_delta_events(
     if not state.sent_output_item_added:
         state.sent_output_item_added = True
         state.current_item_id = f"mcp_{random_uuid()}"
-        mcp_name = ctx.parser.current_recipient[len("mcp."):]
+        mcp_name = ctx.parser.current_recipient[len("mcp.") :]
 
         events.append(
             ResponseOutputItemAddedEvent(
@@ -557,7 +553,7 @@ def emit_function_call_delta_events(
     events: list[StreamingResponsesResponse] = []
     if state.is_first_function_call_delta is False:
         state.is_first_function_call_delta = True
-        fc_name = ctx.parser.current_recipient[len("functions."):]
+        fc_name = ctx.parser.current_recipient[len("functions.") :]
         state.current_item_id = f"fc_{random_uuid()}"
         tool_call_item = ResponseFunctionToolCall(
             name=fc_name,
@@ -588,7 +584,6 @@ def emit_function_call_delta_events(
     return events
 
 
-
 def emit_content_delta_events(
     ctx: StreamingHarmonyContext,
     state: HarmonyStreamingState,
@@ -597,10 +592,7 @@ def emit_content_delta_events(
     if not ctx.last_content_delta:
         return []
 
-    if (
-        ctx.parser.current_channel == "final"
-        and ctx.parser.current_recipient is None
-    ):
+    if ctx.parser.current_channel == "final" and ctx.parser.current_recipient is None:
         return emit_final_channel_delta_events(ctx, state)
     elif (
         ctx.parser.current_channel == "analysis"
@@ -635,13 +627,12 @@ def emit_content_delta_events(
     return []
 
 
-
 def emit_browser_tool_events(
     previous_item,
     state: HarmonyStreamingState,
 ) -> list[StreamingResponsesResponse]:
     """Emit events for browser tool calls (web search)."""
-    function_name = previous_item.recipient[len("browser."):]
+    function_name = previous_item.recipient[len("browser.") :]
     parsed_args = json.loads(previous_item.content[0].text)
     action = None
 
@@ -821,7 +812,7 @@ def emit_mcp_prefix_completion_events(
     state: HarmonyStreamingState,
 ) -> list[StreamingResponsesResponse]:
     """Emit events when an MCP prefix tool (mcp.*) completes."""
-    mcp_name = previous_item.recipient[len("mcp."):]
+    mcp_name = previous_item.recipient[len("mcp.") :]
     events: list[StreamingResponsesResponse] = []
     events.append(
         ResponseMcpCallArgumentsDoneEvent(
@@ -859,7 +850,6 @@ def emit_mcp_prefix_completion_events(
     return events
 
 
-
 def emit_tool_action_events(
     ctx: StreamingHarmonyContext,
     state: HarmonyStreamingState,
@@ -891,23 +881,17 @@ def emit_tool_action_events(
         recipient = previous_item.recipient
         # Handle MCP prefix tool completion first
         if recipient.startswith("mcp."):
-            events.extend(
-                emit_mcp_prefix_completion_events(previous_item, state)
-            )
+            events.extend(emit_mcp_prefix_completion_events(previous_item, state))
         else:
             # Handle other MCP tool and code interpreter completion
             is_mcp_tool = is_mcp_tool_by_namespace(
                 recipient
             ) and state.current_item_id.startswith("mcp_")
             if is_mcp_tool:
-                events.extend(
-                    emit_mcp_tool_completion_events(previous_item, state)
-                )
+                events.extend(emit_mcp_tool_completion_events(previous_item, state))
             else:
                 events.extend(
-                    emit_code_interpreter_completion_events(
-                        previous_item, state
-                    )
+                    emit_code_interpreter_completion_events(previous_item, state)
                 )
 
     return events
