@@ -1044,12 +1044,15 @@ class Scheduler(SchedulerInterface):
             if idx >= num_running_reqs:
                 assert not scheduled_in_prev_step
                 resumed_req_ids.add(req_id)
+            if not scheduled_in_prev_step and self.scheduler_config.async_scheduling:
+                assert req.num_output_placeholders == 0, (
+                    "Unexpected output placeholders for request not scheduled "
+                    "in the previous step."
+                )
             if not self.use_v2_model_runner and not scheduled_in_prev_step:
                 num_out = req.num_output_tokens + req.num_output_placeholders
                 if num_out > 0:
-                    out_token_ids = req.output_token_ids.copy()
-                    out_token_ids.extend([-1] * req.num_output_placeholders)
-                    all_token_ids[req_id] = out_token_ids
+                    all_token_ids[req_id] = req.output_token_ids.copy()
             new_block_ids.append(
                 req_to_new_blocks[req_id].get_block_ids(allow_none=True)
             )
