@@ -497,7 +497,6 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         # Text config
         text_config = config.text_config
@@ -520,7 +519,6 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             vision_config=vision_config,
             norm_eps=getattr(config, "rms_norm_eps", 1e-6),
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=maybe_prefix(prefix, "visual"),
         )
 
