@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
@@ -7,7 +8,9 @@ from dataclasses import dataclass
 from typing import Generic, TypeVar
 
 import torch
+from typing_extensions import Self
 
+from vllm import envs
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -16,32 +19,32 @@ from vllm.platforms import current_platform
 
 
 @dataclass
-class ScaledMMLinearLayerConfig:
+class KernelConfig:
     pass
 
 
 @dataclass
-class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
-    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
+class IntKernelConfig(KernelConfig):
+    # TODO: Change to QuantKey like FpKernelConfig
     is_static_input_scheme: bool
     is_channelwise: bool
     input_symmetric: bool
 
 
 @dataclass
-class FP8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
+class FpKernelConfig(KernelConfig):
     weight_quant_key: QuantKey
     activation_quant_key: QuantKey
     out_dtype: torch.dtype | None
 
 
-_FP8ParamsT = tuple[
+_FpParamsT = tuple[
     torch.Tensor,  # weight
     torch.Tensor,  # weight_scale
     torch.Tensor | None,  # input_scale,
     torch.Tensor | None,  # input_scale_ub,
 ]
-_Int8ParamsT = tuple[
+_IntParamsT = tuple[
     torch.Tensor,  # weight
     torch.Tensor,  # weight_scale
     torch.Tensor | None,  # input_scale,
@@ -49,11 +52,43 @@ _Int8ParamsT = tuple[
     torch.Tensor | None,  # azp_adj
 ]
 
-_ParamsT = TypeVar("_ParamsT", _Int8ParamsT, _FP8ParamsT)
-_ConfigT = TypeVar("_ConfigT", bound=ScaledMMLinearLayerConfig)
+_ParamsT = TypeVar("_ParamsT", _IntParamsT, _FpParamsT)
+_ConfigT = TypeVar("_ConfigT", bound=KernelConfig)
 
 
-class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
+class Kernel(Generic[_ConfigT, _ParamsT], ABC):
+    @classmethod
+    def try_select(
+        cls, c: _ConfigT, compute_capability: int | None
+    ) -> tuple[type[Self] | None, list[str]]:
+        """
+        Try to select a compatible kernel variant.
+        """
+        kernel_name = cls.get_name()
+        if kernel_name in envs.VLLM_DISABLED_KERNELS:
+            return None, [f" {kernel_name} is disabled by environment variable"]
+
+        is_supported, reason = cls.is_supported(compute_capability)
+        if not is_supported:
+            return None, [f"{kernel_name}: {reason}"]
+
+        can_implement, reason = cls.can_implement(c)
+        if not can_implement:
+            return None, [f"{kernel_name}: {reason}"]
+
+        return cls, []
+
+    @classmethod
+    def get_name(cls) -> str:
+        """
+        Return the kernel name in format: linear.provider.precision.ClassName
+        """
+        module_path = cls.__module__
+        prefix = "vllm.model_executor.kernels."
+        if module_path.startswith(prefix):
+            module_path = module_path[len(prefix) :]
+        return f"{module_path}.{cls.__name__}"
+
     @classmethod
     @abstractmethod
     def is_supported(
@@ -91,12 +126,8 @@ class ScaledMMLinearKernel(Generic[_ConfigT, _ParamsT], ABC):
         raise NotImplementedError
 
 
-class FP8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[FP8ScaledMMLinearLayerConfig, _FP8ParamsT], ABC
-):
-    def __init__(
-        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
-    ) -> None:
+class FpKernel(Kernel[FpKernelConfig, _FpParamsT], ABC):
+    def __init__(self, c: FpKernelConfig, layer_param_names: Sequence[str]) -> None:
         act_scale_descriptor = c.activation_quant_key.scale
         self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
@@ -109,7 +140,7 @@ class FP8ScaledMMLinearKernel(
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         pass
 
-    def _get_layer_params(self, layer) -> _FP8ParamsT:
+    def _get_layer_params(self, layer) -> _FpParamsT:
         w, w_s, x_s, x_s_ub = self.layer_param_names
         return (
             getattr(layer, w),
@@ -173,10 +204,8 @@ class FP8ScaledMMLinearKernel(
         return None
 
 
-class Int8ScaledMMLinearKernel(
-    ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
-):
-    def _get_layer_params(self, layer) -> _Int8ParamsT:
+class IntKernel(Kernel[IntKernelConfig, _IntParamsT], ABC):
+    def _get_layer_params(self, layer) -> _IntParamsT:
         w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
         return (
             getattr(layer, w_q),

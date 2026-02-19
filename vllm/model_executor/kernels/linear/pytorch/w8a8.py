@@ -1,29 +1,59 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from __future__ import annotations
 
 import torch
 
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8_linear
 from vllm.config import CompilationMode, get_current_vllm_config
 from vllm.platforms import current_platform
 
-from .ScaledMMLinearKernel import (
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
 
+class FpKernel(w8a8_linear.FpKernel):
+    """
+    PyTorch FP8 w8a8 kernel base.
+    - Call FpKernel.select() to auto-select the best variant
+    - Call PerTensorFPKernel.select() to force a specific variant
+    Do not instantiate directly - lacks apply_scaled_mm implementation.
+    """
 
-class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
-    """
-    Base class for FP8 linear kernels using Torch.
-    Each subclass represents a kernel variant for
-    specific device capabilities and torch versions.
-    """
+    @classmethod
+    def try_select(
+        cls, c: w8a8_linear.FpKernelConfig, compute_capability: int | None
+    ) -> tuple[type[FpKernel] | None, list[str]]:
+        """
+        Select a compatible kernel variant.
+        - If called on FpKernel base: tries all variants in priority order
+        - If called on a specific variant: delegates to parent's implementation
+
+        Returns:
+            (kernel_class, None) if successful, or (None, failure_reason) if not.
+        """
+
+        # If called on a specific variant, use parent's default implementation
+        if cls is not FpKernel:
+            return super().try_select(c, compute_capability)
+
+        # If called on FpKernel base, try all variants in priority order
+        failure_reasons = []
+        for variant in [
+            PerTensorFPKernel,
+            RowWiseFPKernel,
+            ChannelWiseFPKernel,
+        ]:
+            kernel, reason = variant.try_select(c, compute_capability)
+            if kernel is not None:
+                return kernel, []
+            failure_reasons.extend(reason)
+
+        return None, failure_reasons
 
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
+        """Shared support check for PyTorch variants"""
         if not (current_platform.is_cuda_alike() or current_platform.is_cpu()):
             return False, "requires ROCm, CUDA or CPU."
 
@@ -47,9 +77,9 @@ class TorchFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         return 17 if pad_output else None
 
 
-class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
+class PerTensorFPKernel(FpKernel):
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.FpKernelConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
@@ -81,7 +111,7 @@ class PerTensorTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
 
 
-class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
+class RowWiseFPKernel(FpKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -100,7 +130,7 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.FpKernelConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
@@ -148,9 +178,9 @@ class RowWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
         return torch.narrow(output, 0, 0, output_shape[0]).view(*output_shape)
 
 
-class ChannelWiseTorchFP8ScaledMMLinearKernel(TorchFP8ScaledMMLinearKernel):
+class ChannelWiseFPKernel(FpKernel):
     @classmethod
-    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.FpKernelConfig) -> tuple[bool, str | None]:
         per_tensor_activation_scales = (
             c.activation_quant_key.scale.group_shape.is_per_tensor()
         )
