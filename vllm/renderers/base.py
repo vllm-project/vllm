@@ -4,7 +4,7 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Executor, Future, ThreadPoolExecutor
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -52,13 +52,25 @@ if TYPE_CHECKING:
         MultiModalInputs,
         MultiModalUUIDDict,
     )
-    from vllm.multimodal.parse import MultiModalDataItems, MultiModalUUIDItems
+    from vllm.multimodal.parse import MultiModalDataItems
     from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
 
 
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
+
+
+class _InlineExecutor(Executor):
+    """Executor that runs callables synchronously in the calling thread."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        f: Future = Future()
+        try:
+            f.set_result(fn(*args, **kwargs))
+        except BaseException as e:
+            f.set_exception(e)
+        return f
 
 
 class BaseRenderer(ABC, Generic[_T]):
@@ -85,11 +97,23 @@ class BaseRenderer(ABC, Generic[_T]):
         # thread-safe, so every access must be serialized through one thread.
         self._executor = ThreadPoolExecutor(max_workers=1)
 
+        # When --async-mm-input-processing is enabled, multimodal
+        # preprocessing is offloaded to the shared thread pool executor.
+        # Otherwise, a dummy inline executor is used (runs synchronously).
+        mm_config = config.model_config.multimodal_config
+        if mm_config and mm_config.async_mm_input_processing:
+            self._mm_executor: Executor = self._executor
+        else:
+            self._mm_executor = _InlineExecutor()
+
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
 
         self.mm_processor: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
+        self._clear_mm_cache_async = make_async(
+            self.clear_mm_cache, executor=self._executor
+        )
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 
@@ -167,7 +191,7 @@ class BaseRenderer(ABC, Generic[_T]):
     async def clear_mm_cache_async(self) -> None:
         """Serialize clear_mm_cache through the shared executor to avoid
         races with concurrent process_inputs on the mm_processor_cache."""
-        await make_async(self.clear_mm_cache, executor=self._executor)()
+        await self._clear_mm_cache_async()
 
     def shutdown(self) -> None:
         mm_processor_cache = self.mm_processor_cache
@@ -481,25 +505,23 @@ class BaseRenderer(ABC, Generic[_T]):
     def _validate_mm_uuids(
         self,
         mm_data: "MultiModalDataDict",
-        mm_data_items: "MultiModalDataItems",
-        mm_uuid_items: "MultiModalUUIDItems",
+        mm_items: "MultiModalDataItems",
+        mm_uuids: "MultiModalUUIDDict | None",
     ) -> None:
-        # NOTE: Keys corresponding to `None` in `mm_data` don't appear in
-        # `mm_data_items`
-        modalities = mm_data.keys() | mm_uuid_items.keys()
+        if mm_uuids is None:
+            mm_uuids = {}
+
+        # NOTE: Keys corresponding to `None` in `mm_data` don't appear in `mm_items`
+        modalities = mm_data.keys() | mm_uuids.keys()
 
         for modality in modalities:
-            data_items = mm_data_items.get(modality)
-            uuid_items = mm_uuid_items.get(modality)
+            data_items = mm_items.get(modality) or list[Any]()
 
-            if data_items is None:
-                if uuid_items is None:
-                    raise ValueError(
-                        f"multi_modal_data[{modality!r}] is empty but "
-                        f"multi_modal_uuids[{modality!r}] is missing."
-                    )
+            uuid_items = mm_uuids.get(modality) or list[str | None]()
+            if isinstance(uuid_items, str):
+                uuid_items = [uuid_items]
 
-            elif uuid_items is not None:
+            if len(data_items) > 0:
                 if len(uuid_items) > 0 and len(data_items) != len(uuid_items):
                     raise ValueError(
                         f"If given, multi_modal_uuids[{modality!r}] must have "
@@ -507,20 +529,25 @@ class BaseRenderer(ABC, Generic[_T]):
                         f"got {len(uuid_items)} vs {len(data_items)}."
                     )
 
-                if len(uuid_items) > 0:
-                    for i, item in enumerate(data_items):
-                        if item is None and uuid_items[i] is None:
+                for i, item in enumerate(data_items):
+                    if item is None:
+                        if not uuid_items:
                             raise ValueError(
-                                f"multi_modal_data[{modality!r}][{i}] is empty "
-                                f"but multi_modal_uuids[{modality!r}][{i}] is "
-                                f"missing."
+                                f"multi_modal_data[{modality!r}][{i}] is empty but "
+                                f"multi_modal_uuids[{modality!r}] is missing."
+                            )
+
+                        if uuid_items[i] is None:
+                            raise ValueError(
+                                f"multi_modal_data[{modality!r}][{i}] is empty but "
+                                f"multi_modal_uuids[{modality!r}][{i}] is missing."
                             )
 
     def _process_mm_uuids(
         self,
         mm_data: "MultiModalDataDict",
-        mm_data_items: "MultiModalDataItems",
-        mm_uuid_items: "MultiModalUUIDItems",
+        mm_items: "MultiModalDataItems",
+        mm_uuids: "MultiModalUUIDDict | None",
         mm_req_id: str,
     ):
         model_config = self.model_config
@@ -535,44 +562,40 @@ class BaseRenderer(ABC, Generic[_T]):
             and model_config.multimodal_config.mm_processor_cache_gb == 0
             and not self.config.cache_config.enable_prefix_caching
         ):
-            mm_uuid_items = {
+            mm_uuids = {
                 modality: [f"{mm_req_id}-{modality}-{i}" for i in range(data_count)]
-                for modality, data_count in mm_data_items.get_all_counts().items()
+                for modality, data_count in mm_items.get_all_counts().items()
             }
 
-        self._validate_mm_uuids(mm_data, mm_data_items, mm_uuid_items)
+        self._validate_mm_uuids(mm_data, mm_items, mm_uuids)
 
-        return mm_uuid_items
+        return mm_uuids
 
     # TODO: Remove str and tokenization_kwargs after deprecating InputPreprocessor
     def _process_multimodal(
         self,
         prompt: list[int] | str,
         mm_data: "MultiModalDataDict",
-        mm_uuids: "MultiModalUUIDDict | None",
         mm_processor_kwargs: Mapping[str, object] | None,
         tokenization_kwargs: dict[str, Any] | None,
+        mm_uuids: "MultiModalUUIDDict | None",
     ) -> "MultiModalInputs":
-        from vllm.multimodal.parse import parse_mm_uuids
         from vllm.multimodal.processing.context import set_request_id
 
         mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
 
         mm_processor = self.get_mm_processor()
 
-        mm_data_items = mm_processor.info.parse_mm_data(mm_data)
-        mm_uuid_items = parse_mm_uuids(mm_uuids)
-        mm_uuid_items = self._process_mm_uuids(
-            mm_data, mm_data_items, mm_uuid_items, mm_req_id
-        )
+        mm_items = mm_processor.info.parse_mm_data(mm_data)
+        mm_uuids = self._process_mm_uuids(mm_data, mm_items, mm_uuids, mm_req_id)
 
         with set_request_id(mm_req_id), set_default_torch_num_threads():
             mm_inputs = mm_processor.apply(
                 prompt,
-                mm_data_items,
-                mm_uuid_items,
-                hf_processor_mm_kwargs=mm_processor_kwargs,
+                mm_items,
+                hf_processor_mm_kwargs=mm_processor_kwargs or {},
                 tokenization_kwargs=tokenization_kwargs,
+                mm_uuids=mm_uuids,
             )
 
         self.update_mm_cache_stats()
@@ -672,16 +695,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return engine_prompt
 
-    @staticmethod
-    def _has_multimodal(prompt: TokPrompt) -> bool:
+    def _has_multimodal(self, prompt: TokPrompt) -> bool:
         """Check if a tokenized prompt contains multimodal data."""
-        if "encoder_prompt" in prompt:
-            enc_dec: EncoderDecoderTokPrompt = prompt  # type: ignore[assignment]
-            if enc_dec["encoder_prompt"].get("multi_modal_data"):
-                return True
-            dec = enc_dec.get("decoder_prompt")
-            return dec is not None and bool(dec.get("multi_modal_data"))
-        return bool(prompt.get("multi_modal_data"))  # type: ignore[union-attr]
+        target = extract_target_prompt(self.model_config, prompt)
+        return bool(target.get("multi_modal_data"))
 
     async def _process_for_engine_async(
         self,
@@ -691,19 +708,14 @@ class BaseRenderer(ABC, Generic[_T]):
         """Offload process_for_engine to the shared executor to avoid
         blocking the event loop during multimodal preprocessing.
 
-        Only active when ``--async-mm-input-processing`` is enabled.
-        Text-only prompts are always processed directly on the event loop
-        since they only do lightweight dict creation.
+        When ``--async-mm-input-processing`` is enabled, multimodal requests
+        are offloaded to a real thread pool.  Otherwise, ``_mm_executor`` is
+        an inline executor so the call runs synchronously with no overhead.
         """
-        mm_config = self.model_config.multimodal_config
-        if (
-            mm_config
-            and mm_config.async_mm_input_processing
-            and any(self._has_multimodal(p) for p in tok_prompts)
-        ):
+        if any(self._has_multimodal(p) for p in tok_prompts):
             return await make_async(
                 lambda: [self.process_for_engine(p, arrival_time) for p in tok_prompts],
-                executor=self._executor,
+                executor=self._mm_executor,
             )()
 
         return [self.process_for_engine(p, arrival_time) for p in tok_prompts]
