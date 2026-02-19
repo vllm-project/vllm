@@ -86,8 +86,9 @@ def _gumbel_sample_kernel(
         gumbel_seed = tl.randint(seed, pos)
 
         # Generate gumbel noise in FP32.
-        r = tl.rand(gumbel_seed, block)
-        gumbel_noise = -tl.log(-tl.log(r + 1e-20) + 1e-20)
+        u = tl.rand(gumbel_seed, block)
+        u = tl.maximum(u, 1e-7)
+        gumbel_noise = -tl.log(-tl.log(u))
 
         # Apply temperature.
         if APPLY_TEMPERATURE:
