@@ -31,9 +31,11 @@ def start_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
 def end_monitoring_torch_compile(vllm_config: VllmConfig) -> None:
     compilation_config: CompilationConfig = vllm_config.compilation_config
     if compilation_config.mode == CompilationMode.VLLM_COMPILE:
+        elapsed = time.time() - torch_compile_start_time
+        compilation_config.compilation_time = elapsed
         logger.info_once(
             "torch.compile takes %.2f s in total",
-            compilation_config.compilation_time,
+            elapsed,
             scope="local",
         )
         global context_manager
