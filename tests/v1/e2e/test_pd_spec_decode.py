@@ -67,10 +67,15 @@ GPT_OSS_EAGLE3 = SDModelConfig(
         "num_speculative_tokens": 3,
         "max_model_len": MAX_MODEL_LEN,
     },
-    # GPT-OSS uses sink attention, which is incompatible with FLASH_ATTN
-    # on Blackwell (FA v2 fallback). Triton supports sinks + NHD layout.
     attention_config={"backend": "TRITON_ATTN"},
     gpu_memory_utilization=0.9,
+)
+
+# ExampleConnector is incompatible with GPT-OSS's hybrid sliding/full
+# attention: slot mappings assume a single block table (block_ids[0]).
+# GPT-OSS + NixlConnector works (raw block transfer, no layout parsing).
+_gpt_oss_skip = pytest.mark.skip(
+    reason="ExampleConnector incompatible with hybrid attention models"
 )
 
 
@@ -213,7 +218,9 @@ def test_pd_mtp_output_match(tmp_path, monkeypatch):
     [
         pytest.param(LLAMA_EAGLE, id="llama3_eagle", marks=large_gpu_mark(min_gb=40)),
         pytest.param(
-            GPT_OSS_EAGLE3, id="gpt_oss_eagle3", marks=large_gpu_mark(min_gb=80)
+            GPT_OSS_EAGLE3,
+            id="gpt_oss_eagle3",
+            marks=[large_gpu_mark(min_gb=80), _gpt_oss_skip],
         ),
     ],
 )
@@ -252,7 +259,9 @@ def test_pd_eagle_acceptance(tmp_path, config: SDModelConfig):
     [
         pytest.param(LLAMA_EAGLE, id="llama3_eagle", marks=large_gpu_mark(min_gb=40)),
         pytest.param(
-            GPT_OSS_EAGLE3, id="gpt_oss_eagle3", marks=large_gpu_mark(min_gb=80)
+            GPT_OSS_EAGLE3,
+            id="gpt_oss_eagle3",
+            marks=[large_gpu_mark(min_gb=80), _gpt_oss_skip],
         ),
     ],
 )
@@ -293,7 +302,9 @@ def test_pd_eagle_prefill_decode(tmp_path, config: SDModelConfig):
     [
         pytest.param(LLAMA_EAGLE, id="llama3_eagle", marks=large_gpu_mark(min_gb=40)),
         pytest.param(
-            GPT_OSS_EAGLE3, id="gpt_oss_eagle3", marks=large_gpu_mark(min_gb=80)
+            GPT_OSS_EAGLE3,
+            id="gpt_oss_eagle3",
+            marks=[large_gpu_mark(min_gb=80), _gpt_oss_skip],
         ),
     ],
 )
