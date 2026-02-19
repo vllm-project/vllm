@@ -242,10 +242,10 @@ class CudaPlatformBase(Platform):
         num_heads: int | None = None,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
-        dict["AttentionBackendEnum", list[str]],
+        dict["AttentionBackendEnum", tuple[int, list[str]]],
     ]:
         valid_backends_priorities = []
-        invalid_reasons = {}
+        invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
 
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
@@ -262,7 +262,7 @@ class CudaPlatformBase(Platform):
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
             if invalid_reasons_i:
-                invalid_reasons[backend] = invalid_reasons_i
+                invalid_reasons[backend] = (priority, invalid_reasons_i)
             else:
                 valid_backends_priorities.append((backend, priority))
 
@@ -323,7 +323,7 @@ class CudaPlatformBase(Platform):
                     "{"
                     + ", ".join(
                         f"{backend.name}: [{', '.join(reasons)}]"
-                        for backend, reasons in invalid_reasons.items()
+                        for backend, (_, reasons) in invalid_reasons.items()
                     )
                     + "}"
                 )
@@ -336,7 +336,30 @@ class CudaPlatformBase(Platform):
 
         # Select the one with the highest priority (lowest index).
         sorted_backends = sorted(valid_backends_priorities, key=lambda x: x[1])
-        return sorted_backends[0][0]
+        chosen_backend, chosen_priority = sorted_backends[0]
+
+        # If the user specified --block-size (but not --attention-backend),
+        # check whether that constraint excluded any higher-priority backends.
+        if attn_selector_config.block_size is not None:
+            excluded = [
+                backend
+                for backend, (priority, reasons) in invalid_reasons.items()
+                if priority < chosen_priority
+                and reasons == ["block_size not supported"]
+            ]
+            if excluded:
+                names = ", ".join(b.name for b in excluded)
+                logger.warning(
+                    "--block-size %d excluded higher-priority backend(s) "
+                    "%s. Using %s instead, which may result in reduced "
+                    "performance. Consider removing --block-size to "
+                    "auto-select the optimal block size.",
+                    attn_selector_config.block_size,
+                    names,
+                    chosen_backend.name,
+                )
+
+        return chosen_backend
 
     @classmethod
     def get_attn_backend_cls(
@@ -371,7 +394,7 @@ class CudaPlatformBase(Platform):
                 "{"
                 + ", ".join(
                     f"{backend.name}: [{', '.join(reasons)}]"
-                    for backend, reasons in invalid_reasons.items()
+                    for backend, (_, reasons) in invalid_reasons.items()
                 )
                 + "}"
             )
@@ -383,7 +406,7 @@ class CudaPlatformBase(Platform):
             logger.info_once(
                 "Using %s attention backend out of potential backends: %s",
                 chosen_backend.name,
-                tuple(b[0].name for b in valid_backends_priorities),
+                tuple(backend.name for backend, _ in valid_backends_priorities),
                 scope="local",
             )
 
