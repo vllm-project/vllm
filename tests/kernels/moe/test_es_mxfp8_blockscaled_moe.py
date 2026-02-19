@@ -31,11 +31,7 @@ def calc_diff(x, y):
 
 
 def is_sm100_supported() -> bool:
-    if not torch.cuda.is_available():
-        return False
-    if not current_platform.is_cuda():
-        return False
-    return current_platform.get_device_capability() >= (10, 0)
+    return current_platform.is_cuda() and current_platform.has_device_capability(100)
 
 
 @pytest.mark.skipif(
