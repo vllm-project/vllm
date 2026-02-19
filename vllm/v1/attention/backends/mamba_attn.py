@@ -227,9 +227,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         """
         num_reqs = common_attn_metadata.num_reqs
 
+        # Treat multi-token queries as decode requests when
+        # speculative decoding is enabled. Otherwise, use the
+        # default decode threshold to prevent misclassification
+        # of prefill queries as decode requests.
+        decode_threshold = (
+            self.reorder_batch_threshold if num_accepted_tokens is not None else 1
+        )
+
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
-                common_attn_metadata, decode_threshold=self.reorder_batch_threshold
+                common_attn_metadata, decode_threshold=decode_threshold
             )
         )
 
