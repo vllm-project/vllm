@@ -684,30 +684,23 @@ class WorkerProc:
         destroy_model_parallel()
         destroy_distributed_environment()
 
-    def monitor_parent_death(self, death_pipe, shutdown_requested: threading.Event):
+    def monitor_death_pipe(self, death_pipe, shutdown_requested: threading.Event):
         if death_pipe is None:
             return
 
-        death_monitor = None
-        # Start death monitoring thread if death_pipe is provided
-        if death_pipe is not None:
+        def death_pipe_monitor():
+            try:
+                # This will block until parent process exits (pipe closes)
+                death_pipe.recv()
+            except EOFError:
+                # Parent process has exited, terminate this worker
+                logger.info_once("Parent process exited, terminating worker")
+                shutdown_requested.set()
+                self.shutdown()
+            except Exception as e:
+                logger.warning("Death monitoring error: %s", e)
 
-            def monitor_parent_death():
-                try:
-                    # This will block until parent process exits (pipe closes)
-                    death_pipe.recv()
-                except EOFError:
-                    # Parent process has exited, terminate this worker
-                    logger.info_once("Parent process exited, terminating worker")
-                    shutdown_requested.set()
-                    self.shutdown()
-                except Exception as e:
-                    logger.warning("Death monitoring error: %s", e)
-
-            death_monitor = Thread(
-                target=monitor_parent_death, daemon=True, name="WorkerDeathMonitor"
-            )
-            death_monitor.start()
+        Thread(target=death_pipe_monitor, daemon=True, name="DeathPipeMonitor").start()
 
     @staticmethod
     def worker_main(*args, **kwargs):
@@ -739,7 +732,7 @@ class WorkerProc:
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
 
-            worker.monitor_parent_death(death_pipe, shutdown_requested)
+            worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
             # Send READY once we know everything is loaded
             ready_writer.send(
