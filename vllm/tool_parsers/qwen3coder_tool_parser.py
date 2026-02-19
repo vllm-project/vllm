@@ -741,8 +741,8 @@ class Qwen3CoderToolParser(ToolParser):
                                         "arguments"
                                     ] = args
                                     break
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug("Failed to re-parse function call for final arguments: %s", e)
 
                 result = DeltaMessage(
                     tool_calls=[
