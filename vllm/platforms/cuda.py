@@ -339,7 +339,7 @@ class CudaPlatformBase(Platform):
         chosen_backend, chosen_priority = sorted_backends[0]
 
         # If the user specified --block-size (but not --attention-backend),
-        # check whether that constraint excluded any higher-priority backends.
+        # check whether that constraint precluded any higher-priority backends.
         if attn_selector_config.block_size is not None:
             excluded = [
                 backend
