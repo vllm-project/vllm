@@ -440,10 +440,10 @@ class EngineArgs:
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     swap_space: float = CacheConfig.swap_space
     cpu_offload_gb: float = OffloadConfig.cpu_offload_gb
+    cpu_offload_params: set[str] = get_field(OffloadConfig, "cpu_offload_params")
     offload_group_size: int = OffloadConfig.offload_group_size
     offload_num_in_group: int = OffloadConfig.offload_num_in_group
     offload_prefetch_step: int = OffloadConfig.offload_prefetch_step
-    cpu_offload_params: set[str] = get_field(OffloadConfig, "cpu_offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
