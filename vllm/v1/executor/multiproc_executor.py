@@ -41,6 +41,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.utils.network_utils import (
     get_distributed_init_method,
@@ -579,10 +580,7 @@ class WorkerProc:
         self._init_message_queues(input_shm_handle, vllm_config)
         self.worker.load_model()
 
-        # Determine block size from the attention backends now that
-        # the model layers are constructed.
-        from vllm.platforms import current_platform
-
+        # Set block size based on the attention backends
         current_platform.update_block_size_for_backend(vllm_config)
 
         # Enable environment variable cache (e.g. assume no more
