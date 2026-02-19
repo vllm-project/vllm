@@ -40,6 +40,7 @@ class AnthropicContentBlock(BaseModel):
     source: dict[str, Any] | None = None
     # For tool use/result
     id: str | None = None
+    tool_use_id: str | None = None
     name: str | None = None
     input: dict[str, Any] | None = None
     content: str | list[dict[str, Any]] | None = None

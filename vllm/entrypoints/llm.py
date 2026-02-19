@@ -542,51 +542,31 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
-    def _resolve_lora_reqs(
-        self,
-        prompts: Sequence[ProcessorInputs],
-        lora_request: Sequence[LoRARequest | None] | LoRARequest | None,
-    ):
-        lora_config = self.llm_engine.vllm_config.lora_config
-        seq_lora_requests = self._lora_request_to_seq(lora_request, len(prompts))
-
-        if (
-            lora_config is None
-            or not self.model_config.is_multimodal_model
-            or (lora_config and lora_config.default_mm_loras is None)
-        ):
-            return seq_lora_requests
-
-        return [
-            self._resolve_single_prompt_mm_lora(
-                prompt,
-                lora_req,
-                lora_config.default_mm_loras,
-            )
-            for prompt, lora_req in zip(prompts, seq_lora_requests)
-        ]
-
-    def _resolve_single_prompt_mm_lora(
+    def _resolve_mm_lora(
         self,
         prompt: ProcessorInputs,
         lora_request: LoRARequest | None,
-        default_mm_loras: dict[str, str] | None,
-    ):
-        if not default_mm_loras or prompt["type"] != "multimodal":
+    ) -> LoRARequest | None:
+        if prompt["type"] != "multimodal":
+            return lora_request
+
+        lora_config = self.llm_engine.vllm_config.lora_config
+        default_mm_loras = None if lora_config is None else lora_config.default_mm_loras
+        if not default_mm_loras:
             return lora_request
 
         prompt_modalities = prompt["mm_placeholders"].keys()
         intersection = set(prompt_modalities).intersection(default_mm_loras.keys())
         if not intersection:
             return lora_request
+
         if len(intersection) > 1:
             # TODO: Would be nice to be able to have multiple loras per prompt
             logger.warning(
-                "Multiple modality specific loras were registered and would be"
-                " used by a single prompt consuming several modalities; "
-                " currently we only support one lora per request; as such,"
-                " lora(s) registered with modalities: %s"
-                " will be skipped",
+                "Multiple modality specific loras were registered and would be "
+                "used by a single prompt consuming several modalities; "
+                "currently we only support one lora per request; as such, "
+                "lora(s) registered with modalities: %s will be skipped",
                 intersection,
             )
             return lora_request
@@ -1915,7 +1895,10 @@ class LLM:
                 request_id = self._add_request(
                     prompt,
                     params[i],
-                    lora_request=None if lora_requests is None else lora_requests[i],
+                    lora_request=self._resolve_mm_lora(
+                        prompt,
+                        None if lora_requests is None else lora_requests[i],
+                    ),
                     priority=0 if priorities is None else priorities[i],
                 )
                 added_request_ids.append(request_id)
