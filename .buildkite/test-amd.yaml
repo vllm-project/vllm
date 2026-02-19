@@ -55,9 +55,11 @@ steps:
   grade: Blocking
   source_file_dependencies:
   - vllm/
+  - tests/detokenizer
   - tests/multimodal
   - tests/utils_
   commands:
+  - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
@@ -548,7 +550,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s -m 'not skip_v1' samplers
+    - pytest -v -s samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
@@ -1105,18 +1107,6 @@ steps:
   - tests/models/quantization
   commands:
     - pytest -v -s models/quantization
-
-# This test is used only in PR development phase to test individual models and should never run on main
-- label: Custom Models Test
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi325_1
-  # grade: Blocking
-  optional: true
-  commands:
-    - echo 'Testing custom models...'
-    # PR authors can temporarily add commands below to test individual models
-    # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
-    # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
 
 - label: Transformers Nightly Models Test
   mirror_hardwares: [amdexperimental]
@@ -1708,7 +1698,6 @@ steps:
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
-  grade: Blocking
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
@@ -1719,7 +1708,6 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
-  grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/multimodal
@@ -1732,7 +1720,6 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
-  grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -1762,7 +1749,6 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -1773,7 +1759,6 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   fast_check: true
   torch_nightly: true
   source_file_dependencies:
@@ -1790,7 +1775,6 @@ steps:
 - label: Entrypoints Unit Tests # 5min
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
-  grade: Blocking
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -1805,7 +1789,6 @@ steps:
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1823,7 +1806,6 @@ steps:
   timeout_in_minutes: 130
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1840,7 +1822,6 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1859,7 +1840,6 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1874,7 +1854,6 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
@@ -1889,7 +1868,6 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_4
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -1951,7 +1929,6 @@ steps:
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_8
-  # grade: Blocking
   gpu: h100
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -1972,7 +1949,6 @@ steps:
 - label: EPLB Algorithm Test # 5min
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
-  grade: Blocking
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1984,7 +1960,6 @@ steps:
 - label: EPLB Execution Test # 10min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
-  # grade: Blocking
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -1999,7 +1974,6 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
-  # grade: Blocking
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -2019,7 +1993,6 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
-  grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -2032,7 +2005,6 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/engine
@@ -2049,7 +2021,6 @@ steps:
   # The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability.
   # See discussion here: https://github.com/vllm-project/vllm/pull/31040
   agent_pool: mi355_8
-  # grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -2063,7 +2034,6 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
-  grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -2074,7 +2044,6 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -2102,7 +2071,6 @@ steps:
 - label: V1 Test attention (H100) # 10min
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   timeout_in_minutes: 30
   gpu: h100
   source_file_dependencies:
@@ -2142,7 +2110,6 @@ steps:
 - label: V1 Test others (CPU) # 5 mins
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
-  grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -2160,7 +2127,6 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/examples"
   source_file_dependencies:
   - vllm/entrypoints
@@ -2195,7 +2161,6 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/cuda
@@ -2207,20 +2172,18 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s -m 'not skip_v1' samplers
+    - pytest -v -s samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -2241,7 +2204,6 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
     - vllm/
@@ -2258,7 +2220,6 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2304,7 +2265,6 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/
   - tests/kernels/core
@@ -2316,7 +2276,6 @@ steps:
   timeout_in_minutes: 35
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/attention/
   - vllm/v1/attention
@@ -2331,7 +2290,6 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -2344,7 +2302,6 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/cutlass_w8a8/moe/
   - csrc/moe/
@@ -2361,7 +2318,6 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/mamba/
   - tests/kernels/mamba
@@ -2405,7 +2361,6 @@ steps:
   torch_nightly: true
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - vllm/engine/arg_utils.py
   - vllm/config/model.py
@@ -2422,7 +2377,6 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite"
   source_file_dependencies:
   - benchmarks/
@@ -2433,7 +2387,6 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/benchmarks/
@@ -2444,7 +2397,6 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -2465,7 +2417,6 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -2477,7 +2428,6 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/
   - vllm/entrypoints/openai/
@@ -2494,7 +2444,6 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2507,7 +2456,6 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -2527,7 +2475,6 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2540,7 +2487,6 @@ steps:
 - label: Basic Models Test (Other CPU) # 5min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   timeout_in_minutes: 10
   torch_nightly: true
   source_file_dependencies:
@@ -2555,7 +2501,6 @@ steps:
   timeout_in_minutes: 25
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2569,7 +2514,6 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -2590,7 +2534,6 @@ steps:
   timeout_in_minutes: 75
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2611,7 +2554,6 @@ steps:
   timeout_in_minutes: 110
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   optional: true
   source_file_dependencies:
   - vllm/
@@ -2627,7 +2569,6 @@ steps:
   timeout_in_minutes: 110
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   optional: true
   source_file_dependencies:
   - vllm/
@@ -2639,7 +2580,6 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   optional: true
   source_file_dependencies:
   - vllm/
@@ -2675,7 +2615,6 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -2687,7 +2626,6 @@ steps:
   timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2705,7 +2643,6 @@ steps:
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - vllm/multimodal/
@@ -2720,7 +2657,6 @@ steps:
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   optional: true
   source_file_dependencies:
   - vllm/
@@ -2735,7 +2671,6 @@ steps:
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   optional: true
   source_file_dependencies:
   - vllm/
@@ -2750,7 +2685,6 @@ steps:
   timeout_in_minutes: 150
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   optional: true
   source_file_dependencies:
   - vllm/
@@ -2765,29 +2699,15 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - vllm/model_executor/layers/quantization
   - tests/models/quantization
   commands:
     - pytest -v -s models/quantization
 
-# This test is used only in PR development phase to test individual models and should never run on main
-- label: Custom Models Test
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi355_1
-  # grade: Blocking
-  optional: true
-  commands:
-    - echo 'Testing custom models...'
-    # PR authors can temporarily add commands below to test individual models
-    # e.g. pytest -v -s models/encoder_decoder/vision_language/test_mllama.py
-    # *To avoid merge conflicts, remember to REMOVE (not just comment out) them before merging the PR*
-
 - label: Transformers Nightly Models Test
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
-  # grade: Blocking
   working_dir: "/vllm-workspace/"
   optional: true
   commands:
@@ -2926,7 +2846,6 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -2942,7 +2861,6 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdmultinode]
   agent_pool: mi355_4
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
@@ -2969,7 +2887,6 @@ steps:
   timeout_in_minutes: 90
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_2
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -3009,7 +2926,6 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_2
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -3031,7 +2947,6 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
@@ -3065,7 +2980,6 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   source_file_dependencies:
@@ -3082,7 +2996,6 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
-  # grade: Blocking
   num_gpus: 4
   source_file_dependencies:
   - vllm/lora
@@ -3107,7 +3020,6 @@ steps:
   timeout_in_minutes: 45
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_2
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   optional: true
@@ -3120,7 +3032,6 @@ steps:
 - label: Weight Loading Multiple GPU Test - Large Models # optional
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_2
-  # grade: Blocking
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   optional: true
@@ -3133,7 +3044,6 @@ steps:
 - label: NixlConnector PD accuracy tests (Distributed) # 30min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
-  # grade: Blocking
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -3147,7 +3057,6 @@ steps:
 - label: DP EP NixlConnector PD accuracy tests (Distributed) # 15min
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
-  # grade: Blocking
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   num_gpus: 4
@@ -3164,7 +3073,6 @@ steps:
 - label: Distributed Tests (A100) # optional
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_4
-  # grade: Blocking
   gpu: a100
   optional: true
   num_gpus: 4
@@ -3187,7 +3095,6 @@ steps:
   optional: true
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_4
-  # grade: Blocking
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
@@ -3203,7 +3110,6 @@ steps:
   optional: true
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_4
-  # grade: Blocking
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
@@ -3218,7 +3124,6 @@ steps:
 - label: Distributed Tests (H200) # optional
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_2
-  # grade: Blocking
   gpu: h200
   optional: true
   working_dir: "/vllm-workspace/"
@@ -3253,7 +3158,6 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_1
-  # grade: Blocking
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
@@ -3263,7 +3167,6 @@ steps:
 - label: LM Eval Large Models (4 Card)
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
-  # grade: Blocking
   gpu: a100
   optional: true
   num_gpus: 4
@@ -3303,7 +3206,6 @@ steps:
 - label: Prime-RL Integration Test # 15min
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_2
-  # grade: Blocking
   timeout_in_minutes: 30
   optional: true
   num_gpus: 2
@@ -3318,7 +3220,6 @@ steps:
 - label: DeepSeek V2-Lite Accuracy
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
-  # grade: Blocking
   timeout_in_minutes: 60
   gpu: h100
   optional: true
@@ -3330,7 +3231,6 @@ steps:
 - label: Qwen3-30B-A3B-FP8-block Accuracy (H100)
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi355_4
-  # grade: Blocking
   timeout_in_minutes: 60
   gpu: h100
   optional: true
@@ -3353,7 +3253,6 @@ steps:
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_4
-  # grade: Blocking
   optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace"
