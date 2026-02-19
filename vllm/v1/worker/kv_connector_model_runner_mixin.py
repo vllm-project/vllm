@@ -48,6 +48,9 @@ class CrossLayerGroup:
     """One contiguous int8 tensor shared by layers with the same page size.
 
     Per-layer views reinterpret the raw bytes as the layer's dtype.
+    When tp_layout is True the tensor has shape
+    (num_blocks, num_kv_heads, num_layers, per_head_page_bytes) so that
+    head-based TP slicing is contiguous.
     """
 
     tensor: torch.Tensor
@@ -55,6 +58,7 @@ class CrossLayerGroup:
     page_size_bytes: int
     spec: KVCacheSpec
     backend: type[AttentionBackend]
+    tp_layout: bool = False
 
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
@@ -138,10 +142,10 @@ class KVConnectorModelRunnerMixin:
     ) -> bool:
         """Check if we should use a uniform cross-layer KV layout.
 
-        When enabled, layers are grouped by page_size_bytes and each group
-        gets a contiguous (num_blocks, num_layers, page_size) tensor for
-        efficient per-block transfers. Requires a KV connector that prefers
-        cross-layer blocks and only AttentionSpec/MambaSpec layers.
+        When enabled, layers sharing the same page geometry are packed into
+        a single contiguous tensor for efficient per-block transfers.
+        Requires a KV connector that prefers cross-layer blocks and only
+        AttentionSpec/MambaSpec layers.
         """
 
         if not has_kv_transfer_group():
@@ -166,46 +170,56 @@ class KVConnectorModelRunnerMixin:
         return True
 
     @staticmethod
-    def _find_blocks_dim(
+    def _find_kv_cache_dims(
         backend: type[AttentionBackend],
         kv_cache_spec: AttentionSpec,
         cache_dtype: CacheDType,
-    ) -> int:
-        """Find which dim in get_kv_cache_shape holds num_blocks.
+    ) -> tuple[int, int]:
+        """Find which dims hold num_blocks and num_kv_heads.
 
-        Probes with a sentinel value (same trick as kv_connector/utils.py).
+        Probes with sentinel values (same trick as kv_connector/utils.py).
+        Returns (blocks_dim, heads_dim) in the logical shape.
         """
-        _SENTINEL = 1234
-        sentinel_shape = backend.get_kv_cache_shape(
-            _SENTINEL,
+        _BLOCKS = 1234
+        _HEADS = 5678
+        shape = backend.get_kv_cache_shape(
+            _BLOCKS,
             kv_cache_spec.block_size,
-            kv_cache_spec.num_kv_heads,
+            _HEADS,
             kv_cache_spec.head_size,
             cache_dtype_str=cache_dtype,
         )
-        return sentinel_shape.index(_SENTINEL)
+        return shape.index(_BLOCKS), shape.index(_HEADS)
 
     @staticmethod
     def _per_layer_permutation(
         stride_order: tuple[int, ...],
-        blocks_physical_pos: int,
+        *extracted_physical_dims: int,
     ) -> tuple[int, ...]:
-        """Permutation to go from (num_blocks, *page_physical_dims) back
-        to the backend's logical dim order."""
+        """Permutation to go from (*extracted_dims, *remaining_physical_dims)
+        back to the backend's logical dim order.
+
+        extracted_physical_dims are the physical positions that were pulled
+        to the front of the tensor, in order.  For default layout pass
+        just (blocks_physical,); for TP layout pass
+        (blocks_physical, heads_physical).
+        """
         n = len(stride_order)
         inv_stride = [0] * n
         for i, j in enumerate(stride_order):
             inv_stride[j] = i
 
-        p = blocks_physical_pos
+        extracted = extracted_physical_dims
+        k = len(extracted)
 
         def phys_to_our(phys_dim: int) -> int:
-            if phys_dim == p:
-                return 0
-            elif phys_dim < p:
-                return phys_dim + 1
-            else:
-                return phys_dim
+            # If this dim was extracted, it sits at its index in the tuple
+            if phys_dim in extracted:
+                return extracted.index(phys_dim)
+            # Otherwise it's after all extracted dims, shifted by
+            # how many extracted dims sit before it in physical order
+            offset = sum(1 for e in extracted if e < phys_dim)
+            return phys_dim - offset + k
 
         return tuple(phys_to_our(inv_stride[j]) for j in range(n))
 
@@ -219,11 +233,13 @@ class KVConnectorModelRunnerMixin:
         kernel_num_blocks: int,
         kernel_block_size: int,
         cache_dtype: CacheDType,
+        tp: bool = False,
     ) -> torch.Tensor:
         """Carve one attention layer's view from the cross-layer tensor.
 
-        Pipeline: view (typed 3D) -> slice layer dim -> permute to
-        the backend's logical shape.
+        When tp is False the input is (knb, num_layers, page_elements).
+        When tp is True the input is (knb, H, num_layers, per_head_elements).
+        Pipeline: view -> slice layer dim -> permute to logical shape.
         """
         logical_shape = backend.get_kv_cache_shape(
             kernel_num_blocks,
@@ -241,22 +257,32 @@ class KVConnectorModelRunnerMixin:
 
         physical_shape = tuple(logical_shape[j] for j in stride_order)
 
-        blocks_logical_pos = KVConnectorModelRunnerMixin._find_blocks_dim(
+        blocks_logical, heads_logical = KVConnectorModelRunnerMixin._find_kv_cache_dims(
             backend, spec, cache_dtype
         )
-        blocks_physical_pos = stride_order[blocks_logical_pos]
+        blocks_physical = stride_order[blocks_logical]
 
-        page_physical_shape = (
-            physical_shape[:blocks_physical_pos]
-            + physical_shape[blocks_physical_pos + 1 :]
-        )
+        # Dims extracted to the front of the tensor
+        extracted: tuple[int, ...]
+        extracted_values: tuple[int, ...]
+        if tp:
+            heads_physical = stride_order[heads_logical]
+            extracted = (blocks_physical, heads_physical)
+            extracted_values = (kernel_num_blocks, spec.num_kv_heads)
+        else:
+            extracted = (blocks_physical,)
+            extracted_values = (kernel_num_blocks,)
 
-        layer_view = cross_layer_tensor.view(
-            kernel_num_blocks, num_layers, *page_physical_shape
-        )
-        layer_slice = layer_view[:, layer_idx]
+        # Remove extracted dims from physical shape
+        remaining = list(physical_shape)
+        for d in sorted(extracted, reverse=True):
+            del remaining[d]
+
+        layer_view = cross_layer_tensor.view(*extracted_values, num_layers, *remaining)
+        # Layer dim sits right after the extracted dims
+        layer_slice = layer_view.select(len(extracted), layer_idx)
         perm = KVConnectorModelRunnerMixin._per_layer_permutation(
-            stride_order, blocks_physical_pos
+            stride_order, *extracted
         )
         return layer_slice.permute(*perm)
 
@@ -307,15 +333,18 @@ class KVConnectorModelRunnerMixin:
         cache_dtype: CacheDType,
         device: torch.device,
         kernel_block_sizes: list[int],
+        tp: bool = False,
     ) -> tuple[
         dict[str, torch.Tensor | list[torch.Tensor]],
         list[CrossLayerGroup],
     ]:
         """Allocate cross-layer KV caches, one tensor per page_size group.
 
-        Each group is a contiguous int8 tensor of shape
+        When tp is True, attention layers are laid out as
+        (num_blocks, num_kv_heads, num_layers, per_head_page_bytes) so
+        that head-based TP slicing is contiguous.
+        Otherwise the default layout is
         (num_blocks, num_layers_in_group, page_size_bytes).
-        Per-layer views reinterpret the raw bytes for the layer's dtype.
 
         Assumes use_uniform_kv_cache() returned True.
 
@@ -334,37 +363,63 @@ class KVConnectorModelRunnerMixin:
                         attn_group.kv_cache_group_id,
                     )
 
-        # Group KVCacheTensors by page_size_bytes
-        grouped: dict[int, list[tuple[int, Any]]] = defaultdict(list)
+        # Group KVCacheTensors.  When tp is set, attention layers are
+        # grouped by (num_kv_heads, per_head_page_size) so that all layers
+        # in a group share the same H dimension.
+        # Key is either ("tp", H, per_head) or ("default", page_size).
+        grouped: dict[tuple, list[tuple[int, Any]]] = defaultdict(list)
         for tensor_idx, kv_tensor in enumerate(kv_cache_config.kv_cache_tensors):
             spec = layer_info[kv_tensor.shared_by[0]][0]
-            grouped[spec.page_size_bytes].append((tensor_idx, kv_tensor))
+            key: tuple
+            if (
+                tp
+                and isinstance(spec, AttentionSpec)
+                and spec.page_size_bytes % spec.num_kv_heads == 0
+            ):
+                per_head = spec.page_size_bytes // spec.num_kv_heads
+                key = ("tp", spec.num_kv_heads, per_head)
+            else:
+                key = ("default", spec.page_size_bytes)
+            grouped[key].append((tensor_idx, kv_tensor))
 
         # Allocate one cross-layer tensor per group
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]] = {}
         cross_layer_groups: list[CrossLayerGroup] = []
 
-        for page_size, members in grouped.items():
+        for group_key, members in grouped.items():
+            use_tp_layout = group_key[0] == "tp"
             num_group_layers = len(members)
 
             first_size = members[0][1].size
             assert all(m[1].size == first_size for m in members), (
                 "All KVCacheTensors in a cross-layer group must have the same size"
             )
-            assert first_size % page_size == 0
-            num_blocks = first_size // page_size
 
             rep_name = members[0][1].shared_by[0]
             rep_spec, rep_backend, _ = layer_info[rep_name]
+            page_size = rep_spec.page_size_bytes
+
+            assert first_size % page_size == 0
+            num_blocks = first_size // page_size
 
             # Raw int8 buffer; per-layer views reinterpret as needed
             total_bytes = first_size * num_group_layers
             raw = torch.zeros(total_bytes, dtype=torch.int8, device=device)
-            cross_layer_tensor = raw.view(num_blocks, num_group_layers, page_size)
+
+            if use_tp_layout:
+                assert isinstance(rep_spec, AttentionSpec)
+                num_kv_heads = rep_spec.num_kv_heads
+                per_head_page = page_size // num_kv_heads
+                cross_layer_tensor = raw.view(
+                    num_blocks, num_kv_heads, num_group_layers, per_head_page
+                )
+            else:
+                cross_layer_tensor = raw.view(num_blocks, num_group_layers, page_size)
 
             logger.info(
-                "Allocating a cross-layer KV cache of shape %s",
+                "Allocating a cross-layer KV cache of shape %s (tp_layout=%s)",
                 cross_layer_tensor.shape,
+                use_tp_layout,
             )
 
             # Create per-layer views, dispatching by spec type
@@ -383,20 +438,30 @@ class KVConnectorModelRunnerMixin:
                         )
                     )
                 elif isinstance(spec, AttentionSpec):
-                    dtype = spec.dtype
-                    el = torch.tensor([], dtype=dtype).element_size()
+                    el = torch.tensor([], dtype=spec.dtype).element_size()
                     kbs = kernel_block_sizes[gid]
                     npkb = spec.block_size // kbs
                     knb = num_blocks * npkb
-                    kpe = page_size // el // npkb
-                    typed_3d = raw.view(dtype).view(
-                        knb,
-                        num_group_layers,
-                        kpe,
-                    )
+
+                    if use_tp_layout:
+                        pe = per_head_page // el // npkb
+                        typed = raw.view(spec.dtype).view(
+                            knb,
+                            spec.num_kv_heads,
+                            num_group_layers,
+                            pe,
+                        )
+                    else:
+                        pe = page_size // el // npkb
+                        typed = raw.view(spec.dtype).view(
+                            knb,
+                            num_group_layers,
+                            pe,
+                        )
+
                     layer_views.append(
                         KVConnectorModelRunnerMixin._create_attention_layer_view(
-                            typed_3d,
+                            typed,
                             local_idx,
                             num_group_layers,
                             spec,
@@ -404,6 +469,7 @@ class KVConnectorModelRunnerMixin:
                             knb,
                             kbs,
                             cache_dtype,
+                            tp=use_tp_layout,
                         )
                     )
                 else:
@@ -425,6 +491,7 @@ class KVConnectorModelRunnerMixin:
                     page_size_bytes=page_size,
                     spec=rep_spec,
                     backend=rep_backend,
+                    tp_layout=use_tp_layout,
                 )
             )
 
