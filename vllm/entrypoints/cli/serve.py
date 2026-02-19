@@ -223,8 +223,12 @@ def run_headless(args: argparse.Namespace):
     try:
         engine_manager.join_first()
     finally:
+        timeout = None
+        if shutdown_requested:
+            timeout = vllm_config.shutdown_timeout
+            logger.info("Waiting up to %d seconds for processes to exit", timeout)
+        engine_manager.shutdown(timeout=timeout)
         logger.info("Shutting down.")
-        engine_manager.shutdown()
 
 
 def run_multi_api_server(args: argparse.Namespace):
