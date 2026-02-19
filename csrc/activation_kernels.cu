@@ -13,8 +13,13 @@ struct alignas(32) u32x8_t {
   uint32_t u0, u1, u2, u3, u4, u5, u6, u7;
 };
 
+// 256-bit vector loads require both sm_100+ and CUDA 12.9+
+#define VLLM_SUPPORTS_256BIT_VECTORS                  \
+  (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
+   __CUDACC_VER_MAJOR__ >= 12 && __CUDACC_VER_MINOR__ >= 9)
+
 __device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+#if VLLM_SUPPORTS_256BIT_VECTORS
   asm volatile("ld.global.nc.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];\n"
                : "=r"(val.u0), "=r"(val.u1), "=r"(val.u2), "=r"(val.u3),
                  "=r"(val.u4), "=r"(val.u5), "=r"(val.u6), "=r"(val.u7)
@@ -35,7 +40,7 @@ __device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
 }
 
 __device__ __forceinline__ void st256(u32x8_t& val, u32x8_t* ptr) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+#if VLLM_SUPPORTS_256BIT_VECTORS
   asm volatile("st.global.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};\n"
                :
                : "l"(ptr), "r"(val.u0), "r"(val.u1), "r"(val.u2), "r"(val.u3),
