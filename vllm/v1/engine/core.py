@@ -23,7 +23,6 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.platforms import current_platform
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -109,16 +108,20 @@ class EngineCore:
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
-        current_platform.update_block_size_for_backend(vllm_config)
-        vllm_config.validate_block_size()
-
         self.available_gpu_memory_for_kv_cache = -1
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
             vllm_config
         )
-
+        if kv_cache_config.kv_cache_groups:
+            vllm_config.cache_config.block_size = kv_cache_config.kv_cache_groups[
+                0
+            ].kv_cache_spec.block_size
+        elif vllm_config.cache_config.block_size is None:
+            # Attention-free models (encoder-only, SSM) — use default.
+            vllm_config.cache_config.block_size = 16
+        vllm_config.validate_block_size()
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks
         self.collective_rpc("initialize_cache", args=(num_gpu_blocks, num_cpu_blocks))

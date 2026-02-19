@@ -408,12 +408,8 @@ class Platform:
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        """Ensure block_size is compatible with the attention backend.
-
-        Called from EngineCore after CUDA is initialized and the model
-        executor is created, but before KV caches are allocated.
-        Platforms that need to adjust block_size based on the selected
-        attention backend should override this method.
+        """
+        Ensure block_size is compatible with the attention backend.
         """
         pass
 

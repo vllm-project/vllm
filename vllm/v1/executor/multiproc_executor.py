@@ -579,6 +579,12 @@ class WorkerProc:
         self._init_message_queues(input_shm_handle, vllm_config)
         self.worker.load_model()
 
+        # Determine block size from the attention backends now that
+        # the model layers are constructed.
+        from vllm.platforms import current_platform
+
+        current_platform.update_block_size_for_backend(vllm_config)
+
         # Enable environment variable cache (e.g. assume no more
         # environment variable overrides after this point)
         enable_envs_cache()

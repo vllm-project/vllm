@@ -47,6 +47,12 @@ class UniProcExecutor(Executor):
         self.driver_worker.init_device()
         self.driver_worker.load_model()
 
+        # Determine block size from the attention backends now that
+        # the model layers are constructed.
+        from vllm.platforms import current_platform
+
+        current_platform.update_block_size_for_backend(self.vllm_config)
+
     def _distributed_args(self) -> tuple[str, int, int]:
         """Return (distributed_init_method, rank, local_rank)."""
         distributed_init_method = get_distributed_init_method(get_ip(), get_open_port())
