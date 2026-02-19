@@ -571,14 +571,14 @@ class NixlConnectorScheduler:
 
         # Gather Sliding Window sizes for each kv cache group (if any) in number of
         # blocks per KV cache group. This is used to clip the local attention window.
-        sw_sizes_tokens = [
-            group.kv_cache_spec.sliding_window
-            if isinstance(group.kv_cache_spec, SlidingWindowSpec)
-            else 0
-            for group in kv_cache_config.kv_cache_groups
+        sw_sizes_tokens: list[tuple[int, int]] = [
+            (g.kv_cache_spec.sliding_window, g.kv_cache_spec.block_size)
+            if isinstance(g.kv_cache_spec, SlidingWindowSpec)
+            else (0, self.block_size)
+            for g in kv_cache_config.kv_cache_groups
         ]
         self.blocks_per_sw = [
-            cdiv(n_tokens, self.block_size) for n_tokens in sw_sizes_tokens
+            cdiv(n_tokens, block_size) for n_tokens, block_size in sw_sizes_tokens
         ]
 
     def shutdown(self):
@@ -587,7 +587,7 @@ class NixlConnectorScheduler:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
 
-    def get_sw_clippped_blocks(self, block_ids: BlockIds) -> BlockIds:
+    def get_sw_clipped_blocks(self, block_ids: BlockIds) -> BlockIds:
         """
         Clip the number of blocks to the sliding window size for each kv cache group
         that employs SWA.
@@ -767,7 +767,7 @@ class NixlConnectorScheduler:
                         if num_external_tokens > 0
                         else ()
                     )
-                    local_block_ids = self.get_sw_clippped_blocks(
+                    local_block_ids = self.get_sw_clipped_blocks(
                         unhashed_local_block_ids
                     )
 
@@ -813,7 +813,7 @@ class NixlConnectorScheduler:
             req = req_to_save
 
             assert req.kv_transfer_params is not None
-            clipped_block_id_groups = self.get_sw_clippped_blocks(new_block_id_groups)
+            clipped_block_id_groups = self.get_sw_clipped_blocks(new_block_id_groups)
             meta.add_new_req_to_save(
                 request_id=req_id,
                 local_block_ids=clipped_block_id_groups,
@@ -906,7 +906,7 @@ class NixlConnectorScheduler:
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.
             # Here we "unpad" blocks to send the actual remote blocks to be read.
-            block_ids = self.get_sw_clippped_blocks(block_ids)
+            block_ids = self.get_sw_clipped_blocks(block_ids)
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,

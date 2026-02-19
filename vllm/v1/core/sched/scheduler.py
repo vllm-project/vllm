@@ -2067,6 +2067,8 @@ class Scheduler(SchedulerInterface):
                 # Sync loading. num_computed_tokens includes new tokens
                 req_num_computed_tokens = request.num_cached_tokens
 
+            # Unravel blocks across groups for HMA, as any block may have failed. When
+            # one block is detected as invalid, we reset request state and recompute.
             all_req_block_ids = (
                 (block_id for group in req_block_ids for block_id in group)
                 if is_hma
@@ -2076,7 +2078,8 @@ class Scheduler(SchedulerInterface):
                 req_num_computed_tokens + self.block_size - 1
             ) // self.block_size
             for idx, block_id in enumerate(all_req_block_ids):
-                if idx >= req_num_computed_blocks:
+                if not is_hma and idx >= req_num_computed_blocks:
+                    # When HMA is off, we can easily consider actually computed blocks
                     break
                 if block_id not in invalid_block_ids:
                     continue
@@ -2112,7 +2115,8 @@ class Scheduler(SchedulerInterface):
                         for group in req_block_ids:
                             blocks_to_evict.update(group)
                 else:
-                    # Truncate the computed tokens at the first failed block
+                    # Truncate the computed tokens at the first failed block. When HMA
+                    # is off, the implicit assumption is that the only group is FA
                     request.num_computed_tokens = idx * self.block_size
                     num_affected_tokens = (
                         req_num_computed_tokens - request.num_computed_tokens
