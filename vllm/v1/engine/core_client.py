@@ -47,6 +47,7 @@ from vllm.v1.engine.exceptions import EngineDeadError
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
+    create_engine_core_client_identity,
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
@@ -488,6 +489,9 @@ class MPClient(EngineCoreClient):
                 input_address = client_addresses["input_address"]
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
+                self.engine_registry_address = client_addresses.get(
+                    "engine_registry_address"
+                )
             else:
                 # Engines are managed by this client.
                 with launch_core_engines(vllm_config, executor_class, log_stats) as (
@@ -497,6 +501,7 @@ class MPClient(EngineCoreClient):
                 ):
                     self.resources.coordinator = coordinator
                     self.resources.engine_manager = engine_manager
+                    self.engine_registry_address = addresses.engine_registry_address
 
                 (input_address,) = addresses.inputs
                 (output_address,) = addresses.outputs
@@ -607,19 +612,39 @@ class MPClient(EngineCoreClient):
         # logs an error, shuts down the client and invokes the failure
         # callback to inform the engine.
         def monitor_engine_cores():
-            sentinels = [proc.sentinel for proc in engine_processes]
-            died = multiprocessing.connection.wait(sentinels)
+            died_proc = None
+            while True:
+                sentinels = [proc.sentinel for proc in engine_processes]
+                died = multiprocessing.connection.wait(sentinels)
+                # Re-read engine_processes to detect scale-down changes.
+                # If the died sentinel is no longer in the current list,
+                # it means a scale down removed the process (expected).
+                # If it is still in the list, it's an unexpected crash.
+                if len(engine_processes) == 0:
+                    break
+
+                sentinel_to_proc = {proc.sentinel: proc for proc in engine_processes}
+                if died[0] not in sentinel_to_proc:
+                    # Scale down in progress: process was removed, continue monitoring
+                    continue
+                # An engine process actually died unexpectedly
+                died_proc = sentinel_to_proc[died[0]]
+                break
+
             _self = self_ref()
             if not _self or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
-            proc_name = next(
-                proc.name for proc in engine_processes if proc.sentinel == died[0]
-            )
-            logger.error(
-                "Engine core proc %s died unexpectedly, shutting down client.",
-                proc_name,
-            )
+
+            if died_proc is None:
+                logger.error(
+                    "All engine core processes have exited, shutting down client."
+                )
+            else:
+                logger.error(
+                    "Engine core proc %s died unexpectedly, shutting down client.",
+                    died_proc.name,
+                )
             _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism
             # like MultiprocExecutor, but we set engine_dead flag which will
@@ -1315,12 +1340,11 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             f"different from cur_data_parallel_size {cur_data_parallel_size}"
         )
 
-        assert self.vllm_config.parallel_config.data_parallel_backend == "ray", (
-            "Only ray DP backend supports scaling elastic EP"
-        )
-
         scale_up = new_data_parallel_size > cur_data_parallel_size
-
+        assert (
+            not scale_up
+            or self.vllm_config.parallel_config.data_parallel_backend == "ray"
+        ), "Only ray DP backend supports scaling elastic EP"
         if scale_up:
             await self._scale_up_elastic_ep(
                 cur_data_parallel_size, new_data_parallel_size
@@ -1435,10 +1459,13 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
 
         await asyncio.gather(*reconfig_futures)
 
-        assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
-        self.resources.engine_manager.scale_down_elastic_ep(
-            cur_data_parallel_size, new_data_parallel_size
-        )
+        if self.vllm_config.parallel_config.data_parallel_backend == "ray":
+            assert isinstance(self.resources.engine_manager, CoreEngineActorManager)
+            self.resources.engine_manager.scale_down_elastic_ep(
+                cur_data_parallel_size, new_data_parallel_size
+            )
+        else:
+            self.notify_elastic_ep_event(cur_data_parallel_size, new_data_parallel_size)
 
         self._ensure_stats_update_task()
         scale_down_marker = msgspec.msgpack.encode(
@@ -1451,3 +1478,25 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "[Elastic EP] Scale down completed, new data parallel size: %s",
             new_data_parallel_size,
         )
+
+    def notify_elastic_ep_event(self, cur_dp_size, new_dp_size):
+        assert self.engine_registry_address is not None, (
+            "Engine registry address should not be None when scaling down "
+            "elastic EP with non-ray DP backend"
+        )
+        with make_zmq_socket(
+            zmq.Context(),
+            self.engine_registry_address,
+            zmq.DEALER,
+            bind=False,
+            identity=create_engine_core_client_identity(self.client_index),
+            linger=5000,
+        ) as socket:
+            socket.send(
+                msgspec.msgpack.encode(
+                    {
+                        "cur_data_parallel_size": cur_dp_size,
+                        "new_data_parallel_size": new_dp_size,
+                    }
+                )
+            )
