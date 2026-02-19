@@ -175,7 +175,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
   float const scale_inv = 1.0f / *scale;
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[static_cast<int64_t>(blockIdx.x) * hidden_size + idx];
+    float x =
+        (float)residual[static_cast<int64_t>(blockIdx.x) * hidden_size + idx];
     float const out_norm = ((scalar_t)(x * s_variance)) * weight[idx];
     out[static_cast<int64_t>(blockIdx.x) * hidden_size + idx] =
         scaled_fp8_conversion<true, fp8_type>(out_norm, scale_inv);
