@@ -182,9 +182,6 @@ def test_encoder_with_sender():
     sender = TensorIpcSender(tensor_queue)
     encoder = MsgpackEncoder(tensor_ipc_sender=sender)
 
-    # Sender is always ready with single queue
-    assert sender.is_ready()
-
     if torch.cuda.is_available():
         tensor = torch.randn(2, 3, device="cuda:0")
     else:
@@ -639,7 +636,6 @@ def test_mixed_cpu_cuda_with_ipc_enabled():
 
     # Verify sender configuration
     assert encoder.tensor_ipc_sender is not None, "Sender should be set"
-    assert sender.is_ready(), "Sender should be ready"
 
     # Note: Actual IPC transfer only works across processes
     # (tested in test_cpu_tensor_ipc)

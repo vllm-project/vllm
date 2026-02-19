@@ -39,15 +39,11 @@ class TensorIpcSender:
     """Send-side logic for tensor IPC via torch.multiprocessing.Queue.
 
     Uses a single queue targeting rank 0 (the only rank that consumes
-    multimodal tensors during TP>1 / PP>1).
+    multimodal tensors during TP>1 / PP>1. Note: DP>1 not supported).
     """
 
     def __init__(self, queue: Any):
         self.queue = queue
-
-    def is_ready(self) -> bool:
-        """Always ready — single queue is set at construction time."""
-        return True
 
     def send_tensor(
         self,
@@ -55,10 +51,8 @@ class TensorIpcSender:
         request_id: str | None,
         tensor_id: str,
     ) -> TensorIpcHandle:
-        """Send tensor via queue, return its handle.
+        """Send tensor via queue, return its handle."""
 
-        Contains: share_memory_(), queue.put(), TensorIpcHandle creation.
-        """
         # Move tensor to shared memory for IPC
         # This is required for proper inter-process communication
         if not tensor.is_shared():

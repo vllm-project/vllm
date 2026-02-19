@@ -272,7 +272,7 @@ class MsgpackEncoder:
 
         # Check if we should use IPC for this tensor
         sender = self.tensor_ipc_sender
-        if sender is not None and sender.is_ready():
+        if sender is not None:
             try:
                 # Generate unique tensor ID
                 tensor_id = f"{id(self)}_{self._tensor_id_counter}"
@@ -289,13 +289,6 @@ class MsgpackEncoder:
         # Standard serialization fallback
         # For CUDA tensors without IPC support, we need to move to CPU first
         if obj.is_cuda:
-            if sender is not None and not sender.is_ready():
-                # Only warn if IPC was expected but unavailable
-                logger.warning(
-                    "CUDA tensor without IPC support encountered "
-                    "(no target engine set). Moving to CPU for "
-                    "serialization. This will be slow."
-                )
             obj = obj.cpu()
 
         # view the tensor as a contiguous 1D array of bytes
