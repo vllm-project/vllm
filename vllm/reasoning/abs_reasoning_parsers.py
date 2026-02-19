@@ -104,6 +104,25 @@ class ReasoningParser:
             The extracted content from the input_ids.
         """
 
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count the number of reasoning tokens in a sequence.
+
+        Text-based reasoning models typically wrap their chain-of-thought
+        between special start/end tokens (e.g., ``<think> ... </think>``).
+        Implementations that support reasoning token counting should override
+        this method. The default implementation returns ``0`` so existing
+        parsers remain unchanged unless they explicitly opt in.
+
+        Args:
+            token_ids: Sequence of generated token ids (excluding prompt).
+
+        Returns:
+            int: Number of tokens that belong to reasoning content.
+        """
+
+        # By default, assume the parser cannot detect reasoning spans.
+        return 0
+
     @abstractmethod
     def extract_reasoning(
         self,
