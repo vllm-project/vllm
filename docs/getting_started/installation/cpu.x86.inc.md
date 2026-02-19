@@ -171,7 +171,7 @@ To pull an image for a specific vLLM version:
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-docker pull vllm/vllm-openai-cpu:v${VLLM_VERSION}
+docker pull vllm/vllm-openai-cpu:v${VLLM_VERSION}-x86_64
 ```
 
 All available image tags are here: [https://hub.docker.com/r/vllm/vllm-openai-cpu/tags](https://hub.docker.com/r/vllm/vllm-openai-cpu/tags)
