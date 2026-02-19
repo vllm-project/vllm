@@ -10,7 +10,7 @@ import json
 import pathlib
 import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
-from dataclasses import MISSING, Field, field, fields, is_dataclass
+from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
 from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
 
@@ -66,7 +66,7 @@ def config(
     return decorator(cls)
 
 
-def get_field(cls: ConfigType, name: str) -> Field:
+def get_field(cls: ConfigType, name: str) -> Any:
     """Get the default factory field of a dataclass by name. Used for getting
     default factory fields in `EngineArgs`."""
     if not is_dataclass(cls):
@@ -355,3 +355,28 @@ class Range:
 
     def __repr__(self) -> str:
         return self.__str__()
+
+
+def handle_deprecated(
+    config: ConfigT,
+    old_name: str,
+    new_name_or_names: str | list[str],
+    removal_version: str,
+) -> None:
+    old_val = getattr(config, old_name)
+    if old_val is None:
+        return
+
+    if isinstance(new_name_or_names, str):
+        new_names = [new_name_or_names]
+    else:
+        new_names = new_name_or_names
+
+    msg = (
+        f"{old_name} is deprecated and will be removed in {removal_version}. "
+        f"Use {', '.join(new_names)} instead."
+    )
+    logger.warning(msg)
+
+    for new_name in new_names:
+        setattr(config, new_name, old_val)

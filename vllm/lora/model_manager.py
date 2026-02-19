@@ -35,7 +35,7 @@ from vllm.model_executor.models.interfaces import is_pooling_model
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.budget import MultiModalBudget
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.utils.cache import LRUCache
 from vllm.utils.platform_utils import is_pin_memory_available
 
