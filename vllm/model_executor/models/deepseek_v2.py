@@ -716,7 +716,7 @@ class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
     def __init__(
         self,
         input_size: int,
-        output_size: int,
+        output_size: list[int],
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
     ):
@@ -726,7 +726,7 @@ class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
             bias=False,
             quant_config=quant_config,
             disable_tp=True,
-            prefix=f"{prefix}.kv_a_proj_with_mqa",
+            prefix=prefix,
         )
 
         # Check if the DeepSeek V3 fused A GEMM kernel can be used.
