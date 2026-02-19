@@ -418,10 +418,6 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi && \
     python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
-# Copy extension wheels from extensions-build stage for later use
-COPY --from=extensions-build /tmp/deepgemm/dist /tmp/deepgemm/dist
-COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist
-
 # Check the size of the wheel if RUN_WHEEL_CHECK is true
 COPY .buildkite/check-wheel-size.py check-wheel-size.py
 # sync the default value with .buildkite/check-wheel-size.py
@@ -660,9 +656,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 . /etc/environment && \
 uv pip list
 
-# Install deepgemm wheel that has been built in the `build` stage
+# Install deepgemm wheel that has been built in the `extensions-build` stage
 RUN --mount=type=cache,target=/root/.cache/uv \
-    --mount=type=bind,from=build,source=/tmp/deepgemm/dist,target=/tmp/deepgemm/dist,ro \
+    --mount=type=bind,from=extensions-build,source=/tmp/deepgemm/dist,target=/tmp/deepgemm/dist,ro \
     sh -c 'if ls /tmp/deepgemm/dist/*.whl >/dev/null 2>&1; then \
               uv pip install --system /tmp/deepgemm/dist/*.whl; \
            else \
@@ -672,8 +668,8 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `build` stage
-RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
+# Install EP kernels wheels (pplx-kernels and DeepEP) that have been built in the `extensions-build` stage
+RUN --mount=type=bind,from=extensions-build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
