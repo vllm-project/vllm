@@ -164,7 +164,7 @@ uv pip install dist/*.whl
 You can pull the latest available CPU image from Docker Hub:
 
 ```bash
-docker pull vllm/vllm-openai-cpu:latest
+docker pull vllm/vllm-openai-cpu:latest-x86_64
 ```
 
 To pull an image for a specific vLLM version:
