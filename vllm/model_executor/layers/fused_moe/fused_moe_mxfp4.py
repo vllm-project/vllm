@@ -192,11 +192,12 @@ def fused_moe_mxfp4_kernel(
         )
         return
 
-    # N-dimension offsets
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
+    # N-dimension offsets (no modulo — use explicit mask for partial tiles)
+    offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)
+    n_mask = offs_bn < N
     if HAS_BIAS:
         bias_ptrs = b_bias_ptr + off_experts * stride_bbe + offs_bn * stride_bbn
-        bias = tl.load(bias_ptrs, mask=(offs_bn < N), other=0.0)
+        bias = tl.load(bias_ptrs, mask=n_mask, other=0.0)
 
     # Half-K for packed dimension
     HALF_K: tl.constexpr = BLOCK_SIZE_K // 2
@@ -220,7 +221,7 @@ def fused_moe_mxfp4_kernel(
             + offs_bn[None, :] * stride_bn
             + (k_packed_start + offs_bk[:, None]) * stride_bk
         )
-        b_mask = offs_bk[:, None] < (k_remaining // 2)
+        b_mask = (offs_bk[:, None] < (k_remaining // 2)) & n_mask[None, :]
         b_packed = tl.load(b_ptrs, mask=b_mask, other=0)
 
         # Unpack nibbles
@@ -245,8 +246,9 @@ def fused_moe_mxfp4_kernel(
             + offs_bn[None, :] * stride_bsn
             + (scale_k_start + scale_k_offs[:, None]) * stride_bsk
         )
-        scale_mask = (scale_k_start + scale_k_offs[:, None]) < tl.cdiv(K, 32)
-        raw_scales = tl.load(scale_ptrs, mask=scale_mask, other=127)
+        scale_k_mask = (scale_k_start + scale_k_offs[:, None]) < tl.cdiv(K, 32)
+        scale_mask = scale_k_mask & n_mask[None, :]
+        raw_scales = tl.load(scale_ptrs, mask=scale_mask, other=0)
         # Convert E8M0 -> bf16: [HALF_K, BLOCK_N]
         scales_bf16 = e8m0_scale_to_bf16(raw_scales.to(tl.int32))
 
