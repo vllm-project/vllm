@@ -4789,8 +4789,7 @@ class GPUModelRunner(
                 self.seq_lens.np[num_reqs:] = 0
                 self.seq_lens.copy_to_gpu()
 
-                cum_num_tokens, _ = self._get_cumsum_and_arange(
-                    num_scheduled_tokens)
+                cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
                 self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
                 self.query_start_loc.copy_to_gpu()
 
@@ -4800,8 +4799,7 @@ class GPUModelRunner(
                     num_tokens_padded=num_tokens_padded if pad_attn else None,
                     num_reqs=num_reqs_padded,
                     max_query_len=max_query_len,
-                    ubatch_slices=(ubatch_slices_padded
-                                   if pad_attn else ubatch_slices),
+                    ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
                     for_cudagraph_capture=is_graph_capturing,
                     slot_mappings=slot_mappings_by_group,
                 )
