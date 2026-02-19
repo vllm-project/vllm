@@ -303,7 +303,7 @@ class DefaultMoERunner(MoERunner):
             else torch.ops.vllm.moe_forward_shared
         )
 
-    def _maybe_setup_shared_experts_stream(
+    def _setup_shared_experts_stream(
         self,
         hidden_states: torch.Tensor,
         shared_input: torch.Tensor | None,
@@ -380,7 +380,8 @@ class DefaultMoERunner(MoERunner):
         assert self.shared_experts is not None
         assert shared_output is None
         if order == SharedExpertsOrder.AFTER_QUANT_METHOD and use_shared_experts_stream:
-            hidden_states = self._maybe_setup_shared_experts_stream(
+            # TODO: fold this in?
+            hidden_states = self._setup_shared_experts_stream(
                 hidden_states,
                 shared_input,
             )
@@ -397,6 +398,12 @@ class DefaultMoERunner(MoERunner):
             current_stream().wait_stream(self.shared_experts_stream)
         else:
             shared_output = self.shared_experts(hidden_states)
+
+        if order == SharedExpertsOrder.EXTERNAL:
+            # TODO: figure out how to combine this with maybe_reduce_output?
+            # or get rid of it completely.....
+            assert shared_output is not None
+            shared_output = self._maybe_reduce_shared_out(shared_output)
 
         return shared_output
 
@@ -721,6 +728,11 @@ class DefaultMoERunner(MoERunner):
         else:
             return hidden_states
 
+    #
+    #  forward
+    #    - self.moe_forward (_moe_forward or _moe_forward_shared)
+    #      - forward_chunking_dispatch
+    #        - forward_impl or forward_impl_chunked
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -749,13 +761,6 @@ class DefaultMoERunner(MoERunner):
             self._encode_layer_name(),
         )
 
-        # TODO: figure out how to combine this with maybe_reduce_output
-        if self.shared_experts is not None:
-            fused_output = (
-                self._maybe_reduce_shared_out(fused_output[0]),
-                fused_output[1],
-            )
-
         return self._maybe_reduce_output(fused_output, og_hidden_dims)
 
     def forward_dispatch(
@@ -769,10 +774,19 @@ class DefaultMoERunner(MoERunner):
         layer.ensure_moe_quant_config_init()
 
         router_logits = self._maybe_gate(hidden_states, router_logits)
+
+        shared_output = self._maybe_apply_shared_experts(
+            None,
+            hidden_states,
+            shared_input,
+            SharedExpertsOrder.EXTERNAL,
+        )
+
         with self._sequence_parallel_context():
             if self.use_dp_chunking:
                 return self.forward_impl_chunked(
                     layer,
+                    shared_output,
                     hidden_states,
                     router_logits,
                     shared_input,
@@ -780,6 +794,7 @@ class DefaultMoERunner(MoERunner):
             else:
                 return self.forward_impl(
                     layer,
+                    shared_output,
                     hidden_states,
                     router_logits,
                     shared_input,
@@ -808,6 +823,7 @@ class DefaultMoERunner(MoERunner):
     def forward_impl_chunked(
         self,
         layer: torch.nn.Module,
+        shared_output: torch.Tensor | None,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_input: torch.Tensor | None,
@@ -865,7 +881,7 @@ class DefaultMoERunner(MoERunner):
 
                 shared_output_chunk, hidden_states_chunk = self._apply_quant_method(
                     layer=layer,
-                    shared_output=None,
+                    shared_output=shared_output,
                     hidden_states=hidden_states_chunk,
                     extra_tensor=None,
                     router_logits=router_logits_chunk,
@@ -894,17 +910,11 @@ class DefaultMoERunner(MoERunner):
     def forward_impl(
         self,
         layer: torch.nn.Module,
+        shared_output: torch.Tensor | None,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        shared_output = self._maybe_apply_shared_experts(
-            None,
-            hidden_states,
-            shared_input,
-            SharedExpertsOrder.EXTERNAL,
-        )
-
         # TODO(bnell): parts of the dispatch/combine steps will go away once
         # #32567 lands and the remaining kernels are made MKs.  The PCP
         # code will probably remain
