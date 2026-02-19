@@ -8,7 +8,12 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    FP4ScaledMMLinearKernel,
+    init_fp4_linear_kernel,
+)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    NvFp4LinearBackend,
     apply_nvfp4_linear,
     convert_to_nvfp4_linear_kernel_format,
     select_nvfp4_linear_backend,
@@ -26,6 +31,24 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
     def __init__(self):
         self.backend = select_nvfp4_linear_backend()
         self.group_size = 16
+
+        # Initialize the appropriate FP4 kernel (unless using Marlin)
+        self.kernel: FP4ScaledMMLinearKernel | None
+        if self.backend != NvFp4LinearBackend.MARLIN:
+            # Extract backend name for FlashInfer variants
+            backend_name = None
+            if self.backend.value.startswith("flashinfer-"):
+                backend_name = self.backend.value[len("flashinfer-") :]
+
+            self.kernel = init_fp4_linear_kernel(
+                group_size=self.group_size,
+                is_checkpoint_fp4_serialized=True,
+                out_dtype=None,
+                backend=backend_name,
+                module_name="CompressedTensorsW4A4Fp4",
+            )
+        else:
+            self.kernel = None
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -110,15 +133,26 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         # Convert layer to NVFP4 linear kernel format
         convert_to_nvfp4_linear_kernel_format(self.backend, layer)
 
+        # Initialize kernel weights if using kernel abstraction
+        if self.kernel is not None:
+            self.kernel.process_weights_after_loading(layer)
+
     def apply_weights(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
-            backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
-        )
+        # Marlin uses a special path
+        if self.backend == NvFp4LinearBackend.MARLIN:
+            return apply_nvfp4_linear(
+                backend=self.backend,
+                layer=layer,
+                x=x,
+                bias=bias,
+            )
+
+        # Use kernel abstraction for other backends
+        if self.kernel is None:
+            raise RuntimeError("FP4 kernel not initialized for non-Marlin backend")
+        return self.kernel.apply_weights(layer, x, bias)

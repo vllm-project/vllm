@@ -46,6 +46,8 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+    FP4ScaledMMLinearKernel,
+    init_fp4_linear_kernel,
     init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
@@ -72,6 +74,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     Mxfp8LinearOp,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
+    NvFp4LinearBackend,
     apply_nvfp4_linear,
     convert_to_nvfp4_linear_kernel_format,
     select_nvfp4_linear_backend,
@@ -1112,6 +1115,25 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         self.marlin_input_dtype = None
         self.backend = select_nvfp4_linear_backend()
 
+        # Initialize the appropriate FP4 kernel (unless using Marlin)
+        # Marlin has a special path that doesn't use the kernel abstraction
+        self.kernel: FP4ScaledMMLinearKernel | None
+        if self.backend != NvFp4LinearBackend.MARLIN:
+            # Extract backend name for FlashInfer variants
+            backend_name = None
+            if self.backend.value.startswith("flashinfer-"):
+                backend_name = self.backend.value[len("flashinfer-") :]
+
+            self.kernel = init_fp4_linear_kernel(
+                group_size=self.quant_config.group_size,
+                is_checkpoint_fp4_serialized=self.quant_config.is_checkpoint_nvfp4_serialized,
+                out_dtype=None,  # Will be determined at runtime
+                backend=backend_name,
+                module_name="ModelOptNvFp4LinearMethod",
+            )
+        else:
+            self.kernel = None  # Marlin uses a different path
+
     def create_weights(
         self,
         layer: torch.nn.Module,
@@ -1206,18 +1228,29 @@ class ModelOptNvFp4LinearMethod(LinearMethodBase):
         # Convert layer to NVFP4 linear kernel format
         convert_to_nvfp4_linear_kernel_format(self.backend, layer)
 
+        # Initialize kernel weights if using kernel abstraction
+        if self.kernel is not None:
+            self.kernel.process_weights_after_loading(layer)
+
     def apply(
         self,
         layer: torch.nn.Module,
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_nvfp4_linear(
-            backend=self.backend,
-            layer=layer,
-            x=x,
-            bias=bias,
-        )
+        # Marlin uses a special path (doesn't fit kernel abstraction)
+        if self.backend == NvFp4LinearBackend.MARLIN:
+            return apply_nvfp4_linear(
+                backend=self.backend,
+                layer=layer,
+                x=x,
+                bias=bias,
+            )
+
+        # Use kernel abstraction for other backends
+        if self.kernel is None:
+            raise RuntimeError("FP4 kernel not initialized for non-Marlin backend")
+        return self.kernel.apply_weights(layer, x, bias)
 
 
 class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
