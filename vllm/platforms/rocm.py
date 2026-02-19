@@ -441,6 +441,7 @@ class RocmPlatform(Platform):
         torch.cuda.set_device(device)
 
     @classmethod
+    @with_amdsmi_context
     @lru_cache(maxsize=8)
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         arch_to_capability = {
