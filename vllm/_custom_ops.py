@@ -12,21 +12,7 @@ from vllm.scalar_type import ScalarType
 
 logger = init_logger(__name__)
 
-<<<<<<< HEAD
-if (not current_platform.is_tpu() and not current_platform.is_xpu()
-        and not current_platform.is_tt()):
-    try:
-        import vllm._C
-    except ImportError as e:
-        logger.warning("Failed to import from vllm._C with %r", e)
-
-supports_moe_ops = False
-with contextlib.suppress(ImportError):
-    import vllm._moe_C  # noqa: F401
-    supports_moe_ops = True
-=======
 current_platform.import_kernels()
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
 if TYPE_CHECKING:
 

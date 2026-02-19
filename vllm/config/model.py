@@ -311,6 +311,11 @@ class ModelConfig:
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
 
+    # TT override config
+    override_tt_config: dict[str, Any] = field(default_factory=dict)
+    """Override default TT config, specific to TT devices.
+    e.g. '{\"sample_on_device_mode\": \"all\"}' """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -724,6 +729,9 @@ class ModelConfig:
 
         # Avoid running try_verify_and_update_config multiple times
         self.config_updated = False
+
+        if not current_platform.is_tt() and self.override_tt_config:
+            raise ValueError("`override_tt_config` is only supported on TT devices.")
 
         self._verify_quantization()
         self._verify_cuda_graph()

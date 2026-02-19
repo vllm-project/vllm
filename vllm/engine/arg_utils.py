@@ -443,19 +443,10 @@ class EngineArgs:
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
     disable_log_stats: bool = False
-<<<<<<< HEAD
-    log_global_stats: bool = False
-    revision: Optional[str] = ModelConfig.revision
-    code_revision: Optional[str] = ModelConfig.code_revision
-    rope_scaling: dict[str, Any] = get_field(ModelConfig, "rope_scaling")
-    rope_theta: Optional[float] = ModelConfig.rope_theta
-    hf_token: Optional[Union[bool, str]] = ModelConfig.hf_token
-=======
     aggregate_engine_logging: bool = False
     revision: str | None = ModelConfig.revision
     code_revision: str | None = ModelConfig.code_revision
     hf_token: bool | str | None = ModelConfig.hf_token
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     hf_overrides: HfOverrides = get_field(ModelConfig, "hf_overrides")
     tokenizer_revision: str | None = ModelConfig.tokenizer_revision
     quantization: QuantizationMethods | None = ModelConfig.quantization
@@ -501,15 +492,9 @@ class EngineArgs:
     model_loader_extra_config: dict = get_field(LoadConfig, "model_loader_extra_config")
     ignore_patterns: str | list[str] = get_field(LoadConfig, "ignore_patterns")
 
-<<<<<<< HEAD
-    scheduler_delay_factor: float = SchedulerConfig.delay_factor
-    input_queue_batching_delay: float = (
-        SchedulerConfig.input_queue_batching_delay)
-    enable_chunked_prefill: Optional[
-        bool] = SchedulerConfig.enable_chunked_prefill
-=======
+    input_queue_batching_delay: float = SchedulerConfig.input_queue_batching_delay
+
     enable_chunked_prefill: bool | None = None
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     disable_chunked_mm_input: bool = SchedulerConfig.disable_chunked_mm_input
 
     disable_hybrid_kv_cache_manager: bool = (
@@ -541,16 +526,10 @@ class EngineArgs:
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
-<<<<<<< HEAD
-    override_neuron_config: dict[str, Any] = \
-        get_field(ModelConfig, "override_neuron_config")
-    override_tt_config: dict[str, Any] = \
-        get_field(ModelConfig, "override_tt_config")
-    override_pooler_config: Optional[Union[dict, PoolerConfig]] = \
-=======
+    override_tt_config: dict[str, Any] | None = ModelConfig.override_tt_config
+
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     override_pooler_config: dict | PoolerConfig | None = (
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         ModelConfig.override_pooler_config
     )
     compilation_config: CompilationConfig = get_field(VllmConfig, "compilation_config")
@@ -679,35 +658,6 @@ class EngineArgs:
         model_group.add_argument("--config-format", **model_kwargs["config_format"])
         # This one is a special case because it can bool
         # or str. TODO: Handle this in get_kwargs
-<<<<<<< HEAD
-        model_group.add_argument("--hf-token",
-                                 type=str,
-                                 nargs="?",
-                                 const=True,
-                                 default=model_kwargs["hf_token"]["default"],
-                                 help=model_kwargs["hf_token"]["help"])
-        model_group.add_argument("--hf-overrides",
-                                 **model_kwargs["hf_overrides"])
-        model_group.add_argument("--override-neuron-config",
-                                 **model_kwargs["override_neuron_config"])
-        model_group.add_argument("--override-tt-config",
-                                 **model_kwargs["override_tt_config"])
-        model_group.add_argument("--override-pooler-config",
-                                 **model_kwargs["override_pooler_config"])
-        model_group.add_argument("--logits-processor-pattern",
-                                 **model_kwargs["logits_processor_pattern"])
-        model_group.add_argument("--generation-config",
-                                 **model_kwargs["generation_config"])
-        model_group.add_argument("--override-generation-config",
-                                 **model_kwargs["override_generation_config"])
-        model_group.add_argument("--enable-sleep-mode",
-                                 **model_kwargs["enable_sleep_mode"])
-        model_group.add_argument("--model-impl",
-                                 choices=[f.value for f in ModelImpl],
-                                 **model_kwargs["model_impl"])
-        model_group.add_argument("--override-attention-dtype",
-                                 **model_kwargs["override_attention_dtype"])
-=======
         model_group.add_argument(
             "--hf-token",
             type=str,
@@ -717,6 +667,9 @@ class EngineArgs:
             help=model_kwargs["hf_token"]["help"],
         )
         model_group.add_argument("--hf-overrides", **model_kwargs["hf_overrides"])
+        model_group.add_argument(
+            "--override-tt-config", **model_kwargs["override_tt_config"]
+        )
         model_group.add_argument("--pooler-config", **model_kwargs["pooler_config"])
         model_group.add_argument(
             "--override-pooler-config",
@@ -745,7 +698,6 @@ class EngineArgs:
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
         )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
         # Model loading arguments
         load_kwargs = get_kwargs(LoadConfig)
@@ -1134,23 +1086,8 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--long-prefill-token-threshold",
-<<<<<<< HEAD
-            **scheduler_kwargs["long_prefill_token_threshold"])
-        scheduler_group.add_argument("--num-lookahead-slots",
-                                     **scheduler_kwargs["num_lookahead_slots"])
-        scheduler_group.add_argument("--scheduler-delay-factor",
-                                     **scheduler_kwargs["delay_factor"])
-        scheduler_group.add_argument(
-            "--input-queue-batching-delay",
-            **scheduler_kwargs["input_queue_batching_delay"])
-        scheduler_group.add_argument("--preemption-mode",
-                                     **scheduler_kwargs["preemption_mode"])
-        scheduler_group.add_argument("--num-scheduler-steps",
-                                     **scheduler_kwargs["num_scheduler_steps"])
-=======
             **scheduler_kwargs["long_prefill_token_threshold"],
         )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         scheduler_group.add_argument(
             "--num-lookahead-slots", **scheduler_kwargs["num_lookahead_slots"]
         )
@@ -1181,6 +1118,10 @@ class EngineArgs:
         )
         scheduler_group.add_argument(
             "--stream-interval", **scheduler_kwargs["stream_interval"]
+        )
+        scheduler_group.add_argument(
+            "--input-queue-batching-delay",
+            **scheduler_kwargs["input_queue_batching_delay"],
         )
 
         # Compilation arguments
@@ -1237,20 +1178,11 @@ class EngineArgs:
         )
 
         # Other arguments
-<<<<<<< HEAD
-        parser.add_argument('--disable-log-stats',
-                            action='store_true',
-                            help='Disable logging statistics.')
-        parser.add_argument('--log-global-stats',
-                            action='store_true',
-                            help='Use GlobalStatLogger when log stats is on.')
-=======
         parser.add_argument(
             "--disable-log-stats",
             action="store_true",
             help="Disable logging statistics.",
         )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
         parser.add_argument(
             "--aggregate-engine-logging",
@@ -1337,18 +1269,12 @@ class EngineArgs:
             skip_mm_profiling=self.skip_mm_profiling,
             config_format=self.config_format,
             mm_processor_kwargs=self.mm_processor_kwargs,
-<<<<<<< HEAD
-            disable_mm_preprocessor_cache=self.disable_mm_preprocessor_cache,
-            override_neuron_config=self.override_neuron_config,
-            override_tt_config=self.override_tt_config,
-=======
             mm_processor_cache_gb=self.mm_processor_cache_gb,
             mm_processor_cache_type=self.mm_processor_cache_type,
             mm_shm_cache_max_object_size_mb=self.mm_shm_cache_max_object_size_mb,
             mm_encoder_tp_mode=self.mm_encoder_tp_mode,
             mm_encoder_attn_backend=self.mm_encoder_attn_backend,
             pooler_config=self.pooler_config,
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             override_pooler_config=self.override_pooler_config,
             logits_processor_pattern=self.logits_processor_pattern,
             generation_config=self.generation_config,
@@ -1359,6 +1285,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            override_tt_config=self.override_tt_config,
         )
 
     def validate_tensorizer_args(self):
@@ -1656,8 +1583,7 @@ class EngineArgs:
         if self.data_parallel_address is None:
             if current_platform.is_tt():
                 host_ip = get_ip()
-                logger.info("Using host IP %s as TT data parallel address",
-                            host_ip)
+                logger.info("Using host IP %s as TT data parallel address", host_ip)
                 data_parallel_address = host_ip
             elif self.data_parallel_backend == "ray":
                 host_ip = get_ip()
@@ -1755,11 +1681,6 @@ class EngineArgs:
             max_num_seqs=self.max_num_seqs,
             max_model_len=model_config.max_model_len,
             num_lookahead_slots=num_lookahead_slots,
-<<<<<<< HEAD
-            delay_factor=self.scheduler_delay_factor,
-            input_queue_batching_delay=self.input_queue_batching_delay,
-=======
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             enable_chunked_prefill=self.enable_chunked_prefill,
             disable_chunked_mm_input=self.disable_chunked_mm_input,
             is_multimodal_model=model_config.is_multimodal_model,
@@ -1772,6 +1693,7 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            input_queue_batching_delay=self.input_queue_batching_delay,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
@@ -1975,24 +1897,8 @@ class EngineArgs:
     ) -> tuple[dict[UsageContext | None, int], dict[UsageContext | None, int]]:
         from vllm.usage.usage_lib import UsageContext
 
-<<<<<<< HEAD
-        # Disable chunked prefill for TT devices in V1
-        if current_platform.is_tt():
-            logger.info("Chunked prefill is not yet supported for TT devices; "
-                        "disabling it for V1 backend.")
-            self.enable_chunked_prefill = False
-
-        if not self.enable_chunked_prefill:
-            self.max_num_batched_tokens = model_config.max_model_len
-
-        # V1 should use the new scheduler by default.
-        # Swap it only if this arg is set to the original V0 default
-        if self.scheduler_cls == EngineArgs.scheduler_cls:
-            self.scheduler_cls = "vllm.v1.core.sched.scheduler.Scheduler"
-=======
         default_max_num_batched_tokens: dict[UsageContext | None, int]
         default_max_num_seqs: dict[UsageContext | None, int]
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
         # When no user override, set the default values based on the usage
         # context.
@@ -2120,6 +2026,14 @@ class EngineArgs:
                 "Enabling this manually may cause the engine to crash "
                 "or produce incorrect outputs.",
             )
+
+        # Disable chunked prefill for TT devices in V1
+        if current_platform.is_tt():
+            logger.info(
+                "Chunked prefill is not yet supported for TT devices; "
+                "disabling it for V1 backend."
+            )
+            self.enable_chunked_prefill = False
 
         world_size = self.pipeline_parallel_size * self.tensor_parallel_size
         (

@@ -179,61 +179,28 @@ def cpu_platform_plugin() -> str | None:
     return "vllm.platforms.cpu.CpuPlatform" if is_cpu else None
 
 
-<<<<<<< HEAD
-def neuron_platform_plugin() -> Optional[str]:
-    tnx_installed = False
-    nxd_installed = False
-    logger.debug("Checking if Neuron platform is available.")
-    try:
-        import transformers_neuronx  # noqa: F401
-        tnx_installed = True
-        logger.debug("Confirmed Neuron platform is available because"
-                     " transformers_neuronx is found.")
-    except ImportError:
-        pass
-
-    try:
-        import neuronx_distributed_inference  # noqa: F401
-        nxd_installed = True
-        logger.debug("Confirmed Neuron platform is available because"
-                     " neuronx_distributed_inference is found.")
-    except ImportError:
-        pass
-
-    is_neuron = tnx_installed or nxd_installed
-    return "vllm.platforms.neuron.NeuronPlatform" if is_neuron else None
-
-
-def tt_platform_plugin() -> Optional[str]:
+def tt_platform_plugin() -> str | None:
     is_tt = False
+    logger.debug("Checking if TT platform is available.")
     try:
         # assume ttnn is installed if and only if machine has TT devices
         import ttnn  # noqa: F401
+
         is_tt = True
-        logger.debug("Confirmed TT platform is available because"
-                     " ttnn is found.")
-    except Exception:
-        pass
+        logger.debug("Confirmed TT platform is available because ttnn is found.")
+    except Exception as e:
+        logger.debug("TT platform is not available because: %s", str(e))
 
     return "vllm.platforms.tt.TTPlatform" if is_tt else None
 
 
-builtin_platform_plugins = {
-    'tpu': tpu_platform_plugin,
-    'cuda': cuda_platform_plugin,
-    'rocm': rocm_platform_plugin,
-    'xpu': xpu_platform_plugin,
-    'cpu': cpu_platform_plugin,
-    'neuron': neuron_platform_plugin,
-    'tt': tt_platform_plugin,
-=======
 builtin_platform_plugins = {
     "tpu": tpu_platform_plugin,
     "cuda": cuda_platform_plugin,
     "rocm": rocm_platform_plugin,
     "xpu": xpu_platform_plugin,
     "cpu": cpu_platform_plugin,
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
+    "tt": tt_platform_plugin,
 }
 
 

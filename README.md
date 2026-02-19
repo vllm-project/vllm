@@ -1,10 +1,7 @@
 <!-- markdownlint-disable MD001 MD041 -->
-<<<<<<< HEAD
 **⚠️ Running on Tenstorrent hardware**: To use vLLM with Tenstorrent hardware, please follow the instructions in [tt_metal/README.md](https://github.com/tenstorrent/vllm/blob/dev/tt_metal/README.md) (Note: `dev` is the main development branch).
 
 ---
-=======
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">

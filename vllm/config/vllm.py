@@ -1069,6 +1069,7 @@ class VllmConfig:
             f"enable_prefix_caching={self.cache_config.enable_prefix_caching}, "
             f"enable_chunked_prefill={self.scheduler_config.enable_chunked_prefill}, "  # noqa
             f"pooler_config={self.model_config.pooler_config!r}, "
+            f"override_tt_config={self.model_config.override_tt_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )
 

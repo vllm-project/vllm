@@ -95,12 +95,8 @@ class CoreEngineProcManager:
         handshake_address: str,
         executor_class: type[Executor],
         log_stats: bool,
-<<<<<<< HEAD
-        client_handshake_address: Optional[str] = None,
-        dp_ranks: Optional[list[int]] = None,
-=======
         client_handshake_address: str | None = None,
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
+        dp_ranks: list[int] | None = None,
     ):
         """
         Args:
@@ -111,7 +107,8 @@ class CoreEngineProcManager:
         if dp_ranks is not None:
             assert len(dp_ranks) == local_engine_count, (
                 f"dp_ranks length ({len(dp_ranks)}) must match "
-                f"local_engine_count ({local_engine_count})")
+                f"local_engine_count ({local_engine_count})"
+            )
 
         context = get_mp_context()
         common_kwargs = {
@@ -129,13 +126,10 @@ class CoreEngineProcManager:
         local_dp_ranks = []
         for index in range(local_engine_count):
             local_index = local_start_index + index
-<<<<<<< HEAD
-            global_index = (dp_ranks[index]
-                            if dp_ranks is not None else start_index + index)
-=======
-            global_index = start_index + index
+            global_index = (
+                dp_ranks[index] if dp_ranks is not None else start_index + index
+            )
 
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             # Start EngineCore in background process.
             local_dp_ranks.append(local_index)
             self.processes.append(
@@ -799,16 +793,18 @@ def launch_core_engines(
     # remote MPI-launched device ranks. This may change local_engine_count.
     use_tt_mpi = False
     from vllm.platforms import current_platform
+
     if current_platform.is_tt():
         from vllm.v1.engine.tt_core_launcher import parse_tt_mpi_params
-        rank_binding_file, non_device_dp_ranks = parse_tt_mpi_params(
-            vllm_config)
+
+        rank_binding_file, non_device_dp_ranks = parse_tt_mpi_params(vllm_config)
         use_tt_mpi = rank_binding_file is not None
         if use_tt_mpi:
             # Device ranks (one per host) are launched via MPI and considered
             # remote here; only non-device ranks are local on host 0.
             vllm_config.parallel_config.data_parallel_size_local = len(
-                non_device_dp_ranks)
+                non_device_dp_ranks
+            )
 
     parallel_config = vllm_config.parallel_config
     dp_size = parallel_config.data_parallel_size
@@ -875,7 +871,6 @@ def launch_core_engines(
         yield engine_actor_manager, coordinator, addresses
         return
 
-<<<<<<< HEAD
     if use_tt_mpi:
         # Override local DP size to exclude device DP ranks.
         # Device ranks are considered remote since they're launched via MPI,
@@ -885,10 +880,7 @@ def launch_core_engines(
             CoreEngine(index=i, local=(i in non_device_dp_ranks))
             for i in range(vllm_config.parallel_config.data_parallel_size)
         ]
-    elif offline_mode or (external_dp_lb and dp_rank > 0):
-=======
-    if offline_mode:
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
+    elif offline_mode:
         assert local_engine_count == 1
         engines_to_handshake = [CoreEngine(index=dp_rank, local=True)]
     elif dp_rank == 0:
@@ -944,20 +936,24 @@ def launch_core_engines(
                 "TT-MPI mixed launch: dp_size=%d local_count=%d "
                 "non_device_ranks=%s handshake=%s",
                 parallel_config.data_parallel_size,
-                parallel_config.data_parallel_size_local, non_device_dp_ranks,
-                handshake_address)
+                parallel_config.data_parallel_size_local,
+                non_device_dp_ranks,
+                handshake_address,
+            )
             assert dp_rank == 0, "TT MPI must be launched from rank 0"
             from vllm.v1.engine.tt_core_launcher import tt_run_launch
 
             # Pass addresses so finalizer persists while engines run.
-            assert isinstance(
-                rank_binding_file,
-                str), ("rank_binding_file must be a non-empty string")
-            tt_run_launch(handshake_address=handshake_address,
-                          vllm_config=vllm_config,
-                          rank_binding_file=rank_binding_file,
-                          log_stats=log_stats,
-                          cleanup_target=addresses)
+            assert isinstance(rank_binding_file, str), (
+                "rank_binding_file must be a non-empty string"
+            )
+            tt_run_launch(
+                handshake_address=handshake_address,
+                vllm_config=vllm_config,
+                rank_binding_file=rank_binding_file,
+                log_stats=log_stats,
+                cleanup_target=addresses,
+            )
             if non_device_dp_ranks:
                 # Use CoreEngineProcManager with explicit dp_ranks list.
                 # local_dp_rank starts at 1 (0 is reserved for device rank).
@@ -977,11 +973,8 @@ def launch_core_engines(
                 local_engine_count=local_engine_count,
                 start_index=dp_rank,
                 local_start_index=local_start_index or 0,
-<<<<<<< HEAD
-                dp_ranks=local_engine_dp_ranks)
-=======
+                dp_ranks=local_engine_dp_ranks,
             )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         else:
             local_engine_manager = None
 

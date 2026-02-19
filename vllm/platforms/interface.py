@@ -158,15 +158,9 @@ class Platform:
     def is_cpu(self) -> bool:
         return self._enum == PlatformEnum.CPU
 
-<<<<<<< HEAD
-    def is_neuron(self) -> bool:
-        return self._enum == PlatformEnum.NEURON
-
     def is_tt(self) -> bool:
         return self._enum == PlatformEnum.TT
 
-=======
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     def is_out_of_tree(self) -> bool:
         return self._enum == PlatformEnum.OOT
 
@@ -519,17 +513,18 @@ class Platform:
         return False
 
     @classmethod
-<<<<<<< HEAD
-    def requires_gathered_batch_dp(cls) -> bool:
-        """
-        Whether DP ranks must gather batches to a single driver
-        before executing. Defaults to False; platforms can override.
-=======
     def opaque_attention_op(cls) -> bool:
         """
         Returns True if we register attention as one giant opaque custom op
         on the current platform
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
+        """
+        return False
+
+    @classmethod
+    def requires_gathered_batch_dp(cls) -> bool:
+        """
+        Whether DP ranks must gather batches to a single driver
+        before executing. Defaults to False; platforms can override.
         """
         return False
 

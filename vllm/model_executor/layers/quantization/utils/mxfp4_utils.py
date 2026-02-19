@@ -1,11 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-<<<<<<< HEAD
-from typing import Callable, Optional
-=======
 from collections.abc import Callable
 from typing import Any
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
 import torch
 
@@ -18,30 +14,6 @@ from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_
 logger = init_logger(__name__)
 
 
-<<<<<<< HEAD
-def _can_support_mxfp4(use_grouped_topk: bool = False,
-                       topk_group: Optional[int] = None,
-                       num_expert_group: Optional[int] = None,
-                       expert_map: Optional[torch.Tensor] = None,
-                       custom_routing_function: Optional[Callable] = None,
-                       e_score_correction_bias: Optional[torch.Tensor] = None,
-                       apply_router_weight_on_input: bool = False,
-                       scoring_func: str = "softmax",
-                       activation: str = "silu",
-                       expert_load_view: Optional[torch.Tensor] = None,
-                       logical_to_physical_map: Optional[torch.Tensor] = None,
-                       logical_replica_count: Optional[torch.Tensor] = None):
-    return not (use_grouped_topk or topk_group or num_expert_group
-                or expert_map or custom_routing_function
-                or e_score_correction_bias or apply_router_weight_on_input
-                or scoring_func != "softmax" or activation != "silu"
-                or expert_load_view or logical_to_physical_map
-                or logical_replica_count)
-
-
-def _dequant_mxfp4(x: torch.Tensor, scale: torch.Tensor,
-                   float_dtype: torch.dtype) -> torch.Tensor:
-=======
 def _swizzle_mxfp4(quant_tensor, scale, num_warps):
     """weight swizzle for mxfp4 moe, used for OAI mxfp4 kernel"""
     assert has_triton_kernels()
@@ -141,7 +113,6 @@ def get_padding_alignment():
 def _dequant_mxfp4(
     x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype
 ) -> torch.Tensor:
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     try:
         from quark.torch.kernel import mx
     except ImportError as err:

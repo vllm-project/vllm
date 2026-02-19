@@ -31,14 +31,11 @@ from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.output_processor import OutputProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.engine.processor import Processor
-<<<<<<< HEAD
-from vllm.v1.executor.abstract import Executor
-from vllm.v1.metrics.loggers import (GlobalStatLogger, PrometheusStatLogger,
-                                     StatLoggerBase, StatLoggerFactory)
-=======
 from vllm.v1.executor import Executor
-from vllm.v1.metrics.loggers import StatLoggerFactory, StatLoggerManager
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
+from vllm.v1.metrics.loggers import (
+    StatLoggerFactory,
+    StatLoggerManager,
+)
 from vllm.v1.metrics.reader import Metric, get_metrics_snapshot
 from vllm.v1.metrics.stats import IterationStats
 from vllm.v1.utils import record_function_or_nullcontext
@@ -57,12 +54,7 @@ class LLMEngine:
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-<<<<<<< HEAD
-        log_global_stats: bool = False,  # if True and log_stats is True, 
-        # log with GlobalStatLogger instead
-=======
         aggregate_engine_logging: bool = False,
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: list[StatLoggerFactory] | None = None,
         mm_registry: MultiModalRegistry = MULTIMODAL_REGISTRY,
@@ -75,16 +67,6 @@ class LLMEngine:
         self.cache_config = vllm_config.cache_config
 
         self.log_stats = log_stats
-<<<<<<< HEAD
-        self.log_global_stats = log_global_stats
-        self.stat_logger: Optional[StatLoggerBase] = None
-        if self.log_stats:
-            if self.log_global_stats:
-                self.stat_logger = GlobalStatLogger(vllm_config)
-            else:
-                self.stat_logger = PrometheusStatLogger(vllm_config)
-=======
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
         executor_backend = self.vllm_config.parallel_config.distributed_executor_backend
         parallel_config = vllm_config.parallel_config
@@ -163,17 +145,7 @@ class LLMEngine:
         usage_context: UsageContext = UsageContext.ENGINE_CONTEXT,
         stat_loggers: list[StatLoggerFactory] | None = None,
         disable_log_stats: bool = False,
-        log_global_stats: bool = False,
     ) -> "LLMEngine":
-<<<<<<< HEAD
-        return cls(vllm_config=vllm_config,
-                   executor_class=Executor.get_class(vllm_config),
-                   log_stats=(not disable_log_stats),
-                   log_global_stats=log_global_stats,
-                   usage_context=usage_context,
-                   stat_loggers=stat_loggers,
-                   multiprocess_mode=envs.VLLM_ENABLE_V1_MULTIPROCESSING)
-=======
         return cls(
             vllm_config=vllm_config,
             executor_class=Executor.get_class(vllm_config),
@@ -182,7 +154,6 @@ class LLMEngine:
             stat_loggers=stat_loggers,
             multiprocess_mode=envs.VLLM_ENABLE_V1_MULTIPROCESSING,
         )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
     @classmethod
     def from_engine_args(
@@ -203,15 +174,6 @@ class LLMEngine:
             enable_multiprocessing = True
 
         # Create the LLMEngine.
-<<<<<<< HEAD
-        return cls(vllm_config=vllm_config,
-                   executor_class=executor_class,
-                   log_stats=not engine_args.disable_log_stats,
-                   log_global_stats=engine_args.log_global_stats,
-                   usage_context=usage_context,
-                   stat_loggers=stat_loggers,
-                   multiprocess_mode=enable_multiprocessing)
-=======
         return cls(
             vllm_config=vllm_config,
             executor_class=executor_class,
@@ -220,7 +182,6 @@ class LLMEngine:
             stat_loggers=stat_loggers,
             multiprocess_mode=enable_multiprocessing,
         )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
     def get_num_unfinished_requests(self) -> int:
         return self.output_processor.get_num_unfinished_requests()
@@ -349,12 +310,6 @@ class LLMEngine:
                     mm_cache_stats=self.processor.stat_mm_cache(),
                 )
                 self.do_log_stats_with_interval()
-
-        if (self.log_stats and self.log_global_stats
-                and not self.has_unfinished_requests()):
-            assert isinstance(self.stat_logger, GlobalStatLogger)
-            self.stat_logger.log_out()
-            self.stat_logger.reset()
 
         return processed_outputs.request_outputs
 

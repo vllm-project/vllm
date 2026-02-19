@@ -48,12 +48,6 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     is_flashinfer_supporting_global_sf,
 )
 from vllm.platforms import current_platform
-<<<<<<< HEAD
-from vllm.platforms.interface import CpuArchEnum
-from vllm.utils import (direct_register_custom_op, has_deep_ep, has_pplx,
-                        round_up)
-from vllm.utils.flashinfer import has_flashinfer
-=======
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     aux_stream,
@@ -61,7 +55,6 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
 if current_platform.is_cuda_alike():
     from .fused_moe import eplb_map_to_physical_and_record, fused_experts
@@ -435,12 +428,6 @@ class FusedMoE(CustomOp):
             self.moe_parallel_config,
             is_lora_enabled=self.vllm_config.lora_config is not None,
         )
-
-        # we padding globally so EP buffer allocation works
-        if quant_config and quant_config.get_name() == "mxfp4" and (
-                envs.VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8
-                or envs.VLLM_USE_FLASHINFER_MOE_MXFP4_BF16):
-            hidden_size = round_up(hidden_size, 256)
 
         # For smuggling this layer into the fused moe custom op
         compilation_config = vllm_config.compilation_config
@@ -1064,16 +1051,6 @@ class FusedMoE(CustomOp):
         return_success: Literal[False],
     ) -> None: ...
 
-<<<<<<< HEAD
-    def weight_loader(self,
-                      param: torch.nn.Parameter,
-                      loaded_weight: torch.Tensor,
-                      weight_name: str,
-                      shard_id: str,
-                      expert_id: int,
-                      return_success: bool = False) -> Optional[bool]:
-
-=======
     @overload
     def weight_loader(
         self,
@@ -1094,7 +1071,6 @@ class FusedMoE(CustomOp):
         expert_id: int,
         return_success: bool = False,
     ) -> bool | None:
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         if self.quant_config and self.quant_config.get_name() == "mxfp4":
             # (FIXME) for gpt-oss all experts are combined
             if "bias" in weight_name:
@@ -1106,10 +1082,6 @@ class FusedMoE(CustomOp):
                 param.data[:, :dim1, :dim2].copy_(loaded_weight)
             return True if return_success else None
 
-<<<<<<< HEAD
-        expert_id = self._map_global_expert_id_to_local_expert_id(expert_id)
-        if expert_id == -1:
-=======
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
         expert_id = self._map_global_expert_id_to_local_expert_id(global_expert_id)
@@ -1125,7 +1097,6 @@ class FusedMoE(CustomOp):
         )
 
         if expert_id == -1 and not use_global_sf:
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             # Failed to load this param since it's not local to this rank
             return False if return_success else None
         # Hereafter, `expert_id` is local physical id
@@ -1629,24 +1600,6 @@ class FusedMoE(CustomOp):
         else:
             return tensor_model_parallel_all_reduce(final_hidden_states)
 
-<<<<<<< HEAD
-    def forward(self, hidden_states: torch.Tensor,
-                router_logits: torch.Tensor):
-        og_hidden_states = hidden_states.shape[-1]
-        if self.hidden_size != og_hidden_states:
-            hidden_states = F.pad(hidden_states,
-                                  (0, self.hidden_size - og_hidden_states),
-                                  mode='constant',
-                                  value=0.0)
-        # TODO: Once the OOM issue for the TPU backend is resolved, we will
-        # switch to using the moe_forward custom op.
-        if current_platform.is_tpu():
-            return self.forward_impl(hidden_states, router_logits)
-        else:
-            return torch.ops.vllm.moe_forward(
-                hidden_states, router_logits,
-                self.layer_name)[..., :og_hidden_states]
-=======
     def forward_native(
         self,
         hidden_states: torch.Tensor,
@@ -1660,7 +1613,6 @@ class FusedMoE(CustomOp):
                 mode="constant",
                 value=0.0,
             )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
         def reduce_output(states: torch.Tensor) -> torch.Tensor:
             if (

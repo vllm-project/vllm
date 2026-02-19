@@ -247,16 +247,10 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
             # See https://github.com/vllm-project/vllm/issues/17448.
             logger.warning(
                 "Encountered invalid prefix detokenization error"
-<<<<<<< HEAD
-                " for request %s, resetting decode stream.", self.request_id)
-            self.stream = DecodeStream(
-                skip_special_tokens=self.skip_special_tokens)
-=======
                 " for request %s, resetting decode stream.",
                 self.request_id,
             )
             self.stream = DecodeStream(skip_special_tokens=self.skip_special_tokens)
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             token = self.stream.step(self.tokenizer, next_token_id)
         return token
 

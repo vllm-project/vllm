@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional, Union
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -28,8 +28,7 @@ def register_tt_models(register_test_models=False) -> None:
 
     llama_text_version = os.getenv("TT_LLAMA_TEXT_VER", "tt_transformers")
     if llama_text_version == "tt_transformers":
-        path_llama_text = (
-            "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM")
+        path_llama_text = "models.tt_transformers.tt.generator_vllm:LlamaForCausalLM"
     elif llama_text_version == "llama3_70b_galaxy":
         path_llama_text = (
             "models.demos.llama3_70b_galaxy.tt.generator_vllm:LlamaForCausalLM"
@@ -41,7 +40,8 @@ def register_tt_models(register_test_models=False) -> None:
     else:
         raise ValueError(
             f"Unsupported TT Llama version: {llama_text_version}, "
-            "pick one of [tt_transformers, llama3_70b_galaxy, llama2_70b]")
+            "pick one of [tt_transformers, llama3_70b_galaxy, llama2_70b]"
+        )
 
     # Llama3.1/3.2 - Text
     ModelRegistry.register_model("TTLlamaForCausalLM", path_llama_text)
@@ -59,15 +59,16 @@ def register_tt_models(register_test_models=False) -> None:
     # Qwen3 - Text
     qwen3_text_version = os.getenv("TT_QWEN3_TEXT_VER", "tt_transformers")
     if qwen3_text_version == "tt_transformers":
-        path_qwen3_text = \
-            "models.tt_transformers.tt.generator_vllm:QwenForCausalLM"
+        path_qwen3_text = "models.tt_transformers.tt.generator_vllm:QwenForCausalLM"
     elif qwen3_text_version == "qwen3_32b_galaxy":
-        path_qwen3_text = \
+        path_qwen3_text = (
             "models.demos.llama3_70b_galaxy.tt.generator_vllm:QwenForCausalLM"
+        )
     else:
         raise ValueError(
             f"Unsupported TT Qwen3 version: {qwen3_text_version}, "
-            "pick one of [tt_transformers, qwen3_32b_galaxy]")
+            "pick one of [tt_transformers, qwen3_32b_galaxy]"
+        )
 
     ModelRegistry.register_model("TTQwen3ForCausalLM", path_qwen3_text)
 
@@ -113,8 +114,7 @@ def register_tt_models(register_test_models=False) -> None:
 
 
 def register_tt_test_models():
-    """Register non-production TT models which are only used for testing.
-    """
+    """Register non-production TT models which are only used for testing."""
     from vllm import ModelRegistry
 
     # Fake model for testing multi-process inference on T3000
@@ -139,7 +139,12 @@ class TTPlatform(Platform):
     simple_compile_backend: str = "eager"
 
     @classmethod
-    def is_async_output_supported(cls, enforce_eager: Optional[bool]) -> bool:
+    def import_kernels(cls) -> None:
+        # Do not import vllm._C or vllm._moe_C
+        pass
+
+    @classmethod
+    def is_async_output_supported(cls, enforce_eager: bool | None) -> bool:
         return True
 
     @classmethod
@@ -149,22 +154,25 @@ class TTPlatform(Platform):
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         assert not vllm_config.scheduler_config.chunked_prefill_enabled, (
-            "Chunked prefill is not yet supported for TT backend")
+            "Chunked prefill is not yet supported for TT backend"
+        )
         assert not vllm_config.speculative_config, (
-            "Speculative decoding is not yet supported for TT backend")
-        assert (vllm_config.parallel_config.tensor_parallel_size == 1
-                and vllm_config.parallel_config.pipeline_parallel_size
-                == 1), "TT backend does not support distributed execution"
-        assert not vllm_config.lora_config, (
-            "LoRA is not supported for TT backend")
+            "Speculative decoding is not yet supported for TT backend"
+        )
+        assert (
+            vllm_config.parallel_config.tensor_parallel_size == 1
+            and vllm_config.parallel_config.pipeline_parallel_size == 1
+        ), "TT backend does not support distributed execution"
+        assert not vllm_config.lora_config, "LoRA is not supported for TT backend"
 
         # Import and register models from tt-metal
         override_tt_config = vllm_config.model_config.override_tt_config
         register_test_models = False
         if override_tt_config and "register_test_models" in override_tt_config:
             register_test_models = override_tt_config["register_test_models"]
-            assert register_test_models in [True, False], \
+            assert register_test_models in [True, False], (
                 f"Invalid option register_test_models: {register_test_models}"
+            )
         register_tt_models(register_test_models)
 
         parallel_config = vllm_config.parallel_config
@@ -172,7 +180,8 @@ class TTPlatform(Platform):
             if envs.VLLM_USE_V1:
                 parallel_config.worker_cls = "vllm.v1.worker.tt_worker.TTWorker"
                 vllm_config.scheduler_config.scheduler_cls = (
-                    "vllm.v1.core.sched.ascend_scheduler.AscendScheduler")
+                    "vllm.v1.core.sched.ascend_scheduler.AscendScheduler"
+                )
             else:
                 parallel_config.worker_cls = "vllm.worker.tt_worker.TTWorker"
 
@@ -185,13 +194,17 @@ class TTPlatform(Platform):
 
         # Verify that the TT architecture is registered in the model registry
         from vllm import ModelRegistry
+
         supported_archs = ModelRegistry.get_supported_archs()
         if not any(arch_name in supported_archs for arch_name in arch_names):
             tt_archs = sorted(
-                [arch for arch in supported_archs if arch.startswith("TT")])
-            raise ValueError(f"No TT model architecture is registered for "
-                             f"model: '{vllm_config.model_config.model}'. "
-                             f"Available TT architectures: {tt_archs}")
+                [arch for arch in supported_archs if arch.startswith("TT")]
+            )
+            raise ValueError(
+                f"No TT model architecture is registered for "
+                f"model: '{vllm_config.model_config.model}'. "
+                f"Available TT architectures: {tt_archs}"
+            )
 
         # Setting attributes on the class level is kind of hacky, but
         # it's the only way to make validate_request depend on vllm_config
@@ -200,8 +213,10 @@ class TTPlatform(Platform):
         # TODO move this to tt_model_runner when request validation
         # stops depending on vllm_config
 
-        if (override_tt_config is not None
-                and "sample_on_device_mode" in override_tt_config):
+        if (
+            override_tt_config is not None
+            and "sample_on_device_mode" in override_tt_config
+        ):
             sample_on_device_mode = override_tt_config["sample_on_device_mode"]
             assert sample_on_device_mode in [
                 "all",
@@ -217,25 +232,25 @@ class TTPlatform(Platform):
         # or if always_compat_sampling is enabled.
 
         always_compat_sampling = False
-        if override_tt_config is not None \
-            and "always_compat_sampling" in override_tt_config:
-            always_compat_sampling = override_tt_config[
-                "always_compat_sampling"]
-            assert always_compat_sampling in [
-                True, False
-            ], "always_compat_sampling must be a boolean"
+        if (
+            override_tt_config is not None
+            and "always_compat_sampling" in override_tt_config
+        ):
+            always_compat_sampling = override_tt_config["always_compat_sampling"]
+            assert always_compat_sampling in [True, False], (
+                "always_compat_sampling must be a boolean"
+            )
             if always_compat_sampling:
                 if envs.VLLM_USE_V1:
                     raise ValueError(
-                        "always_compat_sampling is not yet supported for "
-                        "V1 TT backend.")
-                logger.info(
-                    "Compatibility sampling mode enabled for all requests")
+                        "always_compat_sampling is not yet supported for V1 TT backend."
+                    )
+                logger.info("Compatibility sampling mode enabled for all requests")
         cls.always_compat_sampling = always_compat_sampling  # type: ignore[attr-defined]
 
         # must perform local import to get around circular import
-        from vllm.model_executor.model_loader.utils import (
-            get_model_architecture)
+        from vllm.model_executor.model_loader.utils import get_model_architecture
+
         model_class, _ = get_model_architecture(vllm_config.model_config)
 
         # infer if non-greedy decoding is supported on-device
@@ -243,50 +258,56 @@ class TTPlatform(Platform):
         # TODO: this should come from the class itself as an attribute
         cls.non_greedy_decoding_on_device = False  # type: ignore[attr-defined]
         if model_class.__module__.startswith(
-                "models.demos.llama3_70b_galaxy.tt.generator_vllm"):
+            "models.demos.llama3_70b_galaxy.tt.generator_vllm"
+        ):
             cls.non_greedy_decoding_on_device = True  # type: ignore[attr-defined]
 
         if model_class.__module__.startswith(
-                "models.tt_transformers.tt.generator_vllm"):
+            "models.tt_transformers.tt.generator_vllm"
+        ):
             cls.non_greedy_decoding_on_device = True  # type: ignore[attr-defined]
 
-        if (vllm_config.cache_config.enable_prefix_caching
-                and not envs.VLLM_USE_V1):
+        if vllm_config.cache_config.enable_prefix_caching and not envs.VLLM_USE_V1:
             vllm_config.cache_config.enable_prefix_caching = False
             logger.warning(
-                "Prefix caching is not supported for V0 TT backend, "
-                "disabling it")
+                "Prefix caching is not supported for V0 TT backend, disabling it"
+            )
 
         # Get model capabilities from the class
-        model_capabilities: Optional[dict] = getattr(model_class,
-                                                     "model_capabilities",
-                                                     None)
+        model_capabilities: dict | None = getattr(
+            model_class, "model_capabilities", None
+        )
 
         if vllm_config.cache_config.enable_prefix_caching:
             # Check prefix caching support from capabilities (default to False)
-            supports_prefix_caching = (model_capabilities.get(
-                "supports_prefix_caching", False)
-                                       if model_capabilities else False)
+            supports_prefix_caching = (
+                model_capabilities.get("supports_prefix_caching", False)
+                if model_capabilities
+                else False
+            )
 
             if not supports_prefix_caching:
                 vllm_config.cache_config.enable_prefix_caching = False
                 logger.warning(
                     "Prefix caching is not supported in TT backend for %s, "
-                    "disabling it", model_class.__module__)
+                    "disabling it",
+                    model_class.__module__,
+                )
             else:
                 # Check if the model architecture uses sliding window
                 uses_sliding_window = (
-                    vllm_config.model_config.get_sliding_window() is not None)
+                    vllm_config.model_config.get_sliding_window() is not None
+                )
                 if uses_sliding_window:
                     vllm_config.cache_config.enable_prefix_caching = False
                     logger.warning(
                         "Prefix caching is not supported in TT backend for "
-                        "models with sliding window, disabling it")
+                        "models with sliding window, disabling it"
+                    )
 
         logger.info(
             "Automatic prefix caching is %s",
-            "enabled"
-            if vllm_config.cache_config.enable_prefix_caching else "disabled",
+            "enabled" if vllm_config.cache_config.enable_prefix_caching else "disabled",
         )
 
     @classmethod
@@ -296,7 +317,8 @@ class TTPlatform(Platform):
             if model_config.is_encoder_decoder:
                 raise ValueError(
                     "VLLM_USE_V1=1 was set but encoder-decoder models aren't "
-                    "yet supported in V1 for TT")
+                    "yet supported in V1 for TT"
+                )
             logger.warning("Enabling V1 since VLLM_USE_V1=1")
             return envs.VLLM_USE_V1
         return False
@@ -317,7 +339,7 @@ class TTPlatform(Platform):
     def validate_request(
         cls,
         prompt: PromptType,
-        params: Union[SamplingParams, PoolingParams],
+        params: SamplingParams | PoolingParams,
         processed_inputs: ProcessorInputs,
     ) -> None:
         """Raises if this request is unsupported on this platform"""
@@ -330,15 +352,9 @@ class TTPlatform(Platform):
         if params.best_of is not None:
             raise ValueError(f"Not yet supporting best_of on {dev}")
         if params.prompt_logprobs is not None:
-            raise ValueError(f"Not yet supporting prompt_logprobs on "
-                             f"{dev}")
-
-        # Custom logits_processors are rejected by V1 processor before
-        # reaching here, but support has since been added in upstream.
-        # Defensive check so we remember to add support in the future.
-        if envs.VLLM_USE_V1 and params.logits_processors:
-            raise ValueError(
-                f"Custom logits_processors not supported on {dev} in V1")
+            raise ValueError(f"Not yet supporting prompt_logprobs on {dev}")
+        if params.logits_processors:
+            raise ValueError(f"Custom logits_processors not supported on {dev} in V1")
 
     @staticmethod
     def compat_sampling_required(sampling_params, num_devices) -> bool:
@@ -348,18 +364,24 @@ class TTPlatform(Platform):
         # Multi-device: logprobs > 1 requires host sampling because device
         # can only return the sampled token's logprob.
         # https://github.com/tenstorrent/tt-metal/issues/34077
-        if sampling_params.logprobs is not None \
-        and sampling_params.logprobs > 0 \
-        and (num_devices == 1 or sampling_params.logprobs > 1):
+        if (
+            sampling_params.logprobs is not None
+            and sampling_params.logprobs > 0
+            and (num_devices == 1 or sampling_params.logprobs > 1)
+        ):
             return True
 
         # all of the following sampling params require compat sampling
-        return (sampling_params.min_p != 0.0
-                or (sampling_params.bad_words is not None
-                    and len(sampling_params.bad_words) > 0)
-                or sampling_params.prompt_logprobs is not None
-                or sampling_params.logits_processors is not None
-                or sampling_params.guided_decoding is not None
-                or sampling_params.logit_bias is not None
-                or sampling_params.allowed_token_ids is not None
-                or sampling_params.min_tokens != 0)
+        return (
+            sampling_params.min_p != 0.0
+            or (
+                sampling_params.bad_words is not None
+                and len(sampling_params.bad_words) > 0
+            )
+            or sampling_params.prompt_logprobs is not None
+            or sampling_params.logits_processors is not None
+            or sampling_params.guided_decoding is not None
+            or sampling_params.logit_bias is not None
+            or sampling_params.allowed_token_ids is not None
+            or sampling_params.min_tokens != 0
+        )

@@ -150,6 +150,15 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    input_queue_batching_delay: float = 0.002  # 2ms
+    """Delay in seconds to wait before processing queued requests to allow
+    more requests to arrive and be batched together. The delay is applied
+    after processing initial requests and reapplied after each additional
+    request that arrives if there are no requests in the input queue, up to
+    max_num_seqs. Only applies when there are no running requests and the
+    waiting queue hasn't reached max_num_seqs. Set to 0 to disable batching
+    delays. """
+
     def get_scheduler_cls(self) -> type["SchedulerInterface"]:
         if self.scheduler_cls is None:
             if self.async_scheduling:

@@ -194,12 +194,6 @@ if TYPE_CHECKING:
     VLLM_LOOPBACK_IP: str = ""
     VLLM_ALLOW_CHUNKED_LOCAL_ATTN_WITH_HYBRID_KV_CACHE: bool = False
     VLLM_ENABLE_RESPONSES_API_STORE: bool = False
-<<<<<<< HEAD
-    VLLM_USE_TRTLLM_CONTEXT_ATTENTION: bool = False
-    VLLM_USE_TRTLLM_DECODE_ATTENTION: bool = False
-    VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8: bool = False
-    VLLM_USE_FLASHINFER_MOE_MXFP4_BF16: bool = False
-=======
     VLLM_USE_TRTLLM_ATTENTION: str | None = None
     VLLM_NVFP4_GEMM_BACKEND: str | None = None
     VLLM_FLASHINFER_DISABLE_Q_QUANTIZATION: bool = False
@@ -232,7 +226,6 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
 
 def get_default_cache_root():
@@ -1170,21 +1163,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP8", "0"))
     ),
     # Allow use of FlashInfer CUTLASS kernels for fused moe ops.
-<<<<<<< HEAD
-    "VLLM_USE_FLASHINFER_MOE_FP4":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))),
-
-    # If set to 1, use the FlashInfer
-    # MXFP8 (activation) x MXFP4 (weight) MoE backend.
-    "VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8", "0"))),
-
-    # If set to 1, use the FlashInfer
-    # BF16 (activation) x MXFP4 (weight) MoE backend.
-    "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16":
-    lambda: bool(int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))),
-
-=======
     "VLLM_USE_FLASHINFER_MOE_FP4": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_FP4", "0"))
     ),
@@ -1205,7 +1183,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_FLASHINFER_MOE_MXFP4_BF16": lambda: bool(
         int(os.getenv("VLLM_USE_FLASHINFER_MOE_MXFP4_BF16", "0"))
     ),
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     # Control the cache sized used by the xgrammar compiler. The default
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.

@@ -23,36 +23,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
-<<<<<<< HEAD
-from collections.abc import Mapping, Sequence
-from typing import Any, Optional
-
-import numpy as np
-import torch
-from transformers import BatchFeature
-from transformers.models.qwen2_vl import Qwen2VLImageProcessorFast
-from transformers.models.qwen2_vl.image_processing_qwen2_vl import smart_resize
-from transformers.models.qwen3_vl import (Qwen3VLProcessor,
-                                          Qwen3VLVideoProcessor)
-from transformers.models.qwen3_vl.configuration_qwen3_vl import Qwen3VLConfig
-from transformers.video_utils import VideoMetadata
-
-from vllm.model_executor.models.qwen2_vl import Qwen2VLProcessingInfo
-from vllm.multimodal.inputs import (MultiModalDataDict, MultiModalFieldConfig,
-                                    MultiModalKwargsItem,
-                                    MultiModalKwargsItems, VideoItem)
-from vllm.multimodal.parse import (ImageSize, MultiModalDataItems,
-                                   MultiModalDataParser)
-from vllm.multimodal.processing import (BaseMultiModalProcessor,
-                                        PromptReplacement, PromptUpdate,
-                                        PromptUpdateDetails)
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
-from vllm.utils import is_list_of
-
-
-class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
-
-=======
 
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
@@ -651,7 +621,6 @@ class Qwen3_VisionTransformer(nn.Module):
 
 
 class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     def get_hf_config(self):
         return self.ctx.get_hf_config(Qwen3VLConfig)
 
@@ -665,12 +634,7 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def get_tokenizer(self):
         return self.ctx.tokenizer
 
-<<<<<<< HEAD
-    def get_image_processor(self,
-                            **kwargs: object) -> Qwen2VLImageProcessorFast:
-=======
     def get_image_processor(self, **kwargs: object) -> Qwen2VLImageProcessorFast:
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         return self.get_hf_processor(**kwargs).image_processor
 
     def get_video_processor(self, **kwargs: object) -> Qwen3VLVideoProcessor:
@@ -683,13 +647,6 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         image_height: int,
         num_frames: int = 2,
         do_resize: bool = True,
-<<<<<<< HEAD
-        image_processor: Optional[Qwen2VLImageProcessorFast],
-    ) -> tuple[ImageSize, int]:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
-
-=======
         image_processor: Qwen2VLImageProcessorFast | Qwen3VLVideoProcessor | None,
     ) -> tuple[ImageSize, int]:
         if image_processor is None and num_frames > 1:
@@ -699,7 +656,6 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
 
         is_video = isinstance(image_processor, Qwen3VLVideoProcessor)
 
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
@@ -707,8 +663,6 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         temporal_patch_size = vision_config.temporal_patch_size
 
         if do_resize:
-<<<<<<< HEAD
-=======
             if is_video:
                 smart_resize = video_smart_resize
                 extra_kwargs = {
@@ -718,27 +672,17 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
             else:
                 smart_resize = image_smart_resize
                 extra_kwargs = {}
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * merge_size,
                 min_pixels=image_processor.size["shortest_edge"],
                 max_pixels=image_processor.size["longest_edge"],
-<<<<<<< HEAD
-            )
-            preprocessed_size = ImageSize(width=resized_width,
-                                          height=resized_height)
-        else:
-            preprocessed_size = ImageSize(width=image_width,
-                                          height=image_height)
-=======
                 **extra_kwargs,
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
             preprocessed_size = ImageSize(width=image_width, height=image_height)
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
         padded_num_frames = num_frames + num_frames % temporal_patch_size
 
@@ -751,10 +695,6 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
 
         return preprocessed_size, num_vision_tokens
 
-<<<<<<< HEAD
-    def _calculate_timestamps(self, indices: list[int] | torch.Tensor,
-                              video_fps: float, merge_size: int):
-=======
     def _get_max_video_frames(self, max_tokens: int, start_num_frames: int = 2) -> int:
         return super()._get_max_video_frames(
             max_tokens, start_num_frames=start_num_frames
@@ -790,26 +730,10 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
     def _calculate_timestamps(
         self, indices: list[int] | torch.Tensor, video_fps: float, merge_size: int
     ):
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         if not isinstance(indices, list):
             indices = indices.tolist()
         if len(indices) % merge_size != 0:
             # don't update metadata's frames_indices directly
-<<<<<<< HEAD
-            indices = indices + [indices[-1]
-                                 ] * (merge_size - len(indices) % merge_size)
-        timestamps = [idx / video_fps for idx in indices]
-        timestamps = [(timestamps[i] + timestamps[i + merge_size - 1]) / 2
-                      for i in range(0, len(timestamps), merge_size)]
-        return timestamps
-
-    def _get_video_second_idx(
-            self,
-            metadata: dict[str, Any],
-            out_item: MultiModalKwargsItem,
-            do_sample_frames: Optional[bool] = None,
-            sampled_fps: Optional[float] = None) -> list[int]:
-=======
             indices = indices + [indices[-1]] * (merge_size - len(indices) % merge_size)
         timestamps = [idx / video_fps for idx in indices]
         timestamps = [
@@ -825,7 +749,6 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         do_sample_frames: bool | None = None,
         sampled_fps: float | None = None,
     ) -> list[int]:
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         video_processor = self.get_video_processor()
         merge_size = video_processor.merge_size
         indices = metadata["frames_indices"]
@@ -841,16 +764,6 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
         if do_sample_frames:
             # here video_fps is the fps of the sampled video, and
             # metadata["fps"] refers to the fps of the original video.
-<<<<<<< HEAD
-            video_fps = sampled_fps if sampled_fps else video_processor.fps
-            total_num_frames = metadata["total_num_frames"]
-            num_frames = int(total_num_frames / metadata["fps"] * video_fps)
-            num_frames = min(
-                min(max(num_frames, video_processor.min_frames),
-                    video_processor.max_frames), total_num_frames)
-            indices = np.linspace(0, total_num_frames - 1,
-                                  num_frames).round().astype(int).tolist()
-=======
             sampled_fps = sampled_fps if sampled_fps else video_processor.fps
             total_num_frames = metadata["total_num_frames"]
             num_frames = int(total_num_frames / metadata["fps"] * sampled_fps)
@@ -867,16 +780,11 @@ class Qwen3VLProcessingInfo(Qwen2VLProcessingInfo):
                 .astype(int)
                 .tolist()
             )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         timestamps = self._calculate_timestamps(indices, video_fps, merge_size)
         return timestamps
 
 
 class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
-<<<<<<< HEAD
-
-=======
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -890,25 +798,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-<<<<<<< HEAD
-    ) -> MultiModalDataDict:
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-
-        target_width, target_height = (
-            self.info.get_image_size_with_most_features())
-        target_num_frames = self.info.get_num_frames_with_most_features(
-            seq_len, mm_counts)
-        return {
-            "image":
-            self._get_dummy_images(width=target_width,
-                                   height=target_height,
-                                   num_images=num_images),
-            "video":
-            self._get_dummy_videos(
-                width=target_width,
-                height=target_height,
-=======
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
@@ -983,7 +872,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
             "video": self._get_dummy_videos(
                 width=width,
                 height=height,
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
                 num_frames=target_num_frames,
                 num_videos=num_videos,
             ),
@@ -997,10 +885,6 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         num_frames: int,
         num_videos: int,
     ) -> list[VideoItem]:
-<<<<<<< HEAD
-        num_frames = max(num_frames, 2)
-=======
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
         video_items = []
         for i in range(num_videos):
@@ -1017,13 +901,7 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         return video_items
 
 
-<<<<<<< HEAD
-class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]
-                                 ):
-
-=======
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     def _get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(video_needs_metadata=True)
 
@@ -1038,22 +916,12 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         processor = self.info.get_hf_processor(**mm_kwargs)
 
         # Separate video processing from image processing. Because the videos
-<<<<<<< HEAD
-        # are processed into serval image patches
-        if ("videos" in mm_data and isinstance(mm_data["videos"], list)
-                and len(mm_data["videos"]) > 0):
-            video_grid_thw_lst = []
-            pixel_values_videos_lst = []
-
-            for item_idx, item in enumerate(mm_data.pop("videos", [])):
-=======
         # are processed into several image patches
         if videos := mm_data.pop("videos", []):
             video_grid_thw_lst = []
             pixel_values_videos_lst = []
 
             for item in videos:
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
                 video_array, metadata = item
 
                 # NOTE: @JJJYmmm new attr metadata.frames_indices indicates
@@ -1068,21 +936,12 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     # qwen_vl_utils already has "do_sample_frames" in
                     # mm_kwargs, don't overwrite it.
                     video_mm_kwargs["do_sample_frames"] = metadata.get(
-<<<<<<< HEAD
-                        "do_sample_frames", False)
-
-                metadata = VideoMetadata(**{
-                    k: metadata[k]
-                    for k in metadata if k != "do_sample_frames"
-                })
-=======
                         "do_sample_frames", False
                     )
 
                 metadata = VideoMetadata(
                     **{k: metadata[k] for k in metadata if k != "do_sample_frames"}
                 )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
                 video_mm_data = dict()
                 video_mm_data["videos"] = [[video_array]]
@@ -1095,12 +954,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                     tok_kwargs=tok_kwargs,
                 )
                 input_ids = video_outputs.pop("input_ids")
-<<<<<<< HEAD
-                video_placeholder = processor.tokenizer.batch_decode(
-                    input_ids)[0]
-=======
                 video_placeholder = processor.tokenizer.batch_decode(input_ids)[0]
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
                 prompt = prompt.replace(
                     "<|vision_start|><|video_pad|><|vision_end|>",
                     video_placeholder,
@@ -1108,12 +962,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 )
 
                 video_grid_thw_lst.append(video_outputs["video_grid_thw"])
-<<<<<<< HEAD
-                pixel_values_videos_lst.append(
-                    video_outputs["pixel_values_videos"])
-=======
                 pixel_values_videos_lst.append(video_outputs["pixel_values_videos"])
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             video_outputs = dict(
                 pixel_values_videos=torch.cat(pixel_values_videos_lst),
                 video_grid_thw=torch.cat(video_grid_thw_lst),
@@ -1146,16 +995,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
         return dict(
             pixel_values=MultiModalFieldConfig.flat_from_sizes(
-<<<<<<< HEAD
-                "image", image_grid_sizes),
-            image_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "image", image_grid_sizes),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
-            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes),
-            video_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "video", video_grid_sizes),
-=======
                 "image", image_grid_sizes
             ),
             image_embeds=MultiModalFieldConfig.flat_from_sizes(
@@ -1168,7 +1007,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             video_embeds=MultiModalFieldConfig.flat_from_sizes(
                 "video", video_grid_sizes
             ),
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             video_grid_thw=MultiModalFieldConfig.batched("video"),
         )
 
@@ -1179,12 +1017,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-<<<<<<< HEAD
-        image_processor = self.info.get_image_processor(
-            **hf_processor_mm_kwargs)
-=======
         image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
         tokenizer = self.info.get_tokenizer()
         hf_config = self.info.get_hf_config()
 
@@ -1195,13 +1028,8 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         merge_length = image_processor.merge_size**2
 
         def get_image_replacement_qwen3vl(item_idx: int):
-<<<<<<< HEAD
-            print(out_mm_kwargs)
-            grid_thw = out_mm_kwargs["image_grid_thw"][item_idx]
-=======
             out_item = out_mm_kwargs["image"][item_idx]
             grid_thw = out_item["image_grid_thw"].data
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             assert isinstance(grid_thw, torch.Tensor)
 
             num_tokens = int(grid_thw.prod()) // merge_length
@@ -1218,17 +1046,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             if is_list_of(sampled_fps, float):
                 sampled_fps = sampled_fps[item_idx]
             timestamps = self.info._get_video_second_idx(
-<<<<<<< HEAD
-                metadata, out_item, do_sample_frames, sampled_fps)
-
-            assert len(timestamps) == grid_thw[0], (
-                f"The timestamps length({len(timestamps)}) should be equal "
-                f"video length ({grid_thw[0]}).")
-
-            frames_idx_token = [
-                tokenizer.encode(f"<{curr_time:.1f} seconds>",
-                                 add_special_tokens=False)
-=======
                 metadata, out_item, do_sample_frames, sampled_fps
             )
 
@@ -1239,27 +1056,18 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
 
             frames_idx_token = [
                 tokenizer.encode(f"<{curr_time:.1f} seconds>", add_special_tokens=False)
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
                 for curr_time in timestamps
             ]
             num_tokens_per_frame = int(grid_thw[1:].prod()) // merge_length
             placeholder = []
             for frame_idx in frames_idx_token:
                 placeholder.extend(frame_idx)
-<<<<<<< HEAD
-                placeholder.extend([vision_start_token_id] +
-                                   [video_token_id] * num_tokens_per_frame +
-                                   [vision_end_token_id])
-            return PromptUpdateDetails.select_token_id(placeholder,
-                                                       video_token_id)
-=======
                 placeholder.extend(
                     [vision_start_token_id]
                     + [video_token_id] * num_tokens_per_frame
                     + [vision_end_token_id]
                 )
             return PromptUpdateDetails.select_token_id(placeholder, video_token_id)
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
         return [
             PromptReplacement(
@@ -1267,10 +1075,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 target=hf_processor.image_token,
                 replacement=get_image_replacement_qwen3vl,
             ),
-<<<<<<< HEAD
-
-=======
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
             # NOTE: We match string on purpose since searching sequence of
             # token ids takes more time.
             PromptReplacement(
@@ -1279,8 +1083,6 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 replacement=get_video_replacement_qwen3vl,
             ),
         ]
-<<<<<<< HEAD
-=======
 
 
 @support_torch_compile(
@@ -1881,4 +1683,3 @@ class Qwen3VLForConditionalGeneration(
             connector="visual.merger",
             tower_model="visual.",
         )
->>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
