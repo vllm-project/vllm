@@ -1408,9 +1408,7 @@ class NanoNemotronVLMultiModalProcessor(
             The (possibly augmented) *mm_data* and the list of
             extracted audio items.
         """
-        video_items = self._get_data_parser().parse_mm_data(
-            {"video": mm_data["video"]}
-        )
+        video_items = self._get_data_parser().parse_mm_data({"video": mm_data["video"]})
         videos = video_items.get_items("video", VideoProcessorItems)
         assert isinstance(videos.metadata, list)
         metadata_list = videos.metadata
@@ -1455,16 +1453,10 @@ class NanoNemotronVLMultiModalProcessor(
         )
 
         hf_processor_mm_kwargs = {
-            k: v
-            for k, v in hf_processor_mm_kwargs.items()
-            if k != "use_audio_in_video"
+            k: v for k, v in hf_processor_mm_kwargs.items() if k != "use_audio_in_video"
         }
 
-        if not (
-            use_audio_in_video
-            and "video" in mm_data
-            and "audio" not in mm_data
-        ):
+        if not (use_audio_in_video and "video" in mm_data and "audio" not in mm_data):
             return super().apply(
                 prompt,
                 mm_data,
@@ -1480,9 +1472,7 @@ class NanoNemotronVLMultiModalProcessor(
             prompt = tokenizer.decode(prompt, skip_special_tokens=False)
 
         for _ in audio_items:
-            prompt = prompt.replace(
-                "<video>", "<video>" + AUDIO_CONTEXT, 1
-            )
+            prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
 
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
