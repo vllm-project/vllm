@@ -114,6 +114,9 @@ class BaseRenderer(ABC, Generic[_T]):
         self._clear_mm_cache_async = make_async(
             self.clear_mm_cache, executor=self._executor
         )
+        self._process_for_engine_batch_async = make_async(
+            self._process_for_engine_batch, executor=self._mm_executor
+        )
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 
@@ -700,6 +703,13 @@ class BaseRenderer(ABC, Generic[_T]):
         target = extract_target_prompt(self.model_config, prompt)
         return bool(target.get("multi_modal_data"))
 
+    def _process_for_engine_batch(
+        self,
+        tok_prompts: list[TokPrompt],
+        arrival_time: float,
+    ) -> list[ProcessorInputs]:
+        return [self.process_for_engine(p, arrival_time) for p in tok_prompts]
+
     async def _process_for_engine_async(
         self,
         tok_prompts: list[TokPrompt],
@@ -713,12 +723,9 @@ class BaseRenderer(ABC, Generic[_T]):
         an inline executor so the call runs synchronously with no overhead.
         """
         if any(self._has_multimodal(p) for p in tok_prompts):
-            return await make_async(
-                lambda: [self.process_for_engine(p, arrival_time) for p in tok_prompts],
-                executor=self._mm_executor,
-            )()
+            return await self._process_for_engine_batch_async(tok_prompts, arrival_time)
 
-        return [self.process_for_engine(p, arrival_time) for p in tok_prompts]
+        return self._process_for_engine_batch(tok_prompts, arrival_time)
 
     # Top-level methods
     def render_cmpl(
