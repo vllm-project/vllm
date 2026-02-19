@@ -463,42 +463,38 @@ class EngineCore:
             exec_future = self.model_executor.execute_model(
                 scheduler_output, non_block=True
             )
-            with self.log_iteration_details(
-                scheduler_output,
-                self.scheduler.get_kv_cache_usage(),
-            ):
-                if not self.is_ec_producer:
-                    model_executed = scheduler_output.total_num_scheduled_tokens > 0
+            if not self.is_ec_producer:
+                model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-                if self.is_pooling_model or not model_executed:
-                    # No sampling required (no requests scheduled).
-                    future = cast(Future[ModelRunnerOutput], exec_future)
+            if self.is_pooling_model or not model_executed:
+                # No sampling required (no requests scheduled).
+                future = cast(Future[ModelRunnerOutput], exec_future)
+            else:
+                if not scheduler_output.pending_structured_output_tokens:
+                    # We aren't waiting for any tokens, get any grammar output
+                    # and sample immediately.
+                    grammar_output = self.scheduler.get_grammar_bitmask(
+                        scheduler_output
+                    )
+                    future = self.model_executor.sample_tokens(
+                        grammar_output, non_block=True
+                    )
                 else:
-                    if not scheduler_output.pending_structured_output_tokens:
-                        # We aren't waiting for any tokens, get any grammar output
-                        # and sample immediately.
-                        grammar_output = self.scheduler.get_grammar_bitmask(
-                            scheduler_output
-                        )
-                        future = self.model_executor.sample_tokens(
-                            grammar_output, non_block=True
-                        )
-                    else:
-                        # We need to defer sampling until we have processed
-                        # the model output from the prior step.
-                        deferred_scheduler_output = scheduler_output
+                    # We need to defer sampling until we have processed
+                    # the model output from the prior step.
+                    deferred_scheduler_output = scheduler_output
 
-                if not deferred_scheduler_output:
-                    # Add this step's future to the queue.
-                    batch_queue.appendleft((future, scheduler_output, exec_future))
-                    if (
-                        model_executed
-                        and len(batch_queue) < self.batch_queue_size
-                        and not batch_queue[-1][0].done()
-                    ):
-                        # Don't block on next worker response unless the queue is full
-                        # or there are no more requests to schedule.
-                        return None, True
+            if not deferred_scheduler_output:
+                # Add this step's future to the queue.
+                batch_queue.appendleft((future, scheduler_output, exec_future))
+                if (
+                    model_executed
+                    and len(batch_queue) < self.batch_queue_size
+                    and not batch_queue[-1][0].done()
+                ):
+                    # Don't block on next worker response unless the queue is full
+                    # or there are no more requests to schedule.
+                    return None, True
 
         elif not batch_queue:
             # Queue is empty. We should not reach here since this method should
@@ -508,10 +504,12 @@ class EngineCore:
 
         # Block until the next result is available.
         future, scheduler_output, exec_model_fut = batch_queue.pop()
-        kv_cache_usage = self.scheduler.get_kv_cache_usage()
         with (
             self.log_error_detail(scheduler_output),
-            self.log_iteration_details(scheduler_output, kv_cache_usage),
+            self.log_iteration_details(
+                scheduler_output,
+                self.scheduler.get_kv_cache_usage(),
+            ),
         ):
             model_output = future.result()
             if model_output is None:
