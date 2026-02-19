@@ -607,15 +607,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
         # Get query_start_loc.
-        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
-        query_start_loc_np[0] = 0
-        np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1 : num_reqs + 1])
+        query_start_loc_np_full = np.empty(self.max_num_reqs + 1, dtype=np.int32)
+        query_start_loc_np_full[0] = 0
+        np.cumsum(num_scheduled_tokens, out=query_start_loc_np_full[1 : num_reqs + 1])
         # Pad for full CUDA graph mode.
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
-        query_start_loc_np[num_reqs + 1 :] = num_tokens
-        async_copy_to_gpu(query_start_loc_np, out=self.input_buffers.query_start_loc)
+        query_start_loc_np_full[num_reqs + 1 :] = num_tokens
+        async_copy_to_gpu(
+            query_start_loc_np_full, out=self.input_buffers.query_start_loc
+        )
 
-        query_start_loc_np = query_start_loc_np[: num_reqs + 1]
+        query_start_loc_np = query_start_loc_np_full[: num_reqs + 1]
         query_start_loc_cpu = torch.from_numpy(query_start_loc_np)
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         max_query_len = num_scheduled_tokens.max().item()
@@ -688,20 +690,52 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings, self.kv_cache_config
         )
 
+        # metadata for attention, may be padded
+        attn_num_reqs = num_reqs
+        attn_num_tokens = num_tokens
+        attn_query_start_loc = query_start_loc
+        attn_query_start_loc_cpu = query_start_loc_cpu
+        attn_block_tables = block_tables
+        attn_slot_mappings = slot_mappings
+        attn_dcp_local_seq_lens = dcp_local_seq_lens
+        if num_tokens_after_padding > num_tokens:
+            # case when tokens are padded
+            # keep per-step metadata aligned with the captured full-graph shape
+            attn_num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
+            attn_num_tokens = num_tokens_after_padding
+            if attn_num_reqs > num_reqs:
+                # fill -1 for the padded blocks
+                for input_block_table in self.block_tables.input_block_tables:
+                    input_block_table[num_reqs:attn_num_reqs].fill_(-1)
+            attn_block_tables = tuple(
+                input_block_table[:attn_num_reqs]
+                for input_block_table in self.block_tables.input_block_tables
+            )
+            attn_slot_mappings = self.block_tables.slot_mappings[:, :attn_num_tokens]
+            attn_query_start_loc = self.input_buffers.query_start_loc[
+                : attn_num_reqs + 1
+            ]
+            attn_query_start_loc_cpu = torch.from_numpy(
+                query_start_loc_np_full[: attn_num_reqs + 1]
+            )
+            attn_dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[
+                :attn_num_reqs
+            ]
+
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
             attn_metadata_builders=self.attn_metadata_builders,
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            query_start_loc_gpu=query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
+            num_reqs=attn_num_reqs,
+            num_tokens=attn_num_tokens,
+            query_start_loc_gpu=attn_query_start_loc,
+            query_start_loc_cpu=attn_query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=self.input_buffers.seq_lens,
             max_seq_len=self.max_model_len,
-            block_tables=block_tables,
-            slot_mappings=slot_mappings,
+            block_tables=attn_block_tables,
+            slot_mappings=attn_slot_mappings,
             kv_cache_config=self.kv_cache_config,
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=attn_dcp_local_seq_lens,
         )
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
