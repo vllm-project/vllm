@@ -148,6 +148,7 @@ def test_allocate_multi_group_shared_tensors():
 
     assert len(kv_caches) == 8
     assert len(cross_layer_groups) == 1
+    assert not cross_layer_groups[0].tp_layout
     for i in range(num_positions):
         assert kv_caches[f"full.{i}"].data_ptr() == kv_caches[f"sw.{i}"].data_ptr()
 
@@ -186,6 +187,7 @@ def test_mamba_allocation():
     )
 
     assert len(groups) == 1
+    assert not groups[0].tp_layout
     for n in ["m.0", "m.1"]:
         assert isinstance(kv[n], list) and len(kv[n]) == 2
         assert kv[n][0].shape == (nb, 4, 2)
@@ -198,3 +200,120 @@ def test_mamba_allocation():
     assert torch.all(kv["m.1"][0][1] == 99.0)
     assert torch.all(kv["m.1"][0][0] == 0.0)
     assert torch.all(kv["m.0"][0][1] == 0.0)
+
+
+def test_tp_layout_shape():
+    """With tp_size > 1, the backing tensor uses (NB, H, layers, per_head_page)."""
+    num_layers = 3
+    nb = 4
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=torch.float16,
+    )
+
+    kv_caches, groups = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=nb,
+            kv_cache_tensors=[
+                KVCacheTensor(size=spec.page_size_bytes * nb, shared_by=[f"layer.{i}"])
+                for i in range(num_layers)
+            ],
+            kv_cache_groups=[],
+        ),
+        attn_groups=[
+            _make_group(
+                group_id=0,
+                layer_names=[f"layer.{i}" for i in range(num_layers)],
+            )
+        ],
+        cache_dtype="auto",
+        device=torch.device("cpu"),
+        kernel_block_sizes=[BLOCK_SIZE],
+        tp=True,
+    )
+
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.tp_layout
+
+    per_head_page = spec.page_size_bytes // NUM_KV_HEADS
+    assert group.tensor.shape == (nb, NUM_KV_HEADS, num_layers, per_head_page)
+
+    # Per-layer views should match the backend's logical shape
+    # _MockBackend: (num_blocks, 2, num_kv_heads, block_size, head_size)
+    expected = (nb, 2, NUM_KV_HEADS, BLOCK_SIZE, HEAD_SIZE)
+    for i in range(num_layers):
+        assert kv_caches[f"layer.{i}"].shape == expected
+
+
+def test_tp_layout_head_contiguity():
+    """Slicing a subset of heads from TP-layout tensor is contiguous."""
+    nb = 4
+    num_layers = 2
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=torch.float16,
+    )
+
+    _, groups = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=nb,
+            kv_cache_tensors=[
+                KVCacheTensor(size=spec.page_size_bytes * nb, shared_by=[f"l.{i}"])
+                for i in range(num_layers)
+            ],
+            kv_cache_groups=[],
+        ),
+        attn_groups=[
+            _make_group(
+                group_id=0,
+                layer_names=[f"l.{i}" for i in range(num_layers)],
+            )
+        ],
+        cache_dtype="auto",
+        device=torch.device("cpu"),
+        kernel_block_sizes=[BLOCK_SIZE],
+        tp=True,
+    )
+
+    # One block's per-head data (all layers) should be contiguous
+    group = groups[0]
+    block_head = group.tensor[0, 0]  # (layers, per_head_page)
+    assert block_head.is_contiguous()
+    # And head dim comes before layers in memory (H varies slower)
+    assert group.tensor.stride(1) > group.tensor.stride(2)
+
+
+def test_tp_size_1_default_layout():
+    """With tp_size=1, the tensor uses the default (NB, layers, page) layout."""
+    nb = 4
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=torch.float16,
+    )
+
+    _, groups = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=nb,
+            kv_cache_tensors=[
+                KVCacheTensor(size=spec.page_size_bytes * nb, shared_by=[f"l.{i}"])
+                for i in range(2)
+            ],
+            kv_cache_groups=[],
+        ),
+        attn_groups=[_make_group(group_id=0, layer_names=["l.0", "l.1"])],
+        cache_dtype="auto",
+        device=torch.device("cpu"),
+        kernel_block_sizes=[BLOCK_SIZE],
+        tp=False,
+    )
+
+    assert len(groups) == 1
+    assert not groups[0].tp_layout
+    assert groups[0].tensor.shape == (nb, 2, spec.page_size_bytes)
