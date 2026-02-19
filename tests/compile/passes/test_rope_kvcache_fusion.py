@@ -189,7 +189,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
         return ops
 
     def ops_in_model_after(self) -> list[torch._ops.OpOverload]:
-        return [torch.ops.vllm.rocm_aiter_triton_qk_rope_reshape_and_cache.default]
+        return [torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default]
 
 
 @pytest.mark.parametrize(
@@ -249,8 +249,8 @@ def test_rope_kvcache_fusion(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from vllm.compilation.passes.fusion.rocm_aiter_fusion import (
-            ROCmAiterTritonRopeReshapeKVCacheFusionPass,
+        from vllm.compilation.passes.fusion.rope_kvcache_fusion import (
+            RopeKVCacheFusionPass,
         )
 
         m.setenv("VLLM_ROCM_USE_AITER", "1")
@@ -267,7 +267,7 @@ def test_rope_kvcache_fusion(
             device=torch.get_default_device(),
         )
 
-        fusion_pass = ROCmAiterTritonRopeReshapeKVCacheFusionPass(vllm_config)
+        fusion_pass = RopeKVCacheFusionPass(vllm_config)
         passes = [
             NoOpEliminationPass(vllm_config),
             SplitCoalescingPass(vllm_config),

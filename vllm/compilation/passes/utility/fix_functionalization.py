@@ -163,9 +163,9 @@ class FixFunctionalizationPass(VllmInductorPass):
                 )
                 self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
             elif (
-                hasattr(torch.ops.vllm, "rocm_aiter_triton_qk_rope_reshape_and_cache")
+                hasattr(torch.ops.vllm, "fused_rope_and_unified_kv_cache_update")
                 and at_target
-                == torch.ops.vllm.rocm_aiter_triton_qk_rope_reshape_and_cache.default
+                == torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default
             ):
                 mutated_args = {
                     1: "query",
