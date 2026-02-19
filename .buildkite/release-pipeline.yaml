@@ -8,6 +8,21 @@ steps:
   - group: "Build Python wheels"
     key: "build-wheels"
     steps:
+      - label: "Build wheel - aarch64 - CUDA 12.8"
+        depends_on: ~
+        id: build-wheel-arm64-cuda-12-8
+        agents:
+          queue: arm64_cpu_queue_postmerge
+        commands:
+          # #NOTE: torch_cuda_arch_list is derived from upstream PyTorch build files here:
+          # https://github.com/pytorch/pytorch/blob/main/.ci/aarch64_linux/aarch64_ci_build.sh#L7
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --build-arg torch_cuda_arch_list='8.7 8.9 9.0 10.0+PTX' --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh"
+        env:
+          DOCKER_BUILDKIT: "1"
+
       - label: "Build wheel - aarch64 - CUDA 12.9"
         depends_on: ~
         id: build-wheel-arm64-cuda-12-9
@@ -48,6 +63,19 @@ steps:
           - "mkdir artifacts"
           - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
           - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_35"
+        env:
+          DOCKER_BUILDKIT: "1"
+
+      - label: "Build wheel - x86_64 - CUDA 12.8"
+        depends_on: ~
+        id: build-wheel-x86-cuda-12-8
+        agents:
+          queue: cpu_queue_postmerge
+        commands:
+          - "DOCKER_BUILDKIT=1 docker build --build-arg max_jobs=16 --build-arg USE_SCCACHE=1 --build-arg GIT_REPO_CHECK=1 --build-arg CUDA_VERSION=12.8.1 --tag vllm-ci:build-image --target build --progress plain -f docker/Dockerfile ."
+          - "mkdir artifacts"
+          - "docker run --rm -v $(pwd)/artifacts:/artifacts_host vllm-ci:build-image bash -c 'cp -r dist /artifacts_host && chmod -R a+rw /artifacts_host'"
+          - "bash .buildkite/scripts/upload-nightly-wheels.sh manylinux_2_31"
         env:
           DOCKER_BUILDKIT: "1"
 
