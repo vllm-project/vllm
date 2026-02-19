@@ -898,6 +898,121 @@ def test_extract_tool_calls_complex_type_with_single_quote(
     assert args["obj_param"] == {"key": "value"}
 
 
+def test_extract_tool_calls_parameter_tag_in_content(
+    qwen3_tool_parser_parametrized, sample_tools
+):
+    """Test that parameter content containing </parameter> is handled correctly"""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=write_file>
+<parameter=filename>
+test.xml
+</parameter>
+<parameter=content>
+This file contains </parameter> in the middle of the content.
+It should not break the parser.
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    extracted_tool_calls = qwen3_tool_parser_parametrized.extract_tool_calls(
+        model_output, request=request
+    )
+
+    assert extracted_tool_calls.tools_called
+    assert len(extracted_tool_calls.tool_calls) == 1
+    assert extracted_tool_calls.tool_calls[0].function.name == "write_file"
+
+    args = json.loads(extracted_tool_calls.tool_calls[0].function.arguments)
+    assert args["filename"] == "test.xml"
+    assert (
+        args["content"]
+        == "This file contains </parameter> in the middle of the content.\nIt should not break the parser."
+    )
+
+
+def test_extract_tool_calls_streaming_parameter_tag_in_content(
+    qwen3_tool_parser_parametrized, qwen3_tokenizer
+):
+    """Test streaming with parameter content containing </parameter>"""
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "write_file",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filename": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        )
+    ]
+
+    model_output = """<tool_call>
+<function=write_file>
+<parameter=filename>
+test.xml
+</parameter>
+<parameter=content>
+This file contains </parameter> in the middle.
+</parameter>
+</function>
+</tool_call>"""
+
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+
+    tool_states = {}
+    for delta_message in stream_delta_message_generator(
+        qwen3_tool_parser_parametrized, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                idx = tool_call.index
+                if idx not in tool_states:
+                    tool_states[idx] = {
+                        "id": None,
+                        "name": None,
+                        "arguments": "",
+                        "type": None,
+                    }
+
+                if tool_call.id:
+                    tool_states[idx]["id"] = tool_call.id
+                if tool_call.type:
+                    tool_states[idx]["type"] = tool_call.type
+                if tool_call.function:
+                    if tool_call.function.name:
+                        tool_states[idx]["name"] = tool_call.function.name
+                    if tool_call.function.arguments is not None:
+                        tool_states[idx]["arguments"] += tool_call.function.arguments
+
+    assert len(tool_states) == 1
+    state = tool_states[0]
+    assert state["name"] == "write_file"
+    args = json.loads(state["arguments"])
+    assert args["filename"] == "test.xml"
+    assert args["content"] == "This file contains </parameter> in the middle."
+
+
 def test_extract_tool_calls_streaming_missing_opening_tag(
     qwen3_tool_parser_parametrized, qwen3_tokenizer, sample_tools
 ):
