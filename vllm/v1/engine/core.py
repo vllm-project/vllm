@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -109,6 +110,8 @@ class EngineCore:
             self.model_executor.register_failure_callback(executor_fail_callback)
 
         self.available_gpu_memory_for_kv_cache = -1
+
+        current_platform.update_block_size_for_backend(vllm_config)
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(

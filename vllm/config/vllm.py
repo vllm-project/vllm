@@ -916,7 +916,12 @@ class VllmConfig:
         current_platform.check_and_update_config(self)
 
         # If DCP, ensure the block size is right.
-        if self.parallel_config.decode_context_parallel_size > 1:
+        # block_size may still be None here (set later by
+        # Platform.update_block_size_for_backend in EngineCore).
+        if (
+            self.cache_config.block_size is not None
+            and self.parallel_config.decode_context_parallel_size > 1
+        ):
             if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
                 self.parallel_config.cp_kv_cache_interleave_size
                 != self.parallel_config.dcp_kv_cache_interleave_size
@@ -1108,7 +1113,10 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
-        if self.cache_config.mamba_cache_mode == "align":
+        if (
+            self.cache_config.mamba_cache_mode == "align"
+            and self.cache_config.block_size is not None
+        ):
             assert (
                 self.cache_config.block_size
                 <= self.scheduler_config.max_num_batched_tokens

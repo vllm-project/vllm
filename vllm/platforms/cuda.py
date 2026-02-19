@@ -169,27 +169,6 @@ class CudaPlatformBase(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
-        cache_config = vllm_config.cache_config
-        user_specified_block_size = cache_config.block_size is not None
-        if not user_specified_block_size:
-            cache_config.block_size = 16
-
-        # Ensure block_size is compatible with the attention backend.
-        # Note: model_config may be None during testing.
-        # Skip hybrid (attention+mamba) models — their block_size is
-        # managed by HybridAttentionMambaModelConfig
-        # TODO(matt): Limiting this to MLA models is a workaround to avoid
-        # CUDA initialization during testing. Fix this and remove the MLA check
-        if (
-            model_config is not None
-            and not model_config.is_hybrid
-            and model_config.use_mla
-        ):
-            cls._update_block_size_for_backend(
-                vllm_config,
-                user_specified_block_size,
-            )
-
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
         if (
@@ -203,6 +182,23 @@ class CudaPlatformBase(Platform):
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
+
+    @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        cache_config = vllm_config.cache_config
+        user_specified_block_size = cache_config.block_size is not None
+        if not user_specified_block_size:
+            cache_config.block_size = 16
+
+        model_config = vllm_config.model_config
+        # Note: model_config may be None during testing.
+        # Skip hybrid (attention+mamba) models — their block_size is
+        # managed by HybridAttentionMambaModelConfig
+        if model_config is not None and not model_config.is_hybrid:
+            cls._update_block_size_for_backend(
+                vllm_config,
+                user_specified_block_size,
+            )
 
     @classmethod
     def _update_block_size_for_backend(
