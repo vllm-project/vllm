@@ -567,9 +567,16 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         )
         self.fp8_decode_padded_heads = self._compute_fp8_decode_padded_heads(num_heads)
 
+        vllm_config = get_current_vllm_config()
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.q_concat_buffer = torch.empty(
+            max_tokens, num_heads, head_size,
+            dtype=torch.bfloat16,
+            device=current_platform.device_type,
+        )
+
         if kv_cache_dtype == "fp8_ds_mla":
-            # Reserve workspace during initialization
-            vllm_config = get_current_vllm_config()
+            # Reserve workspace during initialization            
             assert vllm_config is not None and vllm_config.model_config is not None
             prefill_workspace_size = get_prefill_workspace_size(
                 vllm_config.model_config.max_model_len
@@ -822,9 +829,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):
             ql_nope, q_pe = q
-            q = torch.empty(ql_nope.shape[0], ql_nope.shape[1],
-                            ql_nope.shape[2] + q_pe.shape[2],
-                            dtype=ql_nope.dtype, device=ql_nope.device)
+            q = self.q_concat_buffer[:ql_nope.shape[0]]
             ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = q.shape[0]
