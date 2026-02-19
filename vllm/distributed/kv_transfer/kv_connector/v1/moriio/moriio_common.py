@@ -278,9 +278,6 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
         )
 
-    def set_transfer_lookup(self, transfer_id_to_request_id: dict[TransferId, ReqId]):
-        self.transfer_id_to_request_id = transfer_id_to_request_id
-
     def add_new_req(
         self,
         request_id: ReqId,
