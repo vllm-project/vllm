@@ -12,6 +12,19 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
+def _count_input_patches(grid_thw_list: list[list[int]]) -> int:
+    """Count total input patches (T*H*W per image). Used for pixel_values slicing."""
+    return sum(t * h * w for t, h, w in grid_thw_list)
+
+
+def _count_output_tokens(
+    grid_thw_list: list[list[int]], spatial_merge_size: int
+) -> int:
+    """Count total output tokens after spatial merging. Used for budget selection."""
+    m = spatial_merge_size
+    return sum(t * (h // m) * (w // m) for t, h, w in grid_thw_list)
+
+
 @dataclass
 class BudgetGraphMetadata:
     """Metadata for a single budget graph.
@@ -180,7 +193,7 @@ class EncoderCudaGraphManager:
     ) -> tuple[torch.Tensor, list[list[int]]]:
         """Create dummy pixel_values and grid_thw for capture."""
         # Compute total patches from grid config
-        total_patches = sum(t * h * w for t, h, w in grid_config)
+        total_patches = _count_input_patches(grid_config)
 
         # Get patch dimensions from vision model's patch_embed
         patch_embed = self.vision_model.patch_embed
@@ -285,7 +298,7 @@ class EncoderCudaGraphManager:
             for chunk_start in range(0, num_images, self.max_batch_size):
                 chunk_end = min(chunk_start + self.max_batch_size, num_images)
                 chunk_grid = grid_thw_list[chunk_start:chunk_end]
-                n_patches = sum(t * h * w for t, h, w in chunk_grid)
+                n_patches = _count_input_patches(chunk_grid)
                 chunk_pv = pixel_values[pixel_start:pixel_start + n_patches]
                 pixel_start += n_patches
                 chunk_out = self._execute_local(chunk_pv, chunk_grid)
@@ -303,10 +316,7 @@ class EncoderCudaGraphManager:
                     outputs.extend(chunk_out)
             return outputs
 
-        total_tokens = sum(
-            (t * (h // spatial_merge_size) * (w // spatial_merge_size))
-            for t, h, w in grid_thw_list
-        )
+        total_tokens = _count_output_tokens(grid_thw_list, spatial_merge_size)
 
         token_budget = self._find_budget_graph(total_tokens)
         if token_budget is None:
