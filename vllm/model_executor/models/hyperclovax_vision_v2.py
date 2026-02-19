@@ -475,7 +475,7 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
         # Text config
         text_config = config.text_config
-        if text_config.model_type in ["gpt2", "hyperclovax", "llama"]:
+        if text_config.model_type == "hyperclovax":
             text_config._attn_implementation = "sdpa"
         if text_config.model_type != "hyperclovax":
             text_config.logits_scaling = 1.0
