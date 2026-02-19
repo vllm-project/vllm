@@ -68,8 +68,6 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-once = False
-once_get_finished = False
 try:
     from mori.io import (
         BackendType,
@@ -757,7 +755,6 @@ class MoRIIOConnectorWorker:
         self.backend_name = backend.get_name()
 
         logger.debug("Detected attention backend %s", self.backend_name)
-
     def schedule_write_blocks(
         self,
         request_id: ReqId,
