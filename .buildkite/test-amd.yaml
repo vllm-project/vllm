@@ -549,7 +549,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s -m samplers
+    - pytest -v -s samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
@@ -2177,7 +2177,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s -m samplers
+    - pytest -v -s samplers
 
 - label: LoRA Test %N # 20min each
   timeout_in_minutes: 30
