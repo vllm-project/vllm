@@ -172,6 +172,14 @@ class FixFunctionalizationPass(VllmInductorPass):
                     2: "key",
                 }
                 self.defunctionalize(graph, node, mutated_args=mutated_args)
+            # only used for test_functionalization::TestFunctionWithMutatedArgsAndReturn
+            elif (
+                hasattr(torch.ops.vllm, "function_with_mutated_args_and_return")
+                and at_target
+                == torch.ops.vllm.function_with_mutated_args_and_return.default
+            ):
+                mutated_args = {1: "x"}
+                self.defunctionalize(graph, node, mutated_args=mutated_args)
             else:
                 continue  # skip the count
 
