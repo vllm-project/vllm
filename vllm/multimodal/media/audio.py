@@ -4,18 +4,17 @@ import base64
 from io import BytesIO
 from pathlib import Path
 
+import av
+import librosa
 import numpy as np
 import numpy.typing as npt
 import pybase64
+import soundfile
 import torch
 
 from vllm.utils.serial_utils import tensor2base64
 
 from .base import MediaIO
-
-import av
-import librosa
-import soundfile
 
 
 def extract_audio_from_video_bytes(
@@ -66,9 +65,7 @@ def extract_audio_from_video_bytes(
         audio = np.concatenate(chunks).astype(np.float32)
 
     if sr is not None and sr != native_sr:
-        audio = librosa.resample(
-            audio, orig_sr=float(native_sr), target_sr=float(sr)
-        )
+        audio = librosa.resample(audio, orig_sr=float(native_sr), target_sr=float(sr))
         return audio, float(sr)
 
     return audio, float(native_sr)

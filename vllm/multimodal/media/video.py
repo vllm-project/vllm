@@ -64,10 +64,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
             )
 
             return np.stack(
-                [
-                    np.asarray(load_frame(frame_data))
-                    for frame_data in data.split(",")
-                ]
+                [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
             ), {}
 
         return self.load_bytes(base64.b64decode(data))
@@ -92,9 +89,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 image_format=video_format,
             )
 
-            return ",".join(
-                encode_frame(Image.fromarray(frame)) for frame in video
-            )
+            return ",".join(encode_frame(Image.fromarray(frame)) for frame in video)
 
         msg = "Only JPEG format is supported for now."
         raise NotImplementedError(msg)
