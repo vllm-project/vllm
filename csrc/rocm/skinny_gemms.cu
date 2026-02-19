@@ -46,28 +46,22 @@
 #endif
 
 int get_lds_size() {
-  static bool is_cached = false;
-  static int result;
-  if (is_cached == false) {
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    std::string device_arch = dprops->gcnArchName;
-    size_t substring = device_arch.find("gfx95");
-    result = (substring == std::string::npos ? 64 * 1024 : 160 * 1024);
-    is_cached = true;
-  }
+  static const int result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx95") == std::string::npos ? 64 * 1024
+                                                          : 160 * 1024;
+  }();
   return result;
 }
 
 bool on_gfx1x() {
-  static bool is_cached = false;
-  static bool result = false;
-  if (!is_cached) {
-    auto dprops = at::cuda::getCurrentDeviceProperties();
-    std::string device_arch = dprops->gcnArchName;
-    result = device_arch.find("gfx11") != std::string::npos ||
-             device_arch.find("gfx12") != std::string::npos;
-    is_cached = true;
-  }
+  static const bool result = [] {
+    const auto* dprops = at::cuda::getCurrentDeviceProperties();
+    const std::string device_arch = dprops->gcnArchName;
+    return device_arch.find("gfx11") != std::string::npos ||
+           device_arch.find("gfx12") != std::string::npos;
+  }();
   return result;
 }
 
