@@ -780,6 +780,7 @@ def test_mixtral_moe(
 @pytest.mark.parametrize(
     "flashinfer_backend", ["latency", "throughput"], ids=["trtllm", "cutlass"]
 )
+@torch.inference_mode()
 def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
     batch_size = 256
 
@@ -841,8 +842,7 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
                 quant_config=inner_vllm_config.quant_config,
                 parallel_config=inner_vllm_config.parallel_config,
             ).cuda()
-        for param in vllm_layer.state_dict().values():
-            initialize_single_dummy_weight(param, low=-3e-1, high=3e-1)
+        _initialize_nemotron_dummy_weights(vllm_layer, model_name)
 
         hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         hf_model = AutoModelForCausalLM.from_config(hf_config, trust_remote_code=True)
@@ -896,6 +896,40 @@ def _load_nemotron_vllm_weights_to_hf_model_fp8(vllm_layer, hf_layer):
         down_proj = down_proj * vllm_layer.shared_experts.down_proj.weight_scale
     hf_layer.shared_experts.up_proj.weight.data[:] = up_proj
     hf_layer.shared_experts.down_proj.weight.data[:] = down_proj
+
+
+def _initialize_nemotron_dummy_weights(vllm_layer, model_name: str) -> None:
+    for name, param in vllm_layer.named_parameters():
+        if model_name.endswith("NVFP4"):
+            if param.dtype == torch.uint8:
+                param.data.copy_(
+                    torch.randint(
+                        low=0,
+                        high=256,
+                        size=tuple(param.shape),
+                        dtype=torch.uint8,
+                        device=param.device,
+                    )
+                )
+                continue
+
+            if "input_scale" in name:
+                param.data.fill_(1.0)
+                continue
+
+            if "scale" in name:
+                # NVFP4 scales must be finite and non-zero for stable dequant.
+                param.data.copy_(
+                    (
+                        0.5
+                        + torch.rand_like(
+                            param, dtype=torch.float32, device=param.device
+                        )
+                    ).to(param.dtype)  # noqa: E501
+                )
+                continue
+
+        initialize_single_dummy_weight(param, low=-3e-1, high=3e-1)
 
 
 def _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, hf_layer):
