@@ -96,7 +96,7 @@ class TestFusedAddRMSNorm(torch.nn.Module):
 
     def forward(self, hidden_states, residual):
         # Reshape input
-        view = hidden_states.view(-1, self.hidden_size)
+        view = hidden_states.reshape(-1, self.hidden_size)
 
         # matrix multiplication
         permute = self.gate_proj.permute(1, 0)
@@ -109,7 +109,7 @@ class TestFusedAddRMSNorm(torch.nn.Module):
             # scaled_mm with static input quantization
             fp8_linear_result = self.fp8_linear(norm_output)
 
-            return view, permute, mm, norm_output, fp8_linear_result, residual_output
+            return fp8_linear_result, residual_output
 
         else:
             return norm_output, residual_output
@@ -332,3 +332,5 @@ def test_fix_functionalization(
                     found[op] = True
         assert all(found[op] for op in model.ops_in_model(do_fusion))
         assert all(not found.get(op) for op in model.ops_not_in_model())
+
+        # TODO (Rohan138): compare the outputs from model_func and model_no_func
