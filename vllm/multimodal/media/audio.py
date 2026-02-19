@@ -9,25 +9,13 @@ import numpy.typing as npt
 import pybase64
 import torch
 
-from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.serial_utils import tensor2base64
 
 from .base import MediaIO
 
-try:
-    import av
-except ImportError:
-    av = PlaceholderModule("av")  # type: ignore[assignment]
-
-try:
-    import librosa
-except ImportError:
-    librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
-
-try:
-    import soundfile
-except ImportError:
-    soundfile = PlaceholderModule("soundfile")  # type: ignore[assignment]
+import av
+import librosa
+import soundfile
 
 
 def extract_audio_from_video_bytes(

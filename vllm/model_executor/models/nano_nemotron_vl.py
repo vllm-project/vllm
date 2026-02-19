@@ -1475,10 +1475,6 @@ class NanoNemotronVLMultiModalProcessor(
 
         mm_data, audio_items = self._extract_audio_from_videos(mm_data)
 
-        if not isinstance(prompt, str):
-            tokenizer = self.info.get_tokenizer()
-            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
-
         for _ in audio_items:
             prompt = prompt.replace(
                 "<video>", "<video>" + AUDIO_CONTEXT, 1
