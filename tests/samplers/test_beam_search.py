@@ -27,7 +27,7 @@ EXTRA_ENGINE_KWARGS: dict = (
         max_num_seqs=1,
     )
     if current_platform.is_rocm()
-    else {}
+    else dict(async_scheduling=False, max_num_seqs=1)
 )
 
 # FIXME(zhuohan): The test can not pass if we:
