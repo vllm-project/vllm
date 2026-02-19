@@ -582,8 +582,8 @@ def current_stream() -> torch.cuda.Stream:
     return _current_stream_tls.value
 
 
-# Global auxilary stream for running operations in background streams.
-# We have single global auxilary stream to avoid an explosion of streams
+# Global auxiliary stream for running operations in background streams.
+# We have single global auxiliary stream to avoid an explosion of streams
 # for every layer (and make profiling look sane).
 #
 # aux_stream() is currently used for:
@@ -693,12 +693,18 @@ def get_accelerator_view_from_cpu_tensor(cpu_tensor: torch.Tensor) -> torch.Tens
     """
     Get an accelerator view of a CPU tensor using Unified Virtual Addressing (UVA).
     """
-    assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
     from vllm.platforms import current_platform
 
     if current_platform.is_xpu():
+        assert cpu_tensor.is_pinned(), "CPU tensor must be pinned"
         return torch.ops._C.get_xpu_view_from_cpu_tensor(cpu_tensor)
-    return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    elif current_platform.is_cuda() or current_platform.is_rocm():
+        return torch.ops._C.get_cuda_view_from_cpu_tensor(cpu_tensor)
+    else:
+        raise ValueError(
+            f"`get_accelerator_view_from_cpu_tensor` is currently "
+            f"not supported in: {current_platform.device_name}"
+        )
 
 
 # Helper function used in testing.

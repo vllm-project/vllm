@@ -293,6 +293,7 @@ set(VLLM_EXT_SRC
   "csrc/fused_qknorm_rope_kernel.cu"
   "csrc/layernorm_quant_kernels.cu"
   "csrc/sampler.cu"
+  "csrc/topk.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
@@ -768,6 +769,25 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
                      "in CUDA target architectures.")
     endif()
+  endif()
+
+  # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_FUSED_A_GEMM_ARCHS)
+    set(DSV3_FUSED_A_GEMM_SRC "csrc/dsv3_fused_a_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV3_FUSED_A_GEMM_SRC}"
+      CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC ${DSV3_FUSED_A_GEMM_SRC})
+    list(APPEND VLLM_GPU_FLAGS "-DENABLE_DSV3_FUSED_A_GEMM=1")
+    message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
+                   "in CUDA target architectures.")
   endif()
 
   # moe_data.cu is used by all CUTLASS MoE kernels.
