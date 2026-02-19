@@ -328,9 +328,9 @@ class Proxy:
         if instance_type == "decode" and instance in self.decode_instances:
             self.decode_instances.remove(instance)
             self.decode_cycler = itertools.cycle(self.decode_instances)
-        if instance_type == "prefill" and instance in self.decode_instances:
+        if instance_type == "prefill" and instance in self.prefill_instances:
             self.prefill_instances.remove(instance)
-            self.prefill_cycler = itertools.cycle(self.decode_instances)
+            self.prefill_cycler = itertools.cycle(self.prefill_instances)
 
 
 class RoundRobinSchedulingPolicy(SchedulingPolicy):
