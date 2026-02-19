@@ -9,6 +9,116 @@
 
 namespace vllm {
 
+struct alignas(32) u32x8_t {
+  uint32_t u0, u1, u2, u3, u4, u5, u6, u7;
+};
+
+// 256-bit vector loads require both sm_100+ and CUDA 12.9+
+#define VLLM_SUPPORTS_256BIT_VECTORS                  \
+  (defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
+   __CUDACC_VER_MAJOR__ >= 12 && __CUDACC_VER_MINOR__ >= 9)
+
+__device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
+#if VLLM_SUPPORTS_256BIT_VECTORS
+  asm volatile("ld.global.nc.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];\n"
+               : "=r"(val.u0), "=r"(val.u1), "=r"(val.u2), "=r"(val.u3),
+                 "=r"(val.u4), "=r"(val.u5), "=r"(val.u6), "=r"(val.u7)
+               : "l"(ptr));
+#else
+  const uint4* uint_ptr = reinterpret_cast<const uint4*>(ptr);
+  uint4 top_half = __ldg(&uint_ptr[0]);
+  uint4 bottom_half = __ldg(&uint_ptr[1]);
+  val.u0 = top_half.x;
+  val.u1 = top_half.y;
+  val.u2 = top_half.z;
+  val.u3 = top_half.w;
+  val.u4 = bottom_half.x;
+  val.u5 = bottom_half.y;
+  val.u6 = bottom_half.z;
+  val.u7 = bottom_half.w;
+#endif
+}
+
+__device__ __forceinline__ void st256(u32x8_t& val, u32x8_t* ptr) {
+#if VLLM_SUPPORTS_256BIT_VECTORS
+  asm volatile("st.global.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};\n"
+               :
+               : "l"(ptr), "r"(val.u0), "r"(val.u1), "r"(val.u2), "r"(val.u3),
+                 "r"(val.u4), "r"(val.u5), "r"(val.u6), "r"(val.u7)
+               : "memory");
+#else
+  uint4* uint_ptr = reinterpret_cast<uint4*>(ptr);
+  uint_ptr[0] = make_uint4(val.u0, val.u1, val.u2, val.u3);
+  uint_ptr[1] = make_uint4(val.u4, val.u5, val.u6, val.u7);
+#endif
+}
+
+template <bool support_256>
+struct VecTraits;
+
+template <>
+struct VecTraits<true> {
+  static constexpr int ARCH_MAX_VEC_SIZE = 32;
+  using vec_t = u32x8_t;
+};
+
+template <>
+struct VecTraits<false> {
+  static constexpr int ARCH_MAX_VEC_SIZE = 16;
+  using vec_t = int4;
+};
+
+template <typename T>
+struct PackedTraits;
+
+template <>
+struct PackedTraits<c10::BFloat16> {
+  using packed_t = __nv_bfloat162;
+};
+
+template <>
+struct PackedTraits<c10::Half> {
+  using packed_t = __half2;
+};
+
+template <>
+struct PackedTraits<float> {
+  using packed_t = float2;
+};
+
+template <typename packed_t>
+__device__ __forceinline__ float2 cast_to_float2(const packed_t& val) {
+  if constexpr (std::is_same_v<packed_t, __nv_bfloat162>) {
+    return __bfloat1622float2(val);
+  } else if constexpr (std::is_same_v<packed_t, __half2>) {
+    return __half22float2(val);
+  } else if constexpr (std::is_same_v<packed_t, float2>) {
+    return float2(val);
+  }
+}
+
+template <typename packed_t>
+__device__ __forceinline__ packed_t cast_to_packed(const float2& val) {
+  if constexpr (std::is_same_v<packed_t, __nv_bfloat162>) {
+    return __float22bfloat162_rn(val);
+  } else if constexpr (std::is_same_v<packed_t, __half2>) {
+    return __float22half2_rn(val);
+  } else if constexpr (std::is_same_v<packed_t, float2>) {
+    return float2(val);
+  }
+}
+
+template <typename packed_t>
+__device__ __forceinline__ packed_t packed_mul(const packed_t& x,
+                                               const packed_t& y) {
+  if constexpr (std::is_same_v<packed_t, __nv_bfloat162> ||
+                std::is_same_v<packed_t, __half2>) {
+    return __hmul2(x, y);
+  } else if constexpr (std::is_same_v<packed_t, float2>) {
+    return make_float2(x.x * y.x, x.y * y.y);
+  }
+}
+
 template <typename scalar_t, scalar_t (*ACT_FN)(const scalar_t&),
           bool act_first>
 __device__ __forceinline__ scalar_t compute(const scalar_t& x,
