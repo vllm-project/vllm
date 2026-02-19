@@ -1155,9 +1155,7 @@ def causal_conv1d_update(
         if conv_state_indices is None:
             assert conv_state.size(0) >= batch
         else:
-            assert ((batch,) == conv_state_indices.shape) and (
-                conv_state_indices.max() < num_cache_lines
-            )
+            assert (batch,) == conv_state_indices.shape
 
         assert weight.stride(1) == 1  # Need this
 
