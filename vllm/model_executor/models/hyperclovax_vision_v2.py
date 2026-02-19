@@ -8,7 +8,6 @@ instead of CLIP/SigLIP used in V1.
 
 Supports:
 - HyperCLOVAX-SEED-Think-32B: Vision + Text
-- HyperCLOVAX-SEED-Omni-8B: Vision + Audio + Text
 """
 
 from collections.abc import Iterable, Mapping, Sequence
@@ -288,7 +287,6 @@ class HCXVisionV2MultiModalProcessor(
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
 
         # Build data dict for HF processor (images/videos only)
-        # The HF processor (HCXVisionV2Processor) doesn't support audio
         # NOTE: We pass the prompt as-is without token normalization.
         # Token expansion is handled by vLLM via _get_prompt_updates since
         # _hf_processor_applies_updates returns False.
@@ -440,7 +438,6 @@ class HCXVisionV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     Supports:
     - HyperCLOVAX-SEED-Think-32B: Vision + Text
-    - HyperCLOVAX-SEED-Omni-8B: Vision + Audio + Text
 
     Uses Qwen2.5 Vision Transformer as the vision encoder.
     """

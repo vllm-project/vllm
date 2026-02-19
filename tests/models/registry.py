@@ -769,9 +769,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "HCXVisionV2ForCausalLM": _HfExamplesInfo(
         "naver-hyperclovax/HyperCLOVAX-SEED-Think-32B",
-        extras={
-            "llama-text-backend": "naver-hyperclovax/HyperCLOVAX-SEED-Omni-8B",
-        },
         trust_remote_code=True,
     ),
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
