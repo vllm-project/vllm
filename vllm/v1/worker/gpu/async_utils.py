@@ -27,7 +27,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.num_sampled_tokens = num_sampled_tokens
         self.copy_event = copy_event
 
-        with switch_stream(copy_stream, main_stream):
+        with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
 
             self.sampled_token_ids = async_copy_to_np(sampler_output.sampled_token_ids)
@@ -75,9 +75,9 @@ def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
 
 
 @contextlib.contextmanager
-def switch_stream(to_stream: torch.cuda.Stream, from_stream: torch.cuda.Stream):
-    """Lightweight version of torch.cuda.stream() context manager, which
-    avoids current stream and device lookups.
+def stream(to_stream: torch.cuda.Stream, from_stream: torch.cuda.Stream):
+    """Lightweight version of torch.cuda.stream() context manager which
+    avoids current_stream and device lookups.
     """
     try:
         torch.cuda.set_stream(to_stream)
