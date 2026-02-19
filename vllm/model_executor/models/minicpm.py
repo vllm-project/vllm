@@ -175,7 +175,7 @@ class MiniCPMMoE(nn.Module):
         )
 
         final_hidden_states = fused_experts(
-            hidden_states, self.ws, self.w2s, topk_weights, topk_ids, inplace=True
+            hidden_states, self.ws, self.w2s, topk_weights, topk_ids, inplace=False
         )
 
         if self.tp_size > 1:

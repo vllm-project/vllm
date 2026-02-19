@@ -8,7 +8,7 @@ clean_docker_tag() {
 }
 
 print_usage_and_exit() {
-    echo "Usage: $0 <registry> <repo> <commit> <branch> <vllm_use_precompiled> <vllm_merge_base_commit> <cache_from> <cache_to>"
+    echo "Usage: $0 <registry> <repo> <commit> <branch> <image_tag> [<image_tag_latest>]"
     exit 1
 }
 
@@ -151,7 +151,7 @@ print_bake_config() {
     docker buildx bake -f "${VLLM_BAKE_FILE_PATH}" -f "${CI_HCL_PATH}" --print "${TARGET}" | tee "${BAKE_CONFIG_FILE}" || true
     echo "Saved bake config to ${BAKE_CONFIG_FILE}"
     echo "--- :arrow_down: Uploading bake config to Buildkite"
-    buildkite-agent artifact upload "${BAKE_CONFIG_FILE}"
+    (cd "$(dirname "${BAKE_CONFIG_FILE}")" && buildkite-agent artifact upload "$(basename "${BAKE_CONFIG_FILE}")")
 }
 
 #################################
@@ -159,7 +159,7 @@ print_bake_config() {
 #################################
 print_instance_info
 
-if [[ $# -lt 7 ]]; then
+if [[ $# -lt 5 ]]; then
     print_usage_and_exit
 fi
 
@@ -168,10 +168,8 @@ REGISTRY=$1
 REPO=$2
 BUILDKITE_COMMIT=$3
 BRANCH=$4
-VLLM_USE_PRECOMPILED=$5
-VLLM_MERGE_BASE_COMMIT=$6
-IMAGE_TAG=$7
-IMAGE_TAG_LATEST=${8:-} # only used for main branch, optional
+IMAGE_TAG=$5
+IMAGE_TAG_LATEST=${6:-} # only used for main branch, optional
 
 # build config
 TARGET="test-ci"
@@ -198,8 +196,6 @@ export CACHE_FROM
 export CACHE_FROM_BASE_BRANCH
 export CACHE_FROM_MAIN
 export CACHE_TO
-export VLLM_USE_PRECOMPILED
-export VLLM_MERGE_BASE_COMMIT
 
 # print args
 echo "--- :mag: Arguments"
@@ -207,8 +203,6 @@ echo "REGISTRY: ${REGISTRY}"
 echo "REPO: ${REPO}"
 echo "BUILDKITE_COMMIT: ${BUILDKITE_COMMIT}"
 echo "BRANCH: ${BRANCH}"
-echo "VLLM_USE_PRECOMPILED: ${VLLM_USE_PRECOMPILED}"
-echo "VLLM_MERGE_BASE_COMMIT: ${VLLM_MERGE_BASE_COMMIT}"
 echo "IMAGE_TAG: ${IMAGE_TAG}"
 echo "IMAGE_TAG_LATEST: ${IMAGE_TAG_LATEST}"
 
