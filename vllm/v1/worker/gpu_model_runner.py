@@ -5986,6 +5986,7 @@ class GPUModelRunner(
                 cache_dtype,
                 self.device,
                 kernel_block_sizes,
+                tp=self.vllm_config.parallel_config.tensor_parallel_size > 1,
             )
             self.cross_layer_groups = cross_layer_groups
         else:
