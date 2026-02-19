@@ -2,13 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Configuration for model weight offloading."""
 
-from typing import Any
-
 from pydantic import Field, model_validator
 from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
-from vllm.utils.hashing import safe_hash
 
 
 @config
@@ -78,18 +75,20 @@ class OffloadConfig:
 
     def compute_hash(self) -> str:
         """
-        WARNING: Whenever a new field is added to this config,
-        ensure that it is included in the factors list if
-        it affects the computation graph.
+        Provide a hash that uniquely identifies all the offload configs.
 
-        Provide a hash that uniquely identifies all the configs
-        that affect the structure of the computation
-        graph from input ids/embeddings to the final hidden states,
-        excluding anything before input ids/embeddings and after
-        the final hidden states.
+        All fields are included because OffloaderV2 patches module
+        forwards and inserts custom ops (wait_prefetch, start_prefetch)
+        into the computation graph. Changing any offload setting can
+        alter which layers are hooked and how prefetch indices are
+        computed, so the compilation cache must distinguish them.
         """
-        # Offload settings don't affect the computation graph structure,
-        # only the memory layout and transfer patterns.
-        factors: list[Any] = []
-        hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
+        # OffloaderV2 (offload_group_size > 0) patches module forwards
+        # and inserts custom ops (wait_prefetch, start_prefetch) into the
+        # computation graph, so all offload settings must be part of the
+        # cache key to avoid stale compilation cache hits.
+        from vllm.config.utils import get_hash_factors, hash_factors
+
+        factors = get_hash_factors(self, ignored_factors=set())
+        hash_str = hash_factors(factors)
         return hash_str
