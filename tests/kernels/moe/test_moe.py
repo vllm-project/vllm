@@ -23,6 +23,7 @@ from tests.kernels.moe.utils import (
     make_dummy_moe_config,
     modular_triton_fused_moe,
 )
+from tests.kernels.quantization.nvfp4_utils import dequantize_nvfp4_to_dtype
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -61,10 +62,6 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize,
     marlin_quantize,
 )
-from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
-    dequantize_to_dtype,
-)
-from vllm.model_executor.layers.quantization.utils.nvfp4_utils import swizzle_blockscale
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
 from vllm.model_executor.model_loader.weight_utils import (
     get_quant_config,
@@ -946,42 +943,42 @@ def _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, hf_layer):
     )
 
     for i in range(vllm_layer.experts.w13_weight.shape[0]):
-        w13 = dequantize_to_dtype(
+        w13 = dequantize_nvfp4_to_dtype(
             tensor_fp4=vllm_layer.experts.w13_weight[i],
-            tensor_sf=swizzle_blockscale(vllm_layer.experts.w13_weight_scale[i]),
+            tensor_sf=vllm_layer.experts.w13_weight_scale[i],
             global_scale=_inv(vllm_layer.experts.w13_weight_scale_2[i].reshape(-1)[0]),
             dtype=torch.float32,
             device=vllm_layer.experts.w13_weight.device,
+            is_sf_128x4_layout=False,
         )
-        w2 = dequantize_to_dtype(
+        w2 = dequantize_nvfp4_to_dtype(
             tensor_fp4=vllm_layer.experts.w2_weight[i],
-            tensor_sf=swizzle_blockscale(vllm_layer.experts.w2_weight_scale[i]),
+            tensor_sf=vllm_layer.experts.w2_weight_scale[i],
             global_scale=_inv(vllm_layer.experts.w2_weight_scale_2[i].reshape(-1)[0]),
             dtype=torch.float32,
             device=vllm_layer.experts.w2_weight.device,
+            is_sf_128x4_layout=False,
         )
         hf_layer.experts[i].up_proj.weight.data[:] = w13
         hf_layer.experts[i].down_proj.weight.data[:] = w2
 
-    up_proj = dequantize_to_dtype(
+    up_proj = dequantize_nvfp4_to_dtype(
         tensor_fp4=vllm_layer.shared_experts.up_proj.weight.data,
-        tensor_sf=swizzle_blockscale(
-            vllm_layer.shared_experts.up_proj.weight_scale.data
-        ),
+        tensor_sf=vllm_layer.shared_experts.up_proj.weight_scale.data,
         global_scale=_inv(vllm_layer.shared_experts.up_proj.weight_scale_2.data.max()),
         dtype=torch.float32,
         device=vllm_layer.shared_experts.up_proj.weight.device,
+        is_sf_128x4_layout=False,
     )
-    down_proj = dequantize_to_dtype(
+    down_proj = dequantize_nvfp4_to_dtype(
         tensor_fp4=vllm_layer.shared_experts.down_proj.weight.data,
-        tensor_sf=swizzle_blockscale(
-            vllm_layer.shared_experts.down_proj.weight_scale.data
-        ),
+        tensor_sf=vllm_layer.shared_experts.down_proj.weight_scale.data,
         global_scale=_inv(
             vllm_layer.shared_experts.down_proj.weight_scale_2.data.max()
         ),
         dtype=torch.float32,
         device=vllm_layer.shared_experts.down_proj.weight.device,
+        is_sf_128x4_layout=False,
     )
     hf_layer.shared_experts.up_proj.weight.data[:] = up_proj
     hf_layer.shared_experts.down_proj.weight.data[:] = down_proj
