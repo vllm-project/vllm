@@ -183,7 +183,7 @@ docker run \
     -v ~/.cache/huggingface:/root/.cache/huggingface \
     -p 8000:8000 \
     --env "HF_TOKEN=<secret>" \
-    vllm/vllm-openai-cpu:latest <args...>
+vllm/vllm-openai-cpu:latest-x86_64 <args...>
 ```
 
 !!! warning
