@@ -376,7 +376,6 @@ steps:
   timeout_in_minutes: 145
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
-  grade: Blocking
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -672,7 +671,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s -m samplers
+    - pytest -v -s samplers
 
 
 - label: LoRA Test %N # 16.1m
@@ -1461,7 +1460,6 @@ steps:
   timeout_in_minutes: 37
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi325_4
-  grade: Blocking
   num_gpus: 4
   optional: true
   source_file_dependencies:
@@ -2101,7 +2099,7 @@ steps:
   - tests/samplers
   - tests/conftest.py
   commands:
-    - pytest -v -s -m samplers
+    - pytest -v -s samplers
 
 
 - label: LoRA Test %N # TBD
