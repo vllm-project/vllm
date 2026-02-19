@@ -329,9 +329,6 @@ class MoRIIOConnectorScheduler:
             )
             self.paths[path] = sock
 
-        print(
-            f"[{time.time()}] send_notify_block:block_notify_list={block_notify_list}"
-        )
         data = {
             "req_id": req_id,
             "transfer_id": transfer_id,
@@ -419,8 +416,6 @@ class MoRIIOConnectorScheduler:
         scheduler_output: SchedulerOutput,
     ) -> KVConnectorMetadata:
         meta = MoRIIOConnectorMetadata()
-        print(f"build_connector_meta:scheduler_output={vars(scheduler_output)}")
-        print(f"build_connector_meta:transfer_id_to_request_id={self.transfer_id_to_request_id}")
         meta.transfer_id_to_request_id=self.transfer_id_to_request_id
 
         if self.mode == MoRIIOMode.WRITE:
@@ -528,7 +523,6 @@ class MoRIIOConnectorScheduler:
         should be freed now or will be sent asynchronously and freed later.
         """
 
-        print(f"request_finished:request_id={request.request_id}")
         request_id = request.request_id
         transfer_id = self.request_id_to_transfer_id[request_id]
         del self.transfer_id_to_request_id[transfer_id]
@@ -628,9 +622,6 @@ class MoRIIOConnectorWorker:
         self.http_port = self.moriio_config.http_port
         self.handshake_port = self.moriio_config.handshake_port
         self.notify_port = self.moriio_config.notify_port
-        print(
-            f"[{time.time()}] MoRIIOConnectorWorker:__init__:self.notify_port={self.notify_port}"
-        )
 
         self.zmq_context = zmq.Context()
         self.metadata_address = (
@@ -960,9 +951,6 @@ class MoRIIOConnectorWorker:
                     sock.send_multipart((identity, b"", buf))
                 elif msg == MoRIIOConstants.POP_DONE_RECV:
                     _, req_id = sock.recv_multipart()
-                    print(
-                        f"[{time.time()}] _moriio_handshake_listener(935):req_id={req_id}"
-                    )
                     logger.debug(
                         "MoRIIO handshake listener received done recv for req",
                         req_id.decode(),
@@ -991,14 +979,8 @@ class MoRIIOConnectorWorker:
         # Send query for the request.
         with zmq_ctx(zmq.DEALER, path) as sock:
             logger.debug("prepare send msg INSTAZNCE: %s", path)
-            print(
-                f"[{time.time()}] _moriio_handshake:send -> ({MoRIIOConstants.GET_META_MSG})"
-            )
             sock.send(MoRIIOConstants.GET_META_MSG)
             received_frame = sock.recv_multipart()
-            print(
-                f"[{time.time()}] _moriio_handshake(966):received_frame={received_frame}"
-            )
             if len(received_frame) != 2 or received_frame[0] != b"":
                 raise HandshakeError(f"Unexpected frame! {received_frame = }")
 
@@ -1040,9 +1022,6 @@ class MoRIIOConnectorWorker:
                 self.remote_kv_cache_metadata = []
 
             received_frame = sock.recv_multipart()
-            print(
-                f"[{time.time()}] _moriio_handshake(1008):received_frame={received_frame}"
-            )
             if len(received_frame) != 2 or received_frame[0] != b"":
                 raise HandshakeError(f"unexpected frame! {received_frame = }")
             buf = received_frame[1]
@@ -1238,8 +1217,6 @@ class MoRIIOConnectorWorker:
             else:
                 done_recving = self._pop_done_transfers()
 
-        print(f"get_finished:transfer_id_to_request_id={self.transfer_id_to_request_id}")
-        print(f"get_finished:done_recving={done_recving}")
         done_recving = set(map(lambda id: self.transfer_id_to_request_id[id], done_recving))
 
         return done_sending, done_recving
@@ -1322,7 +1299,6 @@ class MoRIIOConnectorWorker:
         Start loading by triggering non-blocking moriio_xfer.
         We check for these trnxs to complete in each step().
         """
-        print(f"start_load_kv:metadata={metadata}")
         self.transfer_id_to_request_id=metadata.transfer_id_to_request_id
         if self.is_producer:
             self.moriio_wrapper.async_wait_reqid()

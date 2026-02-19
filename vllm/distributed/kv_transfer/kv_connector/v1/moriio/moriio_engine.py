@@ -137,7 +137,6 @@ class MoRIIOWriter:
 
             # Execute the task
 
-            print(f"[{time.time()}] _write_worker_loop:_execute_write:task={task}")
             self._execute_write_task(task)
 
     def _process_deferred_tasks(self) -> None:
@@ -487,7 +486,6 @@ class MoRIIOWrapper:
 
     def async_wait_reqid(self):
         assert self.notify_port is not None, "Notify port cannot be None"
-        print(f"[{time.time()}] async_wait_reqid:self.notify_port={self.notify_port}")
 
         if self.notify_thread is not None:
             return
@@ -497,13 +495,10 @@ class MoRIIOWrapper:
             path = make_zmq_path("tcp", host, self.notify_port)
             logger.info("Node starting to listen notify from path = %s", path)
 
-            print(f"[{time.time()}] _async_wait:path={path}")
             with zmq_ctx(zmq.ROUTER, path) as sock:
-                print(f"[{time.time()}] _async_wait:sock={sock}")
                 while True:
                     try:
                         identity, msg = sock.recv_multipart()
-                        print(f"[{time.time()}] _async_wait(498):recv:msg={msg}")
                         self._handle_message(msg)
                     except Exception as e:
                         logger.error("Error processing message: %s", e)
@@ -525,7 +520,6 @@ class MoRIIOWrapper:
         handled = False
         try:
             data = msgpack.loads(msg)
-            print(f"_handle_message:data={data}")
             if isinstance(data, dict) and "req_id" in data:
                 self._handle_structured_message(data)
 
@@ -536,7 +530,6 @@ class MoRIIOWrapper:
 
         try:
             msg_str = msg.decode("UTF-8")
-            print(f"[{time.time()}] msg_str={msg_str}")
             if msg_str.startswith(MoRIIOConstants.TRANSFER_PREFIX):
                 self._handle_completion_message(msg_str)
                 handled = True
@@ -549,8 +542,6 @@ class MoRIIOWrapper:
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
         req_id = data["req_id"]
         transfer_id = data["transfer_id"]
-        print(f"[{time.time()}:_handle_structured_message:req_id={req_id}")
-        print(f"[{time.time()}:_handle_structured_message:data={data}")
         block_notify_list = data.get("block_notify_list", [])
         decode_dp_rank = data.get("decode_rank", 0)
         assert len(block_notify_list) > 0, (
@@ -563,7 +554,6 @@ class MoRIIOWrapper:
             )
 
     def _handle_completion_message(self, msg: str):
-        print(f"_handle_completion_message:msg={msg}")
         with self.lock:
             if get_role() == ROLE.PRODUCER:
                 self.done_req_ids.append(msg)
@@ -587,7 +577,6 @@ class MoRIIOWrapper:
         req_list = req_ids if isinstance(req_ids, list) else [req_ids]
 
         sock = self.paths[path]
-        print(f"send_notify:path={path}")
         try:
             for req_id in req_list:
                 if not isinstance(req_id, str):
@@ -595,7 +584,6 @@ class MoRIIOWrapper:
                         "Invalid req_id type: %s, expected str", type(req_id)
                     )
                     continue
-                print(f"[{time.time()}] send_notify:send:req_id={req_id}")
                 sock.send(req_id.encode("utf-8"))
         except Exception as e:
             logger.error("Failed to send notification to %s: %s", path, e)
