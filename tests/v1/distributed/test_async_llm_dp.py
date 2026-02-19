@@ -18,7 +18,7 @@ from vllm.outputs import RequestOutput
 from vllm.platforms import current_platform
 from vllm.sampling_params import RequestOutputKind
 from vllm.v1.engine.async_llm import AsyncLLM
-from vllm.v1.engine.core_client import DPAsyncMPClient, DPLBAsyncMPClient
+from vllm.v1.engine.core_client import DPAsyncMPClient
 from vllm.v1.metrics.loggers import StatLoggerBase
 from vllm.v1.metrics.stats import IterationStats, MultiModalCacheStats, SchedulerStats
 
@@ -214,8 +214,6 @@ def _get_dp_pause_engine_args(expert_parallel: bool) -> AsyncEngineArgs:
 @pytest.mark.parametrize("expert_parallel", [False, True])
 async def test_dp_pause_resume_basic(expert_parallel: bool):
     """Pausing from the client (one call) pauses all DP ranks; resume clears it."""
-    if current_platform.is_rocm():
-        pytest.skip("DP pause tests use mp backend only")
     with ExitStack() as after:
         engine_args = _get_dp_pause_engine_args(expert_parallel)
         engine = AsyncLLM.from_engine_args(engine_args)
@@ -242,8 +240,6 @@ async def test_dp_pause_resume_basic(expert_parallel: bool):
 @pytest.mark.parametrize("expert_parallel", [False, True])
 async def test_dp_pause_abort(expert_parallel: bool):
     """Pause with abort from one client aborts in-flight requests on all DP ranks."""
-    if current_platform.is_rocm():
-        pytest.skip("DP pause tests use mp backend only")
     with ExitStack() as after:
         engine_args = _get_dp_pause_engine_args(expert_parallel)
         engine = AsyncLLM.from_engine_args(engine_args)
@@ -297,8 +293,6 @@ async def test_dp_pause_abort(expert_parallel: bool):
 @pytest.mark.parametrize("expert_parallel", [False, True])
 async def test_dp_pause_keep_then_resume(expert_parallel: bool):
     """Start generation, pause after a few tokens (keep mode), resume; verify gap."""
-    if current_platform.is_rocm():
-        pytest.skip("DP pause tests use mp backend only")
 
     pause_duration = 2.0
     min_tokens_before_pause = 3
@@ -355,8 +349,6 @@ async def test_dp_pause_keep_race_staggered_engines():
     """Race: send pause(keep) to engine 0, then add two requests,
     then pause(keep) to engine 1. Ensures no deadlock when pause
     requests are staggered and requests arrive in between."""
-    if current_platform.is_rocm():
-        pytest.skip("DP pause tests use mp backend only")
     if DP_SIZE != 2:
         pytest.skip("test_dp_pause_keep_race_staggered_engines requires DP_SIZE=2")
 
@@ -366,8 +358,6 @@ async def test_dp_pause_keep_race_staggered_engines():
         after.callback(engine.shutdown)
 
         client = engine.engine_core
-        if not isinstance(client, DPLBAsyncMPClient) or len(client.core_engines) != 2:
-            pytest.skip("need DPLBAsyncMPClient with 2 engines")
 
         original_call_utility = client.call_utility_async
         mid_pause_tasks: list[asyncio.Task] = []
