@@ -226,8 +226,9 @@ class EncoderCudaGraphManager:
         Returns:
             Encoder outputs, or None if graph not captured.
         """
+        num_images = len(grid_thw_list)
         if token_budget not in self.budget_graphs:
-            self.graph_misses += 1
+            self.graph_misses += num_images
             return None
 
         graph_meta = self.budget_graphs[token_budget]
@@ -259,7 +260,7 @@ class EncoderCudaGraphManager:
 
         graph_meta.graph.replay()
 
-        self.graph_hits += 1
+        self.graph_hits += num_images
         return graph_meta.output_buffer
 
     def _execute_local(
@@ -270,6 +271,38 @@ class EncoderCudaGraphManager:
         """Execute encoder on local inputs using CUDA graph."""
         spatial_merge_size = self.vision_model.spatial_merge_size
         num_images = len(grid_thw_list)
+
+        # When the batch exceeds max_batch_size, split and process per chunk.
+        # Each chunk is processed recursively: CUDA graph when a token budget
+        # fits; eager when it does not.
+        if num_images > self.max_batch_size:
+            logger.debug(
+                "Encoder CUDA graph: %d images exceeds max_batch_size=%d, splitting",
+                num_images, self.max_batch_size,
+            )
+            outputs: list[torch.Tensor] = []
+            pixel_start = 0
+            for chunk_start in range(0, num_images, self.max_batch_size):
+                chunk_end = min(chunk_start + self.max_batch_size, num_images)
+                chunk_grid = grid_thw_list[chunk_start:chunk_end]
+                n_patches = sum(t * h * w for t, h, w in chunk_grid)
+                chunk_pv = pixel_values[pixel_start:pixel_start + n_patches]
+                pixel_start += n_patches
+                chunk_out = self._execute_local(chunk_pv, chunk_grid)
+                if chunk_out is None:
+                    # No budget fits this chunk — count per-image misses and run eager.
+                    self.graph_misses += len(chunk_grid)
+                    with torch.inference_mode():
+                        raw = self.vision_model(chunk_pv, chunk_grid)
+                    idx = 0
+                    for t, h, w in chunk_grid:
+                        n = t * (h // spatial_merge_size) * (w // spatial_merge_size)
+                        outputs.append(raw[idx:idx + n])
+                        idx += n
+                else:
+                    outputs.extend(chunk_out)
+            return outputs
+
         total_tokens = sum(
             (t * (h // spatial_merge_size) * (w // spatial_merge_size))
             for t, h, w in grid_thw_list
@@ -281,6 +314,7 @@ class EncoderCudaGraphManager:
                 "Encoder CUDA graph fallback to eager: no budget found for %d tokens from %d images",
                 total_tokens, num_images
             )
+            self.graph_misses += num_images
             return None
 
         waste_pct = (token_budget - total_tokens) / token_budget * 100
