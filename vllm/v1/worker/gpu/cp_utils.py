@@ -3,6 +3,7 @@
 import torch
 
 from vllm.triton_utils import tl, triton
+from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 def prepare_dcp_local_seq_lens(
@@ -32,6 +33,7 @@ def prepare_dcp_local_seq_lens(
     )
 
 
+@CachedKernel
 @triton.jit
 def _dcp_local_seq_lens_kernel(
     out_ptr,

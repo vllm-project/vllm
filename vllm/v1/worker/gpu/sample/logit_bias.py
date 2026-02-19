@@ -6,6 +6,7 @@ import torch
 from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 MAX_NUM_ALLOWED_TOKEN_IDS = 1024
 MAX_NUM_LOGIT_BIAS_TOKENS = 1024
@@ -144,6 +145,7 @@ class LogitBiasState:
         )
 
 
+@CachedKernel
 @triton.jit
 def _bias_kernel(
     logits_ptr,

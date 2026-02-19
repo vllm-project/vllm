@@ -5,8 +5,10 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
+from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
+@CachedKernel
 @triton.jit
 def _topk_log_softmax_kernel(
     output_ptr,
@@ -49,6 +51,7 @@ def _topk_log_softmax_kernel(
     tl.store(output_ptr + req_idx * topk + k_offset, o, mask=k_mask)
 
 
+@CachedKernel
 @triton.jit
 def _ranks_kernel(
     output_ptr,

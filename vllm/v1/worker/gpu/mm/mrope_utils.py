@@ -5,6 +5,7 @@ import torch
 from vllm.model_executor.models.interfaces import SupportsMRoPE
 from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
+from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 class MRopeState:
@@ -85,6 +86,7 @@ class MRopeState:
         )
 
 
+@CachedKernel
 @triton.jit
 def _prepare_mrope_positions_kernel(
     mrope_positions_ptr,

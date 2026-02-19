@@ -9,6 +9,7 @@ from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
 from vllm.v1.worker.gpu.states import RequestState
+from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 class PenaltiesState:
@@ -106,6 +107,7 @@ class PenaltiesState:
         )
 
 
+@CachedKernel
 @triton.jit
 def _penalties_kernel(
     logits_ptr,
@@ -223,6 +225,7 @@ def apply_penalties(
     )
 
 
+@CachedKernel
 @triton.jit
 def _bincount_kernel(
     idx_mapping_ptr,
