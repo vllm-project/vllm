@@ -507,12 +507,14 @@ class BaseRenderer(ABC, Generic[_T]):
                         f"got {len(uuid_items)} vs {len(data_items)}."
                     )
 
-                for i, item in enumerate(data_items):
-                    if item is None and uuid_items[i] is None:
-                        raise ValueError(
-                            f"multi_modal_data[{modality!r}][{i}] is empty but "
-                            f"multi_modal_uuids[{modality!r}][{i}] is missing."
-                        )
+                if len(uuid_items) > 0:
+                    for i, item in enumerate(data_items):
+                        if item is None and uuid_items[i] is None:
+                            raise ValueError(
+                                f"multi_modal_data[{modality!r}][{i}] is empty "
+                                f"but multi_modal_uuids[{modality!r}][{i}] is "
+                                f"missing."
+                            )
 
     def _process_mm_uuids(
         self,
@@ -560,8 +562,7 @@ class BaseRenderer(ABC, Generic[_T]):
 
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
-
-        mm_uuids = self._process_mm_uuids(
+        mm_uuid_items = self._process_mm_uuids(
             mm_data, mm_data_items, mm_uuid_items, mm_req_id
         )
 
@@ -690,10 +691,16 @@ class BaseRenderer(ABC, Generic[_T]):
         """Offload process_for_engine to the shared executor to avoid
         blocking the event loop during multimodal preprocessing.
 
-        Text-only prompts are processed directly on the event loop since
-        they only do lightweight dict creation.
+        Only active when ``--async-mm-input-processing`` is enabled.
+        Text-only prompts are always processed directly on the event loop
+        since they only do lightweight dict creation.
         """
-        if any(self._has_multimodal(p) for p in tok_prompts):
+        mm_config = self.model_config.multimodal_config
+        if (
+            mm_config
+            and mm_config.async_mm_input_processing
+            and any(self._has_multimodal(p) for p in tok_prompts)
+        ):
             return await make_async(
                 lambda: [self.process_for_engine(p, arrival_time) for p in tok_prompts],
                 executor=self._executor,
