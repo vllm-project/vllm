@@ -36,6 +36,7 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -979,15 +980,16 @@ class AsyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    async def pause_scheduler_async(self) -> None:
-        """Pause the scheduler, keeping requests frozen in queue.
-        Blocks until the EngineCore acknowledges the pause.
-        """
-        await self.call_utility_async("pause_scheduler")
+    async def pause_scheduler_async(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        await self.call_utility_async("pause_scheduler", mode, clear_cache)
 
     async def resume_scheduler_async(self) -> None:
-        """Resume the scheduler after a pause."""
         await self.call_utility_async("resume_scheduler")
+
+    async def is_scheduler_paused_async(self) -> bool:
+        return await self.call_utility_async("is_scheduler_paused")
 
     async def profile_async(
         self, is_start: bool = True, profile_prefix: str | None = None
@@ -1202,18 +1204,6 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
-
-    async def pause_scheduler_async(self) -> None:
-        """Pause the scheduler, keeping requests frozen in queue."""
-        raise NotImplementedError(
-            "pause_scheduler_async is not yet supported for data parallel"
-        )
-
-    async def resume_scheduler_async(self) -> None:
-        """Resume the scheduler after a pause."""
-        raise NotImplementedError(
-            "resume_scheduler_async is not yet supported for data parallel"
-        )
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):
