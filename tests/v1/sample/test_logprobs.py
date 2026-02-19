@@ -992,12 +992,6 @@ def test_spec_decode_logprobs(
     contention. Both use identical chunked prefill settings and eager
     mode to control for infrastructure differences.
 
-    On ROCm, the custom skinny GEMM kernels are non-deterministic
-    across LLM instantiations due to persistent workgroup scheduling
-    and wave-level shuffle reductions in gemm_kernels.cu. We disable
-    them here so that the test isolates spec decode correctness from
-    GEMM kernel non-determinism.
-
     Args:
         logprobs_mode: logprobs mode.
         model_setup: Tuple of (method, base model name,
