@@ -60,6 +60,8 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
       logitproc_loaded: server has loaded dummy logitproc if True
     """
 
+    llm_ref_kwargs = {k: v for k, v in kwargs.items() if k != "logits_processors"}
+
     # Create a vLLM instance and load custom logitproc
     llm_logitproc = LLM(
         model=MODEL_NAME,
@@ -68,7 +70,11 @@ def _run_test(kwargs: dict, logitproc_loaded: bool) -> None:
     )
 
     # Create a reference vLLM instance without custom logitproc
-    llm_ref = LLM(model=MODEL_NAME, gpu_memory_utilization=0.1)
+    llm_ref = LLM(
+        model=MODEL_NAME,
+        gpu_memory_utilization=0.1,
+        **llm_ref_kwargs,
+    )
 
     # Run inference with logitproc loaded
     outputs_logitproc = llm_logitproc.generate(prompts, sampling_params_list)
@@ -152,7 +158,7 @@ def test_custom_logitsprocs(monkeypatch, logitproc_source: CustomLogitprocSource
 
         # fork is required for workers to see entrypoint patch
         monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
-        _run_test({}, logitproc_loaded=True)
+        _run_test({"attention_backend": "TRITON_ATTN"}, logitproc_loaded=True)
         return
 
     kwargs: dict[str, list[str | type[LogitsProcessor]]] = {}
