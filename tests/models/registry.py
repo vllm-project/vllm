@@ -603,6 +603,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "OpsColQwen3Model": _HfExamplesInfo(
         "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
     ),
+    "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
+        "nvidia/nemotron-colembed-vl-4b-v2",
+    ),
     "SiglipModel": _HfExamplesInfo("google/siglip-base-patch16-224"),
     "PrithviGeoSpatialMAE": _HfExamplesInfo(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",

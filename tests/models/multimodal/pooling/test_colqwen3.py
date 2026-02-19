@@ -25,11 +25,13 @@ from ....conftest import VllmRunner
 MODELS = [
     "TomoroAI/tomoro-colqwen3-embed-4b",
     "OpenSearch-AI/Ops-Colqwen3-4B",
+    "nvidia/nemotron-colembed-vl-4b-v2",
 ]
 
 EMBED_DIMS = {
     "TomoroAI/tomoro-colqwen3-embed-4b": 320,
     "OpenSearch-AI/Ops-Colqwen3-4B": 2560,
+    "nvidia/nemotron-colembed-vl-4b-v2": 2560,
 }
 
 TEXT_QUERIES = [
