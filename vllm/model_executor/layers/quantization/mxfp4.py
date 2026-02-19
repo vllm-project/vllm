@@ -947,20 +947,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         if layer.enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
-        if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            assert self.moe_mk is not None
-
-            return self.moe_mk(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=layer.activation,
-                global_num_experts=layer.global_num_experts,
-                expert_map=layer.expert_map,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-            )
         assert _can_support_mxfp4(
             layer.use_grouped_topk,
             layer.topk_group,
@@ -979,6 +965,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         assert (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
             or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
+            or self.mxfp4_backend == Mxfp4Backend.MARLIN
         )
 
         assert self.moe_mk is not None
