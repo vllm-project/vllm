@@ -198,7 +198,10 @@ class CudaPlatformBase(Platform):
             cache_config.block_size = 16
             return
 
-        from vllm.config.vllm import get_layers_from_vllm_config
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
         from vllm.model_executor.layers.attention_layer_base import (
             AttentionLayerBase,
         )
@@ -213,7 +216,8 @@ class CudaPlatformBase(Platform):
 
         first_layer = next(iter(attn_layers.values()))
         backend_cls = first_layer.get_attn_backend()
-        preferred = backend_cls.get_preferred_block_size(16)
+        with set_current_vllm_config(vllm_config):
+            preferred = backend_cls.get_preferred_block_size(16)
         if preferred != 16:
             logger.info(
                 "Setting kv cache block size to %d for %s backend.",
