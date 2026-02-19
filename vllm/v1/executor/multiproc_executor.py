@@ -5,6 +5,7 @@ import os
 import pickle
 import queue
 import signal
+import threading
 import time
 import traceback
 import weakref
@@ -673,37 +674,21 @@ class WorkerProc:
         return cast(list[WorkerProcHandle], ready_proc_handles)
 
     def shutdown(self):
+        if self.rpc_broadcast_mq is not None:
+            self.rpc_broadcast_mq.shutdown()
+        if self.worker_response_mq is not None:
+            self.worker_response_mq.shutdown()
         self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
         destroy_model_parallel()
         destroy_distributed_environment()
 
-    @staticmethod
-    def worker_main(*args, **kwargs):
-        """Worker initialization and execution loops.
-        This runs a background process"""
+    def monitor_parent_death(self, death_pipe, shutdown_requested: threading.Event):
+        if death_pipe is None:
+            return
 
-        # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
-        shutdown_requested = False
-
-        def signal_handler(signum, frame):
-            nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
-                raise SystemExit()
-
-        # Either SIGTERM or SIGINT will terminate the worker
-        signal.signal(signal.SIGTERM, signal_handler)
-        signal.signal(signal.SIGINT, signal_handler)
-
-        worker = None
-        # tuple[Connection, Connection]
-        reader, ready_writer = kwargs.pop("ready_pipe")
-        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
-        shutdown = False
+        death_monitor = None
         # Start death monitoring thread if death_pipe is provided
         if death_pipe is not None:
 
@@ -714,14 +699,8 @@ class WorkerProc:
                 except EOFError:
                     # Parent process has exited, terminate this worker
                     logger.info_once("Parent process exited, terminating worker")
-                    nonlocal shutdown
-                    shutdown = True
-                    # Shut down message queues
-                    if worker is not None and worker.rpc_broadcast_mq is not None:
-                        worker.rpc_broadcast_mq.shutdown()
-                    if worker is not None and worker.worker_response_mq is not None:
-                        worker.worker_response_mq.shutdown()
-
+                    shutdown_requested.set()
+                    self.shutdown()
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
 
@@ -730,10 +709,37 @@ class WorkerProc:
             )
             death_monitor.start()
 
+    @staticmethod
+    def worker_main(*args, **kwargs):
+        """Worker initialization and execution loops.
+        This runs a background process"""
+
+        # Signal handler used for graceful termination.
+        # SystemExit exception is only raised once to allow this and worker
+        # processes to terminate without error
+        shutdown_requested = threading.Event()
+
+        def signal_handler(signum, frame):
+            nonlocal shutdown_requested
+            if not shutdown_requested.is_set():
+                shutdown_requested.set()
+                raise SystemExit()
+
+        # Either SIGTERM or SIGINT will terminate the worker
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+
+        worker = None
+        # tuple[Connection, Connection]
+        reader, ready_writer = kwargs.pop("ready_pipe")
+        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
+
         try:
             reader.close()
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
+
+            worker.monitor_parent_death(death_pipe, shutdown_requested)
 
             # Send READY once we know everything is loaded
             ready_writer.send(
@@ -762,7 +768,7 @@ class WorkerProc:
 
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
-            elif shutdown:
+            elif shutdown_requested.is_set():
                 logger.info("WorkerProc shutting down.")
             else:
                 logger.exception("WorkerProc failed.")
@@ -770,7 +776,7 @@ class WorkerProc:
             # The parent sends a SIGTERM to all worker processes if
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
-            shutdown_requested = True
+            shutdown_requested.set()
 
         finally:
             if ready_writer is not None:
