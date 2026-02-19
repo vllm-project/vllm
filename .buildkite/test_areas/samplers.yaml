@@ -18,4 +18,4 @@ steps:
       depends_on:
       - image-build-amd
       commands:
-      - pytest -v -s -m samplers
+      - pytest -v -s samplers
