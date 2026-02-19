@@ -2,8 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import mimetypes
+import warnings
+from functools import partial
 from collections import defaultdict
 from collections.abc import Generator, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from itertools import groupby
 from typing import TYPE_CHECKING, Any
 

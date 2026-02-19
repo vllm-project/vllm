@@ -61,7 +61,7 @@ def extract_audio_from_video_bytes(
     container.close()
 
     if not chunks:
-        audio = np.array([], dtype=np.float32)
+        raise ValueError("No audio found in the video.")
     else:
         audio = np.concatenate(chunks).astype(np.float32)
 
