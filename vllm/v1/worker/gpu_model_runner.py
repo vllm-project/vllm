@@ -3769,7 +3769,7 @@ class GPUModelRunner(
             propose_draft_token_ids(valid_sampled_token_ids)
 
         if self.speculative_config is not None:
-            self.clear_connector_metadata()
+            self.finalize_connector_and_clear()
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
