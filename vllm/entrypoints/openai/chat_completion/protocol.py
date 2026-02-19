@@ -15,7 +15,7 @@ from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnota
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
-from vllm.config.utils import replace as utils_replace
+from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -463,9 +463,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 self.structured_outputs = (
                     StructuredOutputsParams(**structured_outputs_kwargs)
                     if self.structured_outputs is None
-                    else utils_replace(
-                        self.structured_outputs, **structured_outputs_kwargs
-                    )
+                    else replace(self.structured_outputs, **structured_outputs_kwargs)
                 )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}

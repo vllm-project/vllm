@@ -39,7 +39,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
 
 from vllm import envs
-from vllm.config.utils import replace as utils_replace
+from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -468,7 +468,7 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                         and struct_out.all_non_structural_tag_constraints_none()
                     ):
-                        sampling_params.structured_outputs = utils_replace(
+                        sampling_params.structured_outputs = replace(
                             struct_out,
                             structural_tag=reasoning_parser.prepare_structured_tag(
                                 struct_out.structural_tag, self.tool_server
