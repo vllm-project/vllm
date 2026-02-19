@@ -630,14 +630,14 @@ class FusedMoE(CustomOp):
         #   - we are using eplb with non-default backend, because of correctness issues
         #   - we are using flashinfer with DP, since there nothing to gain
         #   - we are using marlin kernels
-        backend = self.moe_parallel_config.all2all_backend
-        self.use_overlapped = (
-            not (
-                (self.enable_eplb and backend != "allgather_reducescatter")
-                or self.moe_parallel_config.use_fi_all2allv_kernels
-            )
-            and self._shared_experts is not None
-        )
+        # backend = self.moe_parallel_config.all2all_backend
+        # self.use_overlapped = (
+        #    not (
+        #        (self.enable_eplb and backend != "allgather_reducescatter")
+        #        or self.moe_parallel_config.use_fi_all2allv_kernels
+        #    )
+        #    and self._shared_experts is not None
+        # )
 
         self.runner = self._init_runner()
 
@@ -650,8 +650,8 @@ class FusedMoE(CustomOp):
             moe_config=self.moe_config,
             router=self.router,
             routed_input_transform=self._routed_input_transform,
-            gate=self.gate,
-            shared_experts=self.shared_experts,
+            gate=self._gate,
+            shared_experts=self._shared_experts,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
@@ -694,14 +694,14 @@ class FusedMoE(CustomOp):
                     self,
                     self.quant_method,
                     prepare_finalize,
-                    self.shared_experts,
+                    self.runner.get_shared_experts(),  # XXXXXXXXXXXXXXXXX
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
 
-    @property
-    def shared_experts(self) -> torch.nn.Module | None:
-        return self._shared_experts if self.use_overlapped else None
+    # @property
+    # def shared_experts(self) -> torch.nn.Module | None:
+    #    return self._shared_experts if self.use_overlapped else None
 
     # TODO(bnell): is this needed?
     # @property
@@ -711,9 +711,9 @@ class FusedMoE(CustomOp):
 
     #    return extract_layer_index(self.layer_name)
 
-    @property
-    def gate(self) -> torch.nn.Module | None:
-        return self._gate if self.use_overlapped else None
+    # @property
+    # def gate(self) -> torch.nn.Module | None:
+    #    return self._gate if self.use_overlapped else None
 
     @property
     def tp_size(self):

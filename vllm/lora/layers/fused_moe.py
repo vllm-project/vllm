@@ -141,7 +141,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 self.base_layer.quant_method.select_gemm_impl(
                     prepare_finalize, self.base_layer
                 ),
-                self.base_layer.shared_experts,
+                self.base_layer.runner.get_shared_experts(),  # XXXXXXXXXXXXXXXXXXXX
             )
 
         if quant_config.use_mxfp4_w4a16:
@@ -585,9 +585,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
         return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
 
-    @property
-    def _shared_experts(self):
-        return self.base_layer._shared_experts
+    # @property
+    # def _shared_experts(self):
+    #    return self.base_layer._shared_experts
 
     @property
     def quant_method(self):
