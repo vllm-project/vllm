@@ -578,44 +578,44 @@ numpy==2.2.6
     #   tritonclient
     #   vocos
     #   xarray
-nvidia-cublas-cu13==13.1.0.3
+nvidia-cublas==13.1.0.3
     # via
     #   nvidia-cudnn-cu13
-    #   nvidia-cusolver-cu13
+    #   nvidia-cusolver
     #   torch
-nvidia-cuda-cupti-cu13==13.0.85
+nvidia-cuda-cupti==13.0.85
     # via torch
-nvidia-cuda-nvrtc-cu13==13.0.88
+nvidia-cuda-nvrtc==13.0.88
     # via torch
-nvidia-cuda-runtime-cu13==13.0.96
+nvidia-cuda-runtime==13.0.96
     # via torch
 nvidia-cudnn-cu13==9.17.1.4
     # via torch
-nvidia-cufft-cu13==12.0.0.61
+nvidia-cufft==12.0.0.61
     # via torch
-nvidia-cufile-cu13==1.15.1.6
+nvidia-cufile==1.15.1.6
     # via torch
-nvidia-curand-cu13==10.4.0.35
+nvidia-curand==10.4.0.35
     # via torch
-nvidia-cusolver-cu13==12.0.4.66
+nvidia-cusolver==12.0.4.66
     # via torch
-nvidia-cusparse-cu13==12.6.3.3
+nvidia-cusparse==12.6.3.3
     # via
-    #   nvidia-cusolver-cu13
+    #   nvidia-cusolver
     #   torch
 nvidia-cusparselt-cu13==0.8.0
     # via torch
 nvidia-nccl-cu13==2.28.9
     # via torch
-nvidia-nvjitlink-cu13==13.0.88
+nvidia-nvjitlink==13.0.88
     # via
-    #   nvidia-cufft-cu13
-    #   nvidia-cusolver-cu13
-    #   nvidia-cusparse-cu13
+    #   nvidia-cufft
+    #   nvidia-cusolver
+    #   nvidia-cusparse
     #   torch
 nvidia-nvshmem-cu13==3.4.5
     # via torch
-nvidia-nvtx-cu13==13.0.85
+nvidia-nvtx==13.0.85
     # via torch
 omegaconf==2.3.0
     # via
