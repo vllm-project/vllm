@@ -1417,6 +1417,7 @@ class NanoNemotronVLMultiModalProcessor(
 
         target_sr = None
         if extractor := self.info.audio_extractor:
+            assert extractor is not None
             target_sr = extractor.sampling_rate
 
         audio_items: list[AudioItem] = []
@@ -1746,7 +1747,6 @@ class NanoNemotronVLDummyInputsBuilder(
             dummy_video = {}
 
         if extractor := self.info.audio_extractor:
-            assert extractor is not None
             num_audios = mm_counts.get("audio", 0)
             audio_overrides = mm_options.get("audio") if mm_options else None
             tokens_per_audio = max(1, seq_len // max(num_audios, 1))
