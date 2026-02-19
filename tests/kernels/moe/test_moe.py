@@ -770,7 +770,7 @@ def test_mixtral_moe(
     "model_name",
     [
         "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-FP8",
-        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+        "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4",
     ],
 )
 @pytest.mark.parametrize(
@@ -782,7 +782,7 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
     if not current_platform.has_device_capability(100):
         pytest.skip("Test is only supported for sm >= 100")
     if (
-        model_name == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16"
+        model_name == "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-NVFP4"
         and flashinfer_backend != "throughput"
     ):
         pytest.skip("BF16 model only supported with throughput backend")
@@ -790,8 +790,8 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
     monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "8192")
     if model_name.endswith("FP8"):
         monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP8", "1")
-    if model_name.endswith("BF16"):
-        monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP16", "1")
+    if model_name.endswith("NVFP4"):
+        monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", flashinfer_backend)
     init_distributed_environment(world_size=1, rank=0, local_rank=0)
     init_workspace_manager(torch.cuda.current_device())
