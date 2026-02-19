@@ -160,6 +160,8 @@ for output in outputs:
     print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
     print("-" * 50)
 
+ray.get(llm.sleep.remote(level=0))
+
 # Set up the communication channel between the training process and the
 # inference engine.
 master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
@@ -200,6 +202,8 @@ inference_handle = llm.update_weights.remote(
 # Broadcast all weights from trainer using the weight transfer API
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
+
+ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
 # Generate text with the updated model. The output is expected to be normal
 # because the weights are updated.

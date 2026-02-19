@@ -51,17 +51,37 @@ class IPCWeightTransferInitInfo(WeightTransferInitInfo):
 
 @dataclass
 class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
-    """Update info for IPC weight transfer backend."""
+    """Update info for IPC weight transfer backend.
+
+    Accepts IPC handles either directly via ``ipc_handles`` (Ray transport)
+    or as a base64-encoded pickle via ``ipc_handles_pickled`` (HTTP transport).
+    Exactly one of the two must be provided; if ``ipc_handles_pickled`` is set
+    it is unpickled into ``ipc_handles`` during ``__post_init__``.
+    """
 
     names: list[str]
     dtype_names: list[str]
     shapes: list[list[int]]
-    ipc_handles: list[dict[str, tuple[Callable, tuple]]]
+    ipc_handles: list[dict[str, tuple[Callable, tuple]]] | None = None
     """IPC handles mapping physical GPU UUID to (func, args) tuple.
     Each handle is a dictionary mapping GPU UUID strings to IPC handle tuples."""
+    ipc_handles_pickled: str | None = None
+    """Base64-encoded pickled IPC handles, used for HTTP transport."""
 
     def __post_init__(self):
-        """Validate that all lists have the same length."""
+        if self.ipc_handles_pickled is not None:
+            if self.ipc_handles is not None:
+                raise ValueError(
+                    "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
+                )
+            self.ipc_handles = pickle.loads(base64.b64decode(self.ipc_handles_pickled))
+            self.ipc_handles_pickled = None
+
+        if self.ipc_handles is None:
+            raise ValueError(
+                "Either `ipc_handles` or `ipc_handles_pickled` must be provided"
+            )
+
         num_params = len(self.names)
         if len(self.dtype_names) != num_params:
             raise ValueError(
@@ -107,32 +127,6 @@ class IPCWeightTransferEngine(
         """
         super().__init__(config, parallel_config)
 
-    def parse_update_info(self, update_dict: dict) -> IPCWeightTransferUpdateInfo:
-        """
-        Construct typed update info from dict with validation.
-
-        Supports both direct IPC handles and pickled IPC handles
-        (for HTTP transport). If 'ipc_handles_pickled' is present,
-        it will be unpickled and used as 'ipc_handles'.
-
-        Args:
-            update_dict: Dictionary containing backend-specific update parameters
-
-        Returns:
-            Typed backend-specific update info dataclass
-
-        Raises:
-            ValueError: If update_dict is invalid for this backend
-        """
-        # Handle pickled IPC handles (used for HTTP transport)
-        if "ipc_handles_pickled" in update_dict:
-            pickled_data = update_dict.pop("ipc_handles_pickled")
-            # Unpickle the IPC handles
-            ipc_handles = pickle.loads(base64.b64decode(pickled_data))
-            update_dict["ipc_handles"] = ipc_handles
-
-        return super().parse_update_info(update_dict)
-
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """
         Initialize the weight transfer mechanism.
@@ -159,6 +153,7 @@ class IPCWeightTransferEngine(
             load_weights: Callable that loads weights into the model. Called
                          incrementally for each weight to avoid OOM.
         """
+        assert update_info.ipc_handles is not None
         weights = []
         for name, _dtype_name, _shape, ipc_handle in zip(
             update_info.names,
@@ -180,9 +175,10 @@ class IPCWeightTransferEngine(
 
             func, args = handle
             list_args = list(args)  # type: ignore
-            # Index 6 is the device_index parameter in torch's IPC handle tuple
-            # (rebuild_cuda_tensor function signature). We need to update it to match
-            # the current device where we're reconstructing the tensor.
+            # Index 6 is the device_index parameter in torch's
+            # IPC handle tuple (rebuild_cuda_tensor). Update it
+            # to the current device since the logical index can
+            # differ between sender and receiver.
             list_args[6] = device_index
             weight = func(*list_args)  # type: ignore
             weights.append((name, weight))

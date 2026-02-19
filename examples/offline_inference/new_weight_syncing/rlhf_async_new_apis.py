@@ -227,7 +227,7 @@ generation_futures = [
 finished, pending = ray.wait(generation_futures, num_returns=1)
 
 # Pause generation in preparation for weight sync
-ray.get(llm.pause_generation.remote(wait_for_inflight_requests=False))
+ray.get(llm.pause_generation.remote(mode="abort"))
 
 # Synchronize the updated weights to the inference engine using batched API.
 # Collect all weight metadata from the training actor

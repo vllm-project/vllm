@@ -54,7 +54,7 @@ class NCCLTrainerSendWeightsArgs:
     """CUDA stream to use for broadcasting if packed is False.
     If packed is True, new streams will be created for each buffer."""
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
-    """Size in bytes for each packed tensor buffer. Default is 1GB.
+    """Size in bytes for each packed tensor buffer.
     Must match the value used in NCCLWeightTransferUpdateInfo."""
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     """Number of buffers for double/triple buffering during packed transfer.
@@ -73,7 +73,7 @@ class NCCLWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     When True, multiple tensors are batched together before broadcasting
     to reduce NCCL communication overhead."""
     packed_buffer_size_bytes: int = DEFAULT_PACKED_BUFFER_SIZE_BYTES
-    """Size in bytes for each packed tensor buffer. Default is 1GB.
+    """Size in bytes for each packed tensor buffer.
     Both producer and consumer must use the same value."""
     packed_num_buffers: int = DEFAULT_PACKED_NUM_BUFFERS
     """Number of buffers for double/triple buffering during packed transfer.
@@ -220,8 +220,7 @@ class NCCLWeightTransferEngine(
             iterator: Iterator of model parameters. Returns (name, tensor) tuples
             trainer_args: Dictionary or NCCLTrainerSendWeightsArgs instance containing
                          NCCL-specific arguments. If a dict, should contain keys from
-                         NCCLTrainerSendWeightsArgs. Note: 'group' and 'stream' fields
-                         contain non-serializable objects and should be passed directly.
+                         NCCLTrainerSendWeightsArgs.
 
         Example:
             >>> from vllm.distributed.weight_transfer.nccl_engine import (

@@ -57,7 +57,7 @@ MODEL_NAME = "facebook/opt-125m"
 
 @ray.remote
 class TrainModel:
-    def __init__(self, llm_handle: ray.ObjectRef):
+    def __init__(self, llm_handle: ray.actor.ActorHandle):
         self.train_model = AutoModelForCausalLM.from_pretrained(
             MODEL_NAME,
         )
@@ -66,9 +66,11 @@ class TrainModel:
 
     def init_weight_transfer(self):
         # IPC backend doesn't need initialization info
-        self.llm_handle.init_weight_transfer_engine.remote(dict(init_info=dict()))
+        ray.get(
+            self.llm_handle.init_weight_transfer_engine.remote(dict(init_info=dict()))
+        )
 
-    def broadcast_weights(self, llm_handle: ray.ObjectRef):
+    def broadcast_weights(self, llm_handle: ray.actor.ActorHandle):
         """Broadcast weights to the inference engine using IPC."""
         self.llm_handle = llm_handle
         trainer_args = IPCTrainerSendWeightsArgs(mode="ray", llm_handle=llm_handle)
@@ -78,7 +80,7 @@ class TrainModel:
         )
 
 
-ray.init(runtime_env={"excludes": [".git/objects/pack/"]})
+ray.init()
 
 pg_colocate = placement_group([{"GPU": 1, "CPU": 0}])
 ray.get(pg_colocate.ready())
@@ -129,12 +131,15 @@ for output in outputs:
     print(f"Prompt: {prompt!r}\nGenerated text: {generated_text!r}")
     print("-" * 50)
 
+ray.get(llm.sleep.remote(level=0))
+
 ray.get(train_model.init_weight_transfer.remote())
 # Synchronize the updated weights to the inference engine using batched API.
 ray.get(train_model.broadcast_weights.remote(llm))
 
-# Generate text with the updated model. The output is expected to be nonsense
-# because the weights are zero.
+ray.get(llm.wake_up.remote(tags=["scheduling"]))
+
+# Generate text with the updated model.
 outputs_updated = ray.get(llm.generate.remote(prompts, sampling_params))
 print("-" * 50)
 for output in outputs_updated:

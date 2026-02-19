@@ -38,6 +38,7 @@ CHECK_IMPORTS = {
             "vllm/distributed/device_communicators/shm_broadcast.py",
             "vllm/distributed/device_communicators/shm_object_storage.py",
             "vllm/distributed/weight_transfer/ipc_engine.py",
+            "tests/distributed/test_weight_transfer.py",
             "vllm/utils/hashing.py",
             "tests/multimodal/media/test_base.py",
             "tests/tokenizers_/test_hf.py",
