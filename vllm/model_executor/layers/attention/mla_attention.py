@@ -1269,13 +1269,12 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        block_size = cache_config.block_size
 
         chunked_prefill_workspace_size = min(
             # Try for 8 full length request or at least 4 pages per-request
             max(
                 8 * model_config.max_model_len,
-                4 * scheduler_config.max_num_seqs * block_size,
+                4 * scheduler_config.max_num_seqs * cache_config.block_size,
             ),
             # For long-context models try not to over-allocate limiting
             # kv-cache space, limiting it to 64k tokens,
@@ -1291,7 +1290,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         # Enforce that we enough for at least 1 page per request
         chunked_prefill_workspace_size = max(
             chunked_prefill_workspace_size,
-            scheduler_config.max_num_seqs * block_size,
+            scheduler_config.max_num_seqs * cache_config.block_size,
         )
 
         return chunked_prefill_workspace_size
