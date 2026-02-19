@@ -67,19 +67,31 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def maybe_get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
+        delay_clear: bool = False,
     ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
-            KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
+            KVConnectorModelRunnerMixin._get_kv_connector_output(
+                scheduler_output, delay_clear=delay_clear
+            )
             if has_kv_transfer_group()
             else nullcontext()
         )
+
+    @staticmethod
+    def clear_connector_metadata() -> None:
+        """Explicitly clear connector metadata. Use after draft model forward
+        when delay_clear=True was passed to maybe_get_kv_connector_output."""
+        if has_kv_transfer_group():
+            get_kv_transfer_group().clear_connector_metadata()
 
     # This context manager must be used within an active forward context.
     # It encapsulates the entire KV connector lifecycle within execute_model
     @staticmethod
     @contextmanager
     def _get_kv_connector_output(
-        scheduler_output: "SchedulerOutput", wait_for_save: bool = True
+        scheduler_output: "SchedulerOutput",
+        wait_for_save: bool = True,
+        delay_clear: bool = False,
     ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
 
@@ -108,7 +120,8 @@ class KVConnectorModelRunnerMixin:
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
 
-            kv_connector.clear_connector_metadata()
+            if not delay_clear:
+                kv_connector.clear_connector_metadata()
 
     @staticmethod
     def use_uniform_kv_cache(
