@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+import warnings
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -28,6 +29,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 
@@ -72,6 +74,33 @@ class InputProcessor:
             mm_registry=mm_registry,
         )
 
+        from vllm.platforms import current_platform
+
+        platform_validate_request = current_platform.validate_request
+        if supports_kw(platform_validate_request, "prompt"):
+            logger.warning_once(
+                "The signature of Platform.validate_request has changed from "
+                "`(cls, prompt, params, processed_inputs) -> None` to "
+                "`(cls, processed_inputs, params) -> None`. The old signature "
+                "will no longer be supported starting from v0.18."
+            )
+
+            orig_validate_request = platform_validate_request
+
+            def compat_validate_request(
+                processed_inputs: ProcessorInputs,
+                params: SamplingParams | PoolingParams,
+            ):
+                return orig_validate_request(
+                    processed_inputs,
+                    params,
+                    processed_inputs,  # type: ignore
+                )  # type: ignore
+
+            platform_validate_request = compat_validate_request
+
+        self._platform_validate_request = platform_validate_request
+
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.renderer.tokenizer
@@ -87,6 +116,16 @@ class InputProcessor:
         supported_tasks: tuple[SupportedTask, ...] | None,
     ):
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
+        if params.truncate_prompt_tokens is not None:
+            params_type = type(params).__name__
+            warnings.warn(
+                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
+                "is deprecated and will be removed in v0.17. "
+                "Please pass it via `tokenization_kwargs` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         if isinstance(params, SamplingParams):
             params.verify(
                 self.model_config,
@@ -211,11 +250,24 @@ class InputProcessor:
             )
 
         if isinstance(prompt, dict) and "type" in prompt:
+            if tokenization_kwargs:
+                logger.warning_once(
+                    "Passing tokenization_kwargs to InputProcessor is deprecated "
+                    "and will be removed in v0.18. You should instead pass "
+                    "them to Renderer.render_cmpl() or Renderer.render_chat()."
+                )
+
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
             processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
         else:
+            logger.warning_once(
+                "Passing raw prompts to InputProcessor is deprecated "
+                "and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+            )
+
             if arrival_time is None:
                 arrival_time = time.time()
 
@@ -224,13 +276,7 @@ class InputProcessor:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        from vllm.platforms import current_platform
-
-        current_platform.validate_request(
-            prompt=prompt,
-            params=params,
-            processed_inputs=processed_inputs,
-        )
+        self._platform_validate_request(processed_inputs, params)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)

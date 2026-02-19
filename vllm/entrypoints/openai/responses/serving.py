@@ -759,6 +759,19 @@ class OpenAIServingResponses(OpenAIServing):
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
+        # For text-based reasoning parsers (e.g., <think>...</think>),
+        # HarmonyContext already counts reasoning tokens via channels.
+        # For Simple/Parsable contexts, derive reasoning_tokens from
+        # accumulated output token IDs using the parser if not already set.
+        if (
+            num_reasoning_tokens == 0
+            and self.parser is not None
+            and self.parser.reasoning_parser_cls is not None
+            and isinstance(context, (SimpleContext, ParsableContext))
+        ):
+            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+            accumulated = getattr(context, "_accumulated_token_ids", []) or []
+            num_reasoning_tokens = reasoning_parser.count_reasoning_tokens(accumulated)
 
         usage = ResponseUsage(
             input_tokens=num_prompt_tokens,

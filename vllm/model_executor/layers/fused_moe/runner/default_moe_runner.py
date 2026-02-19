@@ -151,7 +151,7 @@ class DefaultMoERunner(MoERunner):
     kernels for different parallel execution modes.
 
     Eventually, this class will be split up and specialized for different
-    configurations, e.g. the presense or absence of shared experts, a gate, etc.
+    configurations, e.g. the presence or absence of shared experts, a gate, etc.
     """
 
     def __init__(
