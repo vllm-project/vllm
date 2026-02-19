@@ -114,9 +114,6 @@ class BaseRenderer(ABC, Generic[_T]):
         self._clear_mm_cache_async = make_async(
             self.clear_mm_cache, executor=self._executor
         )
-        self._process_for_engine_batch_async = make_async(
-            self._process_for_engine_batch, executor=self._mm_executor
-        )
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 
@@ -205,9 +202,8 @@ class BaseRenderer(ABC, Generic[_T]):
             executor.shutdown(wait=False)
 
         if (
-            (mm_executor := getattr(self, "_mm_executor", None)) is not None
-            and mm_executor is not executor
-        ):
+            mm_executor := getattr(self, "_mm_executor", None)
+        ) is not None and mm_executor is not executor:
             mm_executor.shutdown(wait=False)
 
     def get_bos_token_id(self) -> int | None:
@@ -667,6 +663,35 @@ class BaseRenderer(ABC, Generic[_T]):
             cache_salt=prompt.get("cache_salt"),
         )
 
+    async def _process_tokens_async(
+        self,
+        prompt: TokensPrompt,
+    ) -> "TokenInputs | MultiModalInputs":
+        prompt_token_ids = prompt["prompt_token_ids"]
+
+        inputs: TokenInputs | MultiModalInputs
+        if multi_modal_data := prompt.get("multi_modal_data"):
+            loop = asyncio.get_running_loop()
+            inputs = await loop.run_in_executor(
+                self._mm_executor,
+                lambda: self._process_multimodal(
+                    prompt_token_ids,
+                    multi_modal_data,
+                    mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                    tokenization_kwargs=None,
+                    mm_uuids=prompt.get("multi_modal_uuids"),
+                ),
+            )
+        else:
+            inputs = token_inputs(prompt_token_ids)
+
+        if prompt_text := prompt.get("prompt"):
+            inputs["prompt"] = prompt_text
+        if cache_salt := prompt.get("cache_salt"):
+            inputs["cache_salt"] = cache_salt
+
+        return inputs
+
     def _process_singleton(
         self,
         prompt: SingletonTokPrompt,
@@ -675,6 +700,15 @@ class BaseRenderer(ABC, Generic[_T]):
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
         return self._process_tokens(prompt)  # type: ignore[arg-type]
+
+    async def _process_singleton_async(
+        self,
+        prompt: SingletonTokPrompt,
+    ) -> SingletonInputs:
+        if "prompt_embeds" in prompt:
+            return self._process_embeds(prompt)  # type: ignore[arg-type]
+
+        return await self._process_tokens_async(prompt)  # type: ignore[arg-type]
 
     def _process_enc_dec(
         self,
@@ -687,6 +721,23 @@ class BaseRenderer(ABC, Generic[_T]):
             encoder_inputs=self._process_singleton(enc_prompt),
             decoder_inputs=(
                 None if dec_prompt is None else self._process_singleton(dec_prompt)
+            ),
+            decoder_start_token_id=self.get_dec_start_token_id(),
+        )
+
+    async def _process_enc_dec_async(
+        self,
+        prompt: EncoderDecoderTokPrompt,
+    ) -> EncoderDecoderInputs:
+        enc_prompt = prompt["encoder_prompt"]
+        dec_prompt = prompt["decoder_prompt"]
+
+        return build_enc_dec_inputs(
+            encoder_inputs=await self._process_singleton_async(enc_prompt),
+            decoder_inputs=(
+                None
+                if dec_prompt is None
+                else await self._process_singleton_async(dec_prompt)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
         )
@@ -704,34 +755,29 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return engine_prompt
 
-    def _has_multimodal(self, prompt: TokPrompt) -> bool:
-        """Check if a tokenized prompt contains multimodal data."""
-        target = extract_target_prompt(self.model_config, prompt)
-        return bool(target.get("multi_modal_data"))
-
-    def _process_for_engine_batch(
-        self,
-        tok_prompts: list[TokPrompt],
-        arrival_time: float,
-    ) -> list[ProcessorInputs]:
-        return [self.process_for_engine(p, arrival_time) for p in tok_prompts]
-
     async def _process_for_engine_async(
         self,
         tok_prompts: list[TokPrompt],
         arrival_time: float,
     ) -> list[ProcessorInputs]:
-        """Offload process_for_engine to the shared executor to avoid
-        blocking the event loop during multimodal preprocessing.
+        """Process prompts for the engine, offloading multimodal
+        preprocessing via ``self._mm_executor``.
 
-        When ``--async-mm-input-processing`` is enabled, multimodal requests
-        are offloaded to a real thread pool.  Otherwise, ``_mm_executor`` is
-        an inline executor so the call runs synchronously with no overhead.
+        When ``--async-mm-input-processing`` is enabled, ``_mm_executor``
+        is a real thread pool.  Otherwise it is an inline executor so the
+        call runs synchronously with no overhead.
         """
-        if any(self._has_multimodal(p) for p in tok_prompts):
-            return await self._process_for_engine_batch_async(tok_prompts, arrival_time)
-
-        return self._process_for_engine_batch(tok_prompts, arrival_time)
+        results: list[ProcessorInputs] = []
+        for prompt in tok_prompts:
+            if "encoder_prompt" in prompt:
+                engine_prompt: ProcessorInputs = await self._process_enc_dec_async(
+                    prompt  # type: ignore[arg-type]
+                )
+            else:
+                engine_prompt = await self._process_singleton_async(prompt)
+            engine_prompt["arrival_time"] = arrival_time
+            results.append(engine_prompt)
+        return results
 
     # Top-level methods
     def render_cmpl(
