@@ -241,3 +241,32 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
         serve_parser.parse_args(
             args=["--default-chat-template-kwargs", "not valid json"]
         )
+
+
+### Tests for LoRA target modules parsing
+def test_lora_target_modules_single(serve_parser):
+    """Test parsing single lora-target-modules argument"""
+    args = serve_parser.parse_args(
+        args=["--enable-lora", "--lora-target-modules", "o_proj"]
+    )
+    assert args.lora_target_modules == ["o_proj"]
+
+
+def test_lora_target_modules_multiple(serve_parser):
+    """Test parsing multiple lora-target-modules arguments"""
+    args = serve_parser.parse_args(
+        args=[
+            "--enable-lora",
+            "--lora-target-modules",
+            "o_proj",
+            "qkv_proj",
+            "down_proj",
+        ]
+    )
+    assert args.lora_target_modules == ["o_proj", "qkv_proj", "down_proj"]
+
+
+def test_lora_target_modules_default_none(serve_parser):
+    """Test that lora-target-modules defaults to None"""
+    args = serve_parser.parse_args(args=[])
+    assert args.lora_target_modules is None

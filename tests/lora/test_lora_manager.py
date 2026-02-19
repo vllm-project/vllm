@@ -711,3 +711,98 @@ def test_packed_loras(default_vllm_config, dist_init, dummy_model_gate_up, devic
     torch.testing.assert_close(
         packed_lora1.lora_b[1], model_lora_clone1.get_lora("up_proj").lora_b
     )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_config(default_vllm_config, dist_init, dummy_model, device):
+    """Test that target_modules config restricts which modules get LoRA applied."""
+    model = dummy_model
+
+    # Test with target_modules restricting to only dense1
+    _manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=2,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=["dense1"],
+        ),
+        device=device,
+    )
+
+    # Only dense1 modules should be replaced with LoRA layers
+    assert isinstance(model.get_submodule("dense1"), ColumnParallelLinearWithLoRA)
+    assert isinstance(
+        model.get_submodule("layer1.dense1"), ColumnParallelLinearWithLoRA
+    )
+    # dense2 should NOT be replaced (not in target_modules)
+    assert not isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
+    assert not isinstance(
+        model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA
+    )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_multiple(default_vllm_config, dist_init, dummy_model, device):
+    """Test that multiple target_modules work correctly."""
+    model = dummy_model
+
+    # Test with multiple target_modules
+    _manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=2,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=["dense1", "dense2"],
+        ),
+        device=device,
+    )
+
+    # Both dense1 and dense2 modules should be replaced with LoRA layers
+    assert isinstance(model.get_submodule("dense1"), ColumnParallelLinearWithLoRA)
+    assert isinstance(
+        model.get_submodule("layer1.dense1"), ColumnParallelLinearWithLoRA
+    )
+    assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
+    assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_target_modules_none_uses_all(
+    default_vllm_config, dist_init, dummy_model, device
+):
+    """Test that target_modules=None uses all supported modules."""
+    model = dummy_model
+
+    # Test with target_modules=None (default behavior)
+    _manager = LoRAModelManager(
+        model,
+        2,
+        2,
+        2,
+        LoRAConfig(
+            max_lora_rank=8,
+            max_cpu_loras=2,
+            max_loras=2,
+            lora_dtype=DEFAULT_DTYPE,
+            target_modules=None,
+        ),
+        device=device,
+    )
+
+    # All supported modules should be replaced with LoRA layers
+    assert isinstance(model.get_submodule("dense1"), ColumnParallelLinearWithLoRA)
+    assert isinstance(
+        model.get_submodule("layer1.dense1"), ColumnParallelLinearWithLoRA
+    )
+    assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
+    assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
