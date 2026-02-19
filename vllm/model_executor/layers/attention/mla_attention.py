@@ -206,7 +206,6 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import (
     get_dcp_group,
-    get_kvp_group,
     is_global_first_rank,
 )
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -652,7 +651,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     attn_out = dcp_a2a_lse_reduce(
                         attn_out,
                         lse,
-                        get_kvp_group(),
+                        get_dcp_group(),
                     )
                 else:
                     attn_out = cp_lse_ag_out_rs(

@@ -59,16 +59,6 @@ class TestDCPCommBackendConfig:
         assert config.dcp_comm_backend == "ag_rs"
 
 
-class TestKVPGroup:
-    """Test KVP group function exists and is callable."""
-
-    def test_get_kvp_group_importable(self):
-        """Verify get_kvp_group is importable."""
-        from vllm.distributed.parallel_state import get_kvp_group
-
-        assert callable(get_kvp_group)
-
-
 class TestLSEWeightedCombine:
     """Test LSE-weighted combination logic (CPU only, no GPU).
 

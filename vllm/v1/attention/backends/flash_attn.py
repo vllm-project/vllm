@@ -35,7 +35,7 @@ if is_flash_attn_varlen_func_available():
     )
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group, get_kvp_group
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -604,12 +604,13 @@ class FlashAttentionImpl(AttentionImpl):
 
         try:
             parallel_config = get_current_vllm_config().parallel_config
-            self.dcp_a2a = (
+            dcp_a2a = (
                 parallel_config.decode_context_parallel_size > 1
                 and parallel_config.dcp_comm_backend == "a2a"
             )
         except AttributeError:
-            self.dcp_a2a = False
+            dcp_a2a = False
+        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
     def forward(
         self,
@@ -860,20 +861,12 @@ class FlashAttentionImpl(AttentionImpl):
         )
         # FA returns LSE in shape [ H, B ] but combine functions want [ B, H ]
         context_lse_bh = context_lse.transpose(0, 1)
-        if self.dcp_a2a:
-            context_attn_out_cor, context_lse_cor = dcp_a2a_lse_reduce(
-                context_attn_out,
-                context_lse_bh,
-                get_kvp_group(),
-                return_lse=True,
-            )
-        else:
-            context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
-                context_attn_out,
-                context_lse_bh,
-                get_dcp_group(),
-                return_lse=True,
-            )
+        context_attn_out_cor, context_lse_cor = self.dcp_combine(
+            context_attn_out,
+            context_lse_bh,
+            get_dcp_group(),
+            return_lse=True,
+        )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
         query_attn_out, query_lse = flash_attn_varlen_func(

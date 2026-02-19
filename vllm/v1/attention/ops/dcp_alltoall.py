@@ -281,7 +281,7 @@ def dcp_lse_combine_triton(
 def dcp_a2a_lse_reduce(
     local_output: torch.Tensor,
     local_lse: torch.Tensor,
-    kvp_group: GroupCoordinator,
+    dcp_group: GroupCoordinator,
     return_lse: bool = False,
     is_lse_base_on_e: bool = True,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
@@ -303,7 +303,7 @@ def dcp_a2a_lse_reduce(
     Args:
         local_output: [B, H, D] where B=num_tokens, H=total_heads, D=head_dim
         local_lse: [B, H] log-sum-exp values (fp32)
-        kvp_group: GroupCoordinator for KV parallel communication
+        dcp_group: GroupCoordinator for DCP communication
         return_lse: If True, also return the combined global LSE
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
 
@@ -311,7 +311,7 @@ def dcp_a2a_lse_reduce(
         Combined output [B, H/N, D] (head-scattered)
         If return_lse=True, also returns global_lse [B, H/N]
     """
-    world_size = kvp_group.world_size
+    world_size = dcp_group.world_size
 
     if world_size == 1:
         if return_lse:
@@ -339,13 +339,13 @@ def dcp_a2a_lse_reduce(
     work_output = dist.all_to_all_single(
         recv_output.view(-1),
         send_output.view(-1),
-        group=kvp_group.device_group,
+        group=dcp_group.device_group,
         async_op=True,
     )
     work_lse = dist.all_to_all_single(
         recv_lse.view(-1),
         send_lse.view(-1),
-        group=kvp_group.device_group,
+        group=dcp_group.device_group,
         async_op=True,
     )
     work_output.wait()

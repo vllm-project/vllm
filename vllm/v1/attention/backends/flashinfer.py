@@ -3,6 +3,7 @@
 """Attention layer with FlashInfer."""
 
 from dataclasses import dataclass
+from functools import partial
 from typing import ClassVar
 
 import numpy as np
@@ -21,7 +22,7 @@ from typing_extensions import override
 from vllm import envs
 from vllm.config import CUDAGraphMode, VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group, get_kvp_group
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -173,7 +174,11 @@ class BatchDCPPrefillWrapper:
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
     ):
-        self._dcp_a2a = dcp_a2a
+        self._dcp_combine = (
+            dcp_a2a_lse_reduce
+            if dcp_a2a
+            else partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
+        )
         self._context = BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, get_kv_cache_layout()
         )
@@ -252,23 +257,13 @@ class BatchDCPPrefillWrapper:
             v_scale=layer._v_scale_float,
             return_lse=True,
         )
-        if self._dcp_a2a:
-            output_context, lse_context = dcp_a2a_lse_reduce(
-                output_context_tmp,
-                lse_context_tmp,
-                get_kvp_group(),
-                return_lse=True,
-            )
-            lse_context = lse_context.transpose(0, 1).contiguous()
-        else:
-            output_context, lse_context = cp_lse_ag_out_rs(
-                output_context_tmp,
-                lse_context_tmp,
-                get_dcp_group(),
-                return_lse=True,
-                is_lse_base_on_e=False,
-            )
-            lse_context = lse_context.transpose(0, 1).contiguous()
+        output_context, lse_context = self._dcp_combine(
+            output_context_tmp,
+            lse_context_tmp,
+            get_dcp_group(),
+            return_lse=True,
+        )
+        lse_context = lse_context.transpose(0, 1).contiguous()
 
         output_query, lse_query = self._new_tokens.run(
             prefill_query,
@@ -1248,12 +1243,25 @@ class FlashInferImpl(AttentionImpl):
 
         try:
             parallel_config = vllm_config.parallel_config
-            self.dcp_a2a = (
+            dcp_a2a = (
                 parallel_config.decode_context_parallel_size > 1
                 and parallel_config.dcp_comm_backend == "a2a"
             )
         except AttributeError:
-            self.dcp_a2a = False
+            dcp_a2a = False
+        self.dcp_combine = (
+            dcp_a2a_lse_reduce
+            if dcp_a2a
+            else partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
+        )
+        # TODO(#34018): --dcp-replicate-q-proj to make Q replication
+        # configurable at weight level, removing runtime allgather.
+        if dcp_a2a:
+            self._dcp_prepare_query = lambda q: q
+        else:
+            self._dcp_prepare_query = lambda q: get_dcp_group().all_gather(
+                q.contiguous(), dim=-2
+            )
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
@@ -1540,54 +1548,27 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if use_dcp:
-                    if self.dcp_a2a:
-                        # A2A: each rank computes on local KV shard,
-                        # then All-to-All exchanges partial outputs + LSE
-                        output_tmp = torch.empty_like(decode_query)
-                        lse = torch.empty(
-                            (decode_query.size(0), decode_query.size(1)),
-                            dtype=torch.float32,
-                            device=decode_query.device,
-                        )
-                        decode_wrapper.run(
-                            decode_query,
-                            kv_cache_permute,
-                            k_scale=layer._k_scale_float,
-                            v_scale=layer._v_scale_float,
-                            out=output_tmp,
-                            lse=lse,
-                            return_lse=True,
-                        )
-                        output[:num_decode_tokens] = dcp_a2a_lse_reduce(
-                            output_tmp,
-                            lse,
-                            get_kvp_group(),
-                        )
-                    else:
-                        decode_query = get_dcp_group().all_gather(
-                            decode_query.contiguous(), dim=-2
-                        )
-                        output_tmp = torch.empty_like(decode_query)
-                        lse = torch.empty(
-                            (decode_query.size(0), decode_query.size(1)),
-                            dtype=torch.float32,
-                            device=decode_query.device,
-                        )
-                        decode_wrapper.run(
-                            decode_query,
-                            kv_cache_permute,
-                            k_scale=layer._k_scale_float,
-                            v_scale=layer._v_scale_float,
-                            out=output_tmp,
-                            lse=lse,
-                            return_lse=True,
-                        )
-                        output[:num_decode_tokens] = cp_lse_ag_out_rs(
-                            output_tmp,
-                            lse,
-                            get_dcp_group(),
-                            is_lse_base_on_e=False,
-                        )
+                    decode_query = self._dcp_prepare_query(decode_query)
+                    output_tmp = torch.empty_like(decode_query)
+                    lse = torch.empty(
+                        (decode_query.size(0), decode_query.size(1)),
+                        dtype=torch.float32,
+                        device=decode_query.device,
+                    )
+                    decode_wrapper.run(
+                        decode_query,
+                        kv_cache_permute,
+                        k_scale=layer._k_scale_float,
+                        v_scale=layer._v_scale_float,
+                        out=output_tmp,
+                        lse=lse,
+                        return_lse=True,
+                    )
+                    output[:num_decode_tokens] = self.dcp_combine(
+                        output_tmp,
+                        lse,
+                        get_dcp_group(),
+                    )
                 else:
                     decode_wrapper.run(
                         decode_query,
