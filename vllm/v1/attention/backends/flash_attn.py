@@ -23,6 +23,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if is_flash_attn_varlen_func_available():
@@ -34,7 +35,7 @@ if is_flash_attn_varlen_func_available():
     )
 from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
-from vllm.distributed.parallel_state import get_dcp_group
+from vllm.distributed.parallel_state import get_dcp_group, get_kvp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
@@ -299,6 +300,14 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # DCP might not be initialized in testing
             self.dcp_world_size = 1
             self.dcp_rank = 0
+
+        try:
+            self.dcp_a2a = (
+                self.dcp_world_size > 1
+                and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+            )
+        except Exception:
+            self.dcp_a2a = False
 
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
@@ -848,13 +857,22 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
         )
-        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
-            context_attn_out,
-            context_lse.transpose(0, 1),
-            get_dcp_group(),
-            return_lse=True,
-        )
+        # FA returns LSE in shape [ H, B ] but combine functions want [ B, H ]
+        context_lse_bh = context_lse.transpose(0, 1)
+        if self.dcp_a2a:
+            context_attn_out_cor, context_lse_cor = dcp_a2a_lse_reduce(
+                context_attn_out,
+                context_lse_bh,
+                get_kvp_group(),
+                return_lse=True,
+            )
+        else:
+            context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+                context_attn_out,
+                context_lse_bh,
+                get_dcp_group(),
+                return_lse=True,
+            )
         context_lse_cor = context_lse_cor.transpose(0, 1).contiguous()
 
         query_attn_out, query_lse = flash_attn_varlen_func(

@@ -1173,6 +1173,16 @@ def get_dcp_group() -> GroupCoordinator:
     return _DCP
 
 
+def get_kvp_group() -> GroupCoordinator:
+    """Get the KV Parallel (KVP) group for A2A DCP communication.
+
+    For MLA models (TPA=1), the KVP group is the same as the DCP group.
+    When TPA separation is enabled (PR 2), this will return a sub-group
+    of the TP group based on TPA size.
+    """
+    return get_dcp_group()
+
+
 # kept for backward compatibility
 get_context_model_parallel_group = get_dcp_group
 
