@@ -99,27 +99,6 @@ def _moe_forward(
     shared_experts_input: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> torch.Tensor:
-<<<<<<< HEAD
-    layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    # TODO(bnell): this can be removed after MK migration is complete.
-    layer.ensure_moe_quant_config_init()
-    runner = layer.runner
-    with runner._sequence_parallel_context():
-        if runner.use_dp_chunking:
-            return runner.forward_impl_chunked(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
-        else:
-            return runner.forward_impl(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
-=======
     layer = get_layer_from_name(layer_name)
     return layer.runner.forward_dispatch(
         layer,
@@ -127,7 +106,6 @@ def _moe_forward(
         router_logits,
         shared_experts_input,
     )
->>>>>>> d11342756e (wip more refactoring)
 
 
 def _moe_forward_fake(
@@ -145,66 +123,6 @@ def _moe_forward_shared(
     shared_experts_input: torch.Tensor | None,
     layer_name: _layer_name_type,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-<<<<<<< HEAD
-    layer = get_layer_from_name(_resolve_layer_name(layer_name))
-    # TODO(bnell): this can be removed after MK migration is complete.
-    layer.ensure_moe_quant_config_init()
-    runner = layer.runner
-    with runner._sequence_parallel_context():
-        if runner.use_dp_chunking:
-            return runner.forward_impl_chunked(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
-        else:
-            return runner.forward_impl(
-                layer,
-                hidden_states,
-                router_logits,
-                shared_experts_input,
-            )
-
-
-def _moe_forward_shared_new(
-    hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
-    shared_experts_input: torch.Tensor | None,
-    layer_name: str,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    layer = get_layer_from_name(layer_name)
-    runner = layer.runner
-
-    def reduce_shared_out(shared_out: torch.Tensor) -> torch.Tensor:
-        # Reduce shared expert outputs if necessary, since the MLP
-        # should have been created with reduce_results=False.
-        if (
-            runner.reduce_results
-            and get_tensor_model_parallel_world_size() > 1
-            and runner.must_reduce_shared_expert_outputs()
-        ):
-            shared_out = tensor_model_parallel_all_reduce(shared_out)
-        return shared_out
-
-    if not runner.overlap_shared_experts:
-        shared_out = runner._shared_experts(hidden_states)
-        # XXXXXXXXXXXXXXXX
-        shared_experts = None
-
-    router_logits = runner._maybe_gate(hidden_states, router_logits)
-    with runner._sequence_parallel_context():
-        if runner.use_dp_chunking:
-            shared_out, fused_out = runner.forward_impl_chunked(
-                layer, hidden_states, router_logits
-            )
-        else:
-            shared_out = fused_out = runner.forward_impl(
-                layer, hidden_states, router_logits
-            )
-
-    return reduce_shared_out(shared_out), fused_out
-=======
     layer = get_layer_from_name(layer_name)
     return layer.runner.forward_dispatch(
         layer,
@@ -212,7 +130,6 @@ def _moe_forward_shared_new(
         router_logits,
         shared_experts_input,
     )
->>>>>>> d11342756e (wip more refactoring)
 
 
 def _moe_forward_shared_fake(
@@ -328,7 +245,8 @@ class DefaultMoERunner(MoERunner):
             self.moe_config.moe_parallel_config.use_pplx_kernels
             or self.moe_config.moe_parallel_config.use_deepep_ll_kernels
             or self.moe_config.moe_parallel_config.use_mori_kernels
-            or self.moe_config.moe_parallel_config.use_fi_all2allv_kernels
+            or self.moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
+            or self.moe_config.moe_parallel_config.use_nixl_ep_kernels
         ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
 
         # Needed for string -> FusedMoE layer lookup in custom ops.
@@ -401,32 +319,7 @@ class DefaultMoERunner(MoERunner):
             else torch.ops.vllm.moe_forward_shared
         )
 
-<<<<<<< HEAD
-    @property
-    def use_dp_chunking(self) -> bool:
-        return (
-            self.moe_config.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe_config.moe_parallel_config.use_mori_kernels
-            or self.moe_config.moe_parallel_config.use_fi_nvl_two_sided_kernels
-            or self.moe_config.moe_parallel_config.use_nixl_ep_kernels
-        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
-
-    # TODO(bnell): better name
-    @property
-    def overlap_shared_experts(
-        self,
-    ) -> bool:
-        # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        #   - we are using marlin kernels
-        backend = self.moe_config.moe_parallel_config.all2all_backend
-        return self.shared_experts is not None and not (
-            (self.enable_eplb and backend != "allgather_reducescatter")
-            or self.moe_config.moe_parallel_config.use_fi_all2allv_kernels
-        )
-
-    def _maybe_setup_shared_experts_stream(
+    def _setup_shared_experts_stream(
         self,
         hidden_states: torch.Tensor,
         shared_input: torch.Tensor | None,
@@ -499,7 +392,8 @@ class DefaultMoERunner(MoERunner):
         assert self.shared_experts is not None
         assert shared_output is None
         if order == SharedExpertsOrder.AFTER_QUANT_METHOD and use_shared_experts_stream:
-            hidden_states = self._maybe_setup_shared_experts_stream(
+            # TODO: fold this in?
+            hidden_states = self._setup_shared_experts_stream(
                 hidden_states,
                 shared_input,
             )
@@ -516,6 +410,12 @@ class DefaultMoERunner(MoERunner):
             current_stream().wait_stream(self.shared_experts_stream)
         else:
             shared_output = self.shared_experts(hidden_states)
+
+        if order == SharedExpertsOrder.EXTERNAL:
+            # TODO: figure out how to combine this with maybe_reduce_output?
+            # or get rid of it completely.....
+            assert shared_output is not None
+            shared_output = self._maybe_reduce_shared_out(shared_output)
 
         return shared_output
 
@@ -816,6 +716,11 @@ class DefaultMoERunner(MoERunner):
         else:
             return hidden_states
 
+    #
+    #  forward
+    #    - self.moe_forward (_moe_forward or _moe_forward_shared)
+    #      - forward_chunking_dispatch
+    #        - forward_impl or forward_impl_chunked
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -844,13 +749,6 @@ class DefaultMoERunner(MoERunner):
             self._encode_layer_name(),
         )
 
-        # TODO: figure out how to combine this with maybe_reduce_output
-        if self.shared_experts is not None:
-            fused_output = (
-                self._maybe_reduce_shared_out(fused_output[0]),
-                fused_output[1],
-            )
-
         return self._maybe_reduce_output(fused_output, og_hidden_dims)
 
     def forward_dispatch(
@@ -864,10 +762,19 @@ class DefaultMoERunner(MoERunner):
         layer.ensure_moe_quant_config_init()
 
         router_logits = self._maybe_gate(hidden_states, router_logits)
+
+        shared_output = self._maybe_apply_shared_experts(
+            None,
+            hidden_states,
+            shared_input,
+            SharedExpertsOrder.EXTERNAL,
+        )
+
         with self._sequence_parallel_context():
             if self.use_dp_chunking:
                 return self.forward_impl_chunked(
                     layer,
+                    shared_output,
                     hidden_states,
                     router_logits,
                     shared_input,
@@ -875,6 +782,7 @@ class DefaultMoERunner(MoERunner):
             else:
                 return self.forward_impl(
                     layer,
+                    shared_output,
                     hidden_states,
                     router_logits,
                     shared_input,
@@ -903,6 +811,7 @@ class DefaultMoERunner(MoERunner):
     def forward_impl_chunked(
         self,
         layer: torch.nn.Module,
+        shared_output: torch.Tensor | None,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_input: torch.Tensor | None,
@@ -964,7 +873,7 @@ class DefaultMoERunner(MoERunner):
 
                 shared_output_chunk, hidden_states_chunk = self._apply_quant_method(
                     layer=layer,
-                    shared_output=None,
+                    shared_output=shared_output,
                     hidden_states=hidden_states_chunk,
                     router_logits=router_logits_chunk,
                     shared_input=shared_input_chunk,
@@ -992,27 +901,11 @@ class DefaultMoERunner(MoERunner):
     def forward_impl(
         self,
         layer: torch.nn.Module,
+        shared_output: torch.Tensor | None,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         shared_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        shared_output = self._maybe_apply_shared_experts(
-            None,
-            hidden_states,
-            shared_input,
-            SharedExpertsOrder.EXTERNAL,
-        )
-
-        # The shared experts stream must be set up before calling the gate so they
-        # can be overlapped.
-        if not run_shared_experts_before:
-            self._maybe_setup_shared_experts_stream(
-                hidden_states,
-                shared_input,
-            )
-
-        router_logits = self._maybe_gate(hidden_states, router_logits)
-
         # TODO(bnell): parts of the dispatch/combine steps will go away once
         # #32567 lands and the remaining kernels are made MKs.  The PCP
         # code will probably remain
