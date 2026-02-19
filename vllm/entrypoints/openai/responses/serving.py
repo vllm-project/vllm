@@ -116,13 +116,12 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, token_inputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
-from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -229,6 +228,12 @@ class OpenAIServingResponses(OpenAIServing):
         self.enable_force_include_usage = enable_force_include_usage
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
 
         # If False (default), the "store" option is (silently) ignored and the
         # response is not stored. If True, the response is stored in memory.
@@ -292,14 +297,16 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: TokPrompt,
+        engine_prompt: ProcessorInputs,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         prompt_len = self._extract_prompt_len(engine_prompt)
-        if self.max_model_len <= prompt_len:
+        max_model_len = self.model_config.max_model_len
+
+        if prompt_len >= max_model_len:
             error_message = (
                 f"The engine prompt length {prompt_len} "
-                f"exceeds the max_model_len {self.max_model_len}. "
+                f"exceeds the max_model_len {max_model_len}. "
                 "Please reduce prompt."
             )
             return self.create_error_response(
@@ -414,6 +421,7 @@ class OpenAIServingResponses(OpenAIServing):
             raw_request.state.request_metadata = request_metadata
 
         # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[ConversationContext, None]] = []
 
         builtin_tool_list: list[str] = []
@@ -431,8 +439,7 @@ class OpenAIServingResponses(OpenAIServing):
             assert len(builtin_tool_list) == 0
             available_tools = []
         try:
-            renderer = self.engine_client.renderer
-            tokenizer = renderer.get_tokenizer()
+            tokenizer = self.renderer.get_tokenizer()
 
             for engine_prompt in engine_prompts:
                 maybe_error = self._validate_generator_input(engine_prompt)
@@ -440,16 +447,16 @@ class OpenAIServingResponses(OpenAIServing):
                     return maybe_error
 
                 default_max_tokens = get_max_tokens(
-                    self.max_model_len,
+                    max_model_len,
                     request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
+                    self.override_max_tokens,
                 )
 
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params
                 )
-                tok_params = request.build_tok_params(self.model_config)
 
                 trace_headers = (
                     None
@@ -503,7 +510,6 @@ class OpenAIServingResponses(OpenAIServing):
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
-                    tok_params=tok_params,
                     context=context,
                     lora_request=lora_request,
                     priority=request.priority,
@@ -638,7 +644,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+        engine_prompt = token_inputs(prompt_token_ids)
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
@@ -980,7 +986,9 @@ class OpenAIServingResponses(OpenAIServing):
             output_items.extend(last_items)
         return output_items
 
-    def _extract_system_message_from_request(self, request) -> str | None:
+    def _extract_system_message_from_request(
+        self, request: ResponsesRequest
+    ) -> str | None:
         system_msg = None
         if not isinstance(request.input, str):
             for response_msg in request.input:
@@ -988,7 +996,17 @@ class OpenAIServingResponses(OpenAIServing):
                     isinstance(response_msg, dict)
                     and response_msg.get("role") == "system"
                 ):
-                    system_msg = response_msg.get("content")
+                    content = response_msg.get("content")
+                    if isinstance(content, str):
+                        system_msg = content
+                    elif isinstance(content, list):
+                        for param in content:
+                            if (
+                                isinstance(param, dict)
+                                and param.get("type") == "input_text"
+                            ):
+                                system_msg = param.get("text")
+                                break
                     break
         return system_msg
 

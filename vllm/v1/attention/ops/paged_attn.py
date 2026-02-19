@@ -9,7 +9,7 @@ from vllm.platforms import current_platform
 if current_platform.is_cuda_alike():
     from vllm import _custom_ops as ops
 elif current_platform.is_xpu():
-    from vllm._ipex_ops import ipex_ops as ops  # type: ignore[no-redef]
+    from vllm._xpu_ops import xpu_ops as ops  # type: ignore[no-redef]
 
 
 class PagedAttention:

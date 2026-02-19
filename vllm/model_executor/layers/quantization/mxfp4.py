@@ -14,8 +14,12 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     mxfp4_mxfp8_moe_quant_config,
@@ -25,7 +29,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     BatchedMarlinExperts,
     MarlinExperts,
-    fused_marlin_moe,
 )
 from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
     OAITritonExperts,
@@ -164,7 +167,7 @@ def get_mxfp4_backend(with_lora_support: bool) -> Mxfp4Backend:
             logger.info_once("Using Triton backend")
             return Mxfp4Backend.TRITON
     elif current_platform.is_xpu():
-        logger.info_once("Using ipex marlin backend on XPU")
+        logger.info_once("Using xpu backend on XPU")
         return Mxfp4Backend.MARLIN
     elif current_platform.is_rocm():
         if rocm_aiter_ops.is_enabled() and on_gfx950():
@@ -226,7 +229,6 @@ class Mxfp4Config(QuantizationConfig):
                 return XpuMxfp4MoEMethod(layer.moe_config)
             else:
                 quant_method = Mxfp4MoEMethod(layer.moe_config)
-                quant_method.marlin_input_dtype = get_marlin_input_dtype(prefix)
                 return quant_method
         elif isinstance(layer, Attention):
             # TODO: Add support for MXFP4 Attention.
@@ -243,12 +245,13 @@ class Mxfp4Config(QuantizationConfig):
 
 
 class Mxfp4MoEMethod(FusedMoEMethodBase):
+    """MXFP4 MoE quantization method."""
+
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
         self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
 
-        self.marlin_input_dtype = None
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
         )
@@ -259,6 +262,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
+        self.moe_mk: mk.FusedMoEModularKernel | None = None
 
     def create_weights(
         self,
@@ -417,7 +421,30 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def process_weights_after_loading(self, layer):
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            prepare_moe_fp4_layer_for_marlin(layer, input_dtype=self.marlin_input_dtype)
+            prepare_moe_fp4_layer_for_marlin(
+                layer, input_dtype=get_marlin_input_dtype()
+            )
+
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+
+            prepare_finalize = maybe_make_prepare_finalize(
+                moe=self.moe,
+                quant_config=self.moe_quant_config,
+                routing_tables=layer._maybe_init_expert_routing_tables(),
+                allow_new_interface=True,
+            )
+            assert prepare_finalize is not None
+
+            self.moe_mk = mk.FusedMoEModularKernel(
+                prepare_finalize,
+                MarlinExperts(
+                    self.moe,
+                    self.moe_quant_config,
+                ),
+                inplace=not self.moe.disable_inplace,
+                shared_experts=None,
+            )
         elif (
             self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
             or self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
@@ -969,33 +996,26 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert not self.is_monolithic
         if layer.enable_eplb:
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            return fused_marlin_moe(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                layer.w13_bias,
-                layer.w2_bias,
-                layer.w13_weight_scale,
-                layer.w2_weight_scale,
-                topk_weights,
-                topk_ids,
-                global_scale1=None,
-                global_scale2=None,
-                quant_type_id=scalar_types.float4_e2m1f.id,
-                apply_router_weight_on_input=layer.apply_router_weight_on_input,
-                global_num_experts=layer.global_num_experts,
-                activation=layer.activation,
-                expert_map=layer.expert_map,
-                input_dtype=self.marlin_input_dtype,
-                inplace=not self.moe.disable_inplace,
-            )
+            assert self.moe_mk is not None
 
+            return self.moe_mk(
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                expert_map=layer.expert_map,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            )
         assert _can_support_mxfp4(
             layer.use_grouped_topk,
             layer.topk_group,
@@ -1228,8 +1248,9 @@ class XpuMxfp4MoEMethod(Mxfp4MoEMethod):
         x: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor:
-        assert layer.activation == "swigluoai", (
-            "Only swiglu_oai activation is supported for XPU MXFP4 MoE"
+        assert layer.activation == MoEActivation.SWIGLUOAI, (
+            "Only swiglu_oai activation is supported for "
+            f"XPU MXFP4 MoE, not {layer.activation}."
         )
         from vllm_xpu_kernels.fused_moe_interface import xpu_fused_moe
 
