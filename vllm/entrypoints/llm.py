@@ -1758,15 +1758,12 @@ class LLM:
                 self._preprocess_cmpl_one(prompt, tok_kwargs)
                 for prompt, tok_kwargs in zip(
                     maybe_tqdm(
-                        seq_prompts,
-                        use_tqdm=use_tqdm,
-                        desc="Rendering prompts",
+                        seq_prompts, use_tqdm=use_tqdm, desc="Rendering prompts"
                     ),
                     seq_tok_kwargs,
                 )
             ),
             params=seq_params,
-            use_tqdm=use_tqdm,
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
         )
@@ -1779,7 +1776,7 @@ class LLM:
         | Sequence[SamplingParams | PoolingParams],
         *,
         use_tqdm: bool | Callable[..., tqdm] = True,
-        lora_request: list[LoRARequest] | LoRARequest | None = None,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
