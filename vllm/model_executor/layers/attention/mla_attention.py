@@ -407,16 +407,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         # Attributes for forward_impl method
-        self.chunked_prefill_workspace_size = (
-            MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-                get_current_vllm_config()
-            )
-        )
+        self._chunked_prefill_workspace_size: int | None = None
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
+
+    @property
+    def chunked_prefill_workspace_size(self) -> int:
+        if self._chunked_prefill_workspace_size is None:
+            self._chunked_prefill_workspace_size = (
+                MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
+                    get_current_vllm_config()
+                )
+            )
+        return self._chunked_prefill_workspace_size
 
     def forward(
         self,
@@ -1262,8 +1268,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        # Use 128 as conservative upper bound if not set by user
-        block_size = cache_config.block_size or 128
+        block_size = cache_config.block_size
 
         chunked_prefill_workspace_size = min(
             # Try for 8 full length request or at least 4 pages per-request
