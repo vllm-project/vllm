@@ -41,6 +41,7 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    GateLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -148,11 +149,10 @@ class NemotronHMoE(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
             bias=False,
-            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
