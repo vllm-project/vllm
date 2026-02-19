@@ -383,6 +383,11 @@ class GPUModelRunner(
             self.speculative_config.uses_draft_model()
             or self.speculative_config.use_eagle()
         ):
+            # When speculative decoding is enabled, reserve
+            # extra per-request slots (for the bonus token).
+            # Additionally, when parallel drafting is enabled,
+            # we need to account for the parallel positions
+            # per request.
             multiplier = (
                 self.speculative_config.num_speculative_tokens
                 if self.speculative_config.parallel_drafting
@@ -4689,7 +4694,7 @@ class GPUModelRunner(
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
-        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+        assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
             assert not uniform_decode
