@@ -204,6 +204,12 @@ class BaseRenderer(ABC, Generic[_T]):
         if executor := getattr(self, "_executor", None):
             executor.shutdown(wait=False)
 
+        if (
+            (mm_executor := getattr(self, "_mm_executor", None)) is not None
+            and mm_executor is not executor
+        ):
+            mm_executor.shutdown(wait=False)
+
     def get_bos_token_id(self) -> int | None:
         if self.tokenizer is None:
             logger.warning_once(
