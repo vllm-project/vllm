@@ -301,14 +301,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             self.dcp_world_size = 1
             self.dcp_rank = 0
 
-        try:
-            self.dcp_a2a = (
-                self.dcp_world_size > 1
-                and vllm_config.parallel_config.dcp_comm_backend == "a2a"
-            )
-        except Exception:
-            self.dcp_a2a = False
-
         self.cp_kv_cache_interleave_size = (
             self.parallel_config.cp_kv_cache_interleave_size
         )
@@ -609,6 +601,15 @@ class FlashAttentionImpl(AttentionImpl):
             if self.vllm_flash_attn_version is not None
             else False
         )
+
+        try:
+            parallel_config = get_current_vllm_config().parallel_config
+            self.dcp_a2a = (
+                parallel_config.decode_context_parallel_size > 1
+                and parallel_config.dcp_comm_backend == "a2a"
+            )
+        except AttributeError:
+            self.dcp_a2a = False
 
     def forward(
         self,

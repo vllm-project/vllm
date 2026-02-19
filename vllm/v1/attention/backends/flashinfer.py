@@ -253,10 +253,9 @@ class BatchDCPPrefillWrapper:
             return_lse=True,
         )
         if self._dcp_a2a:
-            lse_context_bh = lse_context_tmp.transpose(0, 1)
             output_context, lse_context = dcp_a2a_lse_reduce(
                 output_context_tmp,
-                lse_context_bh,
+                lse_context_tmp,
                 get_kvp_group(),
                 return_lse=True,
             )
@@ -1246,6 +1245,15 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+
+        try:
+            parallel_config = vllm_config.parallel_config
+            self.dcp_a2a = (
+                parallel_config.decode_context_parallel_size > 1
+                and parallel_config.dcp_comm_backend == "a2a"
+            )
+        except AttributeError:
+            self.dcp_a2a = False
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (

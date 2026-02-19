@@ -209,37 +209,29 @@ class CudaPlatformBase(Platform):
         # MLA models are not affected (they handle DCP differently).
         compilation_config = vllm_config.compilation_config
         if dcp_size > 1 and model_config is not None:
-            from vllm.config import CompilationConfig
+            from vllm.config.compilation import CUDAGraphMode
 
             if (
                 not model_config.use_mla
-                and compilation_config.cudagraph_mode
-                != CompilationConfig.CudaGraphMode.PIECEWISE
+                and compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE
             ):
                 logger.info(
                     "DCP with GQA requires PIECEWISE CUDA graphs. "
                     "Forcing cudagraph_mode=PIECEWISE."
                 )
-                compilation_config.cudagraph_mode = (
-                    CompilationConfig.CudaGraphMode.PIECEWISE
-                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         # PCP also requires PIECEWISE CUDA graphs
         pcp_size = parallel_config.prefill_context_parallel_size
         if pcp_size > 1:
-            from vllm.config import CompilationConfig
+            from vllm.config.compilation import CUDAGraphMode
 
-            if (
-                compilation_config.cudagraph_mode
-                != CompilationConfig.CudaGraphMode.PIECEWISE
-            ):
+            if compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE:
                 logger.info(
                     "PCP requires PIECEWISE CUDA graphs. "
                     "Forcing cudagraph_mode=PIECEWISE."
                 )
-                compilation_config.cudagraph_mode = (
-                    CompilationConfig.CudaGraphMode.PIECEWISE
-                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
