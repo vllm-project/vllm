@@ -173,7 +173,8 @@ fused_add_rms_norm_kernel(
   __syncthreads();
 
   for (int idx = threadIdx.x; idx < hidden_size; idx += blockDim.x) {
-    float x = (float)residual[static_cast<int64_t>(blockIdx.x) * hidden_size + idx];
+    float x =
+        (float)residual[static_cast<int64_t>(blockIdx.x) * hidden_size + idx];
     input[blockIdx.x * input_stride + idx] =
         ((scalar_t)(x * s_variance)) * weight[idx];
   }
