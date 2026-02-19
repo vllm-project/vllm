@@ -1,18 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import copy
-import time
-from collections import Counter as collectionsCounter
-from collections import deque
-from contextlib import contextmanager
-from dataclasses import dataclass
-from functools import partial
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Literal, Mapping, NamedTuple, Optional)
-from typing import Sequence as GenericSequence
-from typing import Set, Type, Union, cast
+from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
 
+<<<<<<< HEAD
 import torch
 from typing_extensions import TypeVar
 
@@ -2136,3 +2127,6 @@ class LLMEngine:
 if envs.is_set("VLLM_USE_V1") and envs.VLLM_USE_V1:
     from vllm.v1.engine.llm_engine import LLMEngine as V1LLMEngine
     LLMEngine = V1LLMEngine  # type: ignore
+=======
+LLMEngine = V1LLMEngine  # type: ignore
+>>>>>>> 0075bfffd4201d1377f0d048848f82911e917639

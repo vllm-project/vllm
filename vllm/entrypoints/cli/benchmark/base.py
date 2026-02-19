@@ -6,7 +6,7 @@ from vllm.entrypoints.cli.types import CLISubcommand
 
 
 class BenchmarkSubcommandBase(CLISubcommand):
-    """ The base class of subcommands for vllm bench. """
+    """The base class of subcommands for `vllm bench`."""
 
     help: str
 

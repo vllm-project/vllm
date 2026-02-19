@@ -67,8 +67,7 @@ class TensorMemoryPool:
         if max_block_size <= 0 or min_block_size <= 0:
             raise ValueError("Block sizes must be positive")
         if max_block_size < min_block_size:
-            raise ValueError(
-                "Max block size must be greater than min block size")
+            raise ValueError("Max block size must be greater than min block size")
 
         self.max_block_size = self._round_to_power_of_two(max_block_size)
         self.min_block_size = self._round_to_power_of_two(min_block_size)
@@ -91,16 +90,18 @@ class TensorMemoryPool:
             size //= 2
 
     def _allocate_pinned_memory(self):
-        self.base_tensor = torch.empty(self.max_block_size // 4,
-                                       dtype=torch.float32,
-                                       pin_memory=True)
+        self.base_tensor = torch.empty(
+            self.max_block_size // 4, dtype=torch.float32, pin_memory=True
+        )
         self.base_address = self.base_tensor.data_ptr()
-        initial_block = MemoryBlock(size=self.max_block_size,
-                                    addr=self.base_address)
-        self.free_lists[self.max_block_size][
-            initial_block.addr] = initial_block
-        logger.debug("TensorMemoryPool, base_address:", self.base_address,
-                     self.base_address % self.max_block_size)
+        initial_block = MemoryBlock(size=self.max_block_size, addr=self.base_address)
+        self.free_lists[self.max_block_size][initial_block.addr] = initial_block
+
+        logger.debug(
+            "TensorMemoryPool, base_address:%d, max_block_size:%d",
+            self.base_address,
+            self.max_block_size,
+        )
 
     def allocate(self, size: int) -> int:
         """Allocates a memory block of at least the requested size.
@@ -117,8 +118,7 @@ class TensorMemoryPool:
         if size <= 0:
             raise ValueError("Allocation size must be positive")
 
-        required_size = self._round_to_power_of_two(
-            max(size, self.min_block_size))
+        required_size = self._round_to_power_of_two(max(size, self.min_block_size))
         if required_size > self.max_block_size:
             raise ValueError("Requested size exceeds maximum block size")
 
@@ -134,8 +134,7 @@ class TensorMemoryPool:
         raise ValueError("Insufficient memory")
 
     def _split_block(self, block: MemoryBlock, required_size: int):
-        while (block.size > required_size
-               and block.size // 2 >= self.min_block_size):
+        while block.size > required_size and block.size // 2 >= self.min_block_size:
             buddy_size = block.size // 2
             buddy_addr = block.addr + buddy_size
 
@@ -164,8 +163,11 @@ class TensorMemoryPool:
         depth = 0
 
         while depth < MAX_MERGE_DEPTH:
-            buddy_offset = block.size if (block.addr - self.base_address) % (
-                2 * block.size) == 0 else -block.size
+            buddy_offset = (
+                block.size
+                if (block.addr - self.base_address) % (2 * block.size) == 0
+                else -block.size
+            )
             buddy_addr = block.addr + buddy_offset
             buddy = self.free_lists[block.size].get(buddy_addr)
             if buddy:
@@ -201,14 +203,14 @@ class TensorMemoryPool:
             self.free(addr)
             raise ValueError(
                 f"Allocated block size {block.size} is smaller than "
-                f"required size {size}")
+                f"required size {size}"
+            )
 
         try:
             buffer = (ctypes.c_byte * block.size).from_address(block.addr)
-            cpu_tensor = torch.frombuffer(buffer,
-                                          dtype=tensor.dtype,
-                                          count=tensor.numel()).reshape(
-                                              tensor.shape)
+            cpu_tensor = torch.frombuffer(
+                buffer, dtype=tensor.dtype, count=tensor.numel()
+            ).reshape(tensor.shape)
         except ValueError as err:
             self.free(addr)
             raise ValueError(f"Failed to create tensor view: {err}") from err
@@ -217,8 +219,13 @@ class TensorMemoryPool:
 
         return addr
 
-    def load_tensor(self, addr: int, dtype: torch.dtype,
-                    shape: tuple[int, ...], device) -> torch.Tensor:
+    def load_tensor(
+        self,
+        addr: int,
+        dtype: torch.dtype,
+        shape: tuple[int, ...],
+        device: torch.device,
+    ) -> torch.Tensor:
         """Loads a tensor from pinned host memory to the specified device.
 
         Args:
@@ -245,8 +252,9 @@ class TensorMemoryPool:
             raise ValueError("Requested tensor size exceeds block size")
 
         buffer = (ctypes.c_byte * block.size).from_address(block.addr)
-        cpu_tensor = torch.frombuffer(buffer, dtype=dtype,
-                                      count=num_elements).reshape(shape)
+        cpu_tensor = torch.frombuffer(buffer, dtype=dtype, count=num_elements).reshape(
+            shape
+        )
 
         cuda_tensor = torch.empty(shape, dtype=dtype, device=device)
 
@@ -258,7 +266,7 @@ class TensorMemoryPool:
         """Cleans up all memory resources and resets the pool state."""
         self.free_lists.clear()
         self.allocated_blocks.clear()
-        if hasattr(self, 'base_tensor'):
+        if hasattr(self, "base_tensor"):
             del self.base_tensor
 
     def __del__(self):

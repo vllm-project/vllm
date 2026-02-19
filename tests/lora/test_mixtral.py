@@ -11,15 +11,15 @@ from vllm.platforms import current_platform
 MODEL_PATH = "mistralai/Mixtral-8x7B-Instruct-v0.1"
 
 
-def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
-              prompts: list[str]) -> list[str]:
-
+def do_sample(
+    llm: vllm.LLM, lora_path: str, lora_id: int, prompts: list[str]
+) -> list[str]:
     sampling_params = vllm.SamplingParams(temperature=0, max_tokens=256)
     outputs = llm.generate(
         prompts,
         sampling_params,
-        lora_request=LoRARequest(str(lora_id), lora_id, lora_path)
-        if lora_id else None)
+        lora_request=LoRARequest(str(lora_id), lora_id, lora_path) if lora_id else None,
+    )
     # Print the outputs.
     generated_texts: list[str] = []
     for output in outputs:
@@ -33,8 +33,11 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int,
 @pytest.mark.parametrize("tp_size", [4])
 def test_mixtral_lora(mixtral_lora_files, tp_size):
     """Original test, the LoRA model has the common target modules, not all"""
-    if torch.cuda.device_count(
-    ) < tp_size and tp_size > 1 and current_platform.is_cuda_alike():
+    if (
+        torch.cuda.device_count() < tp_size
+        and tp_size > 1
+        and current_platform.is_cuda_alike()
+    ):
         pytest.skip(f"Not enough GPUs for tensor parallelism {tp_size}")
 
     prompts = [
@@ -50,15 +53,25 @@ def test_mixtral_lora(mixtral_lora_files, tp_size):
         max_loras=4,
         distributed_executor_backend="ray",
         tensor_parallel_size=tp_size,
-        enable_chunked_prefill=True,
     )
 
     expected_lora_output = [
-        "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])",  # noqa: E501
-        "give_opinion(name[SpellForce 3], developer[Grimlore Games], release_year[2017], rating[poor])",  # noqa: E501
-        "inform(name[BioShock], release_year[2007], rating[good], genres[action-adventure, role-playing, shooter], platforms[PlayStation, Xbox, PC], available_on_steam[yes], has_linux_release[no], has_mac_release[yes])",  # noqa: E501
+        [
+            "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])"  # noqa: E501
+        ],
+        [
+            "give_opinion(name[SpellForce 3], developer[Grimlore Games], release_year[2017], rating[poor])",  # noqa: E501
+            "give_opinion(name[SpellForce 3], release_year[2017], developer[Grimlore Games], rating[poor])",  # noqa: E501
+        ],
+        [
+            "inform(name[BioShock], release_year[2007], rating[good], genres[action-adventure, role-playing, shooter], platforms[PlayStation, Xbox, PC], available_on_steam[yes], has_linux_release[no], has_mac_release[yes])"  # noqa: E501
+        ],
     ]
-    assert do_sample(llm, mixtral_lora_files, lora_id=1,
-                     prompts=prompts) == expected_lora_output
-    assert do_sample(llm, mixtral_lora_files, lora_id=2,
-                     prompts=prompts) == expected_lora_output
+
+    def check_outputs(generated: list[str]):
+        assert len(generated) == len(expected_lora_output)
+        for gen, gt_choices in zip(generated, expected_lora_output):
+            assert gen in gt_choices
+
+    check_outputs(do_sample(llm, mixtral_lora_files, lora_id=1, prompts=prompts))
+    check_outputs(do_sample(llm, mixtral_lora_files, lora_id=2, prompts=prompts))

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from contextlib import contextmanager
 from typing import TYPE_CHECKING
 
 import torch
@@ -22,7 +23,8 @@ class XPUModelRunner(GPUModelRunner):
         vllm_config: VllmConfig,
         device: torch.device,
     ):
-        super().__init__(vllm_config, device)
+        with _torch_cuda_wrapper():
+            super().__init__(vllm_config, device)
         # FIXME: To be verified.
         self.cascade_attn_enabled = False
 
@@ -31,3 +33,16 @@ class XPUModelRunner(GPUModelRunner):
 
     def _sync_device(self) -> None:
         torch.xpu.synchronize()
+
+
+@contextmanager
+def _torch_cuda_wrapper():
+    try:
+        # replace cuda APIs with xpu APIs, this should work by default
+        torch.cuda.Stream = torch.xpu.Stream
+        torch.cuda.default_stream = torch.xpu.current_stream
+        torch.cuda.current_stream = torch.xpu.current_stream
+        torch.cuda.stream = torch.xpu.stream
+        yield
+    finally:
+        pass

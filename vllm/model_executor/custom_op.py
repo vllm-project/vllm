@@ -1,11 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Optional
 
 import torch.nn as nn
 
-from vllm.config import get_current_vllm_config
+from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -32,8 +31,11 @@ class CustomOp(nn.Module):
             op_cls_to_instantiate = cls
         else:
             op_cls_to_instantiate = cls.op_registry_oot[op_name]
-            logger.debug("Instantiating custom op: %s using %s", op_name,
-                         str(op_cls_to_instantiate))
+            logger.debug(
+                "Instantiating custom op: %s using %s",
+                op_name,
+                str(op_cls_to_instantiate),
+            )
         return super().__new__(op_cls_to_instantiate)
 
     def __init__(self):
@@ -73,11 +75,6 @@ class CustomOp(nn.Module):
         # NOTE(woosuk): This is a placeholder for future extensions.
         return self.forward_native(*args, **kwargs)
 
-    def forward_neuron(self, *args, **kwargs):
-        # By default, we assume that Neuron ops are compatible with the
-        # PyTorch-native implementation.
-        return self.forward_native(*args, **kwargs)
-
     def forward_oot(self, *args, **kwargs):
         # By default, we assume that OOT ops are compatible with the
         # PyTorch-native implementation.
@@ -86,13 +83,12 @@ class CustomOp(nn.Module):
     def dispatch_forward(self):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = get_cached_compilation_config()
         enabled = self.enabled()
         if enabled:
             compilation_config.enabled_custom_ops.update([self.__class__.name])
         else:
-            compilation_config.disabled_custom_ops.update(
-                [self.__class__.name])
+            compilation_config.disabled_custom_ops.update([self.__class__.name])
 
         if not enabled:
             return self.forward_native
@@ -105,8 +101,6 @@ class CustomOp(nn.Module):
             return self.forward_tpu
         elif current_platform.is_xpu():
             return self.forward_xpu
-        elif current_platform.is_neuron():
-            return self.forward_neuron
         elif current_platform.is_out_of_tree():
             return self.forward_oot
         else:
@@ -115,48 +109,49 @@ class CustomOp(nn.Module):
     @classmethod
     def enabled(cls) -> bool:
         # if no name, then it was not registered
-        compilation_config = get_current_vllm_config().compilation_config
+        compilation_config = get_cached_compilation_config()
         custom_ops = compilation_config.custom_ops
         if not hasattr(cls, "name"):
             logger.warning_once(
-                "Custom op %s was not registered, which means it won't appear in the op registry. It will be enabled/disabled based on the global settings.",  # noqa: E501
+                "Custom op %s was not registered, which means it won't appear "
+                "in the op registry. It will be enabled/disabled based on the "
+                "global settings.",
                 cls.__name__,
             )
             return CustomOp.default_on()
 
         enabled = f"+{cls.name}" in custom_ops
         disabled = f"-{cls.name}" in custom_ops
-        assert not (enabled
-                    and disabled), f"Cannot enable and disable {cls.name}"
+        assert not (enabled and disabled), f"Cannot enable and disable {cls.name}"
 
         return (CustomOp.default_on() or enabled) and not disabled
 
     @staticmethod
     def default_on() -> bool:
         """
-        On by default if PyTorch Inductor is not used.
-        Specifying 'all' or 'none' in custom_op takes precedence.
+        Behavior controlled by `CompilationConfig.custom_ops`: On by default if
+        'all', off by default if 'none'.
+        When PyTorch Inductor is used, 'none' is the default value,
+        otherwise 'all'.
         """
-        from vllm.config import CompilationLevel
-        compilation_config = get_current_vllm_config().compilation_config
-        default_on = (compilation_config.level < CompilationLevel.PIECEWISE
-                      or not compilation_config.use_inductor)
+        compilation_config = get_cached_compilation_config()
         count_none = compilation_config.custom_ops.count("none")
         count_all = compilation_config.custom_ops.count("all")
-        return default_on and not count_none > 0 or count_all > 0
+        assert count_none + count_all == 1
+
+        return not count_none > 0 or count_all > 0
 
     # Dictionary of all custom ops (classes, indexed by registered name).
     # To check if an op with a name is enabled, call .enabled() on the class.
     # Examples:
     # - MyOp.enabled()
     # - op_registry["my_op"].enabled()
-    op_registry: dict[str, type['CustomOp']] = {}
-    op_registry_oot: dict[str, type['CustomOp']] = {}
+    op_registry: dict[str, type["CustomOp"]] = {}
+    op_registry_oot: dict[str, type["CustomOp"]] = {}
 
     # Decorator to register custom ops.
     @classmethod
     def register(cls, name: str):
-
         def decorator(op_cls):
             assert name not in cls.op_registry, f"Duplicate op name: {name}"
             op_cls.name = name
@@ -175,12 +170,10 @@ class CustomOp(nn.Module):
     # or
     # - @CustomOP.register_oot(name="UnquantizedFusedMoEMethod")
     @classmethod
-    def register_oot(cls, _decorated_op_cls=None, name: Optional[str] = None):
-
+    def register_oot(cls, _decorated_op_cls=None, name: str | None = None):
         def decorator(op_cls):
             reg_name = name if name is not None else cls.__name__
-            assert reg_name not in cls.op_registry_oot, \
-                f"Duplicate op name: {reg_name}"
+            assert reg_name not in cls.op_registry_oot, f"Duplicate op name: {reg_name}"
             op_cls.name = reg_name
             cls.op_registry_oot[reg_name] = op_cls
             return op_cls

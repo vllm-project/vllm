@@ -14,7 +14,10 @@ def include_stop_str_in_output(request):
 
 
 class _DummyDetokenizer(BaseIncrementalDetokenizer):
+<<<<<<< HEAD
 
+=======
+>>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     def __init__(self, request: EngineCoreRequest):
         super().__init__(request)
 
@@ -27,7 +30,12 @@ def _make_request(stop, include_stop_str_in_output: bool, min_tokens: int = 0):
     params = SamplingParams(
         stop=stop,
         include_stop_str_in_output=include_stop_str_in_output,
+<<<<<<< HEAD
         min_tokens=min_tokens)
+=======
+        min_tokens=min_tokens,
+    )
+>>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     # Keep other fields minimal for unit test purposes.
     req = EngineCoreRequest(
         request_id="test",
@@ -44,13 +52,18 @@ def _make_request(stop, include_stop_str_in_output: bool, min_tokens: int = 0):
     return req
 
 
+<<<<<<< HEAD
 def test_stop_string_while_stop_token_terminates(
         include_stop_str_in_output: bool):
+=======
+def test_stop_string_while_stop_token_terminates(include_stop_str_in_output: bool):
+>>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     """
     This test verifies that the detokenizer correctly handles the case where
     the generated token sequence contains both:
     - a stop token
     - an <eos> token
+<<<<<<< HEAD
     
     The detokenizer should respect the stop string and truncate the output
     accordingly.
@@ -59,11 +72,25 @@ def test_stop_string_while_stop_token_terminates(
     - "abcdeZ" is generated, where "Z" is the <eos> token.
     - "cd" is the stop string.
     
+=======
+
+    The detokenizer should respect the stop string and truncate the output
+    accordingly.
+
+    Imagine the following sequence:
+    - "abcdeZ" is generated, where "Z" is the <eos> token.
+    - "cd" is the stop string.
+
+>>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     If include_stop_str_in_output=False, the detokenizer should truncate the
     output to "ab" because the stop string "cd" is excluded.
     If include_stop_str_in_output=True, the detokenizer should include the stop
     string "cd" in the output, resulting in "abcd".
+<<<<<<< HEAD
     
+=======
+
+>>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
 
     This verifies the behavioral change introduced in BaseIncrementalDetokenizer
     where stop-string evaluation occurs before the early-return on
@@ -78,8 +105,14 @@ def test_stop_string_while_stop_token_terminates(
     token_ids = [ord(c) for c in generated_text]
 
     # Create a request with the stop string and initialize the detokenizer.
+<<<<<<< HEAD
     req = _make_request(stop=[stop_string],
                         include_stop_str_in_output=include_stop_str_in_output)
+=======
+    req = _make_request(
+        stop=[stop_string], include_stop_str_in_output=include_stop_str_in_output
+    )
+>>>>>>> 0075bfffd4201d1377f0d048848f82911e917639
     detok = _DummyDetokenizer(req)
 
     # Simulate that the last token ('Z') is a stop token (stop_terminated=True).
@@ -99,5 +132,9 @@ def test_stop_string_while_stop_token_terminates(
 
     # get_next_output_text should return the full text when finished=True.
     # (Buffering only applies during streaming when finished=False.)
+<<<<<<< HEAD
     assert detok.get_next_output_text(finished=True,
                                       delta=False) == expected_text
+=======
+    assert detok.get_next_output_text(finished=True, delta=False) == expected_text
+>>>>>>> 0075bfffd4201d1377f0d048848f82911e917639

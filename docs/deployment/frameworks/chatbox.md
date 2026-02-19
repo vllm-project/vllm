@@ -6,27 +6,31 @@ It allows you to deploy a large language model (LLM) server with vLLM as the bac
 
 ## Prerequisites
 
-- Setup vLLM environment
+Set up the vLLM environment:
+
+```bash
+pip install vllm
+```
 
 ## Deploy
 
-- Start the vLLM server with the supported chat completion model, e.g.
+1. Start the vLLM server with the supported chat completion model, e.g.
 
-```bash
-vllm serve qwen/Qwen1.5-0.5B-Chat
-```
+    ```bash
+    vllm serve qwen/Qwen1.5-0.5B-Chat
+    ```
 
-- Download and install [Chatbox desktop](https://chatboxai.app/en#download).
+1. Download and install [Chatbox desktop](https://chatboxai.app/en#download).
 
-- On the bottom left of settings, Add Custom Provider
-  - API Mode: `OpenAI API Compatible`
-  - Name: vllm
-  - API Host: `http://{vllm server host}:{vllm server port}/v1`
-  - API Path: `/chat/completions`
-  - Model: `qwen/Qwen1.5-0.5B-Chat`
+1. On the bottom left of settings, Add Custom Provider
+    - API Mode: `OpenAI API Compatible`
+    - Name: vllm
+    - API Host: `http://{vllm server host}:{vllm server port}/v1`
+    - API Path: `/chat/completions`
+    - Model: `qwen/Qwen1.5-0.5B-Chat`
 
-![](../../assets/deployment/chatbox-settings.png)
+    ![Chatbox settings screen](../../assets/deployment/chatbox-settings.png)
 
-- Go to `Just chat`, and start to chat:
+1. Go to `Just chat`, and start to chat:
 
-![](../../assets/deployment/chatbox-chat.png)
+    ![Chatbot chat screen](../../assets/deployment/chatbox-chat.png)

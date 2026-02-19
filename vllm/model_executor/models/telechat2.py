@@ -30,16 +30,30 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama import LlamaForCausalLM, LlamaModel
 
 from .llama import LlamaDecoderLayer
-from .utils import (AutoWeightsLoader, PPMissingLayer, WeightsMapper,
-                    is_pp_missing_parameter)
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    WeightsMapper,
+    is_pp_missing_parameter,
+)
 
 
 class TeleChat2Model(LlamaModel):
-
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+        hf_config = vllm_config.model_config.hf_config
+
+        vllm_config.model_config.hf_config.attribute_map = {
+            "num_hidden_layers": "n_layer",
+            "num_attention_heads": "n_head",
+            "intermediate_size": "ffn_hidden_size",
+            "rms_norm_eps": "layer_norm_epsilon",
+        }
+        vllm_config.model_config.hf_config.hidden_act = "silu"
+
         # 1. Initialize the LlamaModel with bias
-        vllm_config.model_config.hf_config.bias = True
-        vllm_config.model_config.hf_config.mlp_bias = True
+        hf_config.bias = True
+        hf_config.mlp_bias = True
+
         super().__init__(vllm_config=vllm_config, prefix=prefix)
         # 2. Remove the bias from the qkv_proj and gate_up_proj based on config
         # Telechat2's gate_up_proj and qkv_proj don't have bias
@@ -51,11 +65,10 @@ class TeleChat2Model(LlamaModel):
                 layer.mlp.gate_up_proj.bias = None
                 layer.mlp.gate_up_proj.skip_bias_add = True
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
-            ('gate_up_proj', 'gate_proj', 0),
-            ('gate_up_proj', 'up_proj', 1),
+            ("gate_up_proj", "gate_proj", 0),
+            ("gate_up_proj", "up_proj", 1),
         ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
@@ -67,9 +80,10 @@ class TeleChat2Model(LlamaModel):
                 v_weight = []
                 for i in range(total_num_heads):
                     start = i * head_dim * 2
-                    k_weight.append(loaded_weight[start:start + head_dim, :])
-                    v_weight.append(loaded_weight[start + head_dim:start +
-                                                  2 * head_dim:])
+                    k_weight.append(loaded_weight[start : start + head_dim, :])
+                    v_weight.append(
+                        loaded_weight[start + head_dim : start + 2 * head_dim :]
+                    )
                 k_weight = torch.cat(k_weight, dim=0)
                 v_weight = torch.cat(v_weight, dim=0)
                 name = name.replace("key_value", "qkv_proj")
@@ -101,15 +115,15 @@ class TeleChat2Model(LlamaModel):
                     if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader",
-                                            default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
 
 
 class TeleChat2ForCausalLM(LlamaForCausalLM):
-
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "transformer.": "model.",
@@ -123,18 +137,17 @@ class TeleChat2ForCausalLM(LlamaForCausalLM):
         },
     )
 
-    def _init_model(self,
-                    vllm_config: VllmConfig,
-                    prefix: str = "",
-                    layer_type: type[nn.Module] = LlamaDecoderLayer):
+    def _init_model(
+        self,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+        layer_type: type[nn.Module] = LlamaDecoderLayer,
+    ):
         return TeleChat2Model(vllm_config=vllm_config, prefix=prefix)
 
-    def load_weights(self, weights: Iterable[tuple[str,
-                                                   torch.Tensor]]) -> set[str]:
-
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
-            skip_prefixes=(["lm_head."]
-                           if self.config.tie_word_embeddings else None),
+            skip_prefixes=(["lm_head."] if self.config.tie_word_embeddings else None),
         )
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
