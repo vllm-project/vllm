@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
     RemoteAllocInfo,
     TransferError,
+    TransferId,
     WriteTask,
     get_port_offset,
     get_role,
@@ -181,7 +182,7 @@ class MoRIIOWriter:
             return self.worker.moriio_wrapper.done_remote_allocate_req_dict[transfer_id]
         except KeyError as e:
             raise KeyError(
-                f"Remote allocation info missing for request {request_id}"
+                f"Remote allocation info missing for transfer {transfer_id}"
             ) from e
 
     def _execute_write_task(self, task: WriteTask) -> None:
@@ -196,7 +197,9 @@ class MoRIIOWriter:
 
         if request_info.block_ids is None:
             logger.debug(
-                f"Request %s remote block IDs not ready: request_id = {task.request_id}, transfer_id = {request.transfer_id}"
+                "Request remote block IDs not ready:request_id = %s, transfer_id = %s",
+                task.request_id,
+                task.transfer_id,
             )
             return
 
@@ -539,7 +542,6 @@ class MoRIIOWrapper:
 
     def _handle_structured_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
-        req_id = data["req_id"]
         transfer_id = data["transfer_id"]
         block_notify_list = data.get("block_notify_list", [])
         decode_dp_rank = data.get("decode_rank", 0)

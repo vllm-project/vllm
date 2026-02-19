@@ -522,9 +522,22 @@ class MoRIIOConnectorScheduler:
         """
 
         request_id = request.request_id
-        transfer_id = self.request_id_to_transfer_id[request_id]
-        del self.transfer_id_to_request_id[transfer_id]
-        del self.request_id_to_transfer_id[request_id]
+        if request_id in self.request_id_to_transfer_id:
+            transfer_id = self.request_id_to_transfer_id[request_id]
+            del self.request_id_to_transfer_id[request_id]
+            if transfer_id in self.transfer_id_to_request_id:
+                del self.transfer_id_to_request_id[transfer_id]
+            else:
+                logger.warning(
+                    "Transfer id not in transfer_id_to_request_id lookup"
+                    "table. There is likely a bug!"
+                )
+        else:
+            logger.warning(
+                "Could not find %s  in transfer_id_to_request_id"
+                "lookup table.  This could lead to a possible hang.",
+                request_id,
+            )
 
         params = request.kv_transfer_params
         logger.debug(
@@ -755,6 +768,7 @@ class MoRIIOConnectorWorker:
         self.backend_name = backend.get_name()
 
         logger.debug("Detected attention backend %s", self.backend_name)
+
     def schedule_write_blocks(
         self,
         request_id: ReqId,
@@ -1214,9 +1228,12 @@ class MoRIIOConnectorWorker:
             else:
                 done_recving = self._pop_done_transfers()
 
-        done_recving = set(
-            map(lambda id: self.transfer_id_to_request_id[id], done_recving)
-        )
+        done_recving = {
+            self.transfer_id_to_request_id[id]
+            for id in filter(
+                lambda id: id in self.transfer_id_to_request_id, done_recving
+            )
+        }
 
         return done_sending, done_recving
 
