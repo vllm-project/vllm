@@ -111,7 +111,7 @@ class CompressedTensorsW8A16Fp8(CompressedTensorsScheme):
         size_k_first = True
         # TODO(rob): refactor block quant into separate class.
         if self.strategy == QuantizationStrategy.BLOCK:
-            assert self.is_static_input_scheme is False
+            assert not self.is_static_input_scheme
             size_k_first = False
             weight, weight_scale = process_fp8_weight_block_strategy(
                 weight, weight_scale
