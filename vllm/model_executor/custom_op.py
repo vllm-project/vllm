@@ -253,6 +253,7 @@ class CustomOp(nn.Module):
 
             return wrapper
 
+        # dynamic=True to avoid recompilations
         return torch.compile(
             fn,
             dynamic=True,
