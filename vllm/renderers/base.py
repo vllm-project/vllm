@@ -675,11 +675,11 @@ class BaseRenderer(ABC, Generic[_T]):
     def _has_multimodal(prompt: TokPrompt) -> bool:
         """Check if a tokenized prompt contains multimodal data."""
         if "encoder_prompt" in prompt:
-            enc = prompt["encoder_prompt"]  # type: ignore[typeddict-item]
-            dec = prompt.get("decoder_prompt")  # type: ignore[union-attr]
-            return bool(enc.get("multi_modal_data")) or bool(
-                dec and dec.get("multi_modal_data")
-            )
+            enc_dec: EncoderDecoderTokPrompt = prompt  # type: ignore[assignment]
+            if enc_dec["encoder_prompt"].get("multi_modal_data"):
+                return True
+            dec = enc_dec.get("decoder_prompt")
+            return dec is not None and bool(dec.get("multi_modal_data"))
         return bool(prompt.get("multi_modal_data"))  # type: ignore[union-attr]
 
     async def _process_for_engine_async(
