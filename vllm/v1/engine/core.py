@@ -104,13 +104,13 @@ class EngineCore:
 
         self.log_stats = log_stats
 
-        current_platform.update_block_size_for_backend(vllm_config)
-        vllm_config.validate_block_size()
-
         # Setup Model.
         self.model_executor = executor_class(vllm_config)
         if executor_fail_callback is not None:
             self.model_executor.register_failure_callback(executor_fail_callback)
+
+        current_platform.update_block_size_for_backend(vllm_config)
+        vllm_config.validate_block_size()
 
         self.available_gpu_memory_for_kv_cache = -1
 
