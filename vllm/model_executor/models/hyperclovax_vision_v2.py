@@ -25,6 +25,7 @@ from vllm.forward_context import set_forward_context
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
+    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -195,8 +196,9 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, object] | None = None,
-    ):
+        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
+    ) -> ProcessorInputs:
         """
         Override to use token IDs directly instead of text strings.
 
@@ -219,11 +221,18 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
             video_token_id
         ] * num_videos
 
-        dummy_mm_data = self.get_dummy_mm_data(seq_len, mm_counts, mm_options)
+        dummy_mm_data = self.get_dummy_mm_data(
+            seq_len,
+            mm_counts,
+            mm_options,
+            mm_processor_kwargs=mm_processor_kwargs,
+        )
+        dummy_mm_items = self.info.parse_mm_data(dummy_mm_data, validate=False)
 
         return ProcessorInputs(
             prompt=prompt_ids,
-            mm_data=dummy_mm_data,
+            mm_items=dummy_mm_items,
+            hf_processor_mm_kwargs=mm_processor_kwargs or {},
             tokenization_kwargs={"truncation": False},
         )
 
@@ -232,9 +241,8 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
-    ) -> dict:
-        from vllm.multimodal.inputs import MultiModalDataDict
-
+        mm_processor_kwargs: Mapping[str, object] | None = None,
+    ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
