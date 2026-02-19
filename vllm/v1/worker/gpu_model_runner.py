@@ -383,11 +383,8 @@ class GPUModelRunner(
             self.speculative_config.uses_draft_model()
             or self.speculative_config.use_eagle()
         ):
-            # When speculative decoding is enabled, reserve
-            # extra per-request slots (for the bonus token).
-            # Additionally, when parallel drafting is enabled,
-            # we need to account for the parallel positions
-            # per request.
+            # When speculative decoding is enabled, additional slots are needed
+            # on top of the scheduler's allocation
             multiplier = (
                 self.speculative_config.num_speculative_tokens
                 if self.speculative_config.parallel_drafting
@@ -1677,10 +1674,7 @@ class GPUModelRunner(
 
         # Hot-Swap lora model
         if self.lora_config:
-            assert (
-                np.sum(num_sampled_tokens)
-                <= self.vllm_config.scheduler_config.max_num_batched_tokens
-            )
+            assert np.sum(num_sampled_tokens) <= self.max_num_tokens
             self.set_active_loras(
                 self.input_batch, num_scheduled_tokens, num_sampled_tokens
             )
@@ -6122,7 +6116,7 @@ class GPUModelRunner(
             + 1
         ) * block_size
         routed_experts_capturer.init_buffer(
-            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            max_num_batched_tokens=self.max_num_tokens,
             max_num_kv_tokens=self.max_num_kv_tokens,
             vllm_config=self.vllm_config,
         )
