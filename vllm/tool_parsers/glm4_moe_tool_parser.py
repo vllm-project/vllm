@@ -448,6 +448,10 @@ class Glm4MoeModelToolParser(ToolParser):
         self.current_tool_id -= 1
 
     def _emit_tool_name_delta(self, tool_name: str) -> DeltaMessage:
+        self.prev_tool_call_arr[self.current_tool_id] = {
+            "name": self._current_tool_name,
+            "arguments": {},
+        }
         return DeltaMessage(
             tool_calls=[
                 DeltaToolCall(
