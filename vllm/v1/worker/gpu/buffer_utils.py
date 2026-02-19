@@ -175,8 +175,7 @@ class StagedWriteTensor:
         )
 
         # Write diffs to the GPU buffer
-        _apply_write_cached(
-            (n,),
+        _apply_write_kernel[(n,)](
             self.gpu,
             self.gpu.stride(0),
             indices_uva,
@@ -195,6 +194,7 @@ class StagedWriteTensor:
         self._staged_write_cu_lens.clear()
 
 
+@CachedKernel
 @triton.jit
 def _apply_write_kernel(
     output_ptr,
@@ -220,6 +220,3 @@ def _apply_write_kernel(
         tl.store(
             output_ptr + row_idx * output_stride + start_idx + block, content, mask=mask
         )
-
-
-_apply_write_cached = CachedKernel(_apply_write_kernel)

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Callable
 
 
 class CachedKernel:
@@ -7,54 +8,69 @@ class CachedKernel:
     the JIT dispatch overhead on subsequent calls.
 
     Triton specializes compiled kernels based on integer argument values
-    (e.g., divisible by 16 vs. not). This class maintains a small cache
-    of launchers keyed by the specialization signature of the non-constexpr
-    integer arguments. Each launcher calls ``CompiledKernel.run`` (the
-    CudaLauncher) directly — the same internal path used by the JIT —
-    skipping argument binding, specialization, and cache key computation.
+    (e.g., divisible by 16 vs. not) and constexpr argument values.
+    This class maintains a cache of launchers keyed by these
+    specialization-relevant properties. Each launcher calls
+    ``CompiledKernel.run`` (the CudaLauncher) directly — the same
+    internal path used by the JIT — skipping argument binding,
+    specialization, and cache key computation.
 
-    NOTE: All calls must use the same constexpr/option values (e.g.,
-    BLOCK_SIZE, num_warps) as the first call.
+    Can be used as a decorator — the call-site syntax is unchanged::
+
+        @CachedKernel
+        @triton.jit
+        def my_kernel(..., BLOCK_SIZE: tl.constexpr):
+            ...
+
+        my_kernel[(grid,)](*args, BLOCK_SIZE=1024)
+
+    Constexpr and launch-option kwargs may vary between calls;
+    each unique combination gets its own cached launcher.
     """
 
-    __slots__ = ("_kernel", "_launchers", "_spec_key_fn", "_constexpr_vals")
+    __slots__ = ("_kernel", "_launchers", "_key_fn", "_constexpr_keys", "_grid")
 
     def __init__(self, kernel):
         self._kernel = kernel
-        self._launchers: dict | None = None
-        self._spec_key_fn = None
-        self._constexpr_vals: tuple = ()
+        self._launchers: dict = {}
+        self._key_fn: Callable | None = None
+        self._constexpr_keys: tuple[str, ...] = ()
+        self._grid: tuple = ()
 
-    def __call__(self, grid, *args, **kwargs):
-        launchers = self._launchers
-        if launchers is not None:
-            assert self._spec_key_fn is not None
-            launch = launchers.get(self._spec_key_fn(args))
+    def __getitem__(self, grid):
+        self._grid = grid if isinstance(grid, tuple) else (grid,)
+        return self
+
+    def __call__(self, *args, **kwargs):
+        grid = self._grid
+        key_fn = self._key_fn
+        if key_fn is not None:
+            key = key_fn(args, kwargs)
+            launch = self._launchers.get(key)
             if launch is not None:
                 launch(grid, *args)
                 return
+
         # Normal JIT dispatch (first call or new specialization).
         self._kernel[grid](*args, **kwargs)
-        if launchers is None:
-            launchers = self._init_params(*args, **kwargs)
-        assert self._spec_key_fn is not None
-        launchers[self._spec_key_fn(args)] = self._build_launcher(*args, **kwargs)
+        if key_fn is None:
+            key_fn = self._init_key_fn(*args, **kwargs)
+            key = key_fn(args, kwargs)
+        self._launchers[key] = self._build_launcher(*args, **kwargs)
 
-    def _init_params(self, *args, **kwargs) -> dict:
-        """One-time setup: identify non-constexpr integer params and
-        cache constexpr values."""
-        self._launchers = {}
+    def _init_key_fn(self, *args, **kwargs) -> Callable:
+        """One-time setup: identify integer params, constexpr params,
+        and build the cache key function."""
         constexpr_names = {p.name for p in self._kernel.params if p.is_constexpr}
+        self._constexpr_keys = tuple(k for k in kwargs if k in constexpr_names)
         int_indices = tuple(
             i
             for i, p in enumerate(self._kernel.params)
             if not p.is_constexpr and i < len(args) and isinstance(args[i], int)
         )
-        self._spec_key_fn = _make_spec_key_fn(int_indices)
-        self._constexpr_vals = tuple(
-            v for k, v in kwargs.items() if k in constexpr_names
-        )
-        return self._launchers
+        key_fn = _make_key_fn(int_indices, tuple(kwargs.keys()))
+        self._key_fn = key_fn
+        return key_fn
 
     def _build_launcher(self, *args, **kwargs):
         """Build a fast launch closure that calls CudaLauncher directly."""
@@ -72,7 +88,7 @@ class CachedKernel:
         exit_hook = knobs.runtime.launch_exit_hook
         device = driver.active.get_current_device()
         get_stream = driver.active.get_current_stream
-        c_vals = self._constexpr_vals
+        c_vals = tuple(kwargs[k] for k in self._constexpr_keys)
 
         def launch(grid, *args):
             c_run(
@@ -92,33 +108,20 @@ class CachedKernel:
         return launch
 
 
-def _make_spec_key_fn(int_indices: tuple[int, ...]):
-    """Build a specialized function that computes the triton specialization
-    key for the given integer parameter indices.
+def _make_key_fn(int_indices: tuple[int, ...], kw_keys: tuple[str, ...]) -> Callable:
+    """Build a function that computes the cache key from args and kwargs.
 
-    Triton specializes integer args into three categories:
-    - value == 1: compiled as constexpr (value baked into binary)
-    - value % 16 == 0: divisibility hint for vectorization
-    - otherwise: no specialization
+    The key captures triton's integer arg specialization categories
+    (value==1, divisible by 16, or other) and all kwarg values.
     """
-    n = len(int_indices)
-    if n == 0:
-        return lambda args: 0
-    if n == 1:
-        i0 = int_indices[0]
-        return lambda args: 1 if args[i0] == 1 else (2 if args[i0] % 16 == 0 else 0)
-    if n == 2:
-        i0, i1 = int_indices
-        return lambda args: (
-            (1 if args[i0] == 1 else (2 if args[i0] % 16 == 0 else 0))
-            + (1 if args[i1] == 1 else (2 if args[i1] % 16 == 0 else 0)) * 3
-        )
+    if not int_indices and not kw_keys:
+        return lambda args, kw: 0
 
-    def _spec_key(args):
+    def key_fn(args, kw):
         k = 0
         for i in int_indices:
             v = args[i]
             k = k * 3 + (1 if v == 1 else (2 if v % 16 == 0 else 0))
-        return k
+        return (k, *(kw[key] for key in kw_keys)) if kw_keys else k
 
-    return _spec_key
+    return key_fn

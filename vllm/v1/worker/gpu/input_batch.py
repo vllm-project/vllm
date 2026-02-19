@@ -155,6 +155,7 @@ class InputBatch:
         )
 
 
+@CachedKernel
 @triton.jit
 def _prepare_prefill_inputs_kernel(
     input_ids_ptr,
@@ -192,9 +193,6 @@ def _prepare_prefill_inputs_kernel(
         tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
 
 
-_prepare_prefill_inputs_cached = CachedKernel(_prepare_prefill_inputs_kernel)
-
-
 def prepare_prefill_inputs(
     input_ids: torch.Tensor,
     next_prefill_tokens: torch.Tensor,
@@ -205,8 +203,7 @@ def prepare_prefill_inputs(
     num_computed_tokens: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
-    _prepare_prefill_inputs_cached(
-        (num_reqs,),
+    _prepare_prefill_inputs_kernel[(num_reqs,)](
         input_ids,
         next_prefill_tokens,
         idx_mapping,
@@ -219,6 +216,7 @@ def prepare_prefill_inputs(
     )
 
 
+@CachedKernel
 @triton.jit
 def _prepare_pos_seq_lens_kernel(
     pos_ptr,
@@ -256,9 +254,6 @@ def _prepare_pos_seq_lens_kernel(
         tl.store(pos_ptr + start + block, pos, mask=mask)
 
 
-_prepare_pos_seq_lens_cached = CachedKernel(_prepare_pos_seq_lens_kernel)
-
-
 def prepare_pos_seq_lens(
     idx_mapping: torch.Tensor,
     query_start_loc: torch.Tensor,
@@ -269,8 +264,7 @@ def prepare_pos_seq_lens(
     num_reqs = idx_mapping.shape[0]
     # NOTE(woosuk): We do +1 because the last thread block is used
     # to pad unused seq_lens as 0 for full CUDA graphs.
-    _prepare_pos_seq_lens_cached(
-        (num_reqs + 1,),
+    _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
         pos,
         seq_lens,
         idx_mapping,
@@ -281,6 +275,7 @@ def prepare_pos_seq_lens(
     )
 
 
+@CachedKernel
 @triton.jit
 def _combine_sampled_and_draft_tokens_kernel(
     input_ids_ptr,
@@ -338,11 +333,6 @@ def _combine_sampled_and_draft_tokens_kernel(
         )
 
 
-_combine_sampled_and_draft_tokens_cached = CachedKernel(
-    _combine_sampled_and_draft_tokens_kernel
-)
-
-
 def combine_sampled_and_draft_tokens(
     input_ids: torch.Tensor,
     idx_mapping: torch.Tensor,
@@ -362,8 +352,7 @@ def combine_sampled_and_draft_tokens(
         dtype=torch.int64,
         device=input_ids.device,
     )
-    _combine_sampled_and_draft_tokens_cached(
-        (num_reqs,),
+    _combine_sampled_and_draft_tokens_kernel[(num_reqs,)](
         input_ids,
         idx_mapping,
         last_sampled_tokens,
@@ -381,6 +370,7 @@ def combine_sampled_and_draft_tokens(
     return logits_indices
 
 
+@CachedKernel
 @triton.jit
 def _get_num_sampled_and_rejected_kernel(
     num_sampled_ptr,
@@ -410,11 +400,6 @@ def _get_num_sampled_and_rejected_kernel(
     tl.store(num_rejected_ptr + batch_idx, num_rejected)
 
 
-_get_num_sampled_and_rejected_cached = CachedKernel(
-    _get_num_sampled_and_rejected_kernel
-)
-
-
 def get_num_sampled_and_rejected(
     num_sampled: torch.Tensor,
     seq_lens: torch.Tensor,
@@ -424,8 +409,7 @@ def get_num_sampled_and_rejected(
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = idx_mapping.shape[0]
     num_rejected = torch.empty_like(num_sampled)
-    _get_num_sampled_and_rejected_cached(
-        (num_reqs,),
+    _get_num_sampled_and_rejected_kernel[(num_reqs,)](
         num_sampled,
         num_rejected,
         seq_lens,
@@ -436,6 +420,7 @@ def get_num_sampled_and_rejected(
     return num_sampled, num_rejected
 
 
+@CachedKernel
 @triton.jit
 def _post_update_kernel(
     idx_mapping_ptr,
@@ -487,9 +472,6 @@ def _post_update_kernel(
     tl.store(num_computed_tokens_ptr + req_state_idx, num_computed)
 
 
-_post_update_cached = CachedKernel(_post_update_kernel)
-
-
 def post_update(
     # [num_reqs]
     idx_mapping: torch.Tensor,
@@ -513,8 +495,7 @@ def post_update(
     total_len: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
-    _post_update_cached(
-        (num_reqs,),
+    _post_update_kernel[(num_reqs,)](
         idx_mapping,
         num_computed_tokens,
         last_sampled_tokens,
@@ -532,6 +513,7 @@ def post_update(
     )
 
 
+@CachedKernel
 @triton.jit
 def _expand_idx_mapping_kernel(
     idx_mapping_ptr,
@@ -552,9 +534,6 @@ def _expand_idx_mapping_kernel(
     tl.store(expanded_local_pos_ptr + start_idx + block, block, mask=mask)
 
 
-_expand_idx_mapping_cached = CachedKernel(_expand_idx_mapping_kernel)
-
-
 def expand_idx_mapping(
     idx_mapping: torch.Tensor,
     total_num_logits: int,
@@ -566,8 +545,7 @@ def expand_idx_mapping(
     expanded_local_pos = torch.empty(
         total_num_logits, dtype=torch.int32, device=idx_mapping.device
     )
-    _expand_idx_mapping_cached(
-        (num_reqs,),
+    _expand_idx_mapping_kernel[(num_reqs,)](
         idx_mapping,
         expanded_idx_mapping,
         expanded_local_pos,
