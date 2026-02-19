@@ -111,7 +111,11 @@ class EngineCore:
 
         self.available_gpu_memory_for_kv_cache = -1
 
+        # Update block_size for the selected attention backend.
+        # Deferred from check_and_update_config to avoid premature
+        # CUDA initialization in the main process.
         current_platform.update_block_size_for_backend(vllm_config)
+        vllm_config.validate_block_size()
 
         # Setup KV Caches and update CacheConfig after profiling.
         num_gpu_blocks, num_cpu_blocks, kv_cache_config = self._initialize_kv_caches(
