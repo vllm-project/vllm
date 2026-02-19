@@ -1423,6 +1423,13 @@ class NanoNemotronVLMultiModalProcessor(
         audio_items: list[AudioItem] = []
         for _, metadata in enumerate(metadata_list):
             video_bytes = metadata.get("original_video_bytes")
+            if video_bytes is None or len(video_bytes) == 0:
+                raise ValueError(
+                    "Cannot extract audio from video: original_video_bytes is "
+                    "missing or empty. When using use_audio_in_video=True, "
+                    "video must be loaded with keep_video_bytes=True (e.g. via "
+                    "the chat API with a model that sets use_audio_in_video)."
+                )
             audio_items.append(
                 extract_audio_from_video_bytes(
                     video_bytes,
