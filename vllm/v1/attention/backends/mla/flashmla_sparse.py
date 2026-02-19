@@ -821,7 +821,11 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         # Concatenate q if it's a tuple (ql_nope, q_pe)
         if isinstance(q, tuple):
-            q = torch.cat(q, dim=-1)
+            ql_nope, q_pe = q
+            q = torch.empty(ql_nope.shape[0], ql_nope.shape[1],
+                            ql_nope.shape[2] + q_pe.shape[2],
+                            dtype=ql_nope.dtype, device=ql_nope.device)
+            ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = q.shape[0]
 
