@@ -1412,35 +1412,23 @@ class NanoNemotronVLMultiModalProcessor(
             {"video": mm_data["video"]}
         )
         videos = video_items.get_items("video", VideoProcessorItems)
-        metadata_list = (
-            videos.metadata if isinstance(videos.metadata, list) else []
-        )
+        assert isinstance(videos.metadata, list)
+        metadata_list = videos.metadata
 
         target_sr = None
         if extractor := self.info.audio_extractor:
             target_sr = extractor.sampling_rate
 
         audio_items: list[AudioItem] = []
-        for idx, metadata in enumerate(metadata_list):
-            video_bytes = (
-                metadata.get("original_video_bytes") if metadata else None
-            )
-            if video_bytes is None:
-                raise ValueError(
-                    "`use_audio_in_video=True` requires the raw video "
-                    "bytes to be available in metadata. Make sure the "
-                    "server was started with "
-                    '--media-io-kwargs \'{"video": '
-                    '{"keep_video_bytes": true}}\' '
-                    f"(missing for video index {idx})."
-                )
+        for _, metadata in enumerate(metadata_list):
+            video_bytes = metadata.get("original_video_bytes")
             audio_items.append(
                 extract_audio_from_video_bytes(
                     video_bytes,
                     sr=target_sr,
                 )
             )
-            metadata.pop("original_video_bytes", None)
+            del metadata["original_video_bytes"]
 
         mm_data = dict(mm_data)
         mm_data["audio"] = audio_items
@@ -1758,6 +1746,7 @@ class NanoNemotronVLDummyInputsBuilder(
             dummy_video = {}
 
         if extractor := self.info.audio_extractor:
+            assert extractor is not None
             num_audios = mm_counts.get("audio", 0)
             audio_overrides = mm_options.get("audio") if mm_options else None
             tokens_per_audio = max(1, seq_len // max(num_audios, 1))
