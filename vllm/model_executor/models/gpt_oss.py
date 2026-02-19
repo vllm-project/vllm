@@ -586,7 +586,7 @@ class GptOssModel(nn.Module):
                 parts = name.split(".")
                 ids = [s for s in parts if s.isdigit()]
 
-                # for amd-quark format that each expert is seperated
+                # for amd-quark format that each expert is separated
                 # need to extract the parameter name with experts fused.
                 # example model: amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8
                 if len(ids) == 2:

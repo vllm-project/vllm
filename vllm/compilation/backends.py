@@ -285,7 +285,7 @@ class CompilerManager:
         with self.compile_context(compile_range):
             # There is a compilation time optimization here.
             #
-            # If the (input metdata, graph, compiler config) are the same, then
+            # If the (input metadata, graph, compiler config) are the same, then
             # we want to avoid compiling the same artifact again. If we didn't
             # do this optimization, the backend compilation (InductorAdaptor or
             # InductorStandaloneAdaptor)
