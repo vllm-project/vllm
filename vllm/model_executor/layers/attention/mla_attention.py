@@ -407,6 +407,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         )
 
         # Attributes for forward_impl method
+        self._vllm_config = get_current_vllm_config()
         self._chunked_prefill_workspace_size: int | None = None
         self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
             static=True,
@@ -419,7 +420,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if self._chunked_prefill_workspace_size is None:
             self._chunked_prefill_workspace_size = (
                 MLACommonMetadataBuilder.determine_chunked_prefill_workspace_size(
-                    get_current_vllm_config()
+                    self._vllm_config
                 )
             )
         return self._chunked_prefill_workspace_size
