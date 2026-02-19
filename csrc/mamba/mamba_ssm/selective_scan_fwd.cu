@@ -161,14 +161,6 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
         }
     }
 
-
-    // for (int state_idx = threadIdx.x; state_idx < params.dstate; state_idx += blockDim.x) {
-    //     smem_a[state_idx] = A[state_idx * params.A_dstate_stride];
-    //     smem_bc[state_idx] = B[state_idx * params.B_dstate_stride] * C[state_idx * params.C_dstate_stride];
-    // }
-
-    constexpr int kChunkSize = kNThreads * kNItems;
-
     // Use block_size for chunking when APC is enabled, otherwise use 2048 for backwards compatibility
     const int block_size = params.cache_enabled ? params.block_size : 2048;
 
