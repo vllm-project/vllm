@@ -59,7 +59,10 @@ from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import (
+    cuda_device_count_stateless,
+    set_random_seed,  # noqa: F401 - re-exported for use in test files
+)
 
 FP8_DTYPE = current_platform.fp8_dtype()
 
@@ -194,12 +197,86 @@ class RemoteOpenAIServer:
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        pid = self.proc.pid
+        # Graceful shutdown
         self.proc.terminate()
         try:
-            self.proc.wait(8)
+            self.proc.wait(timeout=15)
+            print(f"[RemoteOpenAIServer] Server {pid} terminated gracefully")
         except subprocess.TimeoutExpired:
-            # force kill if needed
+            print(
+                f"[RemoteOpenAIServer] Server {pid} did not respond "
+                "to SIGTERM, sending SIGKILL"
+            )
             self.proc.kill()
+            try:
+                self.proc.wait(timeout=5)
+                print(f"[RemoteOpenAIServer] Server {pid} killed")
+            except subprocess.TimeoutExpired as err:
+                raise RuntimeError(
+                    f"[RemoteOpenAIServer] Failed to kill server process {pid}"
+                ) from err
+        # Wait for GPU memory to be released
+        self._wait_for_gpu_memory_release()
+
+    def _get_gpu_memory_used(self) -> float | None:
+        """Get total GPU memory used across all visible devices in bytes."""
+        try:
+            if current_platform.is_rocm():
+                with _nvml():
+                    handles = amdsmi_get_processor_handles()
+                    total_used = 0
+                    for handle in handles:
+                        vram_info = amdsmi_get_gpu_vram_usage(handle)
+                        total_used += vram_info["vram_used"]
+                    return total_used
+            elif current_platform.is_cuda():
+                with _nvml():
+                    total_used = 0
+                    device_count = cuda_device_count_stateless()
+                    for i in range(device_count):
+                        handle = nvmlDeviceGetHandleByIndex(i)
+                        mem_info = nvmlDeviceGetMemoryInfo(handle)
+                        total_used += mem_info.used
+                    return total_used
+        except Exception as e:
+            print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
+            return None
+        return None
+
+    def _wait_for_gpu_memory_release(self, timeout: float = 30.0):
+        """Poll GPU memory until it stabilizes, indicating cleanup is complete."""
+        start = time.time()
+        prev_used: float | None = None
+        stable_count = 0
+
+        while time.time() - start < timeout:
+            used = self._get_gpu_memory_used()
+
+            if used is None:
+                return  # Can't query, assume ok
+
+            if prev_used is not None and abs(used - prev_used) < 100 * 1024 * 1024:
+                stable_count += 1
+                if stable_count >= 3:
+                    used_gb = used / 1e9
+                    print(
+                        f"[RemoteOpenAIServer] GPU memory stabilized "
+                        f"at {used_gb:.2f} GB"
+                    )
+                    return
+            else:
+                stable_count = 0
+
+            prev_used = used
+            time.sleep(0.1)
+
+        last_reading = prev_used / 1e9 if prev_used is not None else 0.0
+        raise RuntimeError(
+            f"[RemoteOpenAIServer] GPU memory did not stabilize within {timeout}s. "
+            f"Last reading: {last_reading:.2f} GB. "
+            "Child processes may still be holding GPU memory."
+        )
 
     def _poll(self) -> int | None:
         """Subclasses override this method to customize process polling"""
@@ -1299,7 +1376,7 @@ def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
         indices.append(idx)
         prompt = (
             "```python\n# We set a number of variables, "
-            + f"x{idx} will be important later\n"
+            f"x{idx} will be important later\n"
         )
         ln = random.randint(*ln_range)
         for k in range(30, ln):

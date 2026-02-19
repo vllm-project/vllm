@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import pytest
 import pytest_asyncio
 from openai import OpenAI
@@ -35,7 +34,7 @@ async def client(server):
 async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
-        input="What is 13 * 24?",
+        input="What is 123 * 456?",
     )
     assert response is not None
     print("response: ", response)
@@ -137,6 +136,53 @@ async def test_streaming_output_consistency(client: OpenAI, model_name: str):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_reasoning_tokens_e2e(client: OpenAI, model_name: str):
+    """Verify final usage includes reasoning_tokens in streaming mode."""
+    response = await client.responses.create(
+        model=model_name,
+        input="Compute 17 * 19 and explain briefly.",
+        reasoning={"effort": "low"},
+        temperature=0.0,
+        stream=True,
+    )
+
+    completed_event = None
+    async for event in response:
+        if event.type == "response.completed":
+            completed_event = event
+
+    assert completed_event is not None
+    assert completed_event.response.status == "completed"
+    assert completed_event.response.usage is not None
+    assert completed_event.response.usage.output_tokens_details is not None
+    assert completed_event.response.usage.output_tokens_details.reasoning_tokens > 0, (
+        "Expected reasoning_tokens > 0 for streamed Qwen3 response."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_non_streaming_reasoning_tokens_e2e(client: OpenAI, model_name: str):
+    """Verify usage includes reasoning_tokens in non-streaming mode."""
+    response = await client.responses.create(
+        model=model_name,
+        input="Compute 23 * 17 and explain briefly.",
+        reasoning={"effort": "low"},
+        temperature=0.0,
+        stream=False,
+    )
+
+    assert response is not None
+    assert response.status == "completed"
+    assert response.usage is not None
+    assert response.usage.output_tokens_details is not None
+    assert response.usage.output_tokens_details.reasoning_tokens > 0, (
+        "Expected reasoning_tokens > 0 for non-streamed Qwen3 response."
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_max_tokens(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
@@ -147,3 +193,27 @@ async def test_max_tokens(client: OpenAI, model_name: str):
     assert response is not None
     assert response.status == "incomplete"
     assert response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_extra_sampling_params(client: OpenAI, model_name: str):
+    """Test that extra sampling parameters are accepted and work."""
+    # Test with multiple sampling parameters - just verify they're accepted
+    response = await client.responses.create(
+        model=model_name,
+        input="Write a short sentence",
+        max_output_tokens=50,
+        temperature=0.7,
+        top_p=0.9,
+        extra_body={
+            "top_k": 40,
+            "repetition_penalty": 1.2,
+            "seed": 42,
+        },
+    )
+
+    # Verify request succeeded and parameters were accepted
+    assert response.status in ["completed", "incomplete"]
+    assert len(response.output) > 0
+    assert response.output[0].content[0].text  # Has text output

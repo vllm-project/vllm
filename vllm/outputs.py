@@ -162,7 +162,7 @@ class RequestOutput:
                         completion.token_ids.extend(next_completion.token_ids)
                         if next_completion.logprobs:
                             assert completion.logprobs is not None
-                            completion.logprobs.extend(next_completion.logprobs)
+                            completion.logprobs.extend(next_completion.logprobs)  # type: ignore[arg-type]
                         completion.cumulative_logprob = (
                             next_completion.cumulative_logprob
                         )
@@ -191,6 +191,16 @@ class RequestOutput:
             f"multi_modal_placeholders={self.multi_modal_placeholders})"
         )
 
+
+# Sentinel to indicate request is finished, used with streaming inputs.
+STREAM_FINISHED = RequestOutput(
+    request_id="",
+    prompt=None,
+    prompt_token_ids=None,
+    prompt_logprobs=None,
+    outputs=[],
+    finished=True,
+)
 
 _O = TypeVar("_O", default=PoolingOutput)
 

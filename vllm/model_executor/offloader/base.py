@@ -136,7 +136,8 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     elif offload_config.cpu_offload_gb > 0:
         # Use UVA offloading (legacy)
         return UVAOffloader(
-            cpu_offload_max_bytes=int(offload_config.cpu_offload_gb * 1024**3)
+            cpu_offload_max_bytes=int(offload_config.cpu_offload_gb * 1024**3),
+            cpu_offload_params=offload_config.cpu_offload_params,
         )
     else:
         # No offloading

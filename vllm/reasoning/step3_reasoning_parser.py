@@ -100,11 +100,11 @@ class Step3ReasoningParser(ReasoningParser):
 
             return reasoning, content
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         return self.think_end_token_id in input_ids
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         end_token_id = self.think_end_token_id
         return end_token_id in delta_ids

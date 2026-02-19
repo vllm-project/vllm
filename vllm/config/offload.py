@@ -32,6 +32,18 @@ class OffloadConfig:
     This uses UVA (Unified Virtual Addressing) for zero-copy access.
     """
 
+    cpu_offload_params: set[str] = Field(default_factory=set)
+    """The set of parameter name segments to target for CPU offloading.
+    Unmatched parameters are not offloaded. If this set is empty, parameters
+    are offloaded non-selectively until the memory limit defined by
+    `cpu_offload_gb` is reached.
+    Examples:
+        - For parameter name "mlp.experts.w2_weight":
+            - "experts" or "experts.w2_weight" will match.
+            - "expert" or "w2" will NOT match (must be exact segments).
+    This allows distinguishing parameters like "w2_weight" and "w2_weight_scale".
+    """
+
     offload_group_size: int = Field(default=0, ge=0)
     """Advanced CPU offloading (V2): Group every N layers together. Offload last
     `offload_num_in_group` layers of each group. Default is 0 (disabled).
