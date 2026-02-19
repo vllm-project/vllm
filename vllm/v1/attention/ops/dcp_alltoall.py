@@ -335,19 +335,21 @@ def dcp_a2a_lse_reduce(
     send_lse = local_lse.view(B, world_size, H_per_rank).permute(1, 0, 2).contiguous()
     recv_lse = torch.empty_like(send_lse)
 
-    # All-to-All for partial attention outputs
-    dist.all_to_all_single(
+    # All-to-All for partial attention outputs and LSE values (async overlap)
+    work_output = dist.all_to_all_single(
         recv_output.view(-1),
         send_output.view(-1),
         group=kvp_group.device_group,
+        async_op=True,
     )
-
-    # All-to-All for LSE values
-    dist.all_to_all_single(
+    work_lse = dist.all_to_all_single(
         recv_lse.view(-1),
         send_lse.view(-1),
         group=kvp_group.device_group,
+        async_op=True,
     )
+    work_output.wait()
+    work_lse.wait()
 
     # LSE-weighted combination via Triton kernel (local, no communication)
     return dcp_lse_combine_triton(

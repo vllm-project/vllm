@@ -189,8 +189,6 @@ class CudaPlatformBase(Platform):
         # or let other backends (FlashMLA on Hopper) be selected.
         dcp_size = parallel_config.decode_context_parallel_size
         if dcp_size > 1 and model_config is not None and model_config.use_mla:
-            from vllm.config import AttentionBackendEnum
-
             user_backend = vllm_config.attention_config.backend
             if user_backend == AttentionBackendEnum.FLASHINFER_MLA:
                 raise ValueError(
@@ -199,9 +197,7 @@ class CudaPlatformBase(Platform):
                     "results. Use --attention-backend CUTLASS_MLA instead."
                 )
             if user_backend is None and cls.is_device_capability_family(100):
-                from vllm.config import AttentionBackendEnum as ABE
-
-                vllm_config.attention_config.backend = ABE.CUTLASS_MLA
+                vllm_config.attention_config.backend = AttentionBackendEnum.CUTLASS_MLA
                 logger.info(
                     "DCP enabled with MLA on Blackwell: using CUTLASS_MLA "
                     "backend (FlashInferMLA does not return LSE for DCP)."
