@@ -116,13 +116,12 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, token_inputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
 from vllm.outputs import CompletionOutput
 from vllm.parser import ParserManager
-from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
@@ -229,6 +228,12 @@ class OpenAIServingResponses(OpenAIServing):
         self.enable_force_include_usage = enable_force_include_usage
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
 
         # If False (default), the "store" option is (silently) ignored and the
         # response is not stored. If True, the response is stored in memory.
@@ -292,7 +297,7 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: TokPrompt,
+        engine_prompt: ProcessorInputs,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         prompt_len = self._extract_prompt_len(engine_prompt)
@@ -446,12 +451,12 @@ class OpenAIServingResponses(OpenAIServing):
                     request.max_output_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
+                    self.override_max_tokens,
                 )
 
                 sampling_params = request.to_sampling_params(
                     default_max_tokens, self.default_sampling_params
                 )
-                tok_params = request.build_tok_params(self.model_config)
 
                 trace_headers = (
                     None
@@ -505,7 +510,6 @@ class OpenAIServingResponses(OpenAIServing):
                     request_id=request.request_id,
                     engine_prompt=engine_prompt,
                     sampling_params=sampling_params,
-                    tok_params=tok_params,
                     context=context,
                     lora_request=lora_request,
                     priority=request.priority,
@@ -640,7 +644,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+        engine_prompt = token_inputs(prompt_token_ids)
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:
@@ -755,6 +759,19 @@ class OpenAIServingResponses(OpenAIServing):
         num_generated_tokens = context.num_output_tokens
         num_cached_tokens = context.num_cached_tokens
         num_reasoning_tokens = context.num_reasoning_tokens
+        # For text-based reasoning parsers (e.g., <think>...</think>),
+        # HarmonyContext already counts reasoning tokens via channels.
+        # For Simple/Parsable contexts, derive reasoning_tokens from
+        # accumulated output token IDs using the parser if not already set.
+        if (
+            num_reasoning_tokens == 0
+            and self.parser is not None
+            and self.parser.reasoning_parser_cls is not None
+            and isinstance(context, (SimpleContext, ParsableContext))
+        ):
+            reasoning_parser = self.parser.reasoning_parser_cls(tokenizer)
+            accumulated = getattr(context, "_accumulated_token_ids", []) or []
+            num_reasoning_tokens = reasoning_parser.count_reasoning_tokens(accumulated)
 
         usage = ResponseUsage(
             input_tokens=num_prompt_tokens,
