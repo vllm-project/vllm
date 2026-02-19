@@ -2,16 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Unit tests for EncoderCudaGraphManager.
 
-Test organization (all pure Python, no GPU required):
-  - TestFindBudgetGraph      — greedy budget selection logic
-  - TestCountInputPatches    — T*H*W patch counting
-  - TestCountOutputTokens    — T*(H//m)*(W//m) output token counting
-  - TestGenerateGridConfig   — dummy grid generation for graph capture
-  - TestGetCumulativeStats   — hit/miss rate statistics
+Test organization:
+  No GPU required:
+    - TestFindBudgetGraph      — greedy budget selection logic
+    - TestCountInputPatches    — T*H*W patch counting
+    - TestCountOutputTokens    — T*(H//m)*(W//m) output token counting
+    - TestGenerateGridConfig   — dummy grid generation for graph capture
+    - TestGetCumulativeStats   — hit/miss rate statistics
+  GPU required:
+    - TestEncoderCudaGraphCaptureReplay — capture, replay, fallback, counters, chunking
 """
 
 import pytest
+import torch
 
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.mm.encoder_cudagraph import (
     EncoderCudaGraphManager,
     _count_input_patches,
@@ -226,3 +231,194 @@ class TestGetCumulativeStats:
         stats = mgr.get_cumulative_stats()
         assert stats["num_budgets"] == 0  # no graphs captured yet
         assert stats["token_budgets"] == budgets
+
+
+# ---------------------------------------------------------------------------
+# GPU fixtures and helpers
+# ---------------------------------------------------------------------------
+
+# Mock encoder parameters (kept small for fast capture)
+_SPATIAL_MERGE = 2
+_HIDDEN = 32
+_PATCH_SIZE = 4           # H/W per patch in grid_thw units
+_TEMPORAL_PATCH = 1
+_IN_CHANNELS = 3
+# flattened_patch_size = in_channels * temporal_patch * patch_size^2
+_FLAT = _IN_CHANNELS * _TEMPORAL_PATCH * _PATCH_SIZE * _PATCH_SIZE  # 48
+
+# Test budgets: small to keep capture fast
+_BUDGETS = [16, 64]
+_MAX_BATCH = 4
+
+
+class SimpleMockViTEncoder(torch.nn.Module):
+    """Minimal ViT encoder for CUDA graph tests.
+
+    Implements the interface expected by EncoderCudaGraphManager:
+      - spatial_merge_size, out_hidden_size        (attributes)
+      - patch_embed.proj.in_channels, .patch_size, .temporal_patch_size
+      - fast_pos_embed_interpolate(grid_thw_list)  → [n_out, hidden]
+      - rot_pos_emb(grid_thw_list)                 → ([n_out, d], [n_out, d])
+      - forward(pixel_values, grid_thw, encoder_metadata=None) → [n_out, hidden]
+
+    Forward: project all input patches, then simulate spatial merge by
+    averaging groups of m² patches → exactly token_budget output tokens.
+    """
+
+    spatial_merge_size = _SPATIAL_MERGE
+    out_hidden_size = _HIDDEN
+
+    def __init__(self):
+        super().__init__()
+        # Fake patch_embed namespace used by _prepare_dummy_inputs
+        PE = type("PE", (), {
+            "proj": type("P", (), {"in_channels": _IN_CHANNELS})(),
+            "patch_size": _PATCH_SIZE,
+            "temporal_patch_size": _TEMPORAL_PATCH,
+        })()
+        self.patch_embed = PE
+        self.proj = torch.nn.Linear(_FLAT, _HIDDEN)
+
+    def _n_out(self, grid_thw_list: list[list[int]]) -> int:
+        m = self.spatial_merge_size
+        return sum(t * (h // m) * (w // m) for t, h, w in grid_thw_list)
+
+    def fast_pos_embed_interpolate(
+        self, grid_thw_list: list[list[int]]
+    ) -> torch.Tensor:
+        p = next(self.parameters())
+        return torch.zeros(self._n_out(grid_thw_list), _HIDDEN,
+                           device=p.device, dtype=p.dtype)
+
+    def rot_pos_emb(
+        self, grid_thw_list: list[list[int]]
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        p = next(self.parameters())
+        n = self._n_out(grid_thw_list)
+        cos = torch.zeros(n, 16, device=p.device, dtype=p.dtype)
+        sin = torch.zeros(n, 16, device=p.device, dtype=p.dtype)
+        return cos, sin
+
+    def forward(
+        self,
+        pixel_values: torch.Tensor,
+        grid_thw: torch.Tensor | list[list[int]],
+        encoder_metadata: dict | None = None,
+    ) -> torch.Tensor:
+        # pixel_values: [n_patches, _FLAT]
+        # Simulate spatial merge: every m² input patches → 1 output token
+        m2 = self.spatial_merge_size ** 2
+        out = self.proj(pixel_values)       # [n_patches, hidden]
+        n_out = out.shape[0] // m2
+        return out[:n_out * m2].view(n_out, m2, _HIDDEN).mean(dim=1)
+
+
+def _make_manager_for_gpu(
+    encoder: torch.nn.Module,
+    token_budgets: list[int],
+    max_batch_size: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> EncoderCudaGraphManager:
+    """Create EncoderCudaGraphManager bypassing VllmConfig for GPU tests."""
+    mgr = object.__new__(EncoderCudaGraphManager)
+    mgr.token_budgets = sorted(token_budgets)
+    mgr.max_batch_size = max_batch_size
+    mgr.use_dp = False
+    mgr.budget_graphs = {}
+    mgr.graph_hits = 0
+    mgr.graph_misses = 0
+    mgr.log_stats_interval = 100
+    mgr.vision_model = encoder
+    mgr.device = device
+    mgr.dtype = dtype
+    return mgr
+
+
+def _make_pixel_values(
+    grid_thw_list: list[list[int]],
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor:
+    """Random pixel_values matching the total input patch count."""
+    n = _count_input_patches(grid_thw_list)
+    return torch.randn(n, _FLAT, device=device, dtype=dtype)
+
+
+# ---------------------------------------------------------------------------
+# GPU tests — capture, replay, fallback, counters, chunking
+# ---------------------------------------------------------------------------
+
+@pytest.mark.skipif(not current_platform.is_cuda(), reason="Skip if not cuda")
+class TestEncoderCudaGraphCaptureReplay:
+
+    def setup_method(self):
+        self.device = torch.device("cuda:0")
+        self.dtype = torch.float16
+        self.encoder = SimpleMockViTEncoder().to(self.device).half()
+        self.mgr = _make_manager_for_gpu(
+            self.encoder, _BUDGETS, _MAX_BATCH, self.device, self.dtype
+        )
+        self.mgr.capture()
+
+    # --- capture ---
+
+    def test_capture_creates_one_graph_per_budget(self):
+        assert len(self.mgr.budget_graphs) == len(_BUDGETS)
+        assert set(self.mgr.budget_graphs.keys()) == set(_BUDGETS)
+
+    # --- output shape ---
+
+    def test_execute_returns_one_tensor_per_image(self):
+        grid_thw = [[1, 4, 4], [1, 4, 4]]
+        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(pv, grid_thw)
+        assert result is not None
+        assert len(result) == 2
+
+    def test_execute_output_tokens_per_image(self):
+        # [1,4,4] → 1*(4//2)*(4//2) = 4 tokens; [1,8,8] → 16 tokens
+        grid_thw = [[1, 4, 4], [1, 8, 8]]
+        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(pv, grid_thw)
+        assert result is not None
+        assert result[0].shape == (4, _HIDDEN)
+        assert result[1].shape == (16, _HIDDEN)
+
+    # --- budget fallback ---
+
+    def test_returns_none_when_tokens_exceed_all_budgets(self):
+        # [1,18,18] → 1*(18//2)*(18//2) = 81 tokens > max budget 64
+        # 81 <= max_batch_size=4, so no chunking — direct miss
+        grid_thw = [[1, 18, 18]]
+        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(pv, grid_thw)
+        assert result is None
+
+    # --- counters ---
+
+    def test_hit_counter_increments_by_num_images(self):
+        grid_thw = [[1, 4, 4], [1, 4, 4]]
+        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
+        self.mgr.execute(pv, grid_thw)
+        assert self.mgr.graph_hits == 2
+
+    def test_miss_counter_increments_by_num_images(self):
+        grid_thw = [[1, 18, 18]]   # 81 tokens > 64
+        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
+        self.mgr.execute(pv, grid_thw)
+        assert self.mgr.graph_misses == 1
+
+    # --- chunking ---
+
+    def test_chunking_when_images_exceed_max_batch(self):
+        # 8 images > max_batch_size=4 → 2 chunks of 4
+        # each chunk: 4 * 4 = 16 tokens → fits budget 16
+        n_images = _MAX_BATCH * 2
+        grid_thw = [[1, 4, 4]] * n_images
+        pv = _make_pixel_values(grid_thw, self.device, self.dtype)
+        result = self.mgr.execute(pv, grid_thw)
+        assert result is not None
+        assert len(result) == n_images
+        for out in result:
+            assert out.shape == (4, _HIDDEN)
