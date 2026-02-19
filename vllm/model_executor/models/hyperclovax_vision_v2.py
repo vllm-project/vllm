@@ -30,13 +30,14 @@ from vllm.multimodal.inputs import (
 )
 from vllm.multimodal.parse import ImageSize, MultiModalDataItems
 from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
 )
-from vllm.multimodal.profiling import BaseDummyInputsBuilder
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -204,8 +205,6 @@ class HCXVisionV2DummyInputsBuilder(BaseDummyInputsBuilder[HCXVisionV2Processing
         By passing token IDs directly, we ensure the correct token (128060)
         is used for prompt replacement matching.
         """
-        from vllm.multimodal.profiling import ProcessorInputs
-
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
