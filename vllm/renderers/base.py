@@ -482,7 +482,7 @@ class BaseRenderer(ABC, Generic[_T]):
                     )
 
             elif uuid_items is not None:
-                if len(uuid_items) > 0 and len(data_items) != len(uuid_items):
+                if len(data_items) != len(uuid_items):
                     raise ValueError(
                         f"If given, multi_modal_uuids[{modality!r}] must have "
                         f"same length as multi_modal_data[{modality!r}], but "
