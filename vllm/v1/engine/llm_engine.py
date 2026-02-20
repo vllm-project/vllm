@@ -14,7 +14,7 @@ from vllm.config import ParallelConfig, VllmConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.engine.arg_utils import EngineArgs
-from vllm.inputs import PromptType
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -22,7 +22,6 @@ from vllm.outputs import PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
-from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
@@ -220,7 +219,7 @@ class LLMEngine:
     def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType | DictPrompt | TokPrompt,
+        prompt: EngineCoreRequest | PromptType | ProcessorInputs,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -228,22 +227,27 @@ class LLMEngine:
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         prompt_text: str | None = None,
-    ) -> None:
+    ) -> str:
         # Validate the request_id type.
         if not isinstance(request_id, str):
             raise TypeError(f"request_id must be a string, got {type(request_id)}")
 
         # Process raw inputs into the request.
         if isinstance(prompt, EngineCoreRequest):
+            logger.warning_once(
+                "Passing EngineCoreRequest to LLMEngine.generate() and .add_requests() "
+                "is deprecated and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+            )
+
             request = prompt
             if request_id != request.request_id:
                 logger.warning_once(
-                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "LLMEngine.add_request() was passed a request_id parameter that "
                     "does not match the EngineCoreRequest.request_id attribute. The "
                     "latter will be used, and the former will be ignored."
                 )
         else:
-            assert prompt_text is None
             request = self.input_processor.process_inputs(
                 request_id,
                 prompt,
@@ -259,6 +263,8 @@ class LLMEngine:
 
         self.input_processor.assign_request_id(request)
 
+        req_id = request.request_id
+
         # Use cloned params that may have been updated in process_inputs()
         params = request.params
 
@@ -269,7 +275,7 @@ class LLMEngine:
             self.output_processor.add_request(request, prompt_text, None, 0)
             # Add the request to EngineCore.
             self.engine_core.add_request(request)
-            return
+            return req_id
 
         # Fan out child requests (for n>1).
         parent_req = ParentRequest(request)
@@ -285,6 +291,8 @@ class LLMEngine:
             )
             # Add the request to EngineCore.
             self.engine_core.add_request(child_request)
+
+        return req_id
 
     def step(self) -> list[RequestOutput | PoolingRequestOutput]:
         if self.should_execute_dummy_batch:
@@ -320,7 +328,7 @@ class LLMEngine:
                 self.logger_manager.record(
                     scheduler_stats=outputs.scheduler_stats,
                     iteration_stats=iteration_stats,
-                    mm_cache_stats=self.input_processor.stat_mm_cache(),
+                    mm_cache_stats=self.renderer.stat_mm_cache(),
                 )
                 self.do_log_stats_with_interval()
 
@@ -333,7 +341,7 @@ class LLMEngine:
         self.engine_core.profile(False)
 
     def reset_mm_cache(self):
-        self.input_processor.clear_mm_cache()
+        self.renderer.clear_mm_cache()
         self.engine_core.reset_mm_cache()
 
     def reset_prefix_cache(
