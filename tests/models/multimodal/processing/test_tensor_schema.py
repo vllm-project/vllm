@@ -13,6 +13,7 @@ import torch.nn as nn
 from PIL import Image
 
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
+from vllm.config.cache import CacheConfig
 from vllm.config.multimodal import (
     AudioDummyOptions,
     BaseDummyOptions,
@@ -131,7 +132,9 @@ def initialize_dummy_model(
 ):
     temp_file = tempfile.mkstemp()[1]
     current_device = torch.get_default_device()
-    vllm_config = VllmConfig(model_config=model_config)
+    vllm_config = VllmConfig(
+        model_config=model_config, cache_config=CacheConfig(block_size=16)
+    )
     with set_current_vllm_config(vllm_config=vllm_config):
         init_distributed_environment(
             world_size=1,
@@ -160,9 +163,6 @@ def test_model_tensor_schema(model_id: str):
         pytest.skip(
             "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
-    if model_id == "internlm/Intern-S1-Pro":
-        # FIXME(Isotr0py): Fix later.
-        pytest.skip("Intern-S1-Pro has issue to pass the test.")
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")
