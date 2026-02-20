@@ -41,7 +41,8 @@
 #                                                                                                                                   #
 # IMPORTANT:                                                                                                                        #
 #   * Currently AMD CI has MI300 agents, MI325 agents, and MI355 agents. Of those, AMD is using mostly MI325 and MI355. AMD team    #
-#     is actively working on enabling more MI300 machines.                                                                          #
+#     is actively working on enabling more MI300 machines. All upcoming feature improvements are tracked in:                        #
+#         https://github.com/vllm-project/vllm/issues/34994                                                                         #
 #                                                                                                                                   #
 #-----------------------------------------------------------------------------------------------------------------------------------#
 #                                                                                                                                   #
