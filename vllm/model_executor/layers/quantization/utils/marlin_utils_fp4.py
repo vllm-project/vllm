@@ -338,15 +338,15 @@ def prepare_moe_mxfp4_layer_for_marlin(
     w2: torch.Tensor,
     w13_scale: torch.Tensor,
     w2_scale: torch.Tensor,
-    w13_bias: torch.Tensor,
-    w2_bias: torch.Tensor,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
 ]:
     logger.warning_once(
         "Your GPU does not have native support for FP4 computation but "
@@ -450,8 +450,9 @@ def prepare_moe_mxfp4_layer_for_marlin(
 
         bias = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
 
-    w13_bias = premute_bias(w13_bias)
-    w2_bias = premute_bias(w2_bias)
+    if w13_bias is not None and w2_bias is not None:
+        w13_bias = premute_bias(w13_bias)
+        w2_bias = premute_bias(w2_bias)
 
     return w13, w2, w13_scale, w2_scale, w13_bias, w2_bias
 
