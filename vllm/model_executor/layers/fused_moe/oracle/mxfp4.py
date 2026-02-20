@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from enum import Enum
+from typing import Union
+
+import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
@@ -8,10 +11,29 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
 )
+from vllm.model_executor.layers.fused_moe.all2all_utils import (
+    maybe_make_prepare_finalize,
+)
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEQuantConfig,
+    mxfp4_mxfp8_moe_quant_config,
+    mxfp4_w4a16_moe_quant_config,
+    ocp_mx_moe_quant_config,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 
 logger = init_logger(__name__)
+
+if has_triton_kernels():
+    try:
+        from triton_kernels.matmul_ogs import PrecisionConfig
+    except (ImportError, AttributeError) as e:
+        logger.error(
+            "Failed to import Triton kernels. Please make sure your triton "
+            "version is compatible. Error: %s",
+            e,
+        )
 
 
 class Mxfp4MoeBackend(Enum):
@@ -192,7 +214,7 @@ def select_mxfp4_moe_backend(
             if current_platform.is_device_capability_family(100):
                 # Using modular interface
                 # unifying them after #32564 is merged
-                if config.dp_size > 1:
+                if config.dp_size > 1 and config.use_ep:
                     backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16
                     return _return_or_raise(backend, config, activation_format)
                 else:
@@ -207,7 +229,7 @@ def select_mxfp4_moe_backend(
             AVAILABLE_BACKENDS.remove(
                 Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC
             )
-        if config.dp_size > 1:
+        if config.dp_size > 1 and config.use_ep:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
             return _return_or_raise(backend, config, activation_format)
         else:
@@ -234,14 +256,14 @@ def select_mxfp4_moe_backend(
     # FIXME(zyongye): manually select default kernels
     # change to automatic after monolithic kernel PR is merged
     if current_platform.is_device_capability_family(100):
-        if config.dp_size > 1:
+        if config.dp_size > 1 and config.use_ep:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16
             return _return_or_raise(backend, config, activation_format)
         else:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
             return backend, None
     elif current_platform.is_device_capability(90):
-        if config.dp_size > 1:
+        if config.dp_size > 1 and config.use_ep:
             backend = Mxfp4MoeBackend.TRITON
             return _return_or_raise(backend, config, activation_format)
         else:
@@ -267,7 +289,110 @@ def select_mxfp4_moe_backend(
 def convert_to_mxfp4_moe_kernel_format(): ...
 
 
-def make_mxfp4_moe_quant_config(): ...
+def make_mxfp4_moe_quant_config(
+    mxfp4_backend: Mxfp4MoeBackend,
+    w1_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w2_scale: Union[torch.Tensor, "PrecisionConfig"],
+    w1_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+    a1_scale: torch.Tensor | None = None,
+    a2_scale: torch.Tensor | None = None,
+    block_shape: list[int] | None = None,
+):
+    if mxfp4_backend in (
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
+        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
+    ):
+        return mxfp4_mxfp8_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
+    elif mxfp4_backend in (
+        Mxfp4MoeBackend.MARLIN,
+        Mxfp4MoeBackend.BATCHED_MARLIN,
+        Mxfp4MoeBackend.TRITON,
+        Mxfp4MoeBackend.TRITON_UNFUSED,
+        Mxfp4MoeBackend.TRITON_MONOLITHIC,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+    ):
+        return mxfp4_w4a16_moe_quant_config(
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
+    else:
+        return ocp_mx_moe_quant_config(
+            quant_dtype="mxfp4",
+            w1_bias=w1_bias,
+            w2_bias=w2_bias,
+            w1_scale=w1_scale,
+            w2_scale=w2_scale,
+        )
 
 
-def make_mxfp4_moe_kernel(): ...
+def make_mxfp4_moe_kernel(
+    moe_quant_config: FusedMoEQuantConfig,
+    moe_config: FusedMoEConfig,
+    experts_cls: type[mk.FusedMoEPermuteExpertsUnpermute],
+    mxfp4_backend: Mxfp4MoeBackend,
+    routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    shared_experts: torch.nn.Module | None = None,
+):
+    # Create Prepare/Finalize.
+    prepare_finalize = maybe_make_prepare_finalize(
+        moe=moe_config,
+        quant_config=moe_quant_config,
+        routing_tables=routing_tables,
+        allow_new_interface=True,
+    )
+    assert prepare_finalize is not None
+
+    logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+
+    # Create Experts.
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+        max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
+        assert max_num_tokens is not None
+        experts = experts_cls(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+            max_num_tokens=max_num_tokens,
+            num_dispatchers=prepare_finalize.num_dispatchers(),
+        )
+    else:
+        experts = experts_cls(
+            moe_config=moe_config,
+            quant_config=moe_quant_config,
+        )
+
+    # NOTE(rob): we only want the mk to control the shared_expert
+    # if using all2all (for SBO). bnell is making this explict in
+    # the new MoE runner class.
+    kernel = mk.FusedMoEModularKernel(
+        prepare_finalize,
+        experts,
+        shared_experts=(
+            shared_experts
+            if moe_config.moe_parallel_config.use_all2all_kernels
+            else None
+        ),
+        moe_parallel_config=moe_config.moe_parallel_config,
+        inplace=(
+            not moe_config.disable_inplace
+            and mxfp4_backend
+            not in (
+                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
+                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
+                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
+            )
+        ),
+    )
+
+    return kernel
