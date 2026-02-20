@@ -97,9 +97,9 @@
 #     - There is some Tensor Parallelism related processing logic in LoRA that requires multi-GPU testing for validation.           #
 #     - {`pytest -v -s -x lora/test_gptoss_tp.py`}: Disabled for now because MXFP4 backend on non-cuda platform doesn't support     #
 #                                                   LoRA yet.                                                                       #
-#   * [Distributed Tests (A100/MI300)]: Don't test llama model here, it seems hf implementation is buggy. See:                      #
+#   * [Distributed Tests (A100,MI300)]: Don't test llama model here, it seems hf implementation is buggy. See:                      #
 #                                       https://github.com/vllm-project/vllm/pull/5689                                              #
-#   * [Distributed Tests (H100/MI325)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293 in       #
+#   * [Distributed Tests (H100,MI325)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293 in       #
 #                                       favor of new tests in fusions_e2e. We avoid replicating the new jobs in                     #
 #                                       this file as it's deprecated.                                                               #
 #                                                                                                                                   #
@@ -510,7 +510,7 @@ steps:
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 Test attention (H100/MI325) # 14.5m
+- label: V1 Test attention (H100,MI325) # 14.5m
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
@@ -1398,7 +1398,7 @@ steps:
     - DP_EP=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
-- label: Distributed Tests (A100/MI300) # 20.9m
+- label: Distributed Tests (A100,MI300) # 20.9m
   timeout_in_minutes: 37
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi325_4
@@ -1429,7 +1429,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 
-- label: LM Eval Large Models (H100/MI325) # 24.8m
+- label: LM Eval Large Models (H100,MI325) # 24.8m
   timeout_in_minutes: 42
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
@@ -1444,7 +1444,7 @@ steps:
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
 
 
-- label: Distributed Tests (H100/MI325) # 23.0m
+- label: Distributed Tests (H100,MI325) # 23.0m
   timeout_in_minutes: 43
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
@@ -1936,7 +1936,7 @@ steps:
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 Test attention (B200/MI355) # TBD
+- label: V1 Test attention (B200,MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
@@ -2785,7 +2785,7 @@ steps:
     - DP_EP=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
-- label: Distributed Tests (4 GPUs)(A100/MI355) # TBD
+- label: Distributed Tests (4 GPUs)(A100,MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
@@ -2816,7 +2816,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 
-- label: LM Eval Large Models (H100/MI355) # TBD
+- label: LM Eval Large Models (H100,MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
@@ -2831,7 +2831,7 @@ steps:
     - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
 
 
-- label: Distributed Tests (H100/MI355) # TBD
+- label: Distributed Tests (H100,MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
