@@ -38,9 +38,7 @@ def main():
         vllm.entrypoints.cli.run_batch,
     ]
 
-    # Only do environment setup if not showing help
-    if not showing_help:
-        cli_env_setup()
+    cli_env_setup()
 
     # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default.
     # When showing help, skip this to avoid triggering CUDA/platform init
