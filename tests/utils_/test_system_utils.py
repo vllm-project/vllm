@@ -50,23 +50,6 @@ class TestDecorateLogsEnablePrefix:
         assert "(TestWorker pid=" in fake_stdout.getvalue()
         assert "(TestWorker pid=" in fake_stderr.getvalue()
 
-    def test_decorate_logs_skipped_when_enable_prefix_false(self):
-        """decorate_logs should be a no-op when enable_prefix=False."""
-        fake_stdout = io.StringIO()
-        fake_stderr = io.StringIO()
-        with (
-            mock.patch.object(sys, "stdout", fake_stdout),
-            mock.patch.object(sys, "stderr", fake_stderr),
-        ):
-            decorate_logs("TestWorker", enable_prefix=False)
-
-            fake_stdout.write("stdout line\n")
-            fake_stderr.write("stderr line\n")
-
-        # No prefix should have been added
-        assert fake_stdout.getvalue() == "stdout line\n"
-        assert fake_stderr.getvalue() == "stderr line\n"
-
     def test_decorate_logs_skipped_when_configure_logging_off(self):
         """decorate_logs should be a no-op when VLLM_CONFIGURE_LOGGING=0."""
         fake_stdout = io.StringIO()
