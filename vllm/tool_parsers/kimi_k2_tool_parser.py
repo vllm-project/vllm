@@ -39,12 +39,16 @@ class KimiK2ToolParser(ToolParser):
         # Section-level state management to prevent token leakage
         self.in_tool_section: bool = False
         self.token_buffer: str = ""
-        # Buffer size: empirical worst-case for longest marker (~30 chars) * 2
-        # + safety margin for unicode + partial overlap. Prevents unbounded growth.
-        self.buffer_max_size: int = 1024
-        self.section_char_count: int = 0  # Track characters processed in tool section
-        self.max_section_chars: int = 8192  # Force exit if section exceeds this
-        self._buffer_overflow_logged: bool = False  # Log overflow once per session
+        # Buffer size for detecting section markers split across streaming
+        # deltas.  Longest marker is ~30 chars; we keep a generous margin
+        # for unicode multi-byte sequences and partial overlaps.  The
+        # previous 1 KiB cap was too small when tool-call arguments are
+        # large (e.g. code-generation payloads) because it could flush
+        # content that still contained partial markers.
+        self.buffer_max_size: int = 8192
+        self.section_char_count: int = 0
+        # Log once when the marker-detection buffer overflows.
+        self._buffer_overflow_logged: bool = False
 
         # Support both singular and plural variants
         self.tool_calls_start_token: str = "<|tool_calls_section_begin|>"
@@ -137,15 +141,8 @@ class KimiK2ToolParser(ToolParser):
         Reset all streaming state. Call this between requests to prevent
         state leakage when parser instance is reused.
         """
-        # Reset section state
+        super().reset_streaming_state()
         self._reset_section_state()
-
-        # Reset parent class state
-        self.current_tool_name_sent = False
-        self.prev_tool_call_arr = []
-        self.current_tool_id = -1
-        self.streamed_args_for_tool = []
-
         logger.debug("Streaming state reset")
 
     def extract_tool_calls(
@@ -289,19 +286,14 @@ class KimiK2ToolParser(ToolParser):
         # section markers and tool call markers are distinct.
         delta_text, _, _ = self._check_and_strip_markers(delta_text)
 
-        # Error recovery: If in tool section for too long, force exit
+        # Track how much content the current tool section has produced.
+        # Previously this enforced a hard 8 KiB ceiling that would
+        # silently truncate large tool-call arguments (e.g. generated
+        # source files).  The engine already terminates generation via
+        # finish_reason / section-end markers, so an artificial character
+        # limit is unnecessary.  We keep the counter for diagnostics.
         if self.in_tool_section:
             self.section_char_count += len(delta_text)
-            if self.section_char_count > self.max_section_chars:
-                logger.warning(
-                    "Tool section exceeded max length (%d chars), forcing exit. "
-                    "This may indicate malformed model output.",
-                    self.max_section_chars,
-                )
-                self._reset_section_state()
-                # Deferred exit already handled by forced exit above
-                # Return remaining content as reasoning (or empty delta if no content)
-                return DeltaMessage(content=delta_text if delta_text.strip() else "")
 
         try:
             # figure out where we are in the parsing by counting tool call
