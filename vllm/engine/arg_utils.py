@@ -85,7 +85,7 @@ from vllm.config.parallel import (
 )
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
-from vllm.config.vllm import OptimizationLevel
+from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -587,6 +587,7 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
+    performance_mode: PerformanceMode = VllmConfig.performance_mode
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
@@ -1228,6 +1229,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
+        vllm_group.add_argument("--performance-mode", **vllm_kwargs["performance_mode"])
         vllm_group.add_argument(
             "--weight-transfer-config", **vllm_kwargs["weight_transfer_config"]
         )
@@ -1844,6 +1846,7 @@ class EngineArgs:
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
+            performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
         )
 
@@ -2060,6 +2063,13 @@ class EngineArgs:
                 usage_context,
                 SchedulerConfig.DEFAULT_MAX_NUM_SEQS,
             )
+
+        # If throughput mode is set, double max_num_batched_tokens and max_num_seqs.
+        if self.performance_mode == "throughput":
+            if orig_max_num_batched_tokens is None:
+                self.max_num_batched_tokens *= 2
+            if orig_max_num_seqs is None:
+                self.max_num_seqs *= 2
 
         if orig_max_num_batched_tokens is None:
             assert model_config.max_model_len is not None, (
