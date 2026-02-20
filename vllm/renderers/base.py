@@ -732,13 +732,18 @@ class BaseRenderer(ABC, Generic[_T]):
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
 
-        return build_enc_dec_inputs(
-            encoder_inputs=await self._process_singleton_async(enc_prompt),
-            decoder_inputs=(
-                None
+        encoder_inputs, decoder_inputs = await asyncio.gather(
+            self._process_singleton_async(enc_prompt),
+            (
+                asyncio.sleep(0)
                 if dec_prompt is None
-                else await self._process_singleton_async(dec_prompt)
+                else self._process_singleton_async(dec_prompt)
             ),
+        )
+
+        return build_enc_dec_inputs(
+            encoder_inputs=encoder_inputs,
+            decoder_inputs=decoder_inputs,
             decoder_start_token_id=self.get_dec_start_token_id(),
         )
 
