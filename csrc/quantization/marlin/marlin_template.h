@@ -1205,7 +1205,7 @@ __global__ void Marlin(
       }
     }
 
-    if constexpr (b_type == vllm::kFE2M1f) {
+    if constexpr (s_type == vllm::kFE4M3fn || s_type == vllm::kFE8M0fnu) {
       int s_quant_0 = reinterpret_cast<int*>(frag_s[k2])[0];
       int s_quant_1 = reinterpret_cast<int*>(frag_s[k2])[1];
 
