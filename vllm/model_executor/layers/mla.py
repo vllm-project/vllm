@@ -129,6 +129,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             assert self.q_b_proj is not None, (
                 "q_b_proj is required when q_lora_rank is not None"
             )
+
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
             q_c, kv_lora = qkv_lora.split(
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],

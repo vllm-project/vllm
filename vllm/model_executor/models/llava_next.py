@@ -285,6 +285,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
                 text_hidden_size=config.text_config.hidden_size,
                 projector_hidden_act=config.projector_hidden_act,
                 multimodal_projector_bias=config.multimodal_projector_bias,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
         with self._mark_language_model(vllm_config):

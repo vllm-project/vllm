@@ -420,7 +420,7 @@ def make_fp8_moe_quant_config(
     per_out_ch_quant: bool = False,
 ) -> FusedMoEQuantConfig | None:
     """
-    Create FusedMoEQuantConfig for the specifed FP8 Backend.
+    Create FusedMoEQuantConfig for the specified FP8 Backend.
     The FusedMoEQuantConfig holds the scales that are used
     at runtime by the Modular Kernel abstraction.
 

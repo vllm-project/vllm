@@ -385,6 +385,11 @@ class RayDistributedExecutor(Executor):
         self.collective_rpc("init_device")
         self.collective_rpc("load_model")
 
+        def _update_block_size(worker):
+            current_platform.update_block_size_for_backend(worker.vllm_config)
+
+        self.collective_rpc(_update_block_size)
+
         for pp_rank in range(self.parallel_config.pipeline_parallel_size):
             self.pp_tp_workers.append([])
             for tp_rank in range(self.parallel_config.tensor_parallel_size):
