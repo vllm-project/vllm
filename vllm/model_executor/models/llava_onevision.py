@@ -277,6 +277,7 @@ class LlavaOnevisionDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -866,7 +867,6 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
         mm_input_by_modality = self._parse_and_validate_multimodal_inputs(**kwargs)
         if not mm_input_by_modality:
             return []
-            return None
 
         # The result multimodal_embeddings is tuple of tensors, with each
         # tensor corresponding to a multimodal data item (image or video).
@@ -887,7 +887,7 @@ class LlavaOnevisionForConditionalGeneration(nn.Module, SupportsMultiModal, Supp
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

@@ -13,14 +13,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers.image_processing_utils import BatchFeature
-from transformers.tokenization_utils import TensorType
+from transformers.utils import TensorType
 from typing_extensions import TypedDict, Unpack
 
 from vllm.config import VllmConfig
 from vllm.config.model import ModelConfig
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -759,6 +759,7 @@ class IsaacProcessor:
                 # Regular text message
                 processed_messages.append(message)
 
+        kwargs["return_dict"] = False
         return self.tokenizer.apply_chat_template(
             processed_messages,
             tokenize=tokenize,
@@ -849,6 +850,7 @@ class IsaacDummyInputsBuilder(BaseDummyInputsBuilder[IsaacProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -1450,7 +1452,7 @@ class IsaacForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

@@ -14,12 +14,10 @@ void moe_permute(
     const torch::Tensor& token_expert_indices,       // [n_token, topk]
     const std::optional<torch::Tensor>& expert_map,  // [n_expert]
     int64_t n_expert, int64_t n_local_expert, int64_t topk,
-    const std::optional<int64_t>& align_block_size,
     torch::Tensor& permuted_input,             // [permuted_size, hidden]
     torch::Tensor& expert_first_token_offset,  // [n_local_expert + 1]
     torch::Tensor& inv_permuted_idx,           // [n_token, topk]
-    torch::Tensor& permuted_idx,               // [permute_size]
-    torch::Tensor& m_indices) {                // [align_expand_m]
+    torch::Tensor& permuted_idx) {             // [permute_size]
   TORCH_CHECK(expert_first_token_offset.scalar_type() == at::ScalarType::Long,
               "expert_first_token_offset must be int64");
   TORCH_CHECK(topk_ids.scalar_type() == at::ScalarType::Int,
@@ -34,8 +32,6 @@ void moe_permute(
               "token_expert_indices shape must be same as inv_permuted_idx");
   auto n_token = input.sizes()[0];
   auto n_hidden = input.sizes()[1];
-  auto align_block_size_value =
-      align_block_size.has_value() ? align_block_size.value() : -1;
   auto stream = at::cuda::getCurrentCUDAStream().stream();
   const long sorter_size =
       CubKeyValueSorter::getWorkspaceSize(n_token * topk, n_expert);
@@ -80,20 +76,8 @@ void moe_permute(
         get_ptr<int>(permuted_experts_id), get_ptr<int>(sorted_row_idx),
         get_ptr<int>(inv_permuted_idx), get_ptr<int>(permuted_idx),
         get_ptr<int64_t>(expert_first_token_offset), n_token, valid_num_ptr,
-        n_hidden, topk, n_local_expert, align_block_size_value, stream);
+        n_hidden, topk, n_local_expert, stream);
   });
-
-  // get m_indices and update expert_first_token_offset with align block
-  // this is only required for DeepGemm and not required for CUTLASS group gemm
-  if (align_block_size.has_value()) {
-    auto align_expert_first_token_offset =
-        torch::zeros_like(expert_first_token_offset);
-    getMIndices(get_ptr<int64_t>(expert_first_token_offset),
-                get_ptr<int64_t>(align_expert_first_token_offset),
-                get_ptr<int>(m_indices), n_local_expert, align_block_size_value,
-                stream);
-    expert_first_token_offset.copy_(align_expert_first_token_offset);
-  }
 }
 
 void moe_unpermute(
@@ -186,16 +170,13 @@ void shuffle_rows(const torch::Tensor& input_tensor,
 
 #else
 
-void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_weights,
-                 torch::Tensor& topk_ids,
+void moe_permute(const torch::Tensor& input, const torch::Tensor& topk_ids,
                  const torch::Tensor& token_expert_indices,
                  const std::optional<torch::Tensor>& expert_map,
                  int64_t n_expert, int64_t n_local_expert, int64_t topk,
-                 const std::optional<int64_t>& align_block_size,
                  torch::Tensor& permuted_input,
                  torch::Tensor& expert_first_token_offset,
-                 torch::Tensor& src_row_id2dst_row_id_map,
-                 torch::Tensor& m_indices) {
+                 torch::Tensor& inv_permuted_idx, torch::Tensor& permuted_idx) {
   TORCH_CHECK(false, "moe_permute is not supported on CUDA < 12.0");
 }
 

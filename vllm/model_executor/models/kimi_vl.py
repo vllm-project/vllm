@@ -81,7 +81,7 @@ from vllm.transformers_utils.configs import KimiVLConfig, MoonViTConfig
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import AutoWeightsLoader, init_vllm_registered_model, maybe_prefix
-from .vision import run_dp_sharded_mrope_vision_model
+from .vision import is_vit_use_data_parallel, run_dp_sharded_mrope_vision_model
 
 
 # For dummy input only
@@ -93,10 +93,12 @@ class MaxImageTokenMeta:
 
 class KimiVLMultiModalProjector(nn.Module):
     def __init__(
-        self, config: KimiVLConfig, use_data_parallel: bool = False, prefix: str = ""
+        self,
+        config: KimiVLConfig,
+        prefix: str = "",
     ):
         super().__init__()
-        self.use_data_parallel = use_data_parallel
+        self.use_data_parallel = is_vit_use_data_parallel()
 
         self.hidden_size = (
             config.vision_config.hidden_size
@@ -214,6 +216,7 @@ class KimiVLDummyInputsBuilder(BaseDummyInputsBuilder[KimiVLProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -321,7 +324,6 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
             )
             self.multi_modal_projector = KimiVLMultiModalProjector(
                 config=config,
-                use_data_parallel=self.use_data_parallel,
                 prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
@@ -389,7 +391,7 @@ class KimiVLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

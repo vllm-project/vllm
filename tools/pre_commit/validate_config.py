@@ -54,24 +54,18 @@ class ConfigValidator(ast.NodeVisitor):
     def __init__(self): ...
 
     def visit_ClassDef(self, node):
-        # Validate class with both @config and @dataclass decorators
-        decorators = [
-            id
-            for d in node.decorator_list
-            if (
-                isinstance(d, ast.Name)
-                and ((id := d.id) == "config" or id == "dataclass")
-            )
-            or (
-                isinstance(d, ast.Call)
-                and (isinstance(d.func, ast.Name) and (id := d.func.id) == "dataclass")
-            )
-        ]
+        # Validate classes with a @config decorator
+        decorators = set()
+        for decorator in node.decorator_list:
+            if isinstance(decorator, ast.Call):
+                decorator = decorator.func
+            if isinstance(decorator, ast.Name) and decorator.id == "config":
+                decorators.add(decorator.id)
 
-        if set(decorators) == {"config", "dataclass"}:
+        if decorators == {"config"}:
             validate_class(node)
-        elif set(decorators) == {"config"}:
-            fail(f"Class {node.name} with config decorator must be a dataclass.", node)
+        elif "config" in decorators:
+            fail(f"config decorator for {node.name} should be used alone", node)
 
         self.generic_visit(node)
 
