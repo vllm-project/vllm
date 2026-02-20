@@ -110,9 +110,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
         self.weight_dtype = "mxfp4"
-        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(
-            moe.is_lora_enabled
-        )
+        self.mxfp4_backend, self.experts_cls = select_mxfp4_moe_backend(moe)
 
         self.max_capture_size = (
             get_current_vllm_config().compilation_config.max_cudagraph_capture_size
