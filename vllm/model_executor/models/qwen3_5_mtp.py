@@ -156,7 +156,10 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         num_experts: int,
     ) -> bool:
         param = params_dict[name]
-        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+        weight_loader = typing.cast(
+            Callable[..., bool],
+            getattr(param, "weight_loader", default_weight_loader),
+        )
         loaded_local_expert = False
         for expert_id in range(num_experts):
             curr_expert_weight = loaded_weight[expert_id]
