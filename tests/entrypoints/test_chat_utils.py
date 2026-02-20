@@ -2706,13 +2706,14 @@ async def test_parse_chat_messages_video_vision_chunk_with_uuid_async(
     ],
     ids=["image_url", "input_audio", "video_url"],
 )
-def test_system_message_rejects_non_text_content(
-    phi3v_model_config, role, part, part_type_label
+def test_system_message_warns_on_non_text_content(
+    phi3v_model_config, role, part, part_type_label, caplog
 ):
-    """System and developer messages must only accept text content.
+    """System and developer messages should warn on multimodal content.
 
-    Per the OpenAI API specification, sending multimodal content (e.g.
-    ``image_url``) in a system message should be rejected with an error.
+    Per the decision in https://github.com/vllm-project/vllm/pull/34072,
+    sending multimodal content (e.g. ``image_url``) in a system message
+    should issue a warning and skip the part rather than raising an error.
     See https://github.com/vllm-project/vllm/issues/33925
     """
     messages = [
@@ -2726,12 +2727,18 @@ def test_system_message_rejects_non_text_content(
         },
     ]
 
-    with pytest.raises(ValueError, match=f"'{part_type_label}' is not supported"):
-        parse_chat_messages(
+    import logging
+    with caplog.at_level(logging.WARNING, logger="vllm.entrypoints.chat_utils"):
+        conversation, _, _ = parse_chat_messages(
             messages,
             phi3v_model_config,
             content_format="string",
         )
+
+    assert any(
+        f"'{part_type_label}' is not supported" in record.message
+        for record in caplog.records
+    ), f"Expected warning about '{part_type_label}' not found in logs"
 
 
 @pytest.mark.parametrize("role", ["system", "developer"])
@@ -2762,12 +2769,12 @@ def test_system_message_rejects_non_text_content(
         "input_audio_no_type",
     ],
 )
-def test_system_message_rejects_mm_content_without_type_key(
-    phi3v_model_config, role, part, part_type_label
+def test_system_message_warns_on_mm_content_without_type_key(
+    phi3v_model_config, role, part, part_type_label, caplog
 ):
     """Parts without an explicit ``type`` field but with a multimodal key
-    (e.g. ``{"image_url": "..."}`` ) must also be rejected for text-only
-    roles.
+    (e.g. ``{"image_url": "..."}`` ) should issue a warning for text-only
+    roles and skip the part.
 
     See https://github.com/vllm-project/vllm/issues/33925
     """
@@ -2782,12 +2789,18 @@ def test_system_message_rejects_mm_content_without_type_key(
         },
     ]
 
-    with pytest.raises(ValueError, match=f"'{part_type_label}' is not supported"):
-        parse_chat_messages(
+    import logging
+    with caplog.at_level(logging.WARNING, logger="vllm.entrypoints.chat_utils"):
+        conversation, _, _ = parse_chat_messages(
             messages,
             phi3v_model_config,
             content_format="string",
         )
+
+    assert any(
+        f"'{part_type_label}' is not supported" in record.message
+        for record in caplog.records
+    ), f"Expected warning about '{part_type_label}' not found in logs"
 
 
 @pytest.mark.parametrize("role", ["system", "developer"])

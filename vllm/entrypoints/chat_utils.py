@@ -1392,11 +1392,13 @@ def _parse_chat_message_content_part(
                 if has_explicit_mm_type
                 else next(k for k in part if k in _MULTIMODAL_CONTENT_KEYS)
             )
-            raise ValueError(
-                f"Content part type '{label}' is not supported "
-                f"in '{role}' messages. Only text content is accepted "
-                f"for '{role}' role messages."
+            logger.warning(
+                "Content part type '%s' is not supported "
+                "in '%s' messages. Only text content is accepted "
+                "for '%s' role messages. Skipping this content part.",
+                label, role, role,
             )
+            return None
 
     # Handle structured dictionary parts
     part_type, content = _parse_chat_message_content_mm_part(part)
