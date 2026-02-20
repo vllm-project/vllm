@@ -31,6 +31,7 @@ from vllm.triton_utils import tl, triton
 
 if TYPE_CHECKING:
     from vllm.distributed.parallel_state import GroupCoordinator
+    from vllm.v1.attention.ops.common import CPTritonContext
 
 
 def _lse_weighted_combine(
@@ -282,9 +283,10 @@ def dcp_a2a_lse_reduce(
     local_output: torch.Tensor,
     local_lse: torch.Tensor,
     dcp_group: GroupCoordinator,
+    ctx: CPTritonContext | None = None,
     return_lse: bool = False,
-    is_lse_base_on_e: bool = True,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    is_lse_base_on_e=True,
+):
     """
     Combine partial attention outputs across DCP ranks using All-to-All.
 
