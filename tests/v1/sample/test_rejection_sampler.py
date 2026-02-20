@@ -573,7 +573,7 @@ def native_sample_recovered_tokens(
             if draft_probs is None:
                 # prob is target_probs[token_idx] except draft_token_id is zeroed
                 prob = target_probs[token_idx].clone()
-                draft_token_id = draft_token_ids[token_idx].to(torch.int32)
+                draft_token_id = draft_token_ids[token_idx]
                 prob[draft_token_id] = 0.0
             else:
                 prob = (target_probs[token_idx] - draft_probs[token_idx]).clamp_min_(
