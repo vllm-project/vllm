@@ -433,7 +433,9 @@ class JambaModel(nn.Module):
                         continue
                     name = name.replace(weight_name, param_name)
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     weight_loader(
                         param,
                         loaded_weight,
