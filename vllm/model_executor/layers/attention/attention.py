@@ -236,6 +236,31 @@ class Attention(nn.Module, AttentionLayerBase):
                 cache_config.cache_dtype = "fp8"
                 cache_config.calculate_kv_scales = False
 
+        # Skip quantization for specified layers
+        if cache_config is not None and cache_config.kv_cache_dtype_skip_layers:
+            from vllm.model_executor.models.utils import extract_layer_index
+
+            skip = False
+            # Check attention type
+            if (
+                sliding_window is not None
+                and "sliding_window" in cache_config.kv_cache_dtype_skip_layers
+            ):
+                skip = True
+            # Check layer index
+            layer_idx = extract_layer_index(prefix)
+            if str(layer_idx) in cache_config.kv_cache_dtype_skip_layers:
+                skip = True
+            if skip:
+                kv_cache_dtype = "auto"
+                calculate_kv_scales = False
+            logger.info(
+                "Layer %s: kv_cache_dtype=%s, sliding_window=%s",
+                prefix,
+                kv_cache_dtype,
+                sliding_window,
+            )
+
         self.kv_cache_torch_dtype = kv_cache_dtype_str_to_dtype(
             kv_cache_dtype, vllm_config.model_config
         )
