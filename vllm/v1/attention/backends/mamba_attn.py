@@ -154,7 +154,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         assert (
             m.max_query_len <= 1 + self.num_spec_tokens
-            and m.num_actual_tokens <= self.decode_cudagraph_max_bs
+            and m.num_reqs <= self.decode_cudagraph_max_bs
         ), (
             "Mamba only supports decode-only full CUDAGraph capture. "
             "Make sure all cudagraph capture sizes <= max_num_seq."
