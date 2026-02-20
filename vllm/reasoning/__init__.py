@@ -56,6 +56,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningWithThinkingParser",
     ),
+    "kimi_k25": (
+        "kimi_k25_reasoning_parser",
+        "KimiK25ReasoningParser",
+    ),
     "minimax_m2": (
         "minimax_m2_reasoning_parser",
         "MiniMaxM2ReasoningParser",
