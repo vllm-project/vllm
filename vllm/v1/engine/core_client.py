@@ -315,6 +315,8 @@ class InprocClient(EngineCoreClient):
         self.engine_core.reset_encoder_cache()
 
     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        if mode == "wait":
+            raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
         result = self.engine_core.sleep(level, mode)
         assert result is None
 

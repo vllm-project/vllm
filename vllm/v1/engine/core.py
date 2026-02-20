@@ -614,7 +614,7 @@ class EngineCore:
 
         output_queue = getattr(self, "output_queue", None)
         if output_queue is None and mode == "wait":
-            raise ValueError("Cannot use 'wait' pause mode with inline-engine mode")
+            raise ValueError("Cannot use 'wait' pause mode with inproc-engine mode")
 
         def wait_until_idle(engine: "EngineCore", future: Future[Any] | None) -> bool:
             if engine.scheduler.has_unfinished_requests() or engine.batch_queue:
