@@ -41,8 +41,8 @@ class CacheConfig:
     block_size: SkipValidation[int] = None  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
 
-    This is None until `Platform.check_and_update_config()` sets it based on
-    the current platform. Always an int by the time the engine starts."""
+    This is None until the platform sets it. Always an int by the time
+    the engine starts."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory

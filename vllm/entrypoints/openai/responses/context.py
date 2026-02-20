@@ -280,7 +280,6 @@ class ParsableContext(ConversationContext):
         self.num_prompt_tokens = 0
         self.num_output_tokens = 0
         self.num_cached_tokens = 0
-        # TODO: num_reasoning_tokens is not implemented yet.
         self.num_reasoning_tokens = 0
         # not implemented yet for ParsableContext
         self.all_turn_metrics: list[TurnMetrics] = []
@@ -308,12 +307,15 @@ class ParsableContext(ConversationContext):
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.output_messages: list[ResponseRawMessageAndToken] = []
+        self._accumulated_token_ids: list[int] = []
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
         self.num_cached_tokens = output.num_cached_tokens or 0
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         self.parser.process(output.outputs[0])
+        output_token_ids = output.outputs[0].token_ids or []
+        self._accumulated_token_ids.extend(output_token_ids)
 
         # only store if enable_response_messages is True, save memory
         if self.request.enable_response_messages:
