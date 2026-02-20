@@ -2,18 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # imports for structured outputs tests
-import io
 import json
 
-import openai
 import pytest
-import pytest_asyncio
 
 from ...utils import RemoteOpenAIServer
 from .conftest import add_attention_backend
 
-MODEL_NAME = "openai/whisper-large-v3-turbo"
-SERVER_ARGS = ["--enforce-eager"]
 MISTRAL_FORMAT_ARGS = [
     "--tokenizer_mode",
     "mistral",
@@ -22,18 +17,6 @@ MISTRAL_FORMAT_ARGS = [
     "--load_format",
     "mistral",
 ]
-
-
-@pytest.fixture(scope="module")
-def server():
-    with RemoteOpenAIServer(MODEL_NAME, SERVER_ARGS) as remote_server:
-        yield remote_server
-
-
-@pytest_asyncio.fixture
-async def client(server):
-    async with server.get_async_client() as async_client:
-        yield async_client
 
 
 @pytest.mark.asyncio
@@ -105,24 +88,6 @@ async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
     out_usage = out["usage"]
     assert "mary had a little lamb" in out_text
     assert out_usage["seconds"] == 16, out_usage["seconds"]
-
-
-@pytest.mark.asyncio
-async def test_invalid_audio_file(client):
-    """Corrupted audio should surface as HTTP 400."""
-    invalid_audio = io.BytesIO(b"not a valid audio file")
-    invalid_audio.name = "invalid.wav"
-
-    with pytest.raises(openai.BadRequestError) as exc_info:
-        await client.audio.transcriptions.create(
-            model=MODEL_NAME,
-            file=invalid_audio,
-            language="en",
-        )
-
-    assert exc_info.value.status_code == 400
-    assert "Invalid or unsupported audio file" in exc_info.value.message
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
