@@ -347,7 +347,17 @@ def kv_cache_dtype_str_to_dtype(
 ) -> torch.dtype:
     if kv_cache_dtype == "auto":
         # Model config may not be specified for unit tests, default to float16
-        return model_config.dtype if model_config else torch.half
+        if not model_config:
+            return torch.half
+            
+        # First try to resolve using checkpoint's kv_cache_quant_algo
+        resolved_dtype_str = resolve_kv_cache_dtype_string(kv_cache_dtype, model_config)
+        if resolved_dtype_str != "auto":
+            # Checkpoint specified a quantization algorithm, use it
+            return STR_DTYPE_TO_TORCH_DTYPE[resolved_dtype_str]
+        
+        # No checkpoint quantization specified, fall back to model dtype
+        return model_config.dtype
     return STR_DTYPE_TO_TORCH_DTYPE[kv_cache_dtype]
 
 
