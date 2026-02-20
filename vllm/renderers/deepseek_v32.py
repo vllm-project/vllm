@@ -47,26 +47,25 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
     ) -> None:
         super().__init__(config, tokenizer)
 
-        def _apply_chat_template(*args, **kwargs):
-            return self.get_tokenizer().apply_chat_template(*args, **kwargs)
-
         self._apply_chat_template_async = make_async(
-            _apply_chat_template, executor=self._executor
+            self._apply_chat_template, executor=self._executor
         )
+
+    def _apply_chat_template(self, *args, **kwargs):
+        return self.get_tokenizer().apply_chat_template(*args, **kwargs)
 
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             self.model_config,
             content_format="string",
         )
 
-        prompt_raw = tokenizer.apply_chat_template(
+        prompt_raw = self._apply_chat_template(
             conversation=conversation,
             messages=messages,
             **params.get_apply_chat_template_kwargs(),

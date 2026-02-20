@@ -612,9 +612,9 @@ class BaseRenderer(ABC, Generic[_T]):
         prompt: TokensPrompt,
     ) -> "TokenInputs | MultiModalInputs":
         """Process token inputs, with multimodal preprocessing offloaded
-        via ``self._mm_executor`` in the async variant.
+        via `self._mm_executor` in the async variant.
 
-        When ``--async-mm-input-processing`` is enabled, ``_mm_executor``
+        When `--async-mm-input-processing` is enabled, `_mm_executor`
         is a real thread pool.  Otherwise it is an inline executor so the
         call runs synchronously with no overhead.
         """
@@ -767,6 +767,21 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return engine_prompt
 
+    async def process_for_engine_async(
+        self, prompt: TokPrompt, arrival_time: float
+    ) -> ProcessorInputs:
+        engine_prompt: ProcessorInputs
+        if "encoder_prompt" in prompt:
+            engine_prompt = await self._process_enc_dec_async(
+                prompt  # type: ignore[arg-type]
+            )
+        else:
+            engine_prompt = await self._process_singleton_async(prompt)
+
+        engine_prompt["arrival_time"] = arrival_time
+
+        return engine_prompt
+
     # Top-level methods
     def render_cmpl(
         self,
@@ -804,17 +819,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        async def _process_one(p: TokPrompt) -> ProcessorInputs:
-            if "encoder_prompt" in p:
-                ep: ProcessorInputs = await self._process_enc_dec_async(
-                    p  # type: ignore[arg-type]
-                )
-            else:
-                ep = await self._process_singleton_async(p)
-            ep["arrival_time"] = arrival_time
-            return ep
-
-        return list(await asyncio.gather(*(_process_one(p) for p in tok_prompts)))
+        return list(
+            await asyncio.gather(
+                *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
+            )
+        )
 
     def render_chat(
         self,
@@ -878,18 +887,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        async def _process_one(p: TokPrompt) -> ProcessorInputs:
-            if "encoder_prompt" in p:
-                ep: ProcessorInputs = await self._process_enc_dec_async(
-                    p  # type: ignore[arg-type]
-                )
-            else:
-                ep = await self._process_singleton_async(p)
-            ep["arrival_time"] = arrival_time
-            return ep
-
         eng_prompts = list(
-            await asyncio.gather(*(_process_one(p) for p in tok_prompts))
+            await asyncio.gather(
+                *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
+            )
         )
 
         return out_conversations, eng_prompts
