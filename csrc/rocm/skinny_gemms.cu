@@ -346,12 +346,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   // - Then the WG will move to another 8 K elements
   // TODO: Logic below will only work when K is multiple of 8
   //----------------------------------------------------
-  for (uint32_t k = 0; k < max_lds_len; k += THRDS * WvPrGrp * A_CHUNK) {
-    uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
-
-    if (k_in >= min__(Kap * N, max_lds_len)) break;
-
-    *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
+  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+  #else
+    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+  #endif
   }
   __syncthreads();
 
@@ -580,29 +581,22 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m = startColumn;
   }
 
-  for (uint32_t k = 0; k < min__(Kap * N, max_lds_len);
-       k += THRDS * WvPrGrp * A_CHUNK) {
-    uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
-
-    if (k_in >= min__(Kap * N, max_lds_len)) break;
-
-    *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
+  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+  #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+  #else
+    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+  #endif
   }
 
   __syncthreads();
 
   if (threadIdx.y >= _WvPrGrp) return;
 
-  float sum[N][YTILE];
-  scalar8 sum4[N][YTILE];
-
   while (m < M) {
-    for (int i = 0; i < YTILE; i++)
-      for (int n = 0; n < N; n++)
-        if constexpr (!use_mfma)
-          sum[n][i] = 0;
-        else
-          sum4[n][i] = {0, 0, 0, 0};
+    float sum[N][YTILE] = {};
+    scalar8 sum4[N][YTILE] = {};
 
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       bigType bigA[N][UNRL] = {};
@@ -841,13 +835,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   //----------------------------------------------------
   #define PCML
   #ifndef PCML
-  for (uint32_t k = 0; k < min__(Kap * N, max_lds_len);
-       k += THRDS * WvPrGrp * A_CHUNK) {
-    uint32_t k_in = k + ((threadIdx.y * THRDS + threadIdx.x) * A_CHUNK);
-
-    if (k_in >= min__(Kap * N, max_lds_len)) break;
-
-    *((bigType*)(&s[k_in])) = *((bigType*)(&A[k_in]));
+  for (uint32_t k = (threadIdx.y * THRDS + threadIdx.x) * A_CHUNK;
+       k < min__(Kap * N, max_lds_len); k += THRDS * WvPrGrp * A_CHUNK) {
+    #if defined(__gfx950__)
+    __builtin_amdgcn_global_load_lds((int*)(&A[k]), (int*)(&s[k]), 16, 0, 0);
+    #else
+    *((bigType*)(&s[k])) = *((bigType*)(&A[k]));
+    #endif
   }
   __syncthreads();
   #endif
@@ -863,9 +857,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
              : (kFit - kFit % TUC);  // round up to multiple of TUC
   // if (kFit == 0) kFit = TUC;
   kFit = min__(kFit, Kap);
-
-  float sum[N][YTILE];
-  scalar8 sum4[N][YTILE];
 
   //----------------------------------------------------
   // Each wave works on a single column of weight matrix.
@@ -896,12 +887,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // YTILE represents how many column of weight matrix
     // are being worked on by each wave.
     //----------------------------------------------------
-    for (int i = 0; i < YTILE; i++)
-      for (int n = 0; n < N; n++)
-        if constexpr (!use_mfma)
-          sum[n][i] = 0;
-        else
-          sum4[n][i] = {0, 0, 0, 0};
+    float sum[N][YTILE] = {};
+    scalar8 sum4[N][YTILE] = {};
 
     //----------------------------------------------------
     // Fetch weight matrix B in interleaved K-split!
@@ -935,7 +922,12 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           for (uint32_t n = 0; n < N; n++) {
             uint32_t k_in = kBase + n * Kap + kOff;
             uint32_t k_ot = n * kFit + kOff;
+    #if defined(__gfx950__)
+            __builtin_amdgcn_global_load_lds((int*)(&A[k_in]), (int*)(&s[k_ot]),
+                                             16, 0, 0);
+    #else
             *((bigType*)(&s[k_ot])) = *((bigType*)(&A[k_in]));
+    #endif
           }
         }
         __syncthreads();
