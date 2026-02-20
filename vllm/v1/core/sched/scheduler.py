@@ -117,9 +117,9 @@ class Scheduler(SchedulerInterface):
         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
         self.recompute_kv_load_failures = True
         if self.vllm_config.kv_transfer_config is not None:
-            assert not self.is_encoder_decoder, (
-                "Encoder-decoder models are not currently supported with KV connectors"
-            )
+            assert (
+                not self.is_encoder_decoder
+            ), "Encoder-decoder models are not currently supported with KV connectors"
             self.connector = KVConnectorFactory.create_connector(
                 config=self.vllm_config,
                 role=KVConnectorRole.SCHEDULER,
@@ -255,9 +255,9 @@ class Scheduler(SchedulerInterface):
 
             self.routed_experts_reader = RoutedExpertsReader.create()
 
-            assert len(kv_cache_config.kv_cache_groups) > 0, (
-                "enable_return_routed_experts requires at least one kv cache group"
-            )
+            assert (
+                len(kv_cache_config.kv_cache_groups) > 0
+            ), "enable_return_routed_experts requires at least one kv cache group"
             self.max_num_kv_tokens = (
                 kv_cache_config.num_blocks // len(kv_cache_config.kv_cache_groups) + 1
             ) * self.block_size
@@ -276,9 +276,9 @@ class Scheduler(SchedulerInterface):
         num_new_local_computed_tokens: int = 0,
         num_external_computed_tokens: int = 0,
     ) -> int:
-        assert num_external_computed_tokens == 0, (
-            "External KV connector is not verified yet"
-        )
+        assert (
+            num_external_computed_tokens == 0
+        ), "External KV connector is not verified yet"
         num_computed_tokens = (
             request.num_computed_tokens
             + num_new_local_computed_tokens
@@ -915,9 +915,9 @@ class Scheduler(SchedulerInterface):
         NOTE: The request should be popped from the running queue outside of this
         method.
         """
-        assert request.status == RequestStatus.RUNNING, (
-            "Only running requests can be preempted"
-        )
+        assert (
+            request.status == RequestStatus.RUNNING
+        ), "Only running requests can be preempted"
         self.kv_cache_manager.free(request)
         self.encoder_cache_manager.free(request)
         request.status = RequestStatus.PREEMPTED
@@ -1386,7 +1386,9 @@ class Scheduler(SchedulerInterface):
             ):
                 new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
-                if new_token_ids and self.structured_output_manager.should_advance(request, new_token_ids):
+            if new_token_ids and self.structured_output_manager.should_advance(
+                request, new_token_ids
+            ):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None
@@ -1611,7 +1613,10 @@ class Scheduler(SchedulerInterface):
                 continue
 
             # Add newly generated spec token ids to the request.
-                if self.structured_output_manager.should_advance(request, spec_token_ids):
+            if self.structured_output_manager.should_advance(
+                request,
+                spec_token_ids,
+            ):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
@@ -1640,7 +1645,10 @@ class Scheduler(SchedulerInterface):
             # (needed for chunked prefill case for example).
             del spec_token_ids[orig_num_spec_tokens:]
             # Filter out spec tokens which do not adhere to the grammar.
-                if self.structured_output_manager.should_advance(request, spec_token_ids):
+            if self.structured_output_manager.should_advance(
+                request,
+                spec_token_ids,
+            ):
                 metadata = request.structured_output_request
                 assert metadata is not None and metadata.grammar is not None
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
