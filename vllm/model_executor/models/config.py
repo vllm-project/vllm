@@ -586,6 +586,9 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
         """Update mamba_ssm_cache_dtype for NemotronH models when set to 'auto'
         (or not explicitly set), to the value specified in the HF config, or to
         float16 if not specified.
+
+        Also default the attention backend to FlashAttention to avoid accuracy
+        issues with FlashInfer on Blackwell GPUs.
         """
         cache_config = vllm_config.cache_config
         if cache_config.mamba_ssm_cache_dtype == "auto":
@@ -594,10 +597,17 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
                 hf_config, "mamba_ssm_cache_dtype", "float16"
             )
             logger.info(
-                "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model",
+                "Updating mamba_ssm_cache_dtype to '%s' for NemotronH model.",
                 mamba_ssm_cache_dtype,
             )
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
+
+        if vllm_config.attention_config.backend is None:
+            logger.info(
+                "Updating attention backend to FlashAttention to avoid accuracy"
+                " issues with FlashInfer for NemotronH model."
+            )
+            vllm_config.attention_config.backend = AttentionBackendEnum.FLASH_ATTN
 
 
 class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
