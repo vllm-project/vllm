@@ -70,9 +70,7 @@ class RequestOutputCollector:
             # This ensures that request outputs with different request indexes
             # (if n > 1) do not override each other.
             self.output.add(output, aggregate=self.aggregate)
-        elif isinstance(self.output, PoolingRequestOutput) and isinstance(
-            output, PoolingRequestOutput
-        ):
+        elif isinstance(self.output, PoolingRequestOutput):
             self.output = output
 
     async def get(self) -> RequestOutput | PoolingRequestOutput:
