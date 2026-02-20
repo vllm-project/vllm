@@ -48,10 +48,6 @@ def fused_rope_and_unified_kv_cache_update_impl(
     """
     _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
     if layer_slot_mapping is not None:
-        assert hasattr(attn_layer.impl, "do_rope_and_kv_cache_update"), (
-            f"{attn_layer.impl.__class__.__name__}"
-            " does not support fused rope and kv cache update"
-        )
         attn_layer.impl.do_rope_and_kv_cache_update(
             attn_layer,
             query,
