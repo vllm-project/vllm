@@ -982,7 +982,6 @@ steps:
   agent_pool: mi325_1
   optional: true
   grade: Blocking
-  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
