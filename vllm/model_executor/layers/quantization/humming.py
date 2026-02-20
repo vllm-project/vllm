@@ -2,9 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-import re
 from typing import Any
 
+import regex as re
 import torch
 from humming import dtypes
 from humming.layer import HummingLayerMeta, HummingMethod
