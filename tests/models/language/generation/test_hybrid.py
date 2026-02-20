@@ -843,8 +843,12 @@ def test_same_mamba_output_apc_on_vs_off(
             num_logprobs=-1,
             vllm_model=vllm_model,
         )
-    texts_no_apc = [outputs_no_apc[0][i][1] for i in range(len(prompts))]
-    texts_with_apc = [outputs_with_apc[0][i][1] for i in range(len(prompts))]
+    texts_no_apc = [
+        outputs_no_apc[0][i][1].removeprefix(prompts[i]) for i in range(len(prompts))
+    ]
+    texts_with_apc = [
+        outputs_with_apc[0][i][1].removeprefix(prompts[i]) for i in range(len(prompts))
+    ]
 
     for i in range(len(prompts)):
         assert texts_no_apc[i] == texts_with_apc[i], (
