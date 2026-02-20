@@ -15,59 +15,316 @@ EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 REASONING_MODEL_NAME = "Qwen/Qwen3-0.6B"
 
-# ruff: noqa: E501
-INPUT_BATCH = (
-    '{{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "{0}", "messages": [{{"role": "system", "content": "You are a helpful assistant."}},{{"role": "user", "content": "Hello world!"}}],"max_tokens": 1000}}}}\n'
-    '{{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "{0}", "messages": [{{"role": "system", "content": "You are an unhelpful assistant."}},{{"role": "user", "content": "Hello world!"}}],"max_tokens": 1000}}}}\n'
-    '{{"custom_id": "request-3", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "NonExistModel", "messages": [{{"role": "system", "content": "You are an unhelpful assistant."}},{{"role": "user", "content": "Hello world!"}}],"max_tokens": 1000}}}}\n'
-    '{{"custom_id": "request-4", "method": "POST", "url": "/bad_url", "body": {{"model": "{0}", "messages": [{{"role": "system", "content": "You are an unhelpful assistant."}},{{"role": "user", "content": "Hello world!"}}],"max_tokens": 1000}}}}\n'
-    '{{"custom_id": "request-5", "method": "POST", "url": "/v1/chat/completions", "body": {{"stream": "True", "model": "{0}", "messages": [{{"role": "system", "content": "You are an unhelpful assistant."}},{{"role": "user", "content": "Hello world!"}}],"max_tokens": 1000}}}}'
-).format(CHAT_MODEL_NAME)
-
-INVALID_INPUT_BATCH = (
-    '{{"invalid_field": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "{0}", "messages": [{{"role": "system", "content": "You are a helpful assistant."}},{{"role": "user", "content": "Hello world!"}}],"max_tokens": 1000}}}}\n'
-    '{{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "{0}", "messages": [{{"role": "system", "content": "You are an unhelpful assistant."}},{{"role": "user", "content": "Hello world!"}}],"max_tokens": 1000}}}}'
-).format(CHAT_MODEL_NAME)
-
-INPUT_EMBEDDING_BATCH = (
-    f'{{"custom_id": "request-1", "method": "POST", "url": "/v1/embeddings", "body": {{"model": "{EMBEDDING_MODEL_NAME}", "input": "You are a helpful assistant."}}}}\n'
-    f'{{"custom_id": "request-2", "method": "POST", "url": "/v1/embeddings", "body": {{"model": "{EMBEDDING_MODEL_NAME}", "input": "You are an unhelpful assistant."}}}}\n'
-    f'{{"custom_id": "request-3", "method": "POST", "url": "/v1/embeddings", "body": {{"model": "{EMBEDDING_MODEL_NAME}", "input": "Hello world!"}}}}\n'
-    '{"custom_id": "request-4", "method": "POST", "url": "/v1/embeddings", "body": {"model": "NonExistModel", "input": "Hello world!"}}'
+INPUT_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a helpful assistant.",
+                    },
+                    {"role": "user", "content": "Hello world!"},
+                ],
+                "max_tokens": 1000,
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an unhelpful assistant.",
+                    },
+                    {"role": "user", "content": "Hello world!"},
+                ],
+                "max_tokens": 1000,
+            },
+        },
+        {
+            "custom_id": "request-3",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": "NonExistModel",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an unhelpful assistant.",
+                    },
+                    {"role": "user", "content": "Hello world!"},
+                ],
+                "max_tokens": 1000,
+            },
+        },
+        {
+            "custom_id": "request-4",
+            "method": "POST",
+            "url": "/bad_url",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an unhelpful assistant.",
+                    },
+                    {"role": "user", "content": "Hello world!"},
+                ],
+                "max_tokens": 1000,
+            },
+        },
+        {
+            "custom_id": "request-5",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "stream": "True",
+                "model": CHAT_MODEL_NAME,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are an unhelpful assistant.",
+                    },
+                    {"role": "user", "content": "Hello world!"},
+                ],
+                "max_tokens": 1000,
+            },
+        },
+    ]
 )
 
-INPUT_SCORE_BATCH = f"""{{"custom_id": "request-1", "method": "POST", "url": "/score", "body": {{"model": "{RERANKER_MODEL_NAME}", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}}}
-{{"custom_id": "request-2", "method": "POST", "url": "/v1/score", "body": {{"model": "{RERANKER_MODEL_NAME}", "queries": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}}}"""
+INVALID_INPUT_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "invalid_field": "request-1",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Hello world!"},
+                ],
+                "max_tokens": 1000,
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": CHAT_MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": "You are an unhelpful assistant."},
+                    {"role": "user", "content": "Hello world!"},
+                ],
+                "max_tokens": 1000,
+            },
+        },
+    ]
+)
 
-INPUT_RERANK_BATCH = f"""{{"custom_id": "request-1", "method": "POST", "url": "/rerank", "body": {{"model": "{RERANKER_MODEL_NAME}", "query": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}}}
-{{"custom_id": "request-2", "method": "POST", "url": "/v1/rerank", "body": {{"model": "{RERANKER_MODEL_NAME}", "query": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}}}
-{{"custom_id": "request-2", "method": "POST", "url": "/v2/rerank", "body": {{"model": "{RERANKER_MODEL_NAME}", "query": "What is the capital of France?", "documents": ["The capital of Brazil is Brasilia.", "The capital of France is Paris."]}}}}"""
+_SCORE_RERANK_DOCUMENTS = [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris.",
+]
 
-INPUT_REASONING_BATCH = f"""{{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "{REASONING_MODEL_NAME}", "messages": [{{"role": "system", "content": "You are a helpful assistant."}},{{"role": "user", "content": "Solve this math problem: 2+2=?"}}]}}}}
-{{"custom_id": "request-2", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "{REASONING_MODEL_NAME}", "messages": [{{"role": "system", "content": "You are a helpful assistant."}},{{"role": "user", "content": "What is the capital of France?"}}]}}}}"""
+INPUT_EMBEDDING_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/embeddings",
+            "body": {
+                "model": EMBEDDING_MODEL_NAME,
+                "input": "You are a helpful assistant.",
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/embeddings",
+            "body": {
+                "model": EMBEDDING_MODEL_NAME,
+                "input": "You are an unhelpful assistant.",
+            },
+        },
+        {
+            "custom_id": "request-3",
+            "method": "POST",
+            "url": "/v1/embeddings",
+            "body": {
+                "model": EMBEDDING_MODEL_NAME,
+                "input": "Hello world!",
+            },
+        },
+        {
+            "custom_id": "request-4",
+            "method": "POST",
+            "url": "/v1/embeddings",
+            "body": {
+                "model": "NonExistModel",
+                "input": "Hello world!",
+            },
+        },
+    ]
+)
 
-# This is a valid but minimal audio file for testing
+INPUT_SCORE_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/score",
+            "body": {
+                "model": RERANKER_MODEL_NAME,
+                "queries": "What is the capital of France?",
+                "documents": _SCORE_RERANK_DOCUMENTS,
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/score",
+            "body": {
+                "model": RERANKER_MODEL_NAME,
+                "queries": "What is the capital of France?",
+                "documents": _SCORE_RERANK_DOCUMENTS,
+            },
+        },
+    ]
+)
+
+INPUT_RERANK_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/rerank",
+            "body": {
+                "model": RERANKER_MODEL_NAME,
+                "query": "What is the capital of France?",
+                "documents": _SCORE_RERANK_DOCUMENTS,
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/rerank",
+            "body": {
+                "model": RERANKER_MODEL_NAME,
+                "query": "What is the capital of France?",
+                "documents": _SCORE_RERANK_DOCUMENTS,
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v2/rerank",
+            "body": {
+                "model": RERANKER_MODEL_NAME,
+                "query": "What is the capital of France?",
+                "documents": _SCORE_RERANK_DOCUMENTS,
+            },
+        },
+    ]
+)
+
+INPUT_REASONING_BATCH = "\n".join(
+    json.dumps(req)
+    for req in [
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": REASONING_MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "Solve this math problem: 2+2=?"},
+                ],
+            },
+        },
+        {
+            "custom_id": "request-2",
+            "method": "POST",
+            "url": "/v1/chat/completions",
+            "body": {
+                "model": REASONING_MODEL_NAME,
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What is the capital of France?"},
+                ],
+            },
+        },
+    ]
+)
+
 MINIMAL_WAV_BASE64 = "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
 INPUT_TRANSCRIPTION_BATCH = (
-    '{{"custom_id": "request-1", "method": "POST", "url": "/v1/audio/transcriptions", '
-    '"body": {{"model": "openai/whisper-large-v3", "file_url": "data:audio/wav;base64,{}", '
-    '"response_format": "json"}}}}\n'
-).format(MINIMAL_WAV_BASE64)
+    json.dumps(
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/audio/transcriptions",
+            "body": {
+                "model": "openai/whisper-large-v3",
+                "file_url": f"data:audio/wav;base64,{MINIMAL_WAV_BASE64}",
+                "response_format": "json",
+            },
+        }
+    )
+    + "\n"
+)
 
 INPUT_TRANSCRIPTION_HTTP_BATCH = (
-    '{{"custom_id": "request-1", "method": "POST", "url": "/v1/audio/transcriptions", '
-    '"body": {{"model": "openai/whisper-large-v3", "file_url": "{}", '
-    '"response_format": "json"}}}}\n'
-).format(AudioAsset("mary_had_lamb").url)
+    json.dumps(
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/audio/transcriptions",
+            "body": {
+                "model": "openai/whisper-large-v3",
+                "file_url": AudioAsset("mary_had_lamb").url,
+                "response_format": "json",
+            },
+        }
+    )
+    + "\n"
+)
 
 INPUT_TRANSLATION_BATCH = (
-    '{{"custom_id": "request-1", "method": "POST", "url": "/v1/audio/translations", '
-    '"body": {{"model": "openai/whisper-small", "file_url": "{}", '
-    '"response_format": "text", "language": "it", "to_language": "en", '
-    '"temperature": 0.0}}}}\n'
-).format(AudioAsset("mary_had_lamb").url)
+    json.dumps(
+        {
+            "custom_id": "request-1",
+            "method": "POST",
+            "url": "/v1/audio/translations",
+            "body": {
+                "model": "openai/whisper-small",
+                "file_url": AudioAsset("mary_had_lamb").url,
+                "response_format": "text",
+                "language": "it",
+                "to_language": "en",
+                "temperature": 0.0,
+            },
+        }
+    )
+    + "\n"
+)
 
-# Tool definition for testing tool calling
 WEATHER_TOOL = {
     "type": "function",
     "function": {
@@ -90,7 +347,22 @@ WEATHER_TOOL = {
     },
 }
 
-INPUT_TOOL_CALLING_BATCH = f"""{{"custom_id": "request-1", "method": "POST", "url": "/v1/chat/completions", "body": {{"model": "{REASONING_MODEL_NAME}", "messages": [{{"role": "user", "content": "What is the weather in San Francisco?"}}], "tools": [{json.dumps(WEATHER_TOOL)}], "tool_choice": "required", "max_tokens": 1000}}}}"""
+INPUT_TOOL_CALLING_BATCH = json.dumps(
+    {
+        "custom_id": "request-1",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "body": {
+            "model": REASONING_MODEL_NAME,
+            "messages": [
+                {"role": "user", "content": "What is the weather in San Francisco?"},
+            ],
+            "tools": [WEATHER_TOOL],
+            "tool_choice": "required",
+            "max_tokens": 1000,
+        },
+    }
+)
 
 
 def test_empty_file():
