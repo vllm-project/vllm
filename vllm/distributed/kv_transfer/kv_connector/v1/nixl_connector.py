@@ -577,8 +577,11 @@ class NixlConnectorScheduler:
             else (0, self.block_size)
             for g in kv_cache_config.kv_cache_groups
         ]
+        # cdiv(n_tokens, block_size) gives blocks/window; add 1 to conservatively
+        # account for boundary overlap eg window isn't fully aligned with blocks.
         self.blocks_per_sw = [
-            cdiv(n_tokens, block_size) for n_tokens, block_size in sw_sizes_tokens
+            cdiv(n_tokens, block_size) + 1 if n_tokens else 0
+            for n_tokens, block_size in sw_sizes_tokens
         ]
 
     def shutdown(self):
