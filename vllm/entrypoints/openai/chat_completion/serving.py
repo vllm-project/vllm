@@ -1951,22 +1951,24 @@ class OpenAIServingChat(OpenAIServing):
         )
         messages.append(sys_msg)
 
-        merged_instructions = None
-        if request.messages and (
-            request.messages[0]["role"] == "system"
-            or request.messages[0]["role"] == "developer"
-        ):
-            merged_instructions = request.messages[0]["content"]
-            request.messages.pop(0)
+        chat_messages = request.messages
+        merged_instructions: str | None = None
+        if chat_messages and chat_messages[0]["role"] in ("system", "developer"):
+            content = chat_messages[0].get("content")
+            if isinstance(content, str):
+                merged_instructions = content
+                chat_messages = chat_messages[1:]
+
         # Add developer message.
-        dev_msg = get_developer_message(
-            instructions=merged_instructions,
-            tools=request.tools if should_include_tools else None,  # type: ignore[arg-type]
-        )
-        messages.append(dev_msg)
+        if request.tools or merged_instructions:
+            dev_msg = get_developer_message(
+                instructions=merged_instructions,
+                tools=request.tools if should_include_tools else None,  # type: ignore[arg-type]
+            )
+            messages.append(dev_msg)
 
         # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
+        messages.extend(parse_chat_inputs_to_harmony_messages(chat_messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
