@@ -873,8 +873,7 @@ class WorkerProc:
 
     @staticmethod
     def setup_proc_title_and_log_prefix(
-        enable_ep: bool,
-        enable_log_prefix: bool = True,
+        enable_ep: bool, enable_log_prefix: bool = True
     ) -> None:
         dp_size = get_dp_group().world_size
         dp_rank = get_dp_group().rank_in_group
@@ -901,7 +900,8 @@ class WorkerProc:
             ep_rank = get_ep_group().rank_in_group
             process_name += f"_EP{ep_rank}"
         set_process_title(name=process_name)
-        decorate_logs(process_name, enable_prefix=enable_log_prefix)
+        if enable_log_prefix:
+            decorate_logs(process_name)
 
 
 def set_multiprocessing_worker_envs():

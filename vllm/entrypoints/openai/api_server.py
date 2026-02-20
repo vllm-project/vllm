@@ -427,7 +427,8 @@ async def run_server(args, **uvicorn_kwargs) -> None:
     """Run a single-worker API server."""
 
     # Add process-specific prefix to stdout and stderr.
-    decorate_logs("APIServer", enable_prefix=getattr(args, "enable_log_prefix", True))
+    if getattr(args, "enable_log_prefix", True):
+        decorate_logs("APIServer")
 
     listen_address, sock = setup_server(args)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
