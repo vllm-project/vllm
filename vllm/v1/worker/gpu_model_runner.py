@@ -4398,8 +4398,7 @@ class GPUModelRunner(
             if weights_not_loaded:
                 if self.model_config.quantization is None:
                     logger.warning(
-                        "Following weights were not loaded from "
-                        "checkpoint: %s",
+                        "Following weights were not loaded from checkpoint: %s",
                         weights_not_loaded,
                     )
                 else:
