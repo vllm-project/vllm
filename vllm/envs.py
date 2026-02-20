@@ -139,6 +139,8 @@ if TYPE_CHECKING:
     VLLM_ENABLE_MOE_DP_CHUNK: bool = True
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
+    VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
+    VLLM_RAY_EXTRA_ENV_VARS_TO_COPY: str = ""
     VLLM_MARLIN_USE_ATOMIC_ADD: bool = False
     VLLM_MARLIN_INPUT_DTYPE: Literal["int8", "fp8"] | None = None
     VLLM_MXFP4_USE_MARLIN: bool | None = None
@@ -169,6 +171,7 @@ if TYPE_CHECKING:
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
+    VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
@@ -1089,6 +1092,19 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_RAY_DP_PACK_STRATEGY": lambda: os.getenv(
         "VLLM_RAY_DP_PACK_STRATEGY", "strict"
     ),
+    # Comma-separated *additional* prefixes of env vars to copy from the
+    # driver to Ray workers.  These are merged with the built-in defaults
+    # defined in ``vllm.ray.ray_env`` (VLLM_, etc.).  Example: "MYLIB_,OTHER_"
+    "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY": lambda: os.getenv(
+        "VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY", ""
+    ),
+    # Comma-separated *additional* individual env var names to copy from
+    # the driver to Ray workers.  Merged with the built-in defaults
+    # defined in ``vllm.ray.ray_env`` (PYTHONHASHSEED).
+    # Example: "MY_SECRET,MY_FLAG"
+    "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY": lambda: os.getenv(
+        "VLLM_RAY_EXTRA_ENV_VARS_TO_COPY", ""
+    ),
     # Whether to use S3 path for model loading in CI via RunAI Streamer
     "VLLM_CI_USE_S3": lambda: os.environ.get("VLLM_CI_USE_S3", "0") == "1",
     # Use model_redirect to redirect the model name to a local folder.
@@ -1235,6 +1251,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # insecure method and it is needed for some reason.
     "VLLM_ALLOW_INSECURE_SERIALIZATION": lambda: bool(
         int(os.getenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "0"))
+    ),
+    # Temporary: skip adding random suffix to internal request IDs. May be
+    # needed for KV connectors that match request IDs across instances.
+    "VLLM_DISABLE_REQUEST_ID_RANDOMIZATION": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_REQUEST_ID_RANDOMIZATION", "0"))
     ),
     # IP address used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_HOST": lambda: os.getenv(

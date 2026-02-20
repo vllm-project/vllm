@@ -95,23 +95,34 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if either SiLU+Mul or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
-    return cfg.compilation_config.is_custom_op_enabled(
-        "silu_and_mul"
-    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    """
+    Enable if either SiLU+Mul or quant FP8 custom op is active;
+    otherwise Inductor handles fusion.
+    Also enable for FP4 models as FP4 quant is always custom so Inductor cannot fuse it.
+    """
+    return (
+        cfg.compilation_config.is_custom_op_enabled("silu_and_mul")
+        or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+        or (cfg.model_config is not None and cfg.model_config.is_nvfp4_quantized())
+    )
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1 and Hopper+ and flashinfer installed."""
+    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1
         and current_platform.is_cuda()
-        and current_platform.has_device_capability(90)
         and has_flashinfer()
+        and (
+            current_platform.is_device_capability(100)
+            or current_platform.is_device_capability(90)
+        )
+        # tp-dp combination broken:
+        # https://github.com/vllm-project/vllm/issues/34458
+        and cfg.parallel_config.data_parallel_size == 1
     )
 
 
@@ -648,11 +659,6 @@ class VllmConfig:
                     "`external_launcher` distributed executor backend, but you chose "
                     f"`{executor_backend}`."
                 )
-            if self.cache_config.mamba_cache_mode != "none":
-                raise ValueError(
-                    "Currently, async scheduling is not compatible with "
-                    "prefix caching for Mamba models."
-                )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
             if (
@@ -682,13 +688,6 @@ class VllmConfig:
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
-                    scope="local",
-                )
-                self.scheduler_config.async_scheduling = False
-            elif self.cache_config.mamba_cache_mode != "none":
-                logger.warning_once(
-                    "Async scheduling is not compatible with "
-                    "prefix caching for Mamba models and will be disabled.",
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
@@ -916,32 +915,6 @@ class VllmConfig:
             )
         current_platform.check_and_update_config(self)
 
-        # If DCP, ensure the block size is right.
-        if self.parallel_config.decode_context_parallel_size > 1:
-            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
-                self.parallel_config.cp_kv_cache_interleave_size
-                != self.parallel_config.dcp_kv_cache_interleave_size
-            ):
-                self.parallel_config.cp_kv_cache_interleave_size = (
-                    self.parallel_config.dcp_kv_cache_interleave_size
-                )
-                logger.warning_once(
-                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
-                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
-                    "deprecated when PCP is fully supported."
-                )
-            assert (
-                self.parallel_config.cp_kv_cache_interleave_size
-                <= self.cache_config.block_size
-                and self.cache_config.block_size
-                % self.parallel_config.cp_kv_cache_interleave_size
-                == 0
-            ), (
-                f"Block_size({self.cache_config.block_size}) should be greater "
-                "than or equal to and divisible by cp_kv_cache_interleave_size "
-                f"({self.parallel_config.cp_kv_cache_interleave_size})."
-            )
-
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
             self.parallel_config.data_parallel_size
@@ -1109,26 +1082,6 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
-        if self.cache_config.mamba_cache_mode == "align":
-            assert (
-                self.cache_config.block_size
-                <= self.scheduler_config.max_num_batched_tokens
-            ), (
-                "In Mamba cache align mode, block_size "
-                f"({self.cache_config.block_size}) must be <= "
-                "max_num_batched_tokens "
-                f"({self.scheduler_config.max_num_batched_tokens})."
-            )
-            if self.scheduler_config.long_prefill_token_threshold > 0:
-                assert (
-                    self.scheduler_config.long_prefill_token_threshold
-                    >= self.cache_config.block_size
-                )
-            assert not self.scheduler_config.disable_chunked_mm_input, (
-                "Chunked MM input is required because we need the flexibility to "
-                "schedule a multiple of block_size tokens even if they are in the "
-                "middle of a mm input"
-            )
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
@@ -1488,6 +1441,57 @@ class VllmConfig:
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )
+
+    def validate_block_size(self) -> None:
+        """Validate block_size against DCP and mamba constraints.
+
+        Called after Platform.update_block_size_for_backend() has
+        finalised block_size, so that the checks see the real value
+        rather than the initial None sentinel.
+        """
+        block_size = self.cache_config.block_size
+        assert block_size is not None, (
+            "validate_block_size called before block_size was set"
+        )
+
+        # DCP interleave-size compatibility
+        if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.cp_kv_cache_interleave_size
+                != self.parallel_config.dcp_kv_cache_interleave_size
+            ):
+                self.parallel_config.cp_kv_cache_interleave_size = (
+                    self.parallel_config.dcp_kv_cache_interleave_size
+                )
+                logger.warning_once(
+                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                    "deprecated when PCP is fully supported."
+                )
+            assert (
+                self.parallel_config.cp_kv_cache_interleave_size <= block_size
+                and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
+            ), (
+                f"Block_size({block_size}) should be greater "
+                "than or equal to and divisible by cp_kv_cache_interleave_size "
+                f"({self.parallel_config.cp_kv_cache_interleave_size})."
+            )
+
+        # Mamba cache align-mode constraints
+        if self.cache_config.mamba_cache_mode == "align":
+            assert block_size <= self.scheduler_config.max_num_batched_tokens, (
+                "In Mamba cache align mode, block_size "
+                f"({block_size}) must be <= "
+                "max_num_batched_tokens "
+                f"({self.scheduler_config.max_num_batched_tokens})."
+            )
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert self.scheduler_config.long_prefill_token_threshold >= block_size
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility "
+                "to schedule a multiple of block_size tokens even if they are "
+                "in the middle of a mm input"
+            )
 
     @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":
