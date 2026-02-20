@@ -6,7 +6,7 @@ set -e
 
 merge_base_commit=$(git merge-base HEAD origin/main)
 echo "INFO: current merge base commit with main: $merge_base_commit"
-git show --oneline -s $merge_base_commit
+git show --oneline -s "$merge_base_commit"
 
 # test whether the metadata.json url is valid, retry each 3 minutes up to 5 times
 # this avoids cumbersome error messages & manual retries in case the precompiled wheel
@@ -40,7 +40,7 @@ for i in {1..5}; do
         fi
     fi
     # failure handling & retry logic
-    if [ $i -eq 5 ]; then
+    if [ "$i" -eq 5 ]; then
         echo "ERROR: metadata is still not available after 5 attempts."
         echo "ERROR: Please check whether the precompiled wheel for commit $merge_base_commit is available."
         echo " NOTE: If $merge_base_commit is a new commit on main, maybe try again after its release pipeline finishes."
