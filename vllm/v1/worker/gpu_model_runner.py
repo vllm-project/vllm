@@ -5703,9 +5703,9 @@ class GPUModelRunner(
     ) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
-        what it was originally created with.  This happens when the final
+        what it was originally created with. This happens when the final
         block size (determined after model loading) differs from the
-        placeholder used during ``__init__``, or when there are multiple
+        placeholder used during __init__, or when there are multiple
         KV cache groups.
 
         Args:
