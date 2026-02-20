@@ -911,7 +911,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         },
         max_transformers_version="4.57",
         transformers_version_reason={
-            "hf": (
+            "vllm": (
                 "MiniCPMVBatchFeature is incompatible with its base class in "
                 "Transformers v5. See https://huggingface.co/openbmb/MiniCPM-Llama3-V-2_5/discussions/78"
             )
