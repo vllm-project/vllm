@@ -400,7 +400,18 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
 
         rep_a = ops.shuffle_rows(x, a_map)
         rep_a_q = torch.empty_like(rep_a, dtype=torch.float8_e4m3fn)
-        max_blockscale_rows = int(blockscale_offsets[-1].item())
+
+        # max_blockscale_rows = int(blockscale_offsets[-1].item())
+        # Capture-safe upper bound for total blockscale rows:
+        # sum_e align128(tokens_for_expert_e) <=
+        # total_tokens + (align-1) * min(num_experts, total_tokens).
+        # Avoid reading GPU values (e.g. blockscale_offsets[-1].item()) during
+        # CUDA graph capture.
+        total_tokens = m_tokens * topk
+        nonzero_experts_ub = min(num_experts, total_tokens)
+        max_blockscale_rows = (
+            (total_tokens + (128 - 1) * nonzero_experts_ub + 127) // 128
+        ) * 128
         rep_a1_scales = torch.empty(
             (max_blockscale_rows, k_hidden // MXFP8_GROUP_SIZE),
             dtype=torch.uint8,
