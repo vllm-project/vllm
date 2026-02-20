@@ -95,55 +95,114 @@ def do_bench_distributed(
 
     torch.cuda.set_device(device)
 
-    # Warmup runs (don't time)
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    # Warmup runs
     for _ in range(warmup):
         if dist_group is not None:
             dist.barrier(group=dist_group)
         fn()
         torch.cuda.synchronize(device)
-        if dist_group is not None:
-            dist.barrier(group=dist_group)
 
     times: List[float] = []
 
+
     for _ in range(repeat):
-        # Make sure all ranks reach this point before timing/launching the collective
         if dist_group is not None:
             dist.barrier(group=dist_group)
 
-        start_event = torch.cuda.Event(enable_timing=True)
-        end_event = torch.cuda.Event(enable_timing=True)
-
         start_event.record()
         fn()
-        # Record end immediately after fn() returns (do NOT put a CPU barrier before this)
         end_event.record()
 
-        # Wait for this device's GPU work to finish (local sync only)
         torch.cuda.synchronize(device)
-
-        # Optionally ensure all ranks finished this iteration before next iteration
         if post_iteration_barrier and dist_group is not None:
             dist.barrier(group=dist_group)
-
         # elapsed_time returns ms
         times.append(start_event.elapsed_time(end_event))
+        # Optionally ensure all ranks finished this iteration before next iteration
+
 
     if return_mode == "mean":
         return sum(times) / len(times)
     elif return_mode == "median":
         s = sorted(times)
         n = len(s)
-        mid = n // 2
-        if n % 2 == 1:
-            return s[mid]
-        return 0.5 * (s[mid - 1] + s[mid])
+        return s[n // 2] if n % 2 == 1 else 0.5 * (s[n // 2 - 1] + s[n // 2])
     elif return_mode == "min":
         return min(times)
     elif return_mode == "max":
         return max(times)
     elif return_mode == "all":
         return times
+    else:
+        raise ValueError(f"Unknown return_mode: {return_mode}")
+
+# TODO: This currently fails because the CUDA graph cannot capture ops
+# that trigger memory reallocation. Preallocate the necessary tensors
+# in the Helion kernel and pass them to fn() during capture.
+def do_bench_distributed_graph(
+    fn: Callable,
+    repeat: int = 50,
+    device: Optional[Union[torch.device, int]] = None,
+    dist_group: Optional[dist.ProcessGroup] = None,
+    return_mode: str = "mean",
+    warmup: int = 5,
+    post_iteration_barrier: bool = False,
+) -> Union[float, List[float]]:
+    
+    if device is None:
+        device = torch.device("cuda")
+    elif isinstance(device, int):
+        device = torch.device(f"cuda:{device}")
+    torch.cuda.set_device(device)
+
+    # 1. Warmup
+    warmup_count = max(warmup, 11)
+    for _ in range(warmup_count):
+        if dist_group is not None:
+            dist.barrier(group=dist_group)
+        fn()
+    torch.cuda.synchronize()
+
+    # 2. Capture Phase
+    g = torch.cuda.CUDAGraph()
+    # Note: fn() must not contain standard NCCL collectives
+    with torch.cuda.graph(g):
+        fn()
+    torch.cuda.synchronize()
+
+    # 3. Benchmark Phase
+    times: List[float] = [] # FIX: Was missing in your snippet
+    start_event = torch.cuda.Event(enable_timing=True)
+    end_event = torch.cuda.Event(enable_timing=True)
+
+    for _ in range(repeat):
+        if dist_group is not None:
+            dist.barrier(group=dist_group)
+
+        start_event.record()
+        g.replay()
+        end_event.record()
+
+        torch.cuda.synchronize(device)
+
+        if post_iteration_barrier and dist_group is not None:
+            dist.barrier(group=dist_group)
+        
+        times.append(start_event.elapsed_time(end_event))
+
+    # Aggregation
+    if return_mode == "mean":
+        return sum(times) / len(times)
+    elif return_mode == "median":
+        s = sorted(times)
+        n = len(s)
+        return s[n // 2] if n % 2 == 1 else 0.5 * (s[n // 2 - 1] + s[n // 2])
+    elif return_mode in ["min", "max", "all"]:
+        results = {"min": min(times), "max": max(times), "all": times}
+        return results[return_mode]
     else:
         raise ValueError(f"Unknown return_mode: {return_mode}")
 
@@ -184,8 +243,16 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
         # inputs
         a_shared = (torch.rand(M_per_rank, K, device=device, dtype=torch.float32) * 0.05).to(FP8_DTYPE)
         b = (torch.rand(K, N, device=device, dtype=torch.float32) * 0.05).T.contiguous().T.to(FP8_DTYPE)
-        scale_a = (torch.rand((M_per_rank, 1), device=device, dtype=torch.float32) * 0.1 + 0.05)
-        scale_b = (torch.rand((1, N), device=device, dtype=torch.float32) * 0.1 + 0.05)
+        scale_a = torch.rand((M_per_rank , 1), device=device, dtype=torch.float32) * 0.05 + 0.01
+        scale_b = torch.rand((1, N), device=device, dtype=torch.float32) * 0.05 + 0.01
+
+        #adding clamping to avoid nan, inf (overflow)
+        min_val=1e-3 
+        max_val = 0.02 * (1024 / max(K, N))
+
+        scale_a = scale_a.clamp(min=min_val, max=max_val)
+        scale_b = scale_b.clamp(min=min_val, max=max_val)
+
 
         helion_kernel = lambda: torch.ops.vllm.helion_all_gather_fp8_gemm(
             a_shared,
@@ -257,7 +324,14 @@ if __name__ == "__main__":
     # list of shapes to benchmark
     TEST_SHAPES = [
         (128, 32, 64),
-        # (512, 8192, 2048),
+        (256, 1024, 1024),
+        #medium shapes
+        (2048, 1024, 2048),
+        (2048, 4096, 4096),
+        (4096, 2048, 4096),
+        #large shapes
+        (4096, 5120, 5120),
+        (8192, 8192, 8192),
     ]
     rank, local_rank, world_size, device, dist_group, world_group = setup_distributed()
     try:

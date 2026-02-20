@@ -64,19 +64,20 @@
         ]
       ],
       "l2_groupings": [
-        1
+        2
       ],
       "range_unroll_factors": [
         0,
-        1
+        0
       ],
+      "range_warp_specializes": [],
       "range_num_stages": [
         0,
         0
       ],
       "range_multi_buffers": [
         null,
-        false
+        null
       ],
       "range_flattens": [
         null,
@@ -91,8 +92,252 @@
       "num_warps": 1,
       "num_stages": 1,
       "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
+      ],
+      "pid_type": "flat"
+    },
+    "mperrank_512_n_2048_k_1024_splits_1": {
+      "block_sizes": [
+        64,
+        64,
+        64
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        0,
+        0
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
+        0,
+        0
+      ],
+      "range_multi_buffers": [
+        null,
+        null
+      ],
+      "range_flattens": [
+        null,
+        true
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "",
+        ""
+      ],
+      "num_warps": 1,
+      "num_stages": 2,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
         "tensor_descriptor",
-        "tensor_descriptor",
+        "pointer"
+      ],
+      "pid_type": "flat"
+    },
+    "mperrank_64_n_1024_k_1024_splits_1": {
+      "block_sizes": [
+        32,
+        16,
+        256
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        2
+      ],
+      "range_unroll_factors": [
+        0,
+        1
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
+        0,
+        0
+      ],
+      "range_multi_buffers": [
+        null,
+        null
+      ],
+      "range_flattens": [
+        null,
+        false
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "",
+        "first"
+      ],
+      "num_warps": 2,
+      "num_stages": 3,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
+      ],
+      "pid_type": "flat"
+    },
+    "mperrank_1024_n_4096_k_2048_splits_1": {
+      "block_sizes": [
+        64,
+        128,
+        32
+      ],
+      "loop_orders": [
+        [
+          0,
+          1
+        ]
+      ],
+      "l2_groupings": [
+        1
+      ],
+      "range_unroll_factors": [
+        0,
+        0
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
+        0,
+        0
+      ],
+      "range_multi_buffers": [
+        null,
+        null
+      ],
+      "range_flattens": [
+        null,
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "",
+        "first"
+      ],
+      "num_warps": 2,
+      "num_stages": 2,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
+      ],
+      "pid_type": "flat"
+    },
+    "mperrank_1024_n_5120_k_5120_splits_1": {
+      "block_sizes": [
+        64,
+        128,
+        32
+      ],
+      "loop_orders": [
+        [
+          1,
+          0
+        ]
+      ],
+      "l2_groupings": [
+        2
+      ],
+      "range_unroll_factors": [
+        0,
+        0
+      ],
+      "range_warp_specializes": [],
+      "range_num_stages": [
+        0,
+        0
+      ],
+      "range_multi_buffers": [
+        null,
+        null
+      ],
+      "range_flattens": [
+        null,
+        true
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "",
+        ""
+      ],
+      "num_warps": 2,
+      "num_stages": 2,
+      "indexing": [
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer",
+        "pointer"
+      ],
+      "pid_type": "flat"
+    },
+    "mperrank_2048_n_8192_k_8192_splits_1": {
+      "block_sizes": [
+        64,
+        64,
+        32
+      ],
+      "loop_orders": [
+        [
+          0,
+          1
+        ]
+      ],
+      "l2_groupings": [
+        2
+      ],
+      "range_unroll_factors": [
+        0,
+        1
+      ],
+      "range_num_stages": [
+        0,
+        2
+      ],
+      "range_multi_buffers": [
+        null,
+        null
+      ],
+      "range_flattens": [
+        null,
+        null
+      ],
+      "load_eviction_policies": [
+        "",
+        "",
+        "",
+        ""
+      ],
+      "num_warps": 1,
+      "num_stages": 1,
+      "indexing": [
+        "pointer",
+        "pointer",
         "pointer",
         "pointer",
         "pointer"

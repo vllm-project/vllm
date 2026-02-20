@@ -74,9 +74,18 @@ def _helion_all_gather_fp8_gemm_runtime(
     return a_out, best_config
 
 def autotune(fn=helion_matmul_w_progress_fp8, force=False):
-    num_tokens_list = [128]#4096]#, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096]
-    hidden_size_list = [32]#,2048 4096, 8192]
-    N = 64  # Output dimension for b (can tune as needed)
+    shapes_to_tune = [
+        (128, 32, 64),
+        (256, 1024, 1024),
+        #medium shapes
+        (2048, 1024, 2048),
+        (2048, 4096, 4096),
+        (4096, 2048, 4096),
+        #large shapes
+        (4096, 5120, 5120),
+        (8192, 8192, 8192),
+    ]
+    #shapes_to_tune[(num_tokens, hidden_size, N)]
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
     world_size = int(os.environ["WORLD_SIZE"])
@@ -107,9 +116,13 @@ def autotune(fn=helion_matmul_w_progress_fp8, force=False):
     # Store a weak reference to the GroupCoordinator in _groups so the kernel can access it without preventing garbage collection.
     _groups[dist_group.group_name] = weakref.ref(world_group)
     config_manager = ConfigManager()
-    for num_tokens, hidden_size in product(num_tokens_list, hidden_size_list):
+    for num_tokens, hidden_size, N in (shapes_to_tune):
         try:
+            dist.barrier()
+            ConfigManager.reset_instance()
+            config_manager = ConfigManager()
             print(f"Start autotuning with num_tokens={num_tokens} and hidden_size={hidden_size}")
+            torch.cuda.empty_cache()
 
             tokens_per_rank = num_tokens // world_size
             # Local shard for this rank
@@ -118,8 +131,15 @@ def autotune(fn=helion_matmul_w_progress_fp8, force=False):
 
             b = (torch.rand(hidden_size, N, device=device, dtype=torch.float32)  * 0.05).T.contiguous().T
             b= b.to(torch.float8_e4m3fn)
-            scale_a = torch.rand((tokens_per_rank, 1), device=device, dtype=torch.float32) * 0.1 + 0.05
-            scale_b = torch.rand((1, N), device=device, dtype=torch.float32) * 0.1 + 0.05
+            scale_a = torch.rand((tokens_per_rank , 1), device=device, dtype=torch.float32) * 0.05 + 0.01
+            scale_b = torch.rand((1, N), device=device, dtype=torch.float32) * 0.05 + 0.01
+
+            #adding clamping to avoid nan, inf (overflow)
+            min_val=1e-3 
+            max_val = 0.02 * (1024 / max(hidden_size, N))
+
+            scale_a = scale_a.clamp(min=min_val, max=max_val)
+            scale_b = scale_b.clamp(min=min_val, max=max_val)
 
             # Progress tensor
             SPLITS_PER_RANK = 1
@@ -137,6 +157,8 @@ def autotune(fn=helion_matmul_w_progress_fp8, force=False):
                 configs={config_key: best_config},
             )
             print(f"Successfully saved config file {config_key}")
+            torch.cuda.synchronize()
+            dist.barrier()
         except Exception as e:
             print(f"Autotuning failed for num_tokens={num_tokens}, hidden_size={hidden_size}: {e}")
             continue
