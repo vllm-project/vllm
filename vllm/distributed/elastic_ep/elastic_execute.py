@@ -20,15 +20,17 @@ from vllm.distributed import (
     get_dp_group,
     get_ep_group,
     get_pcp_group,
-    get_standby_dp_group,
-    get_standby_ep_group,
     get_tp_group,
 )
-from vllm.distributed.parallel_state import (
+from vllm.distributed.elastic_ep.standby_state import (
     create_standby_groups,
-    destroy_old_comm_groups,
+    get_standby_dp_group,
+    get_standby_ep_group,
+    pop_standby_groups,
+)
+from vllm.distributed.parallel_state import (
+    _replace_active_groups,
     prepare_communication_buffer_for_model,
-    switch_to_standby_groups,
 )
 from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
 from vllm.logger import init_logger
@@ -234,16 +236,14 @@ class ElasticEPScalingExecutor:
             device=self.worker.device,
         )
 
-    def destroy_old_comm_groups(self) -> None:
-        destroy_old_comm_groups()
+    def switch_and_remove(self) -> None:
+        _replace_active_groups(world=None, dp=None, ep=None, eplb=None, node_count=None)
 
     def switch_and_prepare(self) -> None:
         old_dp_size = get_dp_group().world_size
         old_ep_size = get_ep_group().world_size
 
-        destroy_old_comm_groups()
-
-        switch_to_standby_groups()
+        _replace_active_groups(**pop_standby_groups())
 
         parallel_config = self.worker.vllm_config.parallel_config
         reconfig_request = self.reconfig_request
