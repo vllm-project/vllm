@@ -68,7 +68,6 @@ def fused_rope_and_unified_kv_cache_update_impl(
 
 
 def fused_rope_and_unified_kv_cache_update_fake(
-    self,
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,

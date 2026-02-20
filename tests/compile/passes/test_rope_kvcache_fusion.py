@@ -113,13 +113,10 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             device=device,
         )
 
-        # add layer to forward_context to enable fetching attn metadata
-        vllm_config.compilation_config.static_forward_context[self.attn.layer_name] = (
-            self.attn
-        )
-
     def build_attn_metadata(self, batch_size: int) -> CommonAttentionMetadata:
         """Initialize attention metadata."""
+
+        # TODO (Rohan138) reuse utils from vllm/v1/worker/gpu/attn_utils.py
 
         # Create common attn metadata
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
