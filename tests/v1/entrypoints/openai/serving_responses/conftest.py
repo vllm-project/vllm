@@ -6,7 +6,7 @@ import pytest_asyncio
 from tests.utils import RemoteOpenAIServer
 
 # Use a small reasoning model to test the responses API.
-MODEL_NAME = "Qwen/Qwen3-1.7B"
+MODEL_NAME = "/mnt/data4/models/Qwen/Qwen3-8B"
 
 
 @pytest.fixture(scope="module")
