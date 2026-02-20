@@ -226,10 +226,9 @@ def test_rocm_wvsplitk_kernel(
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    if xnorm:
-        assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-8)
-    else:
-        assert torch.allclose(out, ref_out, atol=1e-3, rtol=1e-2)
+    # Accumulation error in fp16 GEMM scales with sqrt(K)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
 @pytest.mark.parametrize("xnorm", [False, True])

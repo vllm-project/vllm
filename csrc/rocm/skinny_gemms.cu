@@ -1845,7 +1845,7 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
   return out_c;
 }
 
-#if defined(__HIP__MI3XX__) || defined(__HIP__GFX1X__)
+#if defined(__HIP__MI3XX__) || defined(__HIP__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -2027,7 +2027,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI3XX__) && !defined(__HIP__GFX1X__)
+#else   // !defined(__HIP__MI3XX__) && !defined(__HIP__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
@@ -2039,9 +2039,9 @@ __global__ void wvSplitKQ_hf_sml_(const int K, const int Kap, const int Kbp,
                                   const int _WvPrGrp, const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__MI3XX__) || defined(__HIP__GFX1X__)
+#endif  // defined(__HIP__MI3XX__) || defined(__HIP__GFX12__)
 
-#if defined(__HIP__MI3XX__) || defined(__HIP__GFX1X__)
+#if defined(__HIP__MI3XX__) || defined(__HIP__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
@@ -2224,7 +2224,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     m += CuCount * _WvPrGrp * YTILE;
   }
 }
-#else   // !defined(__HIP__MI3XX__) && !defined(__HIP__GFX1X__)
+#else   // !defined(__HIP__MI3XX__) && !defined(__HIP__GFX12__)
 template <typename scalar_t, typename fp8_t, int THRDS, int YTILE, int WvPrGrp,
           int A_CHUNK, int UNRL, int N>
 __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
@@ -2236,7 +2236,7 @@ __global__ void wvSplitKQ_hf_(const int K, const int Kap, const int Kbp,
                               const int CuCount) {
   UNREACHABLE_CODE
 }
-#endif  // defined(__HIP__MI3XX__) || defined(__HIP__GFX1X__)
+#endif  // defined(__HIP__MI3XX__) || defined(__HIP__GFX12__)
 
 void wvSplitKQ(const at::Tensor& in_b, const at::Tensor& in_a,
                const std::optional<at::Tensor>& in_bias, at::Tensor& out_c,
