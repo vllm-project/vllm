@@ -415,9 +415,15 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
     def __init__(
-        self, *args, hand_shake_latency: float = 1.8, kv_cache_layout="HND", **kwargs
+        self,
+        *args,
+        hand_shake_latency: float = 1.8,
+        kv_cache_layout="HND",
+        kv_cache_config=None,
+        **kwargs,
     ):
-        kv_cache_config = make_kv_cache_config(block_size=16)
+        if kv_cache_config is None:
+            kv_cache_config = make_kv_cache_config(block_size=16)
         super().__init__(*args, kv_cache_config=kv_cache_config, **kwargs)
         self._hand_shake_latency = hand_shake_latency
         self.kv_cache_layout = kv_cache_layout
@@ -1919,7 +1925,7 @@ class FailingNixlWrapper(FakeNixlWrapper):
         ("transfer_exception", {"fail_transfer_exception": True}, True),
     ],
 )
-@pytest.mark.parametrize("enable_hma", [False])
+@pytest.mark.parametrize("enable_hma", [False, True])
 def test_transfer_failure_logging(
     default_vllm_config,
     dist_init,
@@ -1949,7 +1955,10 @@ def test_transfer_failure_logging(
         make_kv_cache_config(block_size=16, hma_enabled=enable_hma),
     )
     connector.connector_worker = FakeNixlConnectorWorker(
-        vllm_config, connector.engine_id, hand_shake_latency=0.0
+        vllm_config,
+        connector.engine_id,
+        hand_shake_latency=0.0,
+        kv_cache_config=connector._kv_cache_config,
     )
 
     # Configure FailingNixlWrapper to fail in the specified way
