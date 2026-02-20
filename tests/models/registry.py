@@ -1063,22 +1063,26 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Qwen3_5ForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3.5-9B-Instruct",
         max_model_len=4096,
-        min_transformers_version="5.1.0",
+        min_transformers_version="5.2.0",
+        is_available_online=False,
     ),
     "Qwen3_5MoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3.5-35B-A3B-Instruct",
         max_model_len=4096,
-        min_transformers_version="5.1.0",
+        min_transformers_version="5.2.0",
+        is_available_online=False,
     ),
     "Qwen3_5MTP": _HfExamplesInfo(
         "Qwen/Qwen3.5-9B-Instruct",
         speculative_model="Qwen/Qwen3.5-9B-Instruct",
-        min_transformers_version="5.1.0",
+        min_transformers_version="5.2.0",
+        is_available_online=False,
     ),
     "Qwen3_5MoeMTP": _HfExamplesInfo(
         "Qwen/Qwen3.5-35B-A3B-Instruct",
         speculative_model="Qwen/Qwen3.5-35B-A3B-Instruct",
-        min_transformers_version="5.1.0",
+        min_transformers_version="5.2.0",
+        is_available_online=False,
     ),
     "Qwen3OmniMoeForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen3-Omni-30B-A3B-Instruct",
