@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -39,7 +40,9 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.gemm1_clamp_limit = torch.tensor(
             [7.0] * self.num_experts, dtype=torch.float32, device=self.device
         )
-        self.max_capture_size = max_capture_size
+        self.max_capture_size = (
+            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
