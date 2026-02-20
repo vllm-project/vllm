@@ -114,6 +114,62 @@ def check_accuracy(ref_output, actual_output, atol=0.1, rtol=0.85, percent=0.925
     )
 
 
+def torch_bf16_moe(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    activation: MoEActivation,
+    apply_router_weight_on_input: bool = True,
+) -> torch.Tensor:
+    """Reference MoE implementation using native torch matmul in BF16."""
+    assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+
+    batch_size, hidden_dim = hidden_states.shape
+    topk = topk_ids.size(1)
+    expanded_hidden_states = hidden_states.view(batch_size, 1, hidden_dim).repeat(
+        1, topk, 1
+    )
+    expanded_hidden_states = expanded_hidden_states.reshape(-1, hidden_dim)
+
+    output = torch.zeros(
+        batch_size * topk,
+        w2.shape[1],
+        dtype=hidden_states.dtype,
+        device=hidden_states.device,
+    )
+
+    flat_topk_weights = topk_weights.view(-1)
+    flat_topk_ids = topk_ids.view(-1)
+    silu_and_mul = SiluAndMul()
+
+    if apply_router_weight_on_input:
+        expanded_hidden_states = expanded_hidden_states * flat_topk_weights.unsqueeze(
+            1
+        ).to(expanded_hidden_states.dtype)
+
+    for expert_idx in range(w1.shape[0]):
+        mask = flat_topk_ids == expert_idx
+        if not mask.any():
+            continue
+
+        inter_out = expanded_hidden_states[mask] @ w1[expert_idx].t()
+        if activation == MoEActivation.SILU:
+            act_out = silu_and_mul.forward_native(inter_out)
+        else:
+            act_out = torch.square(torch.relu(inter_out))
+
+        output[mask] = act_out @ w2[expert_idx].t()
+
+    if apply_router_weight_on_input:
+        return output.view(batch_size, -1, w2.shape[1]).sum(dim=1)
+    return (
+        output.view(batch_size, -1, w2.shape[1])
+        * flat_topk_weights.view(batch_size, -1, 1).to(output.dtype)
+    ).sum(dim=1)
+
+
 def torch_w8a8_block_fp8_moe(
     hidden_states: torch.Tensor,
     w1: torch.Tensor,
@@ -486,18 +542,14 @@ def test_flashinfer_cutlass_moe_bf16_no_graph(
             renormalize=False,
         )
 
-        output = fused_experts(
+        ref_output = torch_bf16_moe(
             hidden_states,
             w1,
             w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=False,
+            topk_weights,
+            topk_ids,
             activation=activation,
-            global_num_experts=e,
-            expert_map=None,
             apply_router_weight_on_input=True,
-            quant_config=FUSED_MOE_UNQUANTIZED_CONFIG,
         )
 
         moe_config = FusedMoEConfig(
@@ -540,11 +592,11 @@ def test_flashinfer_cutlass_moe_bf16_no_graph(
         )
 
         check_accuracy(
-            ref_output=output,
+            ref_output=ref_output,
             actual_output=flashinfer_cutlass_output,
-            atol=0.1,
-            rtol=0.85,
-            percent=0.925,
+            atol=0.05,
+            rtol=0.05,
+            percent=0.85,
         )
 
 
