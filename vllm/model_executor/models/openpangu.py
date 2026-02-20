@@ -1142,7 +1142,10 @@ class OpenPanguModel(nn.Module):
             if is_pp_missing_parameter(weight_name_mapped, self):
                 continue
             param = params_dict[weight_name_mapped]
-            weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
+            weight_loader = typing.cast(
+                Callable[..., bool],
+                getattr(param, "weight_loader", default_weight_loader),
+            )
             success = weight_loader(
                 param,
                 loaded_weight,

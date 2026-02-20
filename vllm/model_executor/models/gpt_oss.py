@@ -928,7 +928,8 @@ class GptOssModel(nn.Module):
                     # here since otherwise we may skip experts with other
                     # available replicas.
                     weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
+                        Callable[..., bool],
+                        getattr(param, "weight_loader", default_weight_loader),
                     )
                     # Use checkpoint's expert_id for quark format (when expert_id
                     # is extracted from weight name), otherwise use mapping's expert_id

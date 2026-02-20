@@ -689,9 +689,9 @@ class LongcatFlashForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
                     if is_pp_missing_parameter(name, self):
                         continue
                     param = params_dict[name_mapped]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
                     weight_loader = typing.cast(
-                        Callable[..., bool], param.weight_loader
+                        Callable[..., bool],
+                        getattr(param, "weight_loader", default_weight_loader),
                     )
                     success = weight_loader(
                         param,
