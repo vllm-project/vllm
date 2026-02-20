@@ -1370,15 +1370,15 @@ class EngineCoreProc(EngineCore):
     ) -> Future | None:
         """Pause generation; behavior depends on mode.
 
-        All pause states queue new adds. PAUSE_ABORT and PAUSE_KEEP skip step();
-        PAUSE_WAIT allows step() so in-flight requests can drain.
+        All pause modes queue new adds -- "abort" and "keep" skip step();
+        "wait" allows step() so in-flight requests can drain.
 
-        - ``abort``: Set PAUSE_ABORT, abort all requests, wait for abort
-          outputs to be sent (when running with output_queue), clear caches,
-          then complete the returned Future.
-        - ``wait``: Set PAUSE_WAIT (queue adds, keep stepping); when drained,
-          set PAUSE_KEEP, clear caches, complete the returned Future.
-        - ``keep``: Set PAUSE_KEEP; return a Future that completes when the
+        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
+          outputs to be sent (when running with output_queue), optionally
+          clear caches, then complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+          optionally clear caches, then complete the returned Future.
+        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
           output queue is empty.
         """
         if mode not in ("keep", "abort", "wait"):
