@@ -30,6 +30,8 @@ from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failur
 
 logger = init_logger(__name__)
 
+_DEFAULT_MODEL = "Qwen/Qwen3-0.6B"
+
 DESCRIPTION = """Launch a local OpenAI-compatible API server to serve LLM
 completions via HTTP. Defaults to Qwen/Qwen3-0.6B if no model is specified.
 
@@ -37,6 +39,41 @@ Search by using: `--help=<ConfigGroup>` to explore options by section (e.g.,
 --help=ModelConfig, --help=Frontend)
   Use `--help=all` to show all available flags at once.
 """
+
+
+def _warn_if_model_consumed_by_served_name(args: argparse.Namespace) -> None:
+    """Warn if the model fell back to the default while served_model_name
+    contains a value that looks like a model path.
+
+    This can happen when ``--served-model-name`` (``nargs='+'``) is placed
+    before the positional model argument on the CLI, causing argparse to
+    consume the model path as an extra served-name value.
+    """
+    model_tag = getattr(args, "model_tag", None)
+    if model_tag is not None:
+        # Positional model was parsed correctly, nothing to warn about.
+        return
+
+    if args.model != _DEFAULT_MODEL:
+        # Model was explicitly set via some other mechanism.
+        return
+
+    served = getattr(args, "served_model_name", None)
+    if not served:
+        return
+
+    names = served if isinstance(served, list) else [served]
+    model_like = [n for n in names if "/" in n]
+    if model_like:
+        logger.warning(
+            "No positional model argument was parsed, so model "
+            "defaults to '%s'. However, --served-model-name "
+            "contains value(s) that look like model paths: %s. "
+            "If this is unintentional, place the model name before "
+            "any flags: vllm serve <model> --served-model-name ...",
+            _DEFAULT_MODEL,
+            model_like,
+        )
 
 
 class ServeSubcommand(CLISubcommand):
@@ -49,6 +86,12 @@ class ServeSubcommand(CLISubcommand):
         # If model is specified in CLI (as positional arg), it takes precedence
         if hasattr(args, "model_tag") and args.model_tag is not None:
             args.model = args.model_tag
+
+        # Warn if --served-model-name consumed what looks like the model
+        # path, leaving args.model at the default.  This catches cases
+        # the argparse pre-processing didn't fix (e.g. the model path
+        # doesn't contain '/').
+        _warn_if_model_consumed_by_served_name(args)
 
         if args.headless:
             if args.api_server_count is not None and args.api_server_count > 0:

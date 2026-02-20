@@ -24,6 +24,91 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+# Flags whose nargs="+" can accidentally swallow the positional model_tag
+# when placed before it on the CLI.  E.g.:
+#   vllm serve --served-model-name ASR Qwen/Qwen3-ASR-1.7B
+# argparse consumes both "ASR" and "Qwen/Qwen3-ASR-1.7B" as values for
+# --served-model-name, leaving model_tag unset.
+_NARGS_PLUS_FLAGS = frozenset({"--served-model-name", "--served_model_name"})
+
+
+def _looks_like_model_path(value: str) -> bool:
+    """Heuristic: a value that contains '/' is likely a HF model id
+    (e.g. 'Qwen/Qwen3-ASR-1.7B') rather than a plain served name."""
+    return "/" in value
+
+
+def _fix_nargs_plus_before_positional(args: list[str]) -> list[str]:
+    """Detect when a nargs='+' flag has consumed the positional model_tag.
+
+    When the user writes:
+        vllm serve --served-model-name ASR Qwen/Qwen3-ASR-1.7B
+    argparse greedily assigns both 'ASR' and 'Qwen/Qwen3-ASR-1.7B' to
+    --served-model-name.  This function detects the situation and moves
+    the model-path value to the positional slot so argparse parses it
+    correctly.
+    """
+    # Only applies to 'vllm serve ...'
+    if not args or args[0] != "serve":
+        return args
+
+    # Already has a positional model_tag (second element, not a flag)
+    if len(args) > 1 and not args[1].startswith("-"):
+        return args
+
+    for flag in _NARGS_PLUS_FLAGS:
+        try:
+            flag_idx = next(
+                i for i, a in enumerate(args) if a == flag or a.startswith(f"{flag}=")
+            )
+        except StopIteration:
+            continue
+
+        # If using '=' form there is no ambiguity
+        if "=" in args[flag_idx]:
+            continue
+
+        # Collect the values consumed by this flag (everything until the
+        # next flag or end of args)
+        val_start = flag_idx + 1
+        val_end = val_start
+        while val_end < len(args) and not args[val_end].startswith("-"):
+            val_end += 1
+
+        values = args[val_start:val_end]
+        if len(values) < 2:
+            continue
+
+        # Find the last value that looks like a model path
+        model_val_idx = None
+        for vi in range(len(values) - 1, -1, -1):
+            if _looks_like_model_path(values[vi]):
+                model_val_idx = vi
+                break
+
+        if model_val_idx is None:
+            continue
+
+        # Move the model-path value to the positional slot (right after
+        # 'serve') and leave the remaining values for the flag.
+        abs_idx = val_start + model_val_idx
+        model_tag = args[abs_idx]
+        logger.warning(
+            "'%s' looks like a model name but was consumed by "
+            "'%s'. Interpreting it as the positional model "
+            "argument instead. To avoid ambiguity, place the "
+            "model name before any flags: "
+            "vllm serve <model> %s ...",
+            model_tag,
+            flag,
+            flag,
+        )
+        remaining = args[1:abs_idx] + args[abs_idx + 1 :]
+        args = ["serve", model_tag, *remaining]
+        break
+
+    return args
+
 
 class SortedHelpFormatter(ArgumentDefaultsHelpFormatter, RawDescriptionHelpFormatter):
     """SortedHelpFormatter that sorts arguments by their option strings."""
@@ -219,6 +304,8 @@ class FlexibleArgumentParser(ArgumentParser):
                 ]
             except StopIteration:
                 pass
+
+            args = _fix_nargs_plus_before_positional(args)
 
         if "--config" in args:
             args = self._pull_args_from_config(args)

@@ -315,6 +315,12 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if hasattr(args, "subparser") and args.subparser != "serve":
         return
 
+    # Detect when --served-model-name may have swallowed the positional
+    # model argument, leaving args.model at its default.  This happens
+    # because --served-model-name uses nargs='+' and greedily consumes
+    # the subsequent positional value when it is placed before the model.
+    _validate_served_name_did_not_consume_model(args)
+
     # Ensure that the chat template is valid; raises if it likely isn't
     validate_chat_template(args.chat_template)
 
@@ -323,6 +329,40 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+
+def _validate_served_name_did_not_consume_model(
+    args: argparse.Namespace,
+) -> None:
+    """Log a warning if --served-model-name appears to have consumed the
+    model positional argument.
+
+    The heuristic: model_tag is None, the model is the compile-time
+    default, and served_model_name is a list with more than one entry
+    (meaning nargs='+' ate extra values).
+    """
+    model_tag = getattr(args, "model_tag", None)
+    if model_tag is not None:
+        return
+
+    from vllm.config.model import ModelConfig
+
+    default_model = ModelConfig.model
+    if args.model != default_model:
+        return
+
+    served = getattr(args, "served_model_name", None)
+    if isinstance(served, list) and len(served) > 1:
+        logger.warning(
+            "--served-model-name received %d values %s but no "
+            "positional model argument was found. The model "
+            "defaults to '%s' which is likely incorrect. "
+            "Place the model name before flags: "
+            "vllm serve <model> --served-model-name ...",
+            len(served),
+            served,
+            default_model,
+        )
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

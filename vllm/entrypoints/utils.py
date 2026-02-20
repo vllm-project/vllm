@@ -268,9 +268,24 @@ def sanitize_message(message: str) -> str:
     return re.sub(r" at 0x[0-9a-f]+>", ">", message)
 
 
-def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
+def log_version_and_model(
+    lgr: Logger,
+    version: str,
+    model_name: str,
+    served_model_name: str | list[str] | None = None,
+) -> None:
+    served_as = ""
+    if served_model_name:
+        names = (
+            served_model_name
+            if isinstance(served_model_name, list)
+            else [served_model_name]
+        )
+        if names and names != [model_name]:
+            served_as = " (served as {})".format(", ".join(names))
+
     if envs.VLLM_DISABLE_LOG_LOGO or (formatter := current_formatter_type(lgr)) is None:
-        message = "vLLM server version %s, serving model %s"
+        message = "vLLM server version %s, serving model %s" + served_as
     else:
         logo_template = Template(
             "\n       ${w}█     █     █▄   ▄█${r}\n"
@@ -278,6 +293,15 @@ def log_version_and_model(lgr: Logger, version: str, model_name: str) -> None:
             "  ${o}█${r}${b}▄█▀${r} ${w}█     █     █     █${r}  model   ${w}%s${r}\n"
             "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
         )
+        if served_as:
+            logo_template = Template(
+                "\n       ${w}█     █     █▄   ▄█${r}\n"
+                " ${o}▄▄${r} ${b}▄█${r}"
+                " ${w}█     █     █ ▀▄▀ █${r}  version ${w}%s${r}\n"
+                "  ${o}█${r}${b}▄█▀${r}"
+                " ${w}█     █     █     █${r}  model   ${w}%s${r}" + served_as + "\n"
+                "   ${b}▀▀${r}  ${w}▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀${r}\n"
+            )
         colors = {
             "w": "\033[97;1m",  # white
             "o": "\033[93m",  # orange

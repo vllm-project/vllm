@@ -421,7 +421,12 @@ def setup_server(args):
     """Validate API server args, set up signal handler, create socket
     ready to serve."""
 
-    log_version_and_model(logger, VLLM_VERSION, args.model)
+    log_version_and_model(
+        logger,
+        VLLM_VERSION,
+        args.model,
+        served_model_name=getattr(args, "served_model_name", None),
+    )
     log_non_default_args(args)
 
     if args.tool_parser_plugin and len(args.tool_parser_plugin) > 3:
