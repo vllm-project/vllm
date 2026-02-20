@@ -1517,6 +1517,16 @@ def initialize_model_parallel(
         world_size = get_world_group().world_size
         rank = get_world_group().rank
         backend = backend or "nccl"
+        tp_pp_pcp_size = (
+            tensor_model_parallel_size
+            * pipeline_model_parallel_size
+            * prefill_context_model_parallel_size
+        )
+        local_all_ranks = torch.arange(tp_pp_pcp_size).reshape(
+            pipeline_model_parallel_size,
+            prefill_context_model_parallel_size,
+            tensor_model_parallel_size,
+        )
     else:
         world_size = torch.distributed.get_world_size()
         rank = torch.distributed.get_rank()
@@ -1547,16 +1557,6 @@ def initialize_model_parallel(
     group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        tp_pp_pcp_size = (
-            tensor_model_parallel_size
-            * pipeline_model_parallel_size
-            * prefill_context_model_parallel_size
-        )
-        local_all_ranks = torch.arange(tp_pp_pcp_size).reshape(
-            pipeline_model_parallel_size,
-            prefill_context_model_parallel_size,
-            tensor_model_parallel_size,
-        )
         group_ranks = local_all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
         group_ranks = [x.tolist() for x in group_ranks]
     # message queue broadcaster is only used in tensor model parallel group
@@ -1578,16 +1578,6 @@ def initialize_model_parallel(
     group_ranks = all_ranks.reshape(-1, decode_context_model_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        tp_pp_pcp_size = (
-            tensor_model_parallel_size
-            * pipeline_model_parallel_size
-            * prefill_context_model_parallel_size
-        )
-        local_all_ranks = torch.arange(tp_pp_pcp_size).reshape(
-            pipeline_model_parallel_size,
-            prefill_context_model_parallel_size,
-            tensor_model_parallel_size,
-        )
         group_ranks = local_all_ranks.reshape(
             -1, decode_context_model_parallel_size
         ).unbind(0)
@@ -1609,16 +1599,6 @@ def initialize_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        tp_pp_pcp_size = (
-            tensor_model_parallel_size
-            * pipeline_model_parallel_size
-            * prefill_context_model_parallel_size
-        )
-        local_all_ranks = torch.arange(tp_pp_pcp_size).reshape(
-            pipeline_model_parallel_size,
-            prefill_context_model_parallel_size,
-            tensor_model_parallel_size,
-        )
         group_ranks = (
             local_all_ranks.transpose(1, 2)
             .reshape(-1, prefill_context_model_parallel_size)
@@ -1637,16 +1617,6 @@ def initialize_model_parallel(
     )
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        tp_pp_pcp_size = (
-            tensor_model_parallel_size
-            * pipeline_model_parallel_size
-            * prefill_context_model_parallel_size
-        )
-        local_all_ranks = torch.arange(tp_pp_pcp_size).reshape(
-            pipeline_model_parallel_size,
-            prefill_context_model_parallel_size,
-            tensor_model_parallel_size,
-        )
         group_ranks = (
             local_all_ranks.transpose(0, 2)
             .reshape(-1, pipeline_model_parallel_size)
