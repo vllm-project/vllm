@@ -50,7 +50,7 @@ class CoreEngine:
         self.state = CoreEngineState.NEW
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineZmqAddresses:
     # ZMQ input socket addresses for each front-end client (requests)
     inputs: list[str]
@@ -66,7 +66,7 @@ class EngineZmqAddresses:
     frontend_stats_publish_address: str | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class EngineHandshakeMetadata:
     """Metadata sent to each engine process during startup handshake,
     including addresses of the front-end ZMQ queues that they should

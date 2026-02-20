@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
@@ -12,7 +12,7 @@ from vllm.utils.platform_utils import is_pin_memory_available
 pin_memory = is_pin_memory_available()
 
 
-@dataclass
+@dataclass(slots=True)
 class PoolingCursor:
     index: list[int]
     first_token_indices_gpu: torch.Tensor
@@ -47,7 +47,7 @@ class PoolingStates:
         self.hidden_states_cache.clear()
 
 
-@dataclass
+@dataclass(slots=True)
 class PoolingMetadata:
     """Tensors for pooling."""
 
@@ -56,6 +56,7 @@ class PoolingMetadata:
     pooling_params: list[PoolingParams]
     pooling_states: list[PoolingStates]
     pooling_cursor: PoolingCursor | None = None
+    tasks: list[PoolingTask] = field(init=False)
 
     def __post_init__(self) -> None:
         pooling_params = self.pooling_params

@@ -10,7 +10,7 @@ from vllm.config import ParallelConfig
 from vllm.v1.attention.backend import CommonAttentionMetadata
 
 
-@dataclass
+@dataclass(slots=True)
 class UBatchSlice:
     request_slice: slice
     token_slice: slice

@@ -182,7 +182,7 @@ class FlashAttentionBackend(AttentionBackend):
         return None
 
 
-@dataclass
+@dataclass(slots=True)
 class FlashAttentionMetadata:
     # NOTE(sang): Definition of context_len, query_len, and seq_len.
     # |---------- N-1 iteration --------|

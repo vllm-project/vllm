@@ -69,7 +69,7 @@ class TreeAttentionBackend(AttentionBackend):
         return False
 
 
-@dataclass
+@dataclass(slots=True)
 class TreeAttentionMetadata:
     num_actual_tokens: int  # Number of tokens excluding padding.
     max_query_len: int

@@ -20,7 +20,7 @@ from vllm.v1.kv_offload.worker.worker import (
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class Transfer:
     job_id: int
     stream: torch.cuda.Stream

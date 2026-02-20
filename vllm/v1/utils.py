@@ -415,7 +415,7 @@ def tensor_data(tensor: torch.Tensor) -> memoryview:
     return tensor.flatten().contiguous().view(torch.uint8).numpy().data
 
 
-@dataclass
+@dataclass(slots=True)
 class IterationDetails:
     num_ctx_requests: int
     num_ctx_tokens: int

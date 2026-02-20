@@ -28,7 +28,7 @@ from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class UbatchMetadata:
     context: UBatchContext
     input_ids: torch.Tensor
@@ -38,7 +38,7 @@ class UbatchMetadata:
     num_tokens: int
 
 
-@dataclass
+@dataclass(slots=True)
 class CUDAGraphMetaData:
     cudagraph: torch.cuda.CUDAGraph
     ubatch_metadata: UbatchMetadata

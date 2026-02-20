@@ -33,7 +33,7 @@ class InputBuffers:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class InputBatch:
     # batch_idx -> req_id
     req_ids: list[str]

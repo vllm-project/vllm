@@ -19,7 +19,7 @@ class ShortConvAttentionBackend(AttentionBackend):
         return ShortConvAttentionMetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class ShortConvAttentionMetadata(BaseMambaAttentionMetadata):
     pass
 

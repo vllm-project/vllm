@@ -30,7 +30,7 @@ else:
 
 
 @bc_linter_include
-@dataclass
+@dataclass(slots=True)
 class NewRequestData:
     req_id: str
     prompt_token_ids: list[int] | None
@@ -110,7 +110,7 @@ class NewRequestData:
 
 
 @bc_linter_include
-@dataclass
+@dataclass(slots=True)
 class CachedRequestData:
     req_ids: list[str]
     # For request ids not in resumed_req_ids, new_block_ids will be appended to
@@ -180,7 +180,7 @@ class CachedRequestData:
 
 
 @bc_linter_include
-@dataclass
+@dataclass(slots=True)
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -253,7 +253,7 @@ class SchedulerOutput:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class GrammarOutput:
     # ids of structured output requests.
     structured_output_request_ids: list[str]

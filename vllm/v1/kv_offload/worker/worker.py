@@ -14,7 +14,7 @@ TransferType = tuple[str, str]
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class TransferResult:
     job_id: int
     success: bool

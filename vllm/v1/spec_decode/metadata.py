@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 import torch
 
 
-@dataclass
+@dataclass(slots=True)
 class SpecDecodeMetadata:
     # [num_tokens]
     draft_token_ids: torch.Tensor
@@ -23,8 +23,10 @@ class SpecDecodeMetadata:
     # [num_tokens + batch_size]
     logits_indices: torch.Tensor
 
+    max_spec_len: int = field(init=False)
+
     def __post_init__(self):
-        self.max_spec_len = max(self.num_draft_tokens)
+        object.__setattr__(self, "max_spec_len", max(self.num_draft_tokens))
 
     @classmethod
     def make_dummy(

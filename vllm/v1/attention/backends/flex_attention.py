@@ -3,7 +3,7 @@
 """Attention layer with FlexAttention."""
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from functools import cached_property
 from typing import ClassVar
 
@@ -290,7 +290,7 @@ def causal_mask_mod(
     return q_idx >= kv_idx
 
 
-@dataclass
+@dataclass(slots=True)
 class FlexAttentionMetadata:
     causal: bool
     num_actual_tokens: int  # Number of tokens excluding padding.
@@ -320,10 +320,11 @@ class FlexAttentionMetadata:
     num_input_tokens: int = 0  # Number of tokens including padding.
 
     # Flex Metadata
-    num_blocks = 0
+    num_blocks: int = 0
     block_mask: BlockMask | None = None
     score_mod: _score_mod_signature | None = None
     logical_mask_mod: _mask_mod_signature = causal_mask_mod
+    mask_mod: _mask_mod_signature = field(init=False)
     doc_ids: torch.Tensor | None = None
     direct_build: bool = True
     q_block_size: int = 16

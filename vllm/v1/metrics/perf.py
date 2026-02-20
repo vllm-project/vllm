@@ -42,7 +42,7 @@ class InvalidComponent(Exception):
 #### Basic Data Types ####
 
 
-@dataclass
+@dataclass(slots=True)
 class DebugPerfStats:
     ## Stats for debugging the metrics calculation
     calc_duration: float = 0.0  # time spent calculating these stats
@@ -54,7 +54,7 @@ class DebugPerfStats:
     num_write_bytes_per_gpu_breakdown: dict[str, int] | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class PerfStats:
     num_flops_per_gpu: int = 0
     num_read_bytes_per_gpu: int = 0
@@ -62,7 +62,7 @@ class PerfStats:
     debug_stats: DebugPerfStats | None = None
 
 
-@dataclass
+@dataclass(slots=True)
 class ExecutionContext:
     """
     Represents an execution context for a batch of requests.

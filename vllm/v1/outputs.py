@@ -110,7 +110,7 @@ class LogprobsTensors(NamedTuple):
 PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
 
 
-@dataclass
+@dataclass(slots=True)
 class SamplerOutput:
     # [num_reqs, max_num_generated_tokens]
     # Different requests can have different number of generated tokens.
@@ -120,7 +120,7 @@ class SamplerOutput:
     logprobs_tensors: LogprobsTensors | None
 
 
-@dataclass
+@dataclass(slots=True)
 class KVConnectorOutput:
     # [req_ids]
     finished_sending: set[str] | None = None
@@ -147,7 +147,7 @@ class KVConnectorOutput:
         )
 
 
-@dataclass
+@dataclass(slots=True)
 class ECConnectorOutput:
     # [mm_hash]
     finished_sending: set[str] | None = None
@@ -156,7 +156,7 @@ class ECConnectorOutput:
 
 # ModelRunnerOutput is serialized and sent to the scheduler process.
 # This is expensive for torch.Tensor so prefer to use list instead.
-@dataclass
+@dataclass(slots=True)
 class ModelRunnerOutput:
     # [num_reqs]
     req_ids: list[str]
@@ -209,7 +209,7 @@ class AsyncModelRunnerOutput(ABC):
         pass
 
 
-@dataclass
+@dataclass(slots=True)
 class DraftTokenIds:
     # [num_reqs]
     req_ids: list[str]
