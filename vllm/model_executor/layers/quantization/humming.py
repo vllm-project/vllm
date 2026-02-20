@@ -6,9 +6,10 @@ import re
 from typing import Any
 
 import torch
+from humming import dtypes
 from humming.layer import HummingLayerMeta, HummingMethod
 
-from humming import dtypes
+from vllm import envs
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
@@ -33,7 +34,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.humming_moe_utils import (
     humming_moe_align,
 )
-from vllm import envs
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     WEIGHT_CONVERTER_MAP,
 )
@@ -93,7 +93,7 @@ def parse_single_config(config):
         }
     else:
         raise AssertionError(f"Invalid quant_method: {quant_method}")
-    
+
     result_dict["weight_scale_group_size_n"] = result_dict["block_shape"][0]
     result_dict["weight_scale_group_size_k"] = result_dict["block_shape"][1]
     result_dict["ckpt_quant_method"] = quant_method
@@ -143,7 +143,7 @@ class HummingLayerQuantizationConfig(QuantizationConfig):
             has_dynamic_zp=config.get("has_dynamic_zp", False),
             has_global_scale=config.get("has_global_scale", False),
         )
-    
+
     @classmethod
     def get_config_filenames(cls):
         return []
@@ -221,7 +221,7 @@ class HummingConfig(QuantizationConfig):
         cls, config: dict[str, Any], prefix: str
     ) -> dict[str, Any] | None:
         if cls.is_layer_skipped(config, prefix):
-            return
+            return None
 
         layer_config = parse_single_config(config)
         for regex, override_config in config.get("dynamic", {}).items():
@@ -236,7 +236,9 @@ class HummingConfig(QuantizationConfig):
 
         return layer_config
 
-    def get_quant_config_for_layer(self, prefix: str) -> dict[str, Any] | None:
+    def get_quant_config_for_layer(
+        self, prefix: str
+    ) -> HummingLayerQuantizationConfig | None:
         weight_config = self.get_layer_weight_quant_config(self.full_config, prefix)
 
         if weight_config is None:
@@ -247,6 +249,7 @@ class HummingConfig(QuantizationConfig):
 
         if weight_config is not None:
             return HummingLayerQuantizationConfig.from_config(weight_config)
+        return None
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -265,7 +268,7 @@ class HummingConfig(QuantizationConfig):
 
 
 class HummingLinearMethod(LinearMethodBase):
-    def __init__(self, quant_config: HummingConfig):
+    def __init__(self, quant_config: HummingLayerQuantizationConfig):
         self.quant_config = quant_config
         ckpt_quant_method = self.quant_config.ckpt_quant_method
         weight_converter_cls = WEIGHT_CONVERTER_MAP[ckpt_quant_method]
@@ -359,12 +362,13 @@ class HummingLinearMethod(LinearMethodBase):
         def weight_loader(
             param: torch.nn.Parameter,
             loaded_weight: torch.Tensor,
-            shard_id: int | None = None,
+            shard_id: str | int | None = None,
         ):
             param_name = param.param_name
             data = self.weight_converter.convert(loaded_weight, param_name)
-            shard_id = shard_id_map.get(shard_id, shard_id or 0)
-            offset_n = sum(layer.logical_widths[:shard_id])
+            if isinstance(shard_id, str):
+                shard_id = shard_id_map[shard_id]
+            offset_n = sum(layer.logical_widths[: (shard_id or 0)])
             packed = self.quant_config.ckpt_quant_method is not None
             HummingMethod.load_weight(
                 layer=layer,
@@ -390,7 +394,9 @@ class HummingLinearMethod(LinearMethodBase):
 
 
 class HummingMoEMethod(FusedMoEMethodBase):
-    def __init__(self, quant_config: HummingConfig, moe: "FusedMoEConfig") -> None:
+    def __init__(
+        self, quant_config: HummingLayerQuantizationConfig, moe: "FusedMoEConfig"
+    ) -> None:
         super().__init__(moe)
         self.quant_config = quant_config
         self.moe = moe
@@ -509,8 +515,9 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
             offset_n = None
             if param.sublayer == "w13":
-                shard_id = shard_id_map.get(shard_id, shard_id or 0)
-                offset_n = self.meta1.shape_n // 2 * shard_id
+                if isinstance(shard_id, str):
+                    shard_id = shard_id_map[shard_id]
+                offset_n = self.meta1.shape_n // 2 * (shard_id or 0)
 
             packed = self.quant_config.ckpt_quant_method is not None
             HummingMethod.load_weight(

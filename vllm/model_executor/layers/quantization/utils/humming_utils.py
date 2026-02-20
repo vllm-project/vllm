@@ -7,12 +7,12 @@ from humming.utils.weight import quantize_weight
 
 
 class HummingBaseWeightConverter:
-    ckpt_weight_name = "weight"
-    ckpt_weight_scale_name = "weight_scale"
-    ckpt_zero_point_name = "zero_point"
-    ckpt_global_scale_name = "global_scale"
-    ckpt_bias_name = "bias"
-    unused_names = ()
+    ckpt_weight_name: str = "weight"
+    ckpt_weight_scale_name: str = "weight_scale"
+    ckpt_zero_point_name: str = "zero_point"
+    ckpt_global_scale_name: str = "global_scale"
+    ckpt_bias_name: str = "bias"
+    unused_names: tuple[str, ...] = ()
 
     def __init__(self, quant_config):
         self.quant_config = quant_config
@@ -71,10 +71,10 @@ class HummingUnquantizedWeightConverter(HummingBaseWeightConverter):
 
 
 class HummingGPTQWeightConverter(HummingBaseWeightConverter):
-    ckpt_weight_name = "qweight"
-    ckpt_weight_scale_name = "scales"
-    ckpt_zero_point_name = "qzeros"
-    unused_names = ("g_idx",)
+    ckpt_weight_name: str = "qweight"
+    ckpt_weight_scale_name: str = "scales"
+    ckpt_zero_point_name: str = "qzeros"
+    unused_names: tuple[str] = ("g_idx",)
 
     def convert_weight(self, tensor: torch.Tensor) -> dict[str, torch.Tensor]:
         return {"weight": tensor.transpose(-1, -2).contiguous()}
@@ -87,9 +87,9 @@ class HummingGPTQWeightConverter(HummingBaseWeightConverter):
 
 
 class HummingAWQWeightConverter(HummingBaseWeightConverter):
-    ckpt_weight_name = "qweight"
-    ckpt_weight_scale_name = "scales"
-    ckpt_zero_point_name = "qzeros"
+    ckpt_weight_name: str = "qweight"
+    ckpt_weight_scale_name: str = "scales"
+    ckpt_zero_point_name: str = "qzeros"
 
     def __init__(self, quant_config):
         assert quant_config.b_dtype.num_bits == 4
@@ -130,8 +130,8 @@ class HummingFp8WeightConverter(HummingBaseWeightConverter):
 
 
 class HummingNvfp4WeightConverter(HummingBaseWeightConverter):
-    ckpt_weight_name = "weight_packed"
-    ckpt_weight_scale_name = "weight_global_scale"
+    ckpt_weight_name: str = "weight_packed"
+    ckpt_weight_scale_name: str = "weight_global_scale"
 
     def convert_weight(self, tensor: torch.Tensor) -> dict[str, torch.Tensor]:
         return {"weight": tensor.view(torch.int32)}

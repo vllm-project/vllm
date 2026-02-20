@@ -1,9 +1,10 @@
 import torch
+from torch.library import custom_op
+
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     get_moe_align_tensor_size,
     moe_align_block_size,
 )
-from torch.library import custom_op
 
 
 @custom_op("humming::humming_moe_align", mutates_args=())
@@ -12,7 +13,7 @@ def humming_moe_align(
     topk_ids: torch.Tensor,
     num_experts: int,
     expert_map: torch.Tensor | None = None,
-) -> list[torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     assert len(configs) > 0 and len(configs) % 3 == 0
     shape_m = topk_ids.size(0)
 
