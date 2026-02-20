@@ -519,7 +519,6 @@ class LLM:
             ),
             params=seq_params,
             lora_requests=seq_lora_requests,
-            tokenization_kwargs=tokenization_kwargs,
             priorities=seq_priority,
         )
 
@@ -543,51 +542,31 @@ class LLM:
         outputs = self._run_engine(use_tqdm=use_tqdm)
         return self.engine_class.validate_outputs(outputs, RequestOutput)
 
-    def _resolve_lora_reqs(
-        self,
-        prompts: Sequence[ProcessorInputs],
-        lora_request: Sequence[LoRARequest | None] | LoRARequest | None,
-    ):
-        lora_config = self.llm_engine.vllm_config.lora_config
-        seq_lora_requests = self._lora_request_to_seq(lora_request, len(prompts))
-
-        if (
-            lora_config is None
-            or not self.model_config.is_multimodal_model
-            or (lora_config and lora_config.default_mm_loras is None)
-        ):
-            return seq_lora_requests
-
-        return [
-            self._resolve_single_prompt_mm_lora(
-                prompt,
-                lora_req,
-                lora_config.default_mm_loras,
-            )
-            for prompt, lora_req in zip(prompts, seq_lora_requests)
-        ]
-
-    def _resolve_single_prompt_mm_lora(
+    def _resolve_mm_lora(
         self,
         prompt: ProcessorInputs,
         lora_request: LoRARequest | None,
-        default_mm_loras: dict[str, str] | None,
-    ):
-        if not default_mm_loras or prompt["type"] != "multimodal":
+    ) -> LoRARequest | None:
+        if prompt["type"] != "multimodal":
+            return lora_request
+
+        lora_config = self.llm_engine.vllm_config.lora_config
+        default_mm_loras = None if lora_config is None else lora_config.default_mm_loras
+        if not default_mm_loras:
             return lora_request
 
         prompt_modalities = prompt["mm_placeholders"].keys()
         intersection = set(prompt_modalities).intersection(default_mm_loras.keys())
         if not intersection:
             return lora_request
+
         if len(intersection) > 1:
             # TODO: Would be nice to be able to have multiple loras per prompt
             logger.warning(
-                "Multiple modality specific loras were registered and would be"
-                " used by a single prompt consuming several modalities; "
-                " currently we only support one lora per request; as such,"
-                " lora(s) registered with modalities: %s"
-                " will be skipped",
+                "Multiple modality specific loras were registered and would be "
+                "used by a single prompt consuming several modalities; "
+                "currently we only support one lora per request; as such, "
+                "lora(s) registered with modalities: %s will be skipped",
                 intersection,
             )
             return lora_request
@@ -1813,7 +1792,6 @@ class LLM:
             params=seq_params,
             use_tqdm=use_tqdm,
             lora_requests=seq_lora_requests,
-            tokenization_kwargs=tokenization_kwargs,
             priorities=seq_priority,
         )
 
@@ -1872,7 +1850,6 @@ class LLM:
             params=seq_params,
             lora_requests=seq_lora_requests,
             use_tqdm=use_tqdm,
-            tokenization_kwargs=tokenization_kwargs,
         )
 
     def _render_and_run_requests(
@@ -1881,7 +1858,6 @@ class LLM:
         params: Sequence[SamplingParams | PoolingParams],
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         priorities: Sequence[int] | None = None,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
@@ -1899,7 +1875,6 @@ class LLM:
             prompts=prompts,
             params=params,
             lora_requests=lora_requests,
-            tokenization_kwargs=tokenization_kwargs,
             priorities=priorities,
         )
 
@@ -1911,7 +1886,6 @@ class LLM:
         params: Sequence[SamplingParams | PoolingParams],
         *,
         lora_requests: Sequence[LoRARequest | None] | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         priorities: Sequence[int] | None = None,
     ) -> list[str]:
         added_request_ids: list[str] = []
@@ -1921,8 +1895,10 @@ class LLM:
                 request_id = self._add_request(
                     prompt,
                     params[i],
-                    lora_request=None if lora_requests is None else lora_requests[i],
-                    tokenization_kwargs=tokenization_kwargs,
+                    lora_request=self._resolve_mm_lora(
+                        prompt,
+                        None if lora_requests is None else lora_requests[i],
+                    ),
                     priority=0 if priorities is None else priorities[i],
                 )
                 added_request_ids.append(request_id)
@@ -1938,7 +1914,6 @@ class LLM:
         prompt: ProcessorInputs,
         params: SamplingParams | PoolingParams,
         lora_request: LoRARequest | None = None,
-        tokenization_kwargs: dict[str, Any] | None = None,
         priority: int = 0,
     ) -> str:
         if isinstance(params, SamplingParams):
@@ -1947,27 +1922,11 @@ class LLM:
 
         request_id = str(next(self.request_counter))
 
-        if params.truncate_prompt_tokens is not None:
-            params_type = type(params).__name__
-            warnings.warn(
-                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
-                "is deprecated and will be removed in v0.16. "
-                "Please pass it via `tokenization_kwargs` instead.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-
-            tokenization_kwargs = merge_kwargs(
-                tokenization_kwargs,
-                dict(truncate_prompt_tokens=params.truncate_prompt_tokens),
-            )
-
         return self.llm_engine.add_request(
             request_id,
             prompt,
             params,
             lora_request=lora_request,
-            tokenization_kwargs=tokenization_kwargs,
             priority=priority,
         )
 
