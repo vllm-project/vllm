@@ -359,6 +359,8 @@ for i, ((output, pause_idx), (val_output, _)) in enumerate(zip(results, val_resu
                 )
                 break
 
+assert all_pass, "Some prompts failed validation"
+
 ray.get(llm_v2.shutdown.remote())
 ray.kill(llm_v2)
 print("=" * 50)
