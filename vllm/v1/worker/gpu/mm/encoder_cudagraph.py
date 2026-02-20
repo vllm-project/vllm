@@ -281,93 +281,153 @@ class EncoderCudaGraphManager:
         pixel_values: torch.Tensor,
         grid_thw_list: list[list[int]],
     ) -> list[torch.Tensor] | None:
-        """Execute encoder on local inputs using CUDA graph."""
-        spatial_merge_size = self.vision_model.spatial_merge_size
-        num_images = len(grid_thw_list)
+        """Execute encoder on local inputs using greedy-packed CUDA graphs.
 
-        # When the batch exceeds max_batch_size, split and process per chunk.
-        # Each chunk is processed recursively: CUDA graph when a token budget
-        # fits; eager when it does not.
-        if num_images > self.max_batch_size:
-            logger.debug(
-                "Encoder CUDA graph: %d images exceeds max_batch_size=%d, splitting",
-                num_images, self.max_batch_size,
-            )
-            outputs: list[torch.Tensor] = []
-            pixel_start = 0
-            for chunk_start in range(0, num_images, self.max_batch_size):
-                chunk_end = min(chunk_start + self.max_batch_size, num_images)
-                chunk_grid = grid_thw_list[chunk_start:chunk_end]
-                n_patches = _count_input_patches(chunk_grid)
-                chunk_pv = pixel_values[pixel_start:pixel_start + n_patches]
-                pixel_start += n_patches
-                chunk_out = self._execute_local(chunk_pv, chunk_grid)
-                if chunk_out is None:
-                    # No budget fits this chunk — count per-image misses and run eager.
-                    self.graph_misses += len(chunk_grid)
-                    with torch.inference_mode():
-                        raw = self.vision_model(chunk_pv, chunk_grid)
-                    idx = 0
-                    for t, h, w in chunk_grid:
-                        n = t * (h // spatial_merge_size) * (w // spatial_merge_size)
-                        outputs.append(raw[idx:idx + n])
-                        idx += n
-                else:
-                    outputs.extend(chunk_out)
-            return outputs
+        Sort images by output token count (smallest first), then greedily pack
+        as many images as possible into each batch while staying within
+        max_budget tokens and max_batch_size. Once a batch is finalised (next
+        image would overflow either constraint), find the smallest fitting
+        budget once for that batch.
 
-        total_tokens = _count_output_tokens(grid_thw_list, spatial_merge_size)
+        By exchange argument, greedy smallest-first packing minimises eager
+        fallbacks — any other ordering yields a higher token sum in some batch,
+        making that batch more likely to exceed the budget.
 
-        token_budget = self._find_smallest_fitting_budget_given_tokens(total_tokens)
-        if token_budget is None:
-            logger.debug(
-                "Encoder CUDA graph fallback to eager: no budget found for %d tokens from %d images",
-                total_tokens, num_images
-            )
-            self.graph_misses += num_images
-            return None
-
-        waste_pct = (token_budget - total_tokens) / token_budget * 100
-        logger.debug(
-            "Encoder CUDA graph: batch_size=%d, tokens=%d, budget=%d, waste=%.1f%%",
-            num_images, total_tokens, token_budget, waste_pct
-        )
-
-        encoder_metadata = {}
-        encoder_metadata['pos_embeds'] = self.vision_model.fast_pos_embed_interpolate(
-            grid_thw_list
-        )
-        rotary_cos, rotary_sin = self.vision_model.rot_pos_emb(grid_thw_list)
-        encoder_metadata['rotary_pos_emb_cos'] = rotary_cos
-        encoder_metadata['rotary_pos_emb_sin'] = rotary_sin
-
+        Stats note:
+          graph_hits  — counted inside _run_budget_graph after successful replay.
+          graph_misses — counted here for single-image batches where the image
+                         exceeds max_budget. Batches split due to max_batch_size
+                         always satisfy total_tokens <= max_budget and therefore
+                         always find a valid budget (no miss).
+        """
         from vllm.model_executor.models.vision import compute_encoder_metadata
-        seq_metadata = compute_encoder_metadata(
-            grid_thw_list,
-            device=self.device,
-            pad_to_batch_size=None,
-            per_frame=True,
+
+        spatial_merge = self.vision_model.spatial_merge_size
+        num_images = len(grid_thw_list)
+        max_budget = self.token_budgets[-1]
+
+        # Per-image output token counts (for sorting and output slicing)
+        per_image_out_tokens = [
+            _count_output_tokens([grid], spatial_merge)
+            for grid in grid_thw_list
+        ]
+
+        # Cumulative patch offsets in original order (for pixel_values slicing)
+        patch_offsets = [0] * (num_images + 1)
+        for image_idx in range(num_images):
+            patch_offsets[image_idx + 1] = (
+                patch_offsets[image_idx]
+                + _count_input_patches([grid_thw_list[image_idx]])
+            )
+
+        # Sort ascending by output token count (smallest first)
+        sorted_indices = sorted(
+            range(num_images), key=lambda i: per_image_out_tokens[i]
         )
-        encoder_metadata['cu_seqlens'] = seq_metadata['cu_seqlens']
-        # Use CPU tensor from compute_encoder_metadata to avoid GPU sync
-        # when .item() is called during CUDA graph capture
-        encoder_metadata['max_seqlen'] = seq_metadata['max_seqlen']
 
-        output = self._run_budget_graph(
-            pixel_values,
-            grid_thw_list,
-            token_budget,
-            encoder_metadata,
-        )
+        # Greedy pack against max_budget and max_batch_size.
+        # _find_smallest_fitting_budget_given_tokens is called once per
+        # finalised batch, not per image.
+        batches: list[tuple[list[int], int | None]] = []
+        current_batch: list[int] = []
+        current_batch_tokens = 0
 
-        outputs = []
-        start_idx = 0
-        for t, h, w in grid_thw_list:
-            num_tokens = t * (h // spatial_merge_size) * (w // spatial_merge_size)
-            outputs.append(output[start_idx:start_idx + num_tokens])
-            start_idx += num_tokens
+        for orig_idx in sorted_indices:
+            image_tokens = per_image_out_tokens[orig_idx]
+            if (current_batch_tokens + image_tokens <= max_budget
+                    and len(current_batch) < self.max_batch_size):
+                current_batch.append(orig_idx)
+                current_batch_tokens += image_tokens
+            else:
+                if current_batch:
+                    batches.append((
+                        current_batch,
+                        self._find_smallest_fitting_budget_given_tokens(
+                            current_batch_tokens
+                        ),
+                    ))
+                current_batch = [orig_idx]
+                current_batch_tokens = image_tokens
 
-        return outputs
+        if current_batch:
+            batches.append((
+                current_batch,
+                self._find_smallest_fitting_budget_given_tokens(
+                    current_batch_tokens
+                ),
+            ))
+
+        # outputs_by_orig_idx maps each original image index to its output
+        # tensor. Needed because greedy packing reorders images; we restore
+        # the original order before returning.
+        outputs_by_orig_idx: dict[int, torch.Tensor] = {}
+
+        for batch_orig_indices, token_budget in batches:
+            batch_grid = [grid_thw_list[i] for i in batch_orig_indices]
+            batch_out_tokens = _count_output_tokens(batch_grid, spatial_merge)
+
+            batch_pixel_values = torch.cat([
+                pixel_values[patch_offsets[i]:patch_offsets[i + 1]]
+                for i in batch_orig_indices
+            ])
+
+            if token_budget is None:
+                # Single oversized image: image_tokens > max_budget.
+                # graph_misses counted here for this eager fallback.
+                logger.debug(
+                    "Encoder CUDA graph fallback to eager: no budget for "
+                    "%d tokens from %d images",
+                    batch_out_tokens, len(batch_orig_indices),
+                )
+                self.graph_misses += len(batch_orig_indices)
+                with torch.inference_mode():
+                    raw = self.vision_model(batch_pixel_values, batch_grid)
+                output_offset = 0
+                for orig_idx in batch_orig_indices:
+                    n_tok = per_image_out_tokens[orig_idx]
+                    outputs_by_orig_idx[orig_idx] = raw[
+                        output_offset:output_offset + n_tok
+                    ]
+                    output_offset += n_tok
+            else:
+                logger.debug(
+                    "Encoder CUDA graph: batch_size=%d, tokens=%d, "
+                    "budget=%d, waste=%.1f%%",
+                    len(batch_orig_indices), batch_out_tokens, token_budget,
+                    (token_budget - batch_out_tokens) / token_budget * 100,
+                )
+                encoder_metadata: dict = {}
+                encoder_metadata['pos_embeds'] = (
+                    self.vision_model.fast_pos_embed_interpolate(batch_grid)
+                )
+                rotary_cos, rotary_sin = self.vision_model.rot_pos_emb(batch_grid)
+                encoder_metadata['rotary_pos_emb_cos'] = rotary_cos
+                encoder_metadata['rotary_pos_emb_sin'] = rotary_sin
+
+                seq_metadata = compute_encoder_metadata(
+                    batch_grid,
+                    device=self.device,
+                    pad_to_batch_size=None,
+                    per_frame=True,
+                )
+                encoder_metadata['cu_seqlens'] = seq_metadata['cu_seqlens']
+                # Keep max_seqlen on CPU to avoid GPU sync during graph replay
+                encoder_metadata['max_seqlen'] = seq_metadata['max_seqlen']
+
+                # graph_hits counted inside _run_budget_graph after replay
+                output = self._run_budget_graph(
+                    batch_pixel_values, batch_grid, token_budget, encoder_metadata,
+                )
+                output_offset = 0
+                for orig_idx in batch_orig_indices:
+                    n_tok = per_image_out_tokens[orig_idx]
+                    outputs_by_orig_idx[orig_idx] = output[
+                        output_offset:output_offset + n_tok
+                    ]
+                    output_offset += n_tok
+
+        # Return in original batch order (caller maps outputs to token positions)
+        return [outputs_by_orig_idx[i] for i in range(num_images)]
 
     def execute(
         self,
