@@ -8,7 +8,7 @@ clean_docker_tag() {
 }
 
 print_usage_and_exit() {
-    echo "Usage: $0 <registry> <repo> <commit> <branch> <vllm_use_precompiled> <vllm_merge_base_commit> <cache_from> <cache_to>"
+    echo "Usage: $0 <registry> <repo> <commit> <branch> <image_tag> [<image_tag_latest>]"
     exit 1
 }
 
@@ -154,7 +154,7 @@ print_bake_config() {
 #################################
 print_instance_info
 
-if [[ $# -lt 7 ]]; then
+if [[ $# -lt 5 ]]; then
     print_usage_and_exit
 fi
 
