@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
 import glob
+import json
 import os
 import time
 from collections.abc import Generator, Iterable
@@ -77,6 +78,50 @@ class DefaultModelLoader(BaseModelLoader):
                 f"{load_config.load_format}: "
                 f"{unexpected_keys}"
             )
+
+    def _validate_shard_completeness(
+        self,
+        hf_folder: str,
+        hf_weights_files: list[str],
+        use_safetensors: bool,
+    ) -> None:
+        """Validate that all expected shard files are present.
+        
+        This is important for quantized models where parameter matching
+        is skipped but missing shards could lead to silent failures.
+        """
+        if use_safetensors:
+            # Check safetensors index file for expected shards
+            index_file = os.path.join(hf_folder, SAFE_WEIGHTS_INDEX_NAME)
+            if os.path.isfile(index_file):
+                with open(index_file) as f:
+                    weight_map = json.load(f)["weight_map"]
+                
+                # Get all unique safetensors files referenced in the index
+                expected_files = set()
+                for weight_name in weight_map:
+                    expected_files.add(os.path.join(hf_folder, weight_map[weight_name]))
+                
+                # Check if all expected files exist
+                missing_files = []
+                for expected_file in expected_files:
+                    if not os.path.isfile(expected_file):
+                        missing_files.append(os.path.basename(expected_file))
+                
+                if missing_files:
+                    raise ValueError(
+                        f"Missing safetensors shard files: {sorted(missing_files)}. "
+                        "This could lead to incorrect model initialization. "
+                        "Please ensure all model files are downloaded correctly."
+                    )
+        else:
+            # For .pt/.bin files, we rely on the files present in hf_weights_files
+            # which were filtered by _prepare_weights. If the list is empty but
+            # we expected files (based on model metadata), this is an issue.
+            if not hf_weights_files:
+                raise ValueError(
+                    "No weight files found. This could indicate missing model shards."
+                )
 
     def _prepare_weights(
         self,
@@ -295,6 +340,25 @@ class DefaultModelLoader(BaseModelLoader):
             self.counter_after_loading_weights - self.counter_before_loading_weights,
             scope="local",
         )
+        
+        # For quantized models, validate shard completeness to prevent silent failures
+        if model_config.quantization is not None:
+            # Get the primary weights source info for validation
+            primary_weights = DefaultModelLoader.Source(
+                model_config.model,
+                model_config.revision,
+                prefix="",
+                fall_back_to_pt=getattr(model, "fall_back_to_pt_during_load", True),
+                allow_patterns_overrides=getattr(model, "allow_patterns_overrides", None),
+            )
+            hf_folder, hf_weights_files, use_safetensors = self._prepare_weights(
+                primary_weights.model_or_path,
+                primary_weights.revision,
+                primary_weights.fall_back_to_pt,
+                primary_weights.allow_patterns_overrides,
+            )
+            self._validate_shard_completeness(hf_folder, hf_weights_files, use_safetensors)
+        
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking currently.
         if model_config.quantization is None and loaded_weights is not None:
