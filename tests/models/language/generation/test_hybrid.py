@@ -803,7 +803,7 @@ def test_apc_common_prefix_same_batch(
 
 # Test that outputs match whether prefix caching is enabled or not for mamba.
 @pytest.mark.parametrize("model", ["tiiuae/falcon-mamba-7b"])
-def test_apc_same_output_prefix_caching_on_vs_off_vllm_runner(
+def test_same_mamba_output_apc_on_vs_off(
     vllm_runner,
     model: str,
 ) -> None:
