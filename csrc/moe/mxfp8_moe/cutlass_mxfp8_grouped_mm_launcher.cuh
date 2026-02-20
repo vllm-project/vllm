@@ -13,13 +13,13 @@
 #include <string>
 
 #include "cute/tensor.hpp"
-#include "es_sm100_mxfp8_blockscaled_functor.cuh"
-#include "es_sm100_mxfp8_blockscaled_traits.cuh"
+#include "cutlass_mxfp8_grouped_mm_functor.cuh"
+#include "cutlass_mxfp8_grouped_mm_traits.cuh"
 
 namespace expert_specialization {
 
 template <typename GemmTraits>
-void es_sm100_mxfp8_blockscaled_group_mm_pre_compute(
+void cutlass_mxfp8_grouped_mm_pre_compute(
     torch::Tensor& a_ptrs, torch::Tensor& b_ptrs, torch::Tensor& sfa_ptrs,
     torch::Tensor& sfb_ptrs, torch::Tensor& d_ptrs, torch::Tensor& stride_a,
     torch::Tensor& stride_b, torch::Tensor& stride_d, torch::Tensor& layout_sfa,
@@ -27,17 +27,17 @@ void es_sm100_mxfp8_blockscaled_group_mm_pre_compute(
     const torch::Tensor& sfa, const torch::Tensor& sfb, const torch::Tensor& d,
     const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets,
     const torch::Tensor& blockscale_offsets, cudaStream_t stream) {
-  using OffsetFunctor = Sm100Mxfp8BlockScaledOffsetFunctor<GemmTraits>;
+  using OffsetFunctor = CutlassMxfp8GroupedMmOffsetFunctor<GemmTraits>;
   using ElementA = typename OffsetFunctor::ElementA;
   using ElementB = typename OffsetFunctor::ElementB;
   using ElementSF = typename OffsetFunctor::ElementSF;
   using ElementD = typename OffsetFunctor::ElementD;
 
-  using LayoutFunctor = Sm100Mxfp8BlockScaledLayoutFunctor<GemmTraits>;
+  using LayoutFunctor = CutlassMxfp8GroupedMmLayoutFunctor<GemmTraits>;
   using LayoutSFA = typename LayoutFunctor::LayoutSFA;
   using LayoutSFB = typename LayoutFunctor::LayoutSFB;
 
-  using StrideFunctor = Sm100Mxfp8BlockScaledStrideFunctor<GemmTraits>;
+  using StrideFunctor = CutlassMxfp8GroupedMmStrideFunctor<GemmTraits>;
   using StrideA = typename StrideFunctor::StrideA;
   using StrideB = typename StrideFunctor::StrideB;
   using StrideD = typename StrideFunctor::StrideD;
@@ -66,14 +66,13 @@ void es_sm100_mxfp8_blockscaled_group_mm_pre_compute(
   StrideFunctor stride_functor(reinterpret_cast<StrideA*>(stride_a.data_ptr()),
                                reinterpret_cast<StrideB*>(stride_b.data_ptr()),
                                reinterpret_cast<StrideD*>(stride_d.data_ptr()));
-  sm100Mxfp8BlockscaledGroupedGemmPreComputeKernel<<<1, num_experts, 0,
-                                                     stream>>>(
+  cutlassMxfp8GroupedMmPreComputeKernel<<<1, num_experts, 0, stream>>>(
       static_cast<int*>(problem_sizes.data_ptr()), offset_functor,
       layout_functor, stride_functor);
 }
 
 template <typename GemmTraits>
-void es_sm100_mxfp8_blockscaled_group_mm(
+void cutlass_mxfp8_grouped_mm(
     const torch::Tensor& a_ptrs, const torch::Tensor& b_ptrs,
     const torch::Tensor& sfa_ptrs, const torch::Tensor& sfb_ptrs,
     const torch::Tensor& d_ptrs, const torch::Tensor& stride_a,
@@ -144,7 +143,7 @@ void es_sm100_mxfp8_blockscaled_group_mm(
 }
 
 template <typename OutType>
-void es_sm100_mxfp8_blockscaled_group_mm_dispatch_out_dtype(
+void cutlass_mxfp8_grouped_mm_dispatch_out_dtype(
     const torch::Tensor& a, const torch::Tensor& b, const torch::Tensor& sfa,
     const torch::Tensor& sfb, torch::Tensor& d,
     const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets,
@@ -167,14 +166,12 @@ void es_sm100_mxfp8_blockscaled_group_mm_dispatch_out_dtype(
   torch::Tensor layout_sfa = torch::empty({num_experts, 5}, options_int32);
   torch::Tensor layout_sfb = torch::empty({num_experts, 5}, options_int32);
 
-  using GemmTraits =
-      ExpertSpecializationSm100MXFP8BlockscaledGroupedGemmTraits<MMA1SMConfig,
-                                                                 OutType>;
-  es_sm100_mxfp8_blockscaled_group_mm_pre_compute<GemmTraits>(
+  using GemmTraits = CutlassMxfp8GroupedMmGemmTraits<MMA1SMConfig, OutType>;
+  cutlass_mxfp8_grouped_mm_pre_compute<GemmTraits>(
       a_ptrs, b_ptrs, sfa_ptrs, sfb_ptrs, d_ptrs, stride_a, stride_b, stride_d,
       layout_sfa, layout_sfb, a, b, sfa, sfb, d, problem_sizes, expert_offsets,
       blockscale_offsets, stream);
-  es_sm100_mxfp8_blockscaled_group_mm<GemmTraits>(
+  cutlass_mxfp8_grouped_mm<GemmTraits>(
       a_ptrs, b_ptrs, sfa_ptrs, sfb_ptrs, d_ptrs, stride_a, stride_b, stride_d,
       layout_sfa, layout_sfb, problem_sizes, stream);
 }

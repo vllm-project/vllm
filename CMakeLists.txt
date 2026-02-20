@@ -779,8 +779,8 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND ES_MXFP8_GROUPED_MM_ARCHS)
     set(SRCS
-      "csrc/moe/mxfp8_grouped_gemm/es_sm100_mxfp8_blockscaled.cu"
-      "csrc/moe/mxfp8_grouped_gemm/es_sm100_mxfp8_blockscaled_group_quant.cu")
+      "csrc/moe/mxfp8_moe/cutlass_mxfp8_grouped_mm.cu"
+      "csrc/moe/mxfp8_moe/mxfp8_experts_quant.cu")
     set_gencode_flags_for_srcs(
       SRCS "${SRCS}"
       CUDA_ARCHS "${ES_MXFP8_GROUPED_MM_ARCHS}")

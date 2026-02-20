@@ -8,14 +8,14 @@
 
 #include "cute/tensor.hpp"
 #include "cutlass/util/packed_stride.hpp"
-#include "es_sm100_mxfp8_blockscaled_traits.cuh"
+#include "cutlass_mxfp8_grouped_mm_traits.cuh"
 
 namespace expert_specialization {
 
 using namespace cute;
 
 template <typename GemmTraits>
-struct Sm100Mxfp8BlockScaledOffsetFunctor {
+struct CutlassMxfp8GroupedMmOffsetFunctor {
   using Gemm = typename GemmTraits::Gemm;
   using ElementA = typename Gemm::ElementA;
   using ElementB = typename Gemm::ElementB;
@@ -36,8 +36,8 @@ struct Sm100Mxfp8BlockScaledOffsetFunctor {
   ElementSF** sfb_offsets{nullptr};
   ElementD** d_offsets{nullptr};
 
-  Sm100Mxfp8BlockScaledOffsetFunctor() = default;
-  Sm100Mxfp8BlockScaledOffsetFunctor(
+  CutlassMxfp8GroupedMmOffsetFunctor() = default;
+  CutlassMxfp8GroupedMmOffsetFunctor(
       int* _expert_offsets, int* _blockscale_offsets, ElementA* _a_base,
       ElementB* _b_base, ElementSF* _sfa_base, ElementSF* _sfb_base,
       ElementD* _d_base, ElementA** _a_offsets, ElementB** _b_offsets,
@@ -74,15 +74,15 @@ struct Sm100Mxfp8BlockScaledOffsetFunctor {
 };
 
 template <typename GemmTraits>
-struct Sm100Mxfp8BlockScaledLayoutFunctor {
+struct CutlassMxfp8GroupedMmLayoutFunctor {
   using Sm1xxBlkScaledConfig = typename GemmTraits::Sm1xxBlkScaledConfig;
   using LayoutSFA = typename GemmTraits::LayoutSFA;
   using LayoutSFB = typename GemmTraits::LayoutSFB;
   LayoutSFA* layout_sfa_base{nullptr};
   LayoutSFB* layout_sfb_base{nullptr};
 
-  Sm100Mxfp8BlockScaledLayoutFunctor() = default;
-  Sm100Mxfp8BlockScaledLayoutFunctor(LayoutSFA* _layout_sfa_base,
+  CutlassMxfp8GroupedMmLayoutFunctor() = default;
+  CutlassMxfp8GroupedMmLayoutFunctor(LayoutSFA* _layout_sfa_base,
                                      LayoutSFB* _layout_sfb_base)
       : layout_sfa_base(_layout_sfa_base), layout_sfb_base(_layout_sfb_base) {}
 
@@ -97,7 +97,7 @@ struct Sm100Mxfp8BlockScaledLayoutFunctor {
 };
 
 template <typename GemmTraits>
-struct Sm100Mxfp8BlockScaledStrideFunctor {
+struct CutlassMxfp8GroupedMmStrideFunctor {
   using StrideA = typename GemmTraits::StrideA;
   using StrideB = typename GemmTraits::StrideB;
   using StrideD = typename GemmTraits::StrideD;
@@ -105,8 +105,8 @@ struct Sm100Mxfp8BlockScaledStrideFunctor {
   StrideB* stride_B_base{nullptr};
   StrideD* stride_D_base{nullptr};
 
-  Sm100Mxfp8BlockScaledStrideFunctor() = default;
-  Sm100Mxfp8BlockScaledStrideFunctor(StrideA* _stride_A_base,
+  CutlassMxfp8GroupedMmStrideFunctor() = default;
+  CutlassMxfp8GroupedMmStrideFunctor(StrideA* _stride_A_base,
                                      StrideB* _stride_B_base,
                                      StrideD* _stride_D_base)
       : stride_A_base(_stride_A_base),
@@ -125,7 +125,7 @@ struct Sm100Mxfp8BlockScaledStrideFunctor {
 
 template <typename OffsetFunctor, typename LayoutFunctor,
           typename StrideFunctor>
-__global__ void sm100Mxfp8BlockscaledGroupedGemmPreComputeKernel(
+__global__ void cutlassMxfp8GroupedMmPreComputeKernel(
     int* problem_sizes, OffsetFunctor offset_functor,
     LayoutFunctor layout_functor, StrideFunctor stride_functor) {
   int64_t expert_id = static_cast<int64_t>(threadIdx.x);

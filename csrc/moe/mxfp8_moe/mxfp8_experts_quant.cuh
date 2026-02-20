@@ -148,7 +148,7 @@ __inline__ __device__ uint8_t cvt_warp_fp16_to_mxfp8(FragmentS& fragment_s,
 template <typename TensorS, typename TensorP, typename TensorD,
           typename TensorSharedSF, typename TensorSF, typename TiledCopyG2R,
           typename TiledCopyR2G, typename TiledCopyR2S>
-__inline__ __device__ void mxfp8_group_quant_tile(
+__inline__ __device__ void mxfp8_experts_quant_tile(
     TensorS& tensor_s, TensorP& tensor_p, TensorD& tensor_d,
     TensorSharedSF& tensor_shared_sf, TensorSF& tensor_sf, int m,
     TiledCopyG2R& tiled_copy_g2r, TiledCopyR2G& tiled_copy_r2g,
@@ -260,7 +260,7 @@ __inline__ __device__ void mxfp8_group_quant_tile(
 
 template <typename T_IN, typename TiledCopyG2R, typename TiledCopyR2G,
           typename TiledCopyR2S>
-__global__ void mxfp8_group_quant(
+__global__ void mxfp8_experts_quant_kernel(
     const T_IN* input, const int* problem_sizes, const int* expert_offsets,
     const int* blockscale_offsets, cutlass::float_e4m3_t* quant_output,
     uint8_t* scale_factor, int groups, TiledCopyG2R tiled_copy_g2r,
@@ -341,7 +341,7 @@ __global__ void mxfp8_group_quant(
       auto current_scale_factor_tile =
           tensor<0>(scale_factor_tensor(_, blk_offset));
 
-      mxfp8_group_quant_tile<
+      mxfp8_experts_quant_tile<
           decltype(current_input_tile), decltype(current_predict_tile),
           decltype(current_quant_output_tile), decltype(scale_factor_shared),
           decltype(current_scale_factor_tile), TiledCopyG2R, TiledCopyR2G,
@@ -356,11 +356,12 @@ __global__ void mxfp8_group_quant(
 }
 
 template <typename T_IN>
-void launch_es_sm100_mxfp8_blockscaled_grouped_quant(
-    const torch::Tensor& input, const torch::Tensor& problem_sizes,
-    const torch::Tensor& expert_offsets,
-    const torch::Tensor& blockscale_offsets, torch::Tensor& quant_output,
-    torch::Tensor& scale_factor) {
+void launch_mxfp8_experts_quant(const torch::Tensor& input,
+                                const torch::Tensor& problem_sizes,
+                                const torch::Tensor& expert_offsets,
+                                const torch::Tensor& blockscale_offsets,
+                                torch::Tensor& quant_output,
+                                torch::Tensor& scale_factor) {
   ThrLayout thr_layout{};
   ValLayout val_layout{};
   SfR2SThrLayout r2s_thr_layout{};
@@ -387,8 +388,9 @@ void launch_es_sm100_mxfp8_blockscaled_grouped_quant(
   int max_active_blocks_per_sm = -1;
   AT_CUDA_CHECK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(
       &max_active_blocks_per_sm,
-      mxfp8_group_quant<T_IN, decltype(tiled_copy_g2r),
-                        decltype(tiled_copy_r2g), decltype(tiled_copy_r2s)>,
+      mxfp8_experts_quant_kernel<T_IN, decltype(tiled_copy_g2r),
+                                 decltype(tiled_copy_r2g),
+                                 decltype(tiled_copy_r2s)>,
       THREAD_BLOCK_SIZE, 0));
 
   dim3 grid(at::cuda::getCurrentDeviceProperties()->multiProcessorCount *
@@ -397,15 +399,16 @@ void launch_es_sm100_mxfp8_blockscaled_grouped_quant(
   dim3 block(THREAD_BLOCK_SIZE, 1, 1);
   int num_experts = (int)problem_sizes.size(0);
   auto stream = at::cuda::getCurrentCUDAStream();
-  mxfp8_group_quant<T_IN, decltype(tiled_copy_g2r), decltype(tiled_copy_r2g),
-                    decltype(tiled_copy_r2s)><<<grid, block, 0, stream>>>(
-      reinterpret_cast<const T_IN*>(input.data_ptr()),
-      reinterpret_cast<const int*>(problem_sizes.data_ptr()),
-      reinterpret_cast<const int*>(expert_offsets.data_ptr()),
-      reinterpret_cast<const int*>(blockscale_offsets.data_ptr()),
-      reinterpret_cast<cutlass::float_e4m3_t*>(quant_output.data_ptr()),
-      reinterpret_cast<uint8_t*>(scale_factor.data_ptr()), num_experts,
-      tiled_copy_g2r, tiled_copy_r2g, tiled_copy_r2s);
+  mxfp8_experts_quant_kernel<T_IN, decltype(tiled_copy_g2r),
+                             decltype(tiled_copy_r2g), decltype(tiled_copy_r2s)>
+      <<<grid, block, 0, stream>>>(
+          reinterpret_cast<const T_IN*>(input.data_ptr()),
+          reinterpret_cast<const int*>(problem_sizes.data_ptr()),
+          reinterpret_cast<const int*>(expert_offsets.data_ptr()),
+          reinterpret_cast<const int*>(blockscale_offsets.data_ptr()),
+          reinterpret_cast<cutlass::float_e4m3_t*>(quant_output.data_ptr()),
+          reinterpret_cast<uint8_t*>(scale_factor.data_ptr()), num_experts,
+          tiled_copy_g2r, tiled_copy_r2g, tiled_copy_r2s);
 }
 
 }  // namespace expert_specialization

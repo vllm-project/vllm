@@ -1085,7 +1085,7 @@ def cutlass_fp4_moe_mm(
     )
 
 
-def es_sm100_mxfp8_blockscaled_grouped_quant(
+def mxfp8_experts_quant(
     input_tensor: torch.Tensor,
     problem_sizes: torch.Tensor,
     expert_offsets: torch.Tensor,
@@ -1093,7 +1093,7 @@ def es_sm100_mxfp8_blockscaled_grouped_quant(
     quant_output: torch.Tensor,
     scale_factor: torch.Tensor,
 ) -> None:
-    torch.ops._C.es_sm100_mxfp8_blockscaled_grouped_quant(
+    torch.ops._C.mxfp8_experts_quant(
         input_tensor,
         problem_sizes,
         expert_offsets,
@@ -1103,7 +1103,7 @@ def es_sm100_mxfp8_blockscaled_grouped_quant(
     )
 
 
-def es_sm100_mxfp8_blockscaled_grouped_mm(
+def cutlass_mxfp8_grouped_mm(
     a_tensors: torch.Tensor,
     b_tensors: torch.Tensor,
     a_scales: torch.Tensor,
@@ -1113,7 +1113,7 @@ def es_sm100_mxfp8_blockscaled_grouped_mm(
     expert_offsets: torch.Tensor,
     blockscale_offsets: torch.Tensor,
 ) -> None:
-    torch.ops._C.es_sm100_mxfp8_blockscaled_grouped_mm(
+    torch.ops._C.cutlass_mxfp8_grouped_mm(
         a_tensors,
         b_tensors,
         a_scales,
@@ -1125,10 +1125,10 @@ def es_sm100_mxfp8_blockscaled_grouped_mm(
     )
 
 
-if hasattr(torch.ops._C, "es_sm100_mxfp8_blockscaled_grouped_quant"):
+if hasattr(torch.ops._C, "mxfp8_experts_quant"):
 
-    @register_fake("_C::es_sm100_mxfp8_blockscaled_grouped_quant")
-    def _es_sm100_mxfp8_blockscaled_grouped_quant_fake(
+    @register_fake("_C::mxfp8_experts_quant")
+    def _mxfp8_experts_quant_fake(
         input_tensor: torch.Tensor,
         problem_sizes: torch.Tensor,
         expert_offsets: torch.Tensor,
@@ -1139,10 +1139,10 @@ if hasattr(torch.ops._C, "es_sm100_mxfp8_blockscaled_grouped_quant"):
         return None
 
 
-if hasattr(torch.ops._C, "es_sm100_mxfp8_blockscaled_grouped_mm"):
+if hasattr(torch.ops._C, "cutlass_mxfp8_grouped_mm"):
 
-    @register_fake("_C::es_sm100_mxfp8_blockscaled_grouped_mm")
-    def _es_sm100_mxfp8_blockscaled_grouped_mm_fake(
+    @register_fake("_C::cutlass_mxfp8_grouped_mm")
+    def _cutlass_mxfp8_grouped_mm_fake(
         a_tensors: torch.Tensor,
         b_tensors: torch.Tensor,
         a_scales: torch.Tensor,

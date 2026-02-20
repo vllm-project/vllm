@@ -3,7 +3,7 @@
 # Adapted from SGLang:
 # https://github.com/sgl-project/sglang/blob/ded068a76e00878881d52d5bfb791e0f60d7311b/sgl-kernel/tests/test_es_fp8_blockwise_moe.py
 
-"""Tests for SM100 MXFP8 blockscaled grouped MoE kernels."""
+"""Tests for SM100 CUTLASS MXFP8 grouped MoE kernels."""
 
 import random
 
@@ -36,11 +36,14 @@ def is_sm100_supported() -> bool:
 
 @pytest.mark.skipif(
     not is_sm100_supported(),
-    reason="es_sm100_mxfp8_blockscaled kernels are only supported on CUDA SM100+",
+    reason=(
+        "cutlass_mxfp8_grouped_mm and mxfp8_experts_quant "
+        "are only supported on CUDA SM100"
+    ),
 )
 @pytest.mark.parametrize("num_experts", [8, 16, 32, 64])
 @pytest.mark.parametrize("out_dtype", [torch.half, torch.bfloat16])
-def test_es_sm100_mxfp8_blockscaled_grouped_mm(num_experts, out_dtype):
+def test_cutlass_mxfp8_grouped_mm(num_experts, out_dtype):
     device = "cuda"
     alignment = 128
     n_g = random.randint(1, 64) * alignment
@@ -112,7 +115,7 @@ def test_es_sm100_mxfp8_blockscaled_grouped_mm(num_experts, out_dtype):
         (num_experts, n_g, k_g // 32), dtype=torch.uint8, device=device
     )
 
-    ops.es_sm100_mxfp8_blockscaled_grouped_quant(
+    ops.mxfp8_experts_quant(
         a,
         _problem_sizes,
         _expert_offsets,
@@ -121,7 +124,7 @@ def test_es_sm100_mxfp8_blockscaled_grouped_mm(num_experts, out_dtype):
         a_scale_factor,
     )
 
-    ops.es_sm100_mxfp8_blockscaled_grouped_quant(
+    ops.mxfp8_experts_quant(
         b,
         _aux_problem_sizes,
         _aux_expert_offsets,
@@ -133,7 +136,7 @@ def test_es_sm100_mxfp8_blockscaled_grouped_mm(num_experts, out_dtype):
     b_scale_factor = b_scale_factor.view(num_experts, n_g, k_g // 32).transpose(1, 2)
 
     d = torch.empty((expert_offset, n_g), device=device, dtype=out_dtype)
-    ops.es_sm100_mxfp8_blockscaled_grouped_mm(
+    ops.cutlass_mxfp8_grouped_mm(
         a_quant,
         b_quant,
         a_scale_factor,

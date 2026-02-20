@@ -5,13 +5,14 @@
 
 #include <torch/all.h>
 
-#include "es_sm100_mxfp8_blockscaled_launcher.cuh"
+#include "cutlass_mxfp8_grouped_mm_launcher.cuh"
 
-void es_sm100_mxfp8_blockscaled_grouped_mm(
-    const torch::Tensor& a, const torch::Tensor& b, const torch::Tensor& sfa,
-    const torch::Tensor& sfb, torch::Tensor& d,
-    const torch::Tensor& problem_sizes, const torch::Tensor& expert_offsets,
-    const torch::Tensor& blockscale_offsets) {
+void cutlass_mxfp8_grouped_mm(const torch::Tensor& a, const torch::Tensor& b,
+                              const torch::Tensor& sfa,
+                              const torch::Tensor& sfb, torch::Tensor& d,
+                              const torch::Tensor& problem_sizes,
+                              const torch::Tensor& expert_offsets,
+                              const torch::Tensor& blockscale_offsets) {
 #if defined(CUTLASS_ARCH_MMA_SM100_SUPPORTED)
   TORCH_CHECK(problem_sizes.dim() == 2, "problem_sizes must be 2D tensor");
   TORCH_CHECK(problem_sizes.size(1) == 3,
@@ -31,21 +32,19 @@ void es_sm100_mxfp8_blockscaled_grouped_mm(
 
   auto stream = at::cuda::getCurrentCUDAStream();
   if (d.dtype() == torch::kBFloat16) {
-    expert_specialization::
-        es_sm100_mxfp8_blockscaled_group_mm_dispatch_out_dtype<
-            cutlass::bfloat16_t>(a, b, sfa, sfb, d, problem_sizes,
-                                 expert_offsets, blockscale_offsets, stream);
+    expert_specialization::cutlass_mxfp8_grouped_mm_dispatch_out_dtype<
+        cutlass::bfloat16_t>(a, b, sfa, sfb, d, problem_sizes, expert_offsets,
+                             blockscale_offsets, stream);
   } else if (d.dtype() == torch::kFloat16) {
-    expert_specialization::
-        es_sm100_mxfp8_blockscaled_group_mm_dispatch_out_dtype<cutlass::half_t>(
-            a, b, sfa, sfb, d, problem_sizes, expert_offsets,
-            blockscale_offsets, stream);
+    expert_specialization::cutlass_mxfp8_grouped_mm_dispatch_out_dtype<
+        cutlass::half_t>(a, b, sfa, sfb, d, problem_sizes, expert_offsets,
+                         blockscale_offsets, stream);
   } else {
     TORCH_CHECK(false, "dtype must be kFloat16 or kBFloat16");
   }
 #else
   TORCH_CHECK(false,
-              "No implemented es_sm100_mxfp8_blockscaled_grouped_mm for "
+              "No implemented cutlass_mxfp8_grouped_mm for "
               "current device");
 #endif
 }
@@ -53,6 +52,5 @@ void es_sm100_mxfp8_blockscaled_grouped_mm(
 #include "core/registration.h"
 
 TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
-  m.impl("es_sm100_mxfp8_blockscaled_grouped_mm",
-         es_sm100_mxfp8_blockscaled_grouped_mm);
+  m.impl("cutlass_mxfp8_grouped_mm", cutlass_mxfp8_grouped_mm);
 }

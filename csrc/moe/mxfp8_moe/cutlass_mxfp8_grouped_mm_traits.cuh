@@ -45,7 +45,7 @@ const dim3 MMA1SMConfig::preferred_cluster(1, 4, 1);
 const dim3 MMA1SMConfig::fallback_cluster(1, 2, 1);
 
 template <typename _MMAConfig, typename OutputDtype>
-struct ExpertSpecializationSm100MXFP8BlockscaledGroupedGemmTraits {
+struct CutlassMxfp8GroupedMmGemmTraits {
   using MMAConfig = _MMAConfig;
   using ElementInput = cutlass::float_e4m3_t;
   using ElementOutput = OutputDtype;
