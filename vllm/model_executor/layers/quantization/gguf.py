@@ -38,6 +38,7 @@ from vllm.model_executor.models.utils import WeightsMapper
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.v1.utils import record_function_or_nullcontext
 
 logger = init_logger(__name__)
 
@@ -195,12 +196,18 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    n = x.shape[0]
+    m = qweight.shape[0]
+    k = x.shape[-1]
+    wtype = WeightType(qweight_type).name
     # enable MMVQ in contiguous batching with batch_size=1
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
-        y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+        with record_function_or_nullcontext(f"GGUF_MMVQ {n}x{m}x{k} {wtype}"):
+            y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
     # Use MMQ Kernel if it's available (standard + k-quants)
     elif qweight_type in MMQ_QUANT_TYPES:
-        y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
+        with record_function_or_nullcontext(f"GGUF_MMQ {n}x{m}x{k} {wtype}"):
+            y = ops.ggml_mul_mat_a8(qweight, x, qweight_type, qweight.shape[0])
     # If there is no available MMQ kernel, fallback to dequantize
     elif qweight_type in DEQUANT_TYPES:
         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
