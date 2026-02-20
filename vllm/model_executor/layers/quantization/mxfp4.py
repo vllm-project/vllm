@@ -156,7 +156,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self.intermediate_size = intermediate_size_per_partition_after_pad = (
             self.moe.intermediate_size_per_partition
         )
-        self.hidden_size = self.moe.hidden_dim
+        self.hidden_size = hidden_size = self.moe.hidden_dim
 
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
@@ -241,6 +241,46 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_bias: torch.Tensor | None = None,
         w2_bias: torch.Tensor | None = None,
     ) -> None:
+        num_experts = self.num_experts
+        intermediate_size = self.intermediate_size
+        hidden_size = self.hidden_size
+        sf_block_size = 32  # mxfp4 block size
+
+        assert (
+            w13.dim() == 3
+            and w13.shape[0] == num_experts
+            and w13.shape[1] == intermediate_size * 2
+            and w13.shape[2] == hidden_size // 2
+        )
+        assert (
+            w13_scale.dim() == 3
+            and w13_scale.shape[0] == num_experts
+            and w13_scale.shape[1] == intermediate_size * 2
+            and w13_scale.shape[2] == hidden_size // sf_block_size
+        )
+        assert (
+            w2.dim() == 3
+            and w2.shape[0] == num_experts
+            and w2.shape[1] == hidden_size
+            and w2.shape[2] == intermediate_size // 2
+        )
+        assert (
+            w2_scale.dim() == 3
+            and w2_scale.shape[1] == hidden_size
+            and w2_scale.shape[2] == intermediate_size // sf_block_size
+        )
+        if w13_bias is not None:
+            assert (
+                w13_bias.dim() == 2
+                and w13_bias.shape[0] == num_experts
+                and w13_bias.shape[1] == intermediate_size * 2
+            )
+        if w2_bias is not None:
+            assert (
+                w2_bias.dim() == 2
+                and w2_bias.shape[0] == num_experts
+                and w2_bias.shape[1] == hidden_size
+            )
         w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
             convert_to_mxfp4_moe_kernel_format(
                 mxfp4_backend=self.mxfp4_backend,
@@ -251,6 +291,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 w2_weight_scale=w2_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
+                _cache_permute_indices=self._cache_permute_indices,
             )
         )
         replace_parameter(layer, "w13_weight", w13)
@@ -281,9 +322,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13 = layer.w13_weight
         w2 = layer.w2_weight
         w13_scale = layer.w13_weight_scale
-        w2_scale = layer.w2_weight
-        w13_bias = layer.w1_bias
-        w2_bias = layer.w2_bias
+        w2_scale = layer.w2_weight_scale
+        w13_bias = getattr(layer, "w13_bias", None)
+        w2_bias = getattr(layer, "w2_bias", None)
 
         self._setup_kernel(
             layer,

@@ -315,47 +315,12 @@ def convert_to_mxfp4_moe_kernel_format(
 ]:
     assert _cache_permute_indices is not None
 
-    num_experts = layer.num_experts
-    intermediate_size = layer.intermediate_size
-    hidden_size = layer.hidden_size
+    num_experts = w13_weight.shape[0]
+    intermediate_size = w13_weight.shape[1] // 2
+    hidden_size = w13_weight.shape[2] * 2
 
     sf_block_size = 32  # mxfp4 block size
-
     assert w13_bias is not None and w2_bias is not None
-
-    assert (
-        w13_weight.dim() == 3
-        and w13_weight.shape[0] == num_experts
-        and w13_weight.shape[1] == intermediate_size * 2
-        and w13_weight.shape[2] == hidden_size // 2
-    )
-    assert (
-        w13_weight_scale.dim() == 3
-        and w13_weight_scale.shape[0] == num_experts
-        and w13_weight_scale.shape[1] == intermediate_size * 2
-        and w13_weight_scale.shape[2] == hidden_size // sf_block_size
-    )
-    assert (
-        w2_weight.dim() == 3
-        and w2_weight.shape[0] == num_experts
-        and w2_weight.shape[1] == hidden_size
-        and w2_weight.shape[2] == intermediate_size // 2
-    )
-    assert (
-        w2_weight_scale.dim() == 3
-        and w2_weight_scale.shape[1] == hidden_size
-        and w2_weight_scale.shape[2] == intermediate_size // sf_block_size
-    )
-    assert (
-        w13_bias.dim() == 2
-        and w13_bias.shape[0] == num_experts
-        and w13_bias.shape[1] == intermediate_size * 2
-    )
-    assert (
-        w2_bias.dim() == 2
-        and w2_bias.shape[0] == num_experts
-        and w2_bias.shape[1] == hidden_size
-    )
 
     if mxfp4_backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -739,13 +704,15 @@ def make_mxfp4_moe_quant_config(
     w2_scale: Union[torch.Tensor, "PrecisionConfig"],
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
-    a1_scale: torch.Tensor | None = None,
-    a2_scale: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
-):
+) -> FusedMoEQuantConfig | None:
+    if mxfp4_backend in (
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+    ):
+        return None
     if mxfp4_backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
     ):
         return mxfp4_mxfp8_moe_quant_config(
@@ -761,7 +728,6 @@ def make_mxfp4_moe_quant_config(
         Mxfp4MoeBackend.TRITON_UNFUSED,
         Mxfp4MoeBackend.TRITON_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
     ):
         return mxfp4_w4a16_moe_quant_config(
