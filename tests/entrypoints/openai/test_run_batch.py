@@ -14,6 +14,8 @@ CHAT_MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
 EMBEDDING_MODEL_NAME = "intfloat/multilingual-e5-small"
 RERANKER_MODEL_NAME = "BAAI/bge-reranker-v2-m3"
 REASONING_MODEL_NAME = "Qwen/Qwen3-0.6B"
+SPEECH_LARGE_MODEL_NAME = "openai/whisper-large-v3"
+SPEECH_SMALL_MODEL_NAME = "openai/whisper-small"
 
 INPUT_BATCH = "\n".join(
     json.dumps(req)
@@ -134,11 +136,6 @@ INVALID_INPUT_BATCH = "\n".join(
     ]
 )
 
-_SCORE_RERANK_DOCUMENTS = [
-    "The capital of Brazil is Brasilia.",
-    "The capital of France is Paris.",
-]
-
 INPUT_EMBEDDING_BATCH = "\n".join(
     json.dumps(req)
     for req in [
@@ -180,6 +177,11 @@ INPUT_EMBEDDING_BATCH = "\n".join(
         },
     ]
 )
+
+_SCORE_RERANK_DOCUMENTS = [
+    "The capital of Brazil is Brasilia.",
+    "The capital of France is Paris.",
+]
 
 INPUT_SCORE_BATCH = "\n".join(
     json.dumps(req)
@@ -281,7 +283,7 @@ INPUT_TRANSCRIPTION_BATCH = (
             "method": "POST",
             "url": "/v1/audio/transcriptions",
             "body": {
-                "model": "openai/whisper-large-v3",
+                "model": SPEECH_LARGE_MODEL_NAME,
                 "file_url": f"data:audio/wav;base64,{MINIMAL_WAV_BASE64}",
                 "response_format": "json",
             },
@@ -297,7 +299,7 @@ INPUT_TRANSCRIPTION_HTTP_BATCH = (
             "method": "POST",
             "url": "/v1/audio/transcriptions",
             "body": {
-                "model": "openai/whisper-large-v3",
+                "model": SPEECH_LARGE_MODEL_NAME,
                 "file_url": AudioAsset("mary_had_lamb").url,
                 "response_format": "json",
             },
@@ -313,7 +315,7 @@ INPUT_TRANSLATION_BATCH = (
             "method": "POST",
             "url": "/v1/audio/translations",
             "body": {
-                "model": "openai/whisper-small",
+                "model": SPEECH_SMALL_MODEL_NAME,
                 "file_url": AudioAsset("mary_had_lamb").url,
                 "response_format": "text",
                 "language": "it",
@@ -578,7 +580,7 @@ def test_transcription():
                 "-o",
                 output_file.name,
                 "--model",
-                "openai/whisper-large-v3",
+                SPEECH_LARGE_MODEL_NAME,
             ],
         )
         proc.communicate()
@@ -616,7 +618,7 @@ def test_transcription_http_url():
                 "-o",
                 output_file.name,
                 "--model",
-                "openai/whisper-large-v3",
+                SPEECH_LARGE_MODEL_NAME,
             ],
         )
         proc.communicate()
@@ -656,7 +658,7 @@ def test_translation():
                 "-o",
                 output_file.name,
                 "--model",
-                "openai/whisper-small",
+                SPEECH_SMALL_MODEL_NAME,
             ],
         )
         proc.communicate()
