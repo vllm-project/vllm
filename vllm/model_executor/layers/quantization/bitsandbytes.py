@@ -29,7 +29,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 
 
 def _check_bitsandbytes_version():
-    min_version = "0.49.2" if current_platform.is_rocm() else "0.46.1"
+    min_version = "0.49.2" if current_platform.is_rocm() else "0.48.1"
     try:
         import bitsandbytes
 
