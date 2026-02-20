@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -137,6 +138,11 @@ class ExampleConnector(KVConnectorBase_V1):
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
+            if isinstance(
+                attn_metadata.get("model.layers.0.self_attn.attn", None),
+                TritonAttentionMetadata,
+            ):
+                dst_kv_cache_layer = dst_kv_cache_layer.permute(1, 0, 2, 3, 4)
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages = dst_kv_cache_layer_shape[0]
@@ -229,6 +235,8 @@ class ExampleConnector(KVConnectorBase_V1):
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
+            elif isinstance(attn_metadata, TritonAttentionMetadata):
+                layer = layer.permute(1, 0, 2, 3, 4)
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 
