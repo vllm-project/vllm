@@ -788,6 +788,10 @@ class AsyncLLM(EngineClient):
 
         q: RequestOutputCollector | None = None
         try:
+            model_config = self.model_config
+
+            pooling_params.verify(pooling_params.task, model_config)
+
             q = await self.add_request(
                 request_id,
                 prompt,
