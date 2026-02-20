@@ -118,6 +118,9 @@ def partial_json_loads(input_str: str, flags: Allow) -> tuple[Any, int]:
             dec = JSONDecoder()
             return dec.raw_decode(input_str)
         raise
+    except IndexError:  # deal with extra "}" which causes an invalid "pop()"
+        dec = JSONDecoder()
+        return dec.raw_decode(input_str)
 
 
 def is_complete_json(input_str: str) -> bool:
