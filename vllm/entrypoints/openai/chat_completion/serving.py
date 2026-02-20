@@ -1951,12 +1951,19 @@ class OpenAIServingChat(OpenAIServing):
         )
         messages.append(sys_msg)
 
+        merged_instructions = None
+        if request.messages and (
+            request.messages[0]["role"] == "system"
+            or request.messages[0]["role"] == "developer"
+        ):
+            merged_instructions = request.messages[0]["content"]
+            request.messages.pop(0)
         # Add developer message.
-        if request.tools:
-            dev_msg = get_developer_message(
-                tools=request.tools if should_include_tools else None  # type: ignore[arg-type]
-            )
-            messages.append(dev_msg)
+        dev_msg = get_developer_message(
+            instructions=merged_instructions,
+            tools=request.tools if should_include_tools else None,  # type: ignore[arg-type]
+        )
+        messages.append(dev_msg)
 
         # Add user message.
         messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
