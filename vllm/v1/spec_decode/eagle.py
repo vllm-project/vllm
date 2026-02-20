@@ -51,7 +51,7 @@ from vllm.v1.spec_decode.utils import (
     eagle_prepare_next_token_padded_kernel,
     extend_all_queries_by_N,
 )
-from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.utils import CpuGpuBuffer, is_uniform_decode
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 
@@ -79,6 +79,7 @@ class SpecDecodeBaseProposer:
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
+        self.uniform_decode_query_len = 1 + self.num_speculative_tokens
 
         # We need to get the hidden size from the draft model config because
         # the draft model's hidden size can be different from the target model's
@@ -365,24 +366,13 @@ class SpecDecodeBaseProposer:
         return self.model
 
     def initialize_cudagraph_keys(self, cudagraph_mode: CUDAGraphMode) -> None:
-        """Initialize cudagraph dispatcher keys for eagle.
+        """Initialize cudagraph dispatcher keys for eagle."""
+        if self.speculative_config.enforce_eager:
+            cudagraph_mode = CUDAGraphMode.NONE
 
-        Eagle only supports PIECEWISE cudagraphs (via mixed_mode).
-        This should be called after adjust_cudagraph_sizes_for_spec_decode.
-        """
-        if not self.speculative_config.enforce_eager:
-            # This is a temprary mapping open to discussions
-            # FULL_AND_PIECEWISE -> PIECEWISE, FULL_DECODE_ONLY -> FULL
-            # PIECEWISE -> PIECEWISE, FULL -> FULL
-            eagle_cudagraph_mode = (
-                CUDAGraphMode.PIECEWISE
-                if cudagraph_mode.has_piecewise_cudagraphs()
-                else cudagraph_mode.decode_mode()
-            )
-        else:
-            eagle_cudagraph_mode = CUDAGraphMode.NONE
-
-        self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
+        self.cudagraph_dispatcher.initialize_cudagraph_keys(
+            cudagraph_mode, self.uniform_decode_query_len
+        )
 
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
@@ -400,6 +390,7 @@ class SpecDecodeBaseProposer:
         target_hidden_states: torch.Tensor,
         # [batch_size]
         next_token_ids: torch.Tensor,
+        num_scheduled_tokens: dict[str, int],
         token_indices_to_sample: torch.Tensor | None,
         common_attn_metadata: CommonAttentionMetadata,
         sampling_metadata: SamplingMetadata,
@@ -464,8 +455,18 @@ class SpecDecodeBaseProposer:
             num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
         )
 
+        num_reqs = len(num_scheduled_tokens)
+        max_num_scheduled_tokens = max(num_scheduled_tokens.values(), default=0)
+
+        uniform_decode = is_uniform_decode(
+            max_num_scheduled_tokens,
+            self.uniform_decode_query_len,
+            num_tokens,
+            num_reqs,
+        )
+
         cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
-            num_tokens_dp_padded
+            num_tokens_dp_padded, uniform_decode
         )
         num_input_tokens = batch_desc.num_tokens
         if num_tokens_across_dp is not None:
@@ -566,7 +567,7 @@ class SpecDecodeBaseProposer:
         )
 
         cudagraph_runtime_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
-            batch_size_dp_padded
+            batch_size_dp_padded, uniform_decode
         )
         input_batch_size = batch_desc.num_tokens
         if batch_size_across_dp is not None:
@@ -1601,8 +1602,13 @@ class SpecDecodeBaseProposer:
                     num_tokens_unpadded=num_tokens, num_tokens_padded=num_tokens
                 )
                 if use_cudagraphs:
+                    # NOTE(Yizhou): This is also a hack, getting `cudagraph_mode`
+                    # through `use_cudagraphs` argument
+                    uniform_decode = common_attn_metadata is not None
                     cudagraph_runtime_mode, batch_desc = (
-                        self.cudagraph_dispatcher.dispatch(num_tokens_dp_padded)
+                        self.cudagraph_dispatcher.dispatch(
+                            num_tokens_dp_padded, uniform_decode
+                        )
                     )
                     num_input_tokens = batch_desc.num_tokens
                 else:

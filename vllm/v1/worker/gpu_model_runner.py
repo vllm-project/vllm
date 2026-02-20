@@ -164,7 +164,11 @@ from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.utils import (
+    CpuGpuBuffer,
+    is_uniform_decode,
+    record_function_or_nullcontext,
+)
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
@@ -3106,27 +3110,6 @@ class GPUModelRunner(
             **model_kwargs,
         )
 
-    @staticmethod
-    def _is_uniform_decode(
-        max_num_scheduled_tokens: int,
-        uniform_decode_query_len: int,
-        num_tokens: int,
-        num_reqs: int,
-        force_uniform_decode: bool | None = None,
-    ) -> bool:
-        """
-        Checks if it's a decode batch with same amount scheduled tokens
-        across all requests.
-        """
-        return (
-            (
-                (max_num_scheduled_tokens == uniform_decode_query_len)
-                and (num_tokens == max_num_scheduled_tokens * num_reqs)
-            )
-            if force_uniform_decode is None
-            else force_uniform_decode
-        )
-
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -3149,7 +3132,7 @@ class GPUModelRunner(
         torch.Tensor | None,
         CUDAGraphStat | None,
     ]:
-        uniform_decode = self._is_uniform_decode(
+        uniform_decode = is_uniform_decode(
             max_num_scheduled_tokens=max_num_scheduled_tokens,
             uniform_decode_query_len=self.uniform_decode_query_len,
             num_tokens=num_tokens,
@@ -4159,6 +4142,7 @@ class GPUModelRunner(
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
                 next_token_ids=next_token_ids,
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                 token_indices_to_sample=token_indices_to_sample,
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
@@ -4860,14 +4844,16 @@ class GPUModelRunner(
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
                 attn_metadata, spec_decode_common_attn_metadata = (
                     self._build_attention_metadata(
-                            num_tokens=num_tokens_unpadded,
-                            num_tokens_padded=num_tokens_padded if pad_attn else None,
-                            num_reqs=num_reqs_padded,
-                            max_query_len=max_query_len,
-                            ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
-                            for_cudagraph_capture=is_graph_capturing,
-                            slot_mappings=slot_mappings_by_group,
-                            use_spec_decode=self.speculative_config is not None,
+                        num_tokens=num_tokens_unpadded,
+                        num_tokens_padded=num_tokens_padded if pad_attn else None,
+                        num_reqs=num_reqs_padded,
+                        max_query_len=max_query_len,
+                        ubatch_slices=(
+                            ubatch_slices_padded if pad_attn else ubatch_slices
+                        ),
+                        for_cudagraph_capture=is_graph_capturing,
+                        slot_mappings=slot_mappings_by_group,
+                        use_spec_decode=self.speculative_config is not None,
                     )
                 )
 
