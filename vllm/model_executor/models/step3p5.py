@@ -701,7 +701,9 @@ class Step3p5Model(nn.Module):
                     if replaced_name not in params_dict:
                         continue
                     param = params_dict[replaced_name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     moe_expert_num = self.moe_num_experts
                     assert loaded_weight.shape[0] == moe_expert_num
                     for expert_id in range(moe_expert_num):

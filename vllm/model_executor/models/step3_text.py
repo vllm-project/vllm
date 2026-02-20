@@ -508,7 +508,9 @@ class Step3TextForCausalLM(nn.Module, SupportsPP):
                     ) and name not in params_dict:
                         continue
                     param = params_dict[name]
-                    weight_loader = getattr(param, "weight_loader", default_weight_loader)
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
                     for expert_id in range(loaded_weight.shape[0]):
                         loaded_weight_expert = loaded_weight[expert_id]
                         weight_loader(
