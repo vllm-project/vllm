@@ -169,21 +169,6 @@ class CudaPlatformBase(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
-        cache_config = vllm_config.cache_config
-        user_specified_block_size = cache_config.block_size is not None
-        if not user_specified_block_size:
-            cache_config.block_size = 16
-
-        # Ensure block_size is compatible with the attention backend.
-        # Note: model_config may be None during testing.
-        # Skip hybrid (attention+mamba) models — their block_size is
-        # managed by HybridAttentionMambaModelConfig
-        if model_config is not None and not model_config.is_hybrid:
-            cls._update_block_size_for_backend(
-                vllm_config,
-                user_specified_block_size,
-            )
-
         # FlashInferMLA does not return softmax LSE needed for DCP.
         # When DCP is enabled with MLA, force CUTLASS_MLA on Blackwell
         # or let other backends (FlashMLA on Hopper) be selected.
@@ -207,10 +192,10 @@ class CudaPlatformBase(Platform):
         # dcp_context_kv_lens tensor gets captured as a static constant
         # during graph capture, causing incorrect output during decode.
         # MLA models are not affected (they handle DCP differently).
-        compilation_config = vllm_config.compilation_config
         if dcp_size > 1 and model_config is not None:
             from vllm.config.compilation import CUDAGraphMode
 
+            compilation_config = vllm_config.compilation_config
             if (
                 not model_config.use_mla
                 and compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE
@@ -226,6 +211,7 @@ class CudaPlatformBase(Platform):
         if pcp_size > 1:
             from vllm.config.compilation import CUDAGraphMode
 
+            compilation_config = vllm_config.compilation_config
             if compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE:
                 logger.info(
                     "PCP requires PIECEWISE CUDA graphs. "

@@ -5,7 +5,7 @@
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import numpy as np
 import torch
@@ -175,7 +175,7 @@ class BatchDCPPrefillWrapper:
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
     ):
-        self._dcp_combine: Callable[..., object] = (
+        self._dcp_combine: Callable[..., Any] = (
             dcp_a2a_lse_reduce
             if dcp_a2a
             else partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
@@ -1250,7 +1250,7 @@ class FlashInferImpl(AttentionImpl):
             )
         except AttributeError:
             dcp_a2a = False
-        self.dcp_combine: Callable[..., object] = (
+        self.dcp_combine: Callable[..., Any] = (
             dcp_a2a_lse_reduce
             if dcp_a2a
             else partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
