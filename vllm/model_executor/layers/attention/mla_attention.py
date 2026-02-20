@@ -431,7 +431,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        # Apply RoPE here if rotary_emb is available on the impl.
+        # The PR moved RoPE from mla.py into the attention layer to enable
+        # fused RoPE+quant in the impl. For the direct-call path we apply
+        # it upfront so forward_impl sees already-rotated tensors.
+        rotary_emb = getattr(self.impl, "rotary_emb", None)
+        if rotary_emb is not None and positions is not None:
+            q_nope, q_pe = q.split(
+                [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
+            )
+            q_pe, k_pe = rotary_emb(positions, q_pe, k_pe)
+            q = torch.cat([q_nope, q_pe], dim=-1)
+
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(q, kv_c_normed, k_pe, self.layer_name)
 
