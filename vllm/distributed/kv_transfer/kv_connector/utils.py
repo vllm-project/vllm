@@ -4,7 +4,7 @@
 KV cache helper for store.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Literal
 
 import torch
@@ -215,6 +215,7 @@ class TpKVTopology:
     attn_backend: type[AttentionBackend]
     engine_id: str
     remote_block_size: dict[str, int]
+    remote_dcp_size: dict[str, int] = field(default_factory=dict)
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
@@ -282,6 +283,9 @@ class TpKVTopology:
         remote_engine_id: str,
     ) -> int:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
+        dcp_size = self.remote_dcp_size.get(remote_engine_id, 1)
+        if dcp_size > 1:
+            remote_tp_size = remote_tp_size // dcp_size
         return self.tp_ratio(remote_tp_size)
 
     def block_size_ratio_from_engine_id(
@@ -306,11 +310,20 @@ class TpKVTopology:
     def get_target_remote_rank(
         self,
         remote_tp_size: int,
+        remote_dcp_size: int = 1,
     ) -> int:
         """
         Get the remote TP rank (on P) that the current local TP rank
         (on D) will read from.
+
+        With DCP, returns the base rank of the DCP group. The actual
+        TP ranks to read from are [base * dcp_size, ...,
+        base * dcp_size + dcp_size - 1].
         """
+        if remote_dcp_size > 1:
+            assert self.tp_size == remote_tp_size // remote_dcp_size, \
+                "Local TP size must match remote TP size per DCP group."
+            return self.tp_rank
         tp_ratio = self.tp_ratio(remote_tp_size)
         return self.tp_rank // tp_ratio
 
