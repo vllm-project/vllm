@@ -27,7 +27,6 @@ causes unexpected behavior.
 """
 
 import asyncio
-import os
 import uuid
 from dataclasses import asdict
 
@@ -59,12 +58,6 @@ class MyLLM(vllm.AsyncLLMEngine):
     """Configure the vLLM worker for Ray placement group execution."""
 
     def __init__(self, **kwargs):
-        # This actor runs with num_gpus=0, so Ray sets CUDA_VISIBLE_DEVICES=""
-        # to hide all GPUs. Remove it so it doesn't propagate (via runtime_env
-        # inheritance) to the DP engine core actors and their RayWorkerWrapper
-        # children, which need full GPU visibility.
-        if os.environ.get("CUDA_VISIBLE_DEVICES") == "":
-            del os.environ["CUDA_VISIBLE_DEVICES"]
         engine_args = vllm.AsyncEngineArgs(**kwargs)
         vllm_config = engine_args.create_engine_config()
         executor_class = Executor.get_class(vllm_config)
@@ -178,12 +171,13 @@ class TrainModel:
         return new_token_ids
 
 
-# Initialize Ray and set the visible devices.
 ray.init(
     runtime_env={
         "env_vars": {
-            "PYTHONPATH": "/home/ray/default/personal/vllm",
+            # enable batch invariance for deterministic outputs
             "VLLM_BATCH_INVARIANT": "1",
+            # prevent ray from setting CUDA_VISIBLE_DEVICES
+            "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1",
         }
     }
 )
@@ -206,7 +200,6 @@ llm = ray.remote(
     enforce_eager=True,
     max_model_len=8192,
     distributed_executor_backend="ray",
-    enable_prefix_caching=False,
     attention_backend="FLASH_ATTN",
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
@@ -322,7 +315,6 @@ llm_v2 = ray.remote(
     enforce_eager=True,
     max_model_len=8192,
     distributed_executor_backend="ray",
-    enable_prefix_caching=False,
     attention_backend="FLASH_ATTN",
 )
 
@@ -359,8 +351,7 @@ for i, ((output, pause_idx), (val_output, _)) in enumerate(zip(results, val_resu
                 )
                 break
 
-assert all_pass, "Some prompts failed validation"
-
 ray.get(llm_v2.shutdown.remote())
 ray.kill(llm_v2)
+assert all_pass, "Some prompts failed validation, see above for details"
 print("=" * 50)
