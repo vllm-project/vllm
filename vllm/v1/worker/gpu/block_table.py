@@ -8,7 +8,6 @@ from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.buffer_utils import StagedWriteTensor, UvaBackedTensor
-from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 class BlockTables:
@@ -155,7 +154,6 @@ class BlockTables:
         return self.slot_mappings[:, :num_tokens]
 
 
-@CachedKernel
 @triton.jit
 def _gather_block_tables_kernel(
     batch_idx_to_req_idx,  # [batch_size]
@@ -186,7 +184,6 @@ def _gather_block_tables_kernel(
         tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_blocks)
 
 
-@CachedKernel
 @triton.jit
 def _compute_slot_mappings_kernel(
     num_tokens,

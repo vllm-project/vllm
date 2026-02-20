@@ -10,7 +10,6 @@ from vllm.triton_utils import tl, triton
 from vllm.v1.outputs import LogprobsTensors
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
-from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 class PromptLogprobsWorker:
@@ -127,7 +126,6 @@ class PromptLogprobsWorker:
         return prompt_logprobs_dict
 
 
-@CachedKernel
 @triton.jit
 def _prompt_logprobs_token_ids_kernel(
     prompt_logprobs_token_ids_ptr,

@@ -8,7 +8,6 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
-from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 class InputBuffers:
@@ -155,7 +154,6 @@ class InputBatch:
         )
 
 
-@CachedKernel
 @triton.jit
 def _prepare_prefill_inputs_kernel(
     input_ids_ptr,
@@ -216,7 +214,6 @@ def prepare_prefill_inputs(
     )
 
 
-@CachedKernel
 @triton.jit
 def _prepare_pos_seq_lens_kernel(
     pos_ptr,
@@ -275,7 +272,6 @@ def prepare_pos_seq_lens(
     )
 
 
-@CachedKernel
 @triton.jit
 def _combine_sampled_and_draft_tokens_kernel(
     input_ids_ptr,
@@ -370,7 +366,6 @@ def combine_sampled_and_draft_tokens(
     return logits_indices
 
 
-@CachedKernel
 @triton.jit
 def _get_num_sampled_and_rejected_kernel(
     num_sampled_ptr,
@@ -420,7 +415,6 @@ def get_num_sampled_and_rejected(
     return num_sampled, num_rejected
 
 
-@CachedKernel
 @triton.jit
 def _post_update_kernel(
     idx_mapping_ptr,
@@ -513,7 +507,6 @@ def post_update(
     )
 
 
-@CachedKernel
 @triton.jit
 def _expand_idx_mapping_kernel(
     idx_mapping_ptr,

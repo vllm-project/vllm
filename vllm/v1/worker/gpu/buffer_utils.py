@@ -12,7 +12,6 @@ from vllm.utils.torch_utils import (
     async_tensor_h2d,
     get_accelerator_view_from_cpu_tensor,
 )
-from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
 def async_copy_to_gpu(
@@ -194,7 +193,6 @@ class StagedWriteTensor:
         self._staged_write_cu_lens.clear()
 
 
-@CachedKernel
 @triton.jit
 def _apply_write_kernel(
     output_ptr,

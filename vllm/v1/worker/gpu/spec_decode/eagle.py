@@ -21,7 +21,6 @@ from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
-from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 logger = init_logger(__name__)
 
@@ -336,7 +335,6 @@ class EagleSpeculator:
         return self.draft_tokens[:num_reqs]
 
 
-@CachedKernel
 @triton.jit
 def _prepare_eagle_inputs_kernel(
     last_token_indices_ptr,
@@ -425,7 +423,6 @@ def prepare_eagle_inputs(
     return last_token_indices
 
 
-@CachedKernel
 @triton.jit
 def _prepare_eagle_docode_kernel(
     draft_tokens_ptr,
@@ -528,7 +525,6 @@ def prepare_eagle_decode(
     )
 
 
-@CachedKernel
 @triton.jit
 def _update_eagle_inputs_kernel(
     input_ids_ptr,

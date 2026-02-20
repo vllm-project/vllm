@@ -3,10 +3,8 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
-@CachedKernel
 @triton.jit
 def _temperature_kernel(
     logits_ptr,
@@ -51,7 +49,6 @@ def apply_temperature(
     )
 
 
-@CachedKernel
 @triton.jit
 def _gumbel_sample_kernel(
     local_argmax_ptr,

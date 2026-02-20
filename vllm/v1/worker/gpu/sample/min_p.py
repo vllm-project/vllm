@@ -3,10 +3,8 @@
 import torch
 
 from vllm.triton_utils import tl, triton
-from vllm.v1.worker.gpu.triton_utils import CachedKernel
 
 
-@CachedKernel
 @triton.jit
 def _min_p_kernel(
     logits_ptr,
