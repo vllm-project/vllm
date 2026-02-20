@@ -175,11 +175,10 @@ class BatchDCPPrefillWrapper:
         workspace_buffer: torch.Tensor | None = None,
         dcp_a2a: bool = False,
     ):
-        self._dcp_combine = (
-            dcp_a2a_lse_reduce
-            if dcp_a2a
-            else partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
-        )
+        if dcp_a2a:
+            self._dcp_combine = dcp_a2a_lse_reduce
+        else:
+            self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
         self._context = BatchPrefillWithPagedKVCacheWrapper(
             workspace_buffer, get_kv_cache_layout()
         )
@@ -1250,11 +1249,10 @@ class FlashInferImpl(AttentionImpl):
             )
         except AttributeError:
             dcp_a2a = False
-        self.dcp_combine = (
-            dcp_a2a_lse_reduce
-            if dcp_a2a
-            else partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
-        )
+        if dcp_a2a:
+            self.dcp_combine = dcp_a2a_lse_reduce
+        else:
+            self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
         # TODO(#34018): --dcp-replicate-q-proj to make Q replication
         # configurable at weight level, removing runtime allgather.
         self._dcp_prepare_query: Callable[[torch.Tensor], torch.Tensor]

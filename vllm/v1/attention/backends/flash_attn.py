@@ -610,7 +610,10 @@ class FlashAttentionImpl(AttentionImpl):
             )
         except AttributeError:
             dcp_a2a = False
-        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
+        if dcp_a2a:
+            self.dcp_combine = dcp_a2a_lse_reduce
+        else:
+            self.dcp_combine = cp_lse_ag_out_rs
 
     def forward(
         self,
