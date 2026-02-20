@@ -450,7 +450,7 @@ DRA provides a more flexible alternative to the traditional `nvidia.com/gpu` res
               image: vllm/vllm-openai:latest
               command: ["/bin/sh", "-c"]
               args: [
-                "vllm serve mistralai/Mistral-7B-Instruct-v0.3 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
+                "vllm serve mistralai/Ministral-3-14B-Instruct-2512 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
               ]
               env:
               - name: HF_TOKEN
