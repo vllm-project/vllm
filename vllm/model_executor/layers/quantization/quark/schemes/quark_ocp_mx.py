@@ -212,6 +212,10 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
+        self.dequant_weights_aot = (
+            self.emulate and envs.VLLM_EMULATION_DEQUANT_WEIGHTS_AOT
+        )
+
         self.rocm_use_aiter_fp4_asm_gemm = is_rocm_aiter_fp4_asm_gemm_enabled()
 
         if not self.emulate and (dynamic_mxfp4_quant is None or gemm_afp4wfp4 is None):
@@ -265,9 +269,18 @@ class QuarkOCP_MX(QuarkScheme):
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
 
         if self.emulate:
-            layer.weight_scale = torch.nn.Parameter(
-                layer.weight_scale.data, requires_grad=False
-            )
+            if self.dequant_weights_aot:
+                # Dequantize weights ahead of time for faster inference.
+                # Trades higher memory usage for avoiding per-forward dequant.
+                dq_weight = self.dequant_func(
+                    layer.weight.data, layer.weight_scale.data, self.out_dtype
+                )
+                layer.weight = torch.nn.Parameter(dq_weight, requires_grad=False)
+                layer.weight_scale = None
+            else:
+                layer.weight_scale = torch.nn.Parameter(
+                    layer.weight_scale.data, requires_grad=False
+                )
         else:
             if self.rocm_use_aiter_fp4_asm_gemm:
                 # shuffle weight scale
@@ -340,8 +353,10 @@ class QuarkOCP_MX(QuarkScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.emulate:
-            dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             qdq_x = self.quant_dequant_func(x)
+            if self.dequant_weights_aot:
+                return F.linear(qdq_x, layer.weight, bias)
+            dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             return F.linear(qdq_x, dq_w, bias)
         else:
             return torch.ops.vllm.gemm_with_dynamic_quant(
