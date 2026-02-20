@@ -291,7 +291,8 @@ def _set_max_num_batched_encoder_embeds(
 ) -> int:
     if scheduler_config.max_num_batched_encoder_embeds is None:
         logger.info_once(
-            "Defaulting max_num_batched_encoder_embeds to %d.",
+            "Defaulting max_num_batched_encoder_embeds to %s=%d.",
+            origin,
             value,
             scope="local",
         )
@@ -326,13 +327,6 @@ def _get_encoder_cache_size_info(
     if value is None:
         origin = "max_num_batched_encoder_embeds"
         value = max_num_batched_encoder_embeds
-    elif value < max_num_batched_encoder_embeds:
-        raise ValueError(
-            f"encoder_cache_size={value} cannot be less than "
-            f"{max_num_batched_encoder_embeds=} because this effectively limits "
-            "max_num_batched_encoder_embeds to the same value. "
-            "Please increase encoder_cache_size."
-        )
 
     if value < max_tokens_per_mm_item:
         origin = "max_tokens_per_mm_item"
@@ -348,7 +342,8 @@ def _set_encoder_cache_size(
 ) -> int:
     if scheduler_config.encoder_cache_size is None:
         logger.info_once(
-            "Defaulting encoder_cache_size to %d.",
+            "Defaulting encoder_cache_size to %s=%d.",
+            origin,
             value,
             scope="local",
         )
@@ -426,6 +421,14 @@ def compute_mm_encoder_budget(
     encoder_cache_size = _set_encoder_cache_size(
         scheduler_config, *encoder_cache_size_info
     )
+
+    if encoder_cache_size < max_num_batched_encoder_embeds:
+        raise ValueError(
+            f"{encoder_cache_size=} cannot be less than "
+            f"{max_num_batched_encoder_embeds=} because this effectively limits "
+            "max_num_batched_encoder_embeds to the same value. "
+            "Please increase encoder_cache_size."
+        )
 
     return max_num_batched_encoder_embeds, encoder_cache_size
 
