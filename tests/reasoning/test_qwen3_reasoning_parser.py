@@ -19,25 +19,25 @@ def qwen3_tokenizer():
     return AutoTokenizer.from_pretrained(REASONING_MODEL_NAME)
 
 
-# 带 <think></think>，非stream
+# With <think></think>, non-streaming
 WITH_THINK = {
     "output": "<think>This is a reasoning section</think>This is the rest",
     "reasoning": "This is a reasoning section",
     "content": "This is the rest",
 }
-# 带 <think></think>，stream
+# With <think></think>, streaming
 WITH_THINK_STREAM = {
     "output": "<think>This is a reasoning section</think>This is the rest",
     "reasoning": "This is a reasoning section",
     "content": "This is the rest",
 }
-# 不带 <think></think>，非stream
+# Without <think></think>, non-streaming
 WITHOUT_THINK = {
     "output": "This is the rest",
     "reasoning": None,
     "content": "This is the rest",
 }
-# 不带 <think></think>，stream
+# Without <think></think>, streaming
 WITHOUT_THINK_STREAM = {
     "output": "This is the rest",
     "reasoning": None,
@@ -64,6 +64,25 @@ ONLY_OPEN_TAG_STREAM = {
     "output": "<think>This is a reasoning section",
     "reasoning": "This is a reasoning section",
     "content": None,
+}
+
+# Cases where <think> is part of the prompt (chat template), so the model
+# output does NOT contain <think>, only </think>.
+# ``reasoning</think>content``
+NO_START_TOKEN = {
+    "output": "This is a reasoning section</think>This is the rest",
+    "reasoning": "This is a reasoning section",
+    "content": "This is the rest",
+}
+NO_START_TOKEN_COMPLETE = {
+    "output": "This is a reasoning section</think>",
+    "reasoning": "This is a reasoning section",
+    "content": None,
+}
+NO_START_TOKEN_MULTILINE = {
+    "output": "This\nThat</think>This is the rest\nThat",
+    "reasoning": "This\nThat",
+    "content": "This is the rest\nThat",
 }
 
 TEST_CASES = [
@@ -116,6 +135,37 @@ TEST_CASES = [
         True,
         ONLY_OPEN_TAG_STREAM,
         id="only_open_tag_stream",
+    ),
+    # <think> in prompt (not in model output), non-streaming & streaming
+    pytest.param(
+        False,
+        NO_START_TOKEN,
+        id="no_start_token",
+    ),
+    pytest.param(
+        True,
+        NO_START_TOKEN,
+        id="no_start_token_stream",
+    ),
+    pytest.param(
+        False,
+        NO_START_TOKEN_COMPLETE,
+        id="no_start_token_complete",
+    ),
+    pytest.param(
+        True,
+        NO_START_TOKEN_COMPLETE,
+        id="no_start_token_complete_stream",
+    ),
+    pytest.param(
+        False,
+        NO_START_TOKEN_MULTILINE,
+        id="no_start_token_multiline",
+    ),
+    pytest.param(
+        True,
+        NO_START_TOKEN_MULTILINE,
+        id="no_start_token_multiline_stream",
     ),
 ]
 
