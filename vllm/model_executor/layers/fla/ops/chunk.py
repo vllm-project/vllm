@@ -10,7 +10,6 @@
 import warnings
 
 import torch
-from einops import rearrange
 
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
 from .chunk_o import chunk_fwd_o
@@ -139,7 +138,6 @@ def chunk_gated_delta_rule(
     initial_state: torch.Tensor = None,
     output_final_state: bool = False,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = False,
     return_intermediate_states: bool = False,
     state_dtype: torch.dtype | None = None,
@@ -147,15 +145,15 @@ def chunk_gated_delta_rule(
     r"""
     Args:
         q (torch.Tensor):
-            queries of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            Queries of shape `[B, T, H, K]`.
         k (torch.Tensor):
-            keys of shape `[B, T, H, K]` if `head_first=False` else `[B, H, T, K]`.
+            Keys of shape `[B, T, H, K]`.
         v (torch.Tensor):
-            values of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Values of shape `[B, T, H, V]`.
         g (torch.Tensor):
-            (forget) gating tensor (in log space!) of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
+            (forget) Gating tensor (in log space!) of shape `[B, T, H]`.
         beta (torch.Tensor):
-            betas of shape `[B, T, H]` if `head_first=False` else `[B, H, T]`.
+            Betas of shape `[B, T, H]`.
         scale (Optional[int]):
             Scale factor for the RetNet attention scores.
             If not provided, it will default to `1 / sqrt(K)`. Default: `None`.
@@ -168,13 +166,9 @@ def chunk_gated_delta_rule(
         cu_seqlens (torch.LongTensor):
             Cumulative sequence lengths of shape `[N+1]` used for variable-length training,
             consistent with the FlashAttention API.
-        head_first (Optional[bool]):
-            Whether the inputs are in the head-first format, which is not supported for variable-length inputs.
-            Default: `False`.
-
     Returns:
         o (torch.Tensor):
-            Outputs of shape `[B, T, H, V]` if `head_first=False` else `[B, H, T, V]`.
+            Outputs of shape `[B, T, H, V]`.
         final_state (torch.Tensor):
             Final state of shape `[N, H, V, K]` if `output_final_state=True` else `None`.
         intermediate_states (Optional[torch.Tensor]):
@@ -215,24 +209,11 @@ def chunk_gated_delta_rule(
     assert q.dtype != torch.float32, (
         "ChunkGatedDeltaRuleFunction does not support float32. Please use bfloat16."
     )
-    assert len(beta.shape) == 3, (
-        "beta must be of shape [B, T, H] if head_first=False, or [B, H, T] otherwise."
-    )
-
-    if head_first:
-        raise DeprecationWarning(
-            "head_first is deprecated and will be removed in a future version. "
-            "Please use head_first=False for now instead.",
-            stacklevel=2,
-        )
-        q, k, v, beta, g = map(
-            lambda x: rearrange(x, "b h t ... -> b t h ..."), (q, k, v, beta, g)
-        )
-    if not head_first and q.shape[1] < q.shape[2]:
+    assert len(beta.shape) == 3, "beta must be of shape [B, T, H]."
+    if q.shape[1] < q.shape[2]:
         warnings.warn(
             f"Input tensor shape suggests potential format mismatch: seq_len ({q.shape[1]}) < num_heads ({q.shape[2]}). "
             "This may indicate the inputs were passed in head-first format [B, H, T, ...] "
-            "when head_first=False was specified. "
             "Please verify your input tensor format matches the expected shape [B, T, H, ...].",
             stacklevel=2,
         )
@@ -263,8 +244,6 @@ def chunk_gated_delta_rule(
         return_intermediate_states,
         state_dtype,
     )
-    if head_first:
-        o = rearrange(o, "b t h ... -> b h t ...")
     if return_intermediate_states:
         return o, final_state, intermediate_states
     else:
