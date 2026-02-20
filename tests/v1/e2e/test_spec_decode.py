@@ -314,7 +314,6 @@ def test_speculators_model_integration(
     )
 
     # Heuristic: expect at least 66% of prompts to match exactly
-    print(f"Match ratio: {matches}/{len(ref_outputs)}")
     assert matches >= int(0.66 * len(ref_outputs)), (
         f"Only {matches}/{len(ref_outputs)} outputs matched. "
         f"Expected at least {int(0.66 * len(ref_outputs))} matches."
