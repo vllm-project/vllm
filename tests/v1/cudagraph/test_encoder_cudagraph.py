@@ -387,13 +387,19 @@ class TestEncoderCudaGraphCaptureReplay:
 
     # --- budget fallback ---
 
-    def test_returns_none_when_tokens_exceed_all_budgets(self):
-        # [1,18,18] → 1*(18//2)*(18//2) = 81 tokens > max budget 64
-        # 81 <= max_batch_size=4, so no chunking — direct miss
+    def test_eager_fallback_when_tokens_exceed_all_budgets(self):
+        # [1,18,18] → 1*(18//2)*(18//2) = 81 tokens > max budget 64.
+        # Greedy packing handles the fallback internally: the oversized image
+        # gets an eager forward pass and is returned as part of the output list
+        # (execute() no longer returns None for individual image misses).
         grid_thw = [[1, 18, 18]]
         pv = _make_pixel_values(grid_thw, self.device, self.dtype)
         result = self.mgr.execute(pv, grid_thw)
-        assert result is None
+        assert result is not None
+        assert len(result) == 1
+        # Eager output: SimpleMockViTEncoder produces n_out = 81 tokens
+        assert result[0].shape == (81, _HIDDEN)
+        assert self.mgr.graph_misses == 1
 
     # --- counters ---
 
