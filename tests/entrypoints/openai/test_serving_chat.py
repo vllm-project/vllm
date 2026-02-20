@@ -126,7 +126,7 @@ def gptoss_speculative_server(default_server_args: list[str]):
     if is_aiter_found_and_supported():
         env_dict = {"VLLM_ROCM_USE_AITER": "1"}
     with RemoteOpenAIServer(
-        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict
+        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict, max_wait_seconds=480
     ) as remote_server:
         yield remote_server
 

@@ -4,7 +4,7 @@
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -233,3 +233,140 @@ async def test_chat_error_stream():
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+@pytest.mark.parametrize(
+    "image_content",
+    [
+        [{"type": "image_url", "image_url": {"url": "https://example.com/image.jpg"}}],
+        [{"image_url": {"url": "https://example.com/image.jpg"}}],
+    ],
+)
+def test_system_message_warns_on_image(image_content):
+    """Test that system messages with image content trigger a warning."""
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": image_content,
+                }
+            ],
+        )
+
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "image_url" in call_args
+
+
+def test_system_message_accepts_text():
+    """Test that system messages can contain text content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+        ],
+    )
+    assert request.messages[0]["role"] == "system"
+
+
+def test_system_message_accepts_text_array():
+    """Test that system messages can contain an array with text content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "system",
+                "content": [{"type": "text", "text": "You are a helpful assistant."}],
+            },
+        ],
+    )
+    assert request.messages[0]["role"] == "system"
+
+
+def test_user_message_accepts_image():
+    """Test that user messages can still contain image content."""
+    # Should not raise an exception
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": "https://example.com/image.jpg"},
+                    },
+                ],
+            },
+        ],
+    )
+    assert request.messages[0]["role"] == "user"
+
+
+@pytest.mark.parametrize(
+    "audio_content",
+    [
+        [
+            {
+                "type": "input_audio",
+                "input_audio": {"data": "base64data", "format": "wav"},
+            }
+        ],
+        [{"input_audio": {"data": "base64data", "format": "wav"}}],
+    ],
+)
+def test_system_message_warns_on_audio(audio_content):
+    """Test that system messages with audio content trigger a warning."""
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": audio_content,
+                }
+            ],
+        )
+
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "input_audio" in call_args
+
+
+@pytest.mark.parametrize(
+    "video_content",
+    [
+        [{"type": "video_url", "video_url": {"url": "https://example.com/video.mp4"}}],
+        [{"video_url": {"url": "https://example.com/video.mp4"}}],
+    ],
+)
+def test_system_message_warns_on_video(video_content):
+    """Test that system messages with video content trigger a warning."""
+    with patch(
+        "vllm.entrypoints.openai.chat_completion.protocol.logger"
+    ) as mock_logger:
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            messages=[
+                {
+                    "role": "system",
+                    "content": video_content,
+                }
+            ],
+        )
+
+    mock_logger.warning_once.assert_called()
+    call_args = str(mock_logger.warning_once.call_args)
+    assert "System messages should only contain text" in call_args
+    assert "video_url" in call_args
