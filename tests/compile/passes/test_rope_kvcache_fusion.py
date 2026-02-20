@@ -9,6 +9,7 @@ from tests.compile.backend import TestBackend
 from tests.v1.attention.utils import BatchSpec, create_common_attn_metadata
 from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 from vllm.compilation.passes.fusion.matcher_utils import ROTARY_OP
+from vllm.compilation.passes.fusion.rope_kvcache_fusion import RopeKVCacheFusionPass
 from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
 from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.compilation.passes.utility.scatter_split_replace import (
@@ -249,10 +250,6 @@ def test_rope_kvcache_fusion(
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
-        from vllm.compilation.passes.fusion.rope_kvcache_fusion import (
-            RopeKVCacheFusionPass,
-        )
-
         m.setenv("VLLM_ROCM_USE_AITER", "1")
         rocm_aiter_ops.refresh_env_variables()
 
