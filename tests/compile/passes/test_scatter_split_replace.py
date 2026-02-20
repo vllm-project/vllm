@@ -100,12 +100,8 @@ def test_scatter_split_replace(dtype):
         model_compiled = torch.compile(model, backend=backend)
         result_compiled = model_compiled(qkv, pos)
 
-        if dtype == torch.float16:
-            ATOL, RTOL = (2e-3, 2e-3)
-        else:
-            ATOL, RTOL = (1e-2, 1e-2)
         for eager, compiled in zip(result_eager, result_compiled):
-            torch.testing.assert_close(eager, compiled, atol=ATOL, rtol=RTOL)
+            torch.testing.assert_close(eager, compiled)
 
         assert backend.op_count(torch.ops.aten.slice_scatter.default) == 0
         assert backend.op_count(torch.ops.aten.split_with_sizes.default) == 1
