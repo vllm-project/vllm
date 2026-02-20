@@ -42,9 +42,9 @@ class HummingBaseWeightConverter:
         }
         return convert_method_map[name](tensor)
 
-    def get_ckpt_name(self, layer_name: str):
-        return getattr(self, f"ckpt_{layer_name}_name")
-    
+    def get_ckpt_name(self, param_name: str):
+        return getattr(self, f"ckpt_{param_name}_name")
+
     def get_param_name(self, ckpt_name: str):
         for name in ["weight", "weight_scale", "zero_point", "global_scale", "bias"]:
             if self.get_ckpt_name(name) == ckpt_name:
@@ -54,13 +54,14 @@ class HummingBaseWeightConverter:
 class HummingUnquantizedWeightConverter(HummingBaseWeightConverter):
     def convert_weight(self, tensor: torch.Tensor) -> dict[str, torch.Tensor]:
         quanted_weight, weight_scale, zero_point, global_scale = quantize_weight(
-            weight=tensor,
+            weight=tensor.cuda(),
             dtype=self.quant_config.b_dtype,
             scale_dtype=self.quant_config.bs_dtype,
-            group_size=self.quant_config.weight_scale_group_size,
+            group_size=self.quant_config.weight_scale_group_size_k,
             has_dynamic_zp=self.quant_config.has_dynamic_zp,
             has_global_scale=self.quant_config.has_global_scale,
         )
+
         return {
             "weight": quanted_weight,
             "weight_scale": weight_scale,
@@ -147,7 +148,7 @@ class HummingMxfp4WeightConverter(HummingBaseWeightConverter):
         return {"weight_scale": tensor.view(torch.float8_e8m0fnu)}
 
 
-WEIGHT_CONVERTER_MAP: dict[str | None, HummingBaseWeightConverter] = {
+WEIGHT_CONVERTER_MAP: dict[str | None, type[HummingBaseWeightConverter]] = {
     "gptq": HummingGPTQWeightConverter,
     "awq": HummingAWQWeightConverter,
     "fp8": HummingFp8WeightConverter,

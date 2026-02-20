@@ -2,16 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import dataclasses
-import math
+import re
 from typing import Any
 
 import torch
 from humming.layer import HummingLayerMeta, HummingMethod
 
 from humming import dtypes
-from vllm.model_executor.layers.quantization.utils.humming_moe_utils import (
-    humming_moe_align,
-)
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
@@ -33,6 +30,10 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
+from vllm.model_executor.layers.quantization.utils.humming_moe_utils import (
+    humming_moe_align,
+)
+from vllm import envs
 from vllm.model_executor.layers.quantization.utils.humming_utils import (
     WEIGHT_CONVERTER_MAP,
 )
@@ -51,13 +52,62 @@ def is_layer_skipped(prefix: str, ignore_layers: list[str]):
     return any(module_name in prefix for module_name in ignore_layers)
 
 
-class HummingConfig(QuantizationConfig):
+def parse_single_config(config):
+    if "quant_method" not in config:
+        return
+
+    quant_method = config["quant_method"]
+
+    if quant_method == "gptq":
+        desc_act = config.get("desc_act", False)
+        assert not desc_act, "desc_act is not supported by humming"
+        result_dict = {
+            "has_dynamic_zp": not config.get("sym", True),
+            "block_shape": (1, config["group_size"]),
+            "b_dtype": dtypes.DataType.from_str("uint" + str(config["bits"])),
+        }
+    elif quant_method == "awq":
+        result_dict = {
+            "has_dynamic_zp": config.get("zero_point", False),
+            "block_shape": (1, config["group_size"]),
+            "b_dtype": dtypes.DataType.from_str("uint" + str(config["bits"])),
+        }
+    elif quant_method == "fp8":
+        b_dtype = dtypes.DataType.from_str("float8" + config.get("fmt", "e4m3"))
+        result_dict = {
+            "block_shape": config.get("weight_block_size", (0, 0)),
+            "b_dtype": b_dtype,
+        }
+    elif quant_method == "modelopt":
+        result_dict = {
+            "block_shape": (1, 16),
+            "has_global_scale": True,
+            "b_dtype": dtypes.float4e2m1,
+            "bs_dtype": dtypes.float8e4m3,
+        }
+    elif quant_method == "mxfp4":
+        result_dict = {
+            "block_shape": (1, 32),
+            "b_dtype": dtypes.float4e2m1,
+            "bs_dtype": dtypes.float8e8m0,
+        }
+    else:
+        raise AssertionError(f"Invalid quant_method: {quant_method}")
+    
+    result_dict["weight_scale_group_size_n"] = result_dict["block_shape"][0]
+    result_dict["weight_scale_group_size_k"] = result_dict["block_shape"][1]
+    result_dict["ckpt_quant_method"] = quant_method
+
+    return result_dict
+
+
+class HummingLayerQuantizationConfig(QuantizationConfig):
     def __init__(
         self,
-        a_dtype: str,
+        a_dtype: str | None,
         b_dtype: str,
-        c_dtype: str,
-        bs_dtype: str,
+        c_dtype: str | None,
+        bs_dtype: str | None,
         ckpt_quant_method: str | None,
         input_scale_group_size_n: int,
         input_scale_group_size_k: int,
@@ -65,24 +115,60 @@ class HummingConfig(QuantizationConfig):
         weight_scale_group_size_k: int,
         has_dynamic_zp: bool,
         has_global_scale: bool,
-        ignored_layers: list[str] | None,
-        full_config: dict[str, Any],
     ) -> None:
-        super().__init__()
-
         self.a_dtype = a_dtype
         self.b_dtype = b_dtype
         self.c_dtype = c_dtype
         self.bs_dtype = bs_dtype
         self.ckpt_quant_method = ckpt_quant_method
-        self.full_config = full_config
         self.input_scale_group_size_n = input_scale_group_size_n
         self.input_scale_group_size_k = input_scale_group_size_k
         self.weight_scale_group_size_n = weight_scale_group_size_n
         self.weight_scale_group_size_k = weight_scale_group_size_k
         self.has_dynamic_zp = has_dynamic_zp
         self.has_global_scale = has_global_scale
-        self.ignored_layers = ignored_layers or []
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(
+            a_dtype=config.get("a_dtype", None),
+            b_dtype=config["b_dtype"],
+            c_dtype=config.get("c_dtype", None),
+            bs_dtype=config.get("bs_dtype", None),
+            ckpt_quant_method=config.get("ckpt_quant_method", None),
+            input_scale_group_size_n=config.get("input_scale_group_size_n", 0),
+            input_scale_group_size_k=config.get("input_scale_group_size_k", 0),
+            weight_scale_group_size_n=config.get("weight_scale_group_size_n", 0),
+            weight_scale_group_size_k=config.get("weight_scale_group_size_k", 0),
+            has_dynamic_zp=config.get("has_dynamic_zp", False),
+            has_global_scale=config.get("has_global_scale", False),
+        )
+    
+    @classmethod
+    def get_config_filenames(cls):
+        return []
+
+    @classmethod
+    def get_min_capability(cls):
+        return 75
+
+    @classmethod
+    def get_name(cls):
+        return "humming"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        raise NotImplementedError
+
+
+class HummingConfig(QuantizationConfig):
+    def __init__(self, full_config: dict[str, Any] | None = None) -> None:
+        self.full_config: dict[str, Any] = full_config or {}
 
     @classmethod
     def get_name(cls) -> QuantizationMethods:
@@ -98,58 +184,11 @@ class HummingConfig(QuantizationConfig):
 
     @classmethod
     def get_config_filenames(cls) -> list[str]:
-        return ["quantize_config.json"]
+        return []
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "HummingConfig":
-        quant_method = cls.get_from_keys(config, ["quant_method"])
-        ignored_layers = get_ignored_layers(config)
-
-        has_dynamic_zp = False
-        has_global_scale = False
-        if quant_method == "gptq":
-            has_dynamic_zp = not cls.get_from_keys(config, ["sym"])
-            desc_act = config.get("desc_act", False)
-            assert not desc_act, "desc_act is not supported by humming"
-            block_shape = (1, config["group_size"])
-            b_dtype = dtypes.DataType.from_str("uint" + str(config["bits"]))
-            bs_dype = None
-        elif quant_method == "awq":
-            has_dynamic_zp = cls.get_from_keys(config, ["zero_point"])
-            block_shape = (1, config["group_size"])
-            b_dtype = dtypes.uint4
-            bs_dype = None
-        elif quant_method == "fp8":
-            block_shape = cls.get_from_keys_or(config, ["weight_block_size"], (0, 0))
-            b_dtype = dtypes.float8e4m3
-            bs_dype = None
-        elif quant_method == "modelopt":
-            block_shape = (1, 16)
-            b_dtype = dtypes.float4e2m1
-            bs_dype = dtypes.float8e4m3
-            has_global_scale = True
-        elif quant_method == "mxfp4":
-            block_shape = (1, 32)
-            b_dtype = dtypes.float4e2m1
-            bs_dype = dtypes.float8e8m0
-        else:
-            raise AssertionError(f"Invalid quant_method: {quant_method}")
-
-        return cls(
-            a_dtype=None,
-            b_dtype=b_dtype,
-            c_dtype=None,
-            bs_dtype=bs_dype,
-            ckpt_quant_method=quant_method,
-            input_scale_group_size_n=0,
-            input_scale_group_size_k=0,
-            weight_scale_group_size_n=block_shape[0],
-            weight_scale_group_size_k=block_shape[1],
-            has_dynamic_zp=has_dynamic_zp,
-            has_global_scale=has_global_scale,
-            ignored_layers=ignored_layers,
-            full_config=config.copy(),
-        )
+        return cls(full_config=config)
 
     @classmethod
     def override_quantization_method(
@@ -159,25 +198,69 @@ class HummingConfig(QuantizationConfig):
             return cls.get_name()
         return None
 
-    def is_layer_skipped(self, layer: torch.nn.Module, prefix: str):
-        ignored_layers = self.ignored_layers
+    @classmethod
+    def is_layer_skipped(cls, config: dict[str, Any], prefix: str):
+        keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
+        ignored_layers = cls.get_from_keys_or(config, keys, [])
         if any(module_name in prefix for module_name in ignored_layers):
             return True
-        quant_method = self.full_config.get("quant_method", None)
+        if "lm_head" in prefix:
+            return True
 
-        return isinstance(layer, LinearBase) and quant_method == "mxfp4"
+        for regex in config.get("dynamic", {}):
+            if regex[:1] != "-":
+                continue
+            regex = regex[2:]
+            if re.match(regex[2:], prefix):
+                return True
+
+        return False
+
+    @classmethod
+    def get_layer_weight_quant_config(
+        cls, config: dict[str, Any], prefix: str
+    ) -> dict[str, Any] | None:
+        if cls.is_layer_skipped(config, prefix):
+            return
+
+        layer_config = parse_single_config(config)
+        for regex, override_config in config.get("dynamic", {}).items():
+            if regex[:1] != "+":
+                continue
+            regex = regex[2:]
+            if re.match(regex[2:], prefix):
+                layer_config = config.copy()
+                layer_config.update(override_config)
+                layer_config = parse_single_config(layer_config)
+                break
+
+        return layer_config
+
+    def get_quant_config_for_layer(self, prefix: str) -> dict[str, Any] | None:
+        weight_config = self.get_layer_weight_quant_config(self.full_config, prefix)
+
+        if weight_config is None:
+            weight_config = envs.VLLM_HUMMING_ONLINE_QUANT_CONFIG or {}
+            weight_config = self.get_layer_weight_quant_config(weight_config, prefix)
+            if weight_config is not None:
+                weight_config["ckpt_quant_method"] = None
+
+        if weight_config is not None:
+            return HummingLayerQuantizationConfig.from_config(weight_config)
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        if self.is_layer_skipped(layer, prefix):
+        quant_config = self.get_quant_config_for_layer(prefix)
+        if quant_config is None:
             if isinstance(layer, FusedMoE):
                 return UnquantizedFusedMoEMethod(layer.moe_config)
-            return UnquantizedLinearMethod()
+            elif isinstance(layer, LinearBase):
+                return UnquantizedLinearMethod()
         elif isinstance(layer, LinearBase):
-            return HummingLinearMethod(self)
+            return HummingLinearMethod(quant_config)
         elif isinstance(layer, FusedMoE):
-            return HummingMoEMethod(self, layer.moe_config)
+            return HummingMoEMethod(quant_config, layer.moe_config)
         return None
 
 
@@ -207,11 +290,15 @@ class HummingLinearMethod(LinearMethodBase):
         layer.orig_dtype = params_dtype
         layer.weight_block_size = None
 
+        self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
+        self.quant_config.c_dtype = self.quant_config.c_dtype or f16_dtype
+        self.quant_config.bs_dtype = self.quant_config.bs_dtype or f16_dtype
+
         meta = HummingLayerMeta(
-            a_dtype=self.quant_config.a_dtype or f16_dtype,
+            a_dtype=self.quant_config.a_dtype,
             b_dtype=self.quant_config.b_dtype,
-            c_dtype=self.quant_config.c_dtype or f16_dtype,
-            bs_dtype=self.quant_config.bs_dtype or f16_dtype,
+            c_dtype=self.quant_config.c_dtype,
+            bs_dtype=self.quant_config.bs_dtype,
             shape_n=output_size,
             shape_k=input_size,
             has_bias=layer.has_bias,
@@ -278,10 +365,11 @@ class HummingLinearMethod(LinearMethodBase):
             data = self.weight_converter.convert(loaded_weight, param_name)
             shard_id = shard_id_map.get(shard_id, shard_id or 0)
             offset_n = sum(layer.logical_widths[:shard_id])
+            packed = self.quant_config.ckpt_quant_method is not None
             HummingMethod.load_weight(
                 layer=layer,
                 offset_n=offset_n,
-                packed=True,
+                packed=packed,
                 **data,
             )
 
@@ -322,12 +410,16 @@ class HummingMoEMethod(FusedMoEMethodBase):
         layer.num_experts = num_experts
         layer.top_k = self.moe.experts_per_token
 
-        dtype = dtypes.DataType.from_torch_dtype(params_dtype)
+        f16_dtype = dtypes.DataType.from_torch_dtype(params_dtype)
+        self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
+        self.quant_config.c_dtype = self.quant_config.c_dtype or f16_dtype
+        self.quant_config.bs_dtype = self.quant_config.bs_dtype or f16_dtype
+
         base_meta = HummingLayerMeta(
-            a_dtype=self.quant_config.a_dtype or dtype,
+            a_dtype=self.quant_config.a_dtype,
             b_dtype=self.quant_config.b_dtype,
-            c_dtype=self.quant_config.c_dtype or dtype,
-            bs_dtype=self.quant_config.bs_dtype or dtype,
+            c_dtype=self.quant_config.c_dtype,
+            bs_dtype=self.quant_config.bs_dtype,
             shape_n=0,
             shape_k=0,
             has_bias=self.moe.has_bias,
@@ -420,11 +512,12 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 shard_id = shard_id_map.get(shard_id, shard_id or 0)
                 offset_n = self.meta1.shape_n // 2 * shard_id
 
+            packed = self.quant_config.ckpt_quant_method is not None
             HummingMethod.load_weight(
                 layer=layer,
                 offset_n=offset_n,
                 expert_id=expert_id,
-                packed=True,
+                packed=packed,
                 sublayer_name=param.sublayer,
                 **data,
             )
