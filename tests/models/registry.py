@@ -685,10 +685,18 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     # [Decoder-only]
     "AriaForConditionalGeneration": _HfExamplesInfo("rhymes-ai/Aria"),
     "AudioFlamingo3ForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/audio-flamingo-3-hf", min_transformers_version="5.0.0"
+        "nvidia/audio-flamingo-3-hf",
+        min_transformers_version="5.3.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
+        },
     ),
     "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf", min_transformers_version="5.3.0"
+        "nvidia/music-flamingo-2601-hf",
+        min_transformers_version="5.3.0",
+        transformers_version_reason={
+            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
+        },
     ),
     "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
