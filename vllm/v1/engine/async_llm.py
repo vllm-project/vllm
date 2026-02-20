@@ -790,7 +790,7 @@ class AsyncLLM(EngineClient):
         try:
             model_config = self.model_config
 
-            pooling_params.verify(pooling_params.task, model_config)
+            pooling_params.verify(model_config)
 
             q = await self.add_request(
                 request_id,
