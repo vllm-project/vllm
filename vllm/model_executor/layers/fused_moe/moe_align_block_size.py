@@ -8,6 +8,24 @@ from vllm.triton_utils import triton
 from vllm.utils.math_utils import round_up
 
 
+def get_moe_align_tensor_size(
+    topk_ids: torch.Tensor,
+    num_experts: int,
+    block_size: int,
+    pad_sorted_ids: bool = False,
+):
+    max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+    if pad_sorted_ids:
+        max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+    if topk_ids.numel() < num_experts:
+        max_num_tokens_padded = min(
+            topk_ids.numel() * block_size, max_num_tokens_padded
+        )
+
+    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+    return max_num_tokens_padded, max_num_m_blocks
+
+
 def moe_align_block_size(
     topk_ids: torch.Tensor,
     block_size: int,
@@ -15,6 +33,9 @@ def moe_align_block_size(
     expert_map: torch.Tensor | None = None,
     pad_sorted_ids: bool = False,
     ignore_invalid_experts: bool = False,
+    sorted_ids: torch.Tensor | None = None,
+    expert_ids: torch.Tensor | None = None,
+    num_tokens_post_pad: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Aligns the token distribution across experts to be compatible with block
@@ -78,14 +99,23 @@ def moe_align_block_size(
         max_num_tokens_padded = min(
             topk_ids.numel() * block_size, max_num_tokens_padded
         )
-    sorted_ids = torch.empty(
-        (max_num_tokens_padded,), dtype=torch.int32, device=topk_ids.device
-    )
-    max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-    expert_ids = torch.empty(
-        (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
-    )
-    num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
+    if sorted_ids is None:
+        sorted_ids = torch.empty(
+            (max_num_tokens_padded,),
+            dtype=torch.int32,
+            device=topk_ids.device,
+        )
+    if expert_ids is None:
+        max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
+        expert_ids = torch.empty(
+            (max_num_m_blocks,),
+            dtype=torch.int32,
+            device=topk_ids.device,
+        )
+    if num_tokens_post_pad is None:
+        num_tokens_post_pad = torch.empty(
+            (1), dtype=torch.int32, device=topk_ids.device
+        )
 
     ops.moe_align_block_size(
         topk_ids,

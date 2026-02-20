@@ -9,6 +9,9 @@ import torch
 from humming.layer import HummingLayerMeta, HummingMethod
 
 from humming import dtypes
+from vllm.model_executor.layers.quantization.utils.humming_moe_utils import (
+    humming_moe_align,
+)
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
@@ -16,9 +19,6 @@ from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    moe_align_block_size,
 )
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
@@ -219,6 +219,7 @@ class HummingLinearMethod(LinearMethodBase):
             has_dynamic_zp=self.quant_config.has_dynamic_zp,
             has_global_scale=self.quant_config.has_global_scale,
         )
+        self.meta = meta
         HummingMethod.create_weights(layer, meta)
         self.process_params(layer)
 
@@ -288,6 +289,8 @@ class HummingLinearMethod(LinearMethodBase):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         HummingMethod.finish_load(layer)
+        use_stream_k = not vllm_is_batch_invariant()
+        HummingMethod.prepare_default_kernel_configs(layer, use_stream_k=use_stream_k)
 
     def apply(
         self,
@@ -295,21 +298,7 @@ class HummingLinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        use_stream_k = not vllm_is_batch_invariant()
-
-        # TODO: config tunning
-        block_size_m = math.ceil(x.size(0) / 16) * 16
-        block_size_m = min(block_size_m, 64)
-        block_shape = (block_size_m, 128, 64)
-        warp_shape = (block_size_m, 64, 32)
-
-        return HummingMethod.forward_layer(
-            layer=layer,
-            block_shape=block_shape,
-            warp_shape=warp_shape,
-            inputs=x,
-            use_stream_k=use_stream_k,
-        )
+        return HummingMethod.forward_layer(layer, x)
 
 
 class HummingMoEMethod(FusedMoEMethodBase):
@@ -331,6 +320,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
         **extra_weight_attrs,
     ):
         layer.num_experts = num_experts
+        layer.top_k = self.moe.experts_per_token
 
         dtype = dtypes.DataType.from_torch_dtype(params_dtype)
         base_meta = HummingLayerMeta(
@@ -448,22 +438,42 @@ class HummingMoEMethod(FusedMoEMethodBase):
         HummingMethod.finish_load(layer, "w13")
         HummingMethod.finish_load(layer, "w2")
 
+        use_stream_k = not vllm_is_batch_invariant()
+        HummingMethod.prepare_default_kernel_configs(
+            layer,
+            sublayer_name="w13",
+            use_stream_k=use_stream_k,
+            is_moe=True,
+            top_k=layer.top_k,
+            is_moe_down=False,
+        )
+        HummingMethod.prepare_default_kernel_configs(
+            layer,
+            sublayer_name="w2",
+            use_stream_k=use_stream_k,
+            is_moe=True,
+            top_k=layer.top_k,
+            is_moe_down=True,
+        )
+
     def prepare_buffer(
         self,
         layer: FusedMoE,
-        output_shape_m: int,
+        shape_m: int,
+        top_k: int,
         dtype: torch.dtype,
         device: torch.device,
     ):
-        output_shape1 = (output_shape_m, layer.humming_metas["w13"].shape_n)
-        output_shape2 = (output_shape_m, layer.humming_metas["w2"].shape_n)
-        buffer_size1 = output_shape1[0] * output_shape1[1]
-        buffer_size2 = output_shape2[0] * output_shape2[1]
+        output_shape1 = (shape_m, top_k, layer.humming_metas["w13"].shape_n)
+        output_shape2 = (shape_m, top_k, layer.humming_metas["w2"].shape_n)
+        input_shape2 = (shape_m, top_k, layer.humming_metas["w13"].shape_n // 2)
+        buffer_size1 = output_shape1[0] * output_shape1[1] * output_shape1[2]
+        buffer_size2 = output_shape2[0] * output_shape2[1] * output_shape2[2]
 
         buffer_size = max(buffer_size1, buffer_size2) + buffer_size1 // 2
         buffer = torch.empty(buffer_size, dtype=dtype, device=device)
         output1 = buffer[buffer_size1 // 2 :][:buffer_size1].view(*output_shape1)
-        input2 = buffer[: buffer_size1 // 2].view(output_shape_m, -1)
+        input2 = buffer[: buffer_size1 // 2].view(*input_shape2)
         output2 = buffer[buffer_size1 // 2 :][:buffer_size2].view(*output_shape2)
 
         return output1, input2, output2
@@ -477,29 +487,23 @@ class HummingMoEMethod(FusedMoEMethodBase):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # TODO: config tunning
-        sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
+        sorted_token_ids, expert_ids, num_tokens_post_padded = humming_moe_align(
+            layer.humming_block_size_configs["w13"],
             topk_ids=topk_ids,
-            block_size=32,
             num_experts=layer.num_experts,
             expert_map=layer.expert_map,
-            ignore_invalid_experts=True,
         )
 
-        output_shape_m = x.size(0) * topk_ids.size(-1)
         output1, input2, output2 = self.prepare_buffer(
             layer,
-            output_shape_m,
-            x.dtype,
-            x.device,
+            shape_m=x.size(0),
+            top_k=topk_ids.size(-1),
+            dtype=x.dtype,
+            device=x.device,
         )
-
-        block_shape = (32, 64, 64)
-        warp_shape = (16, 64, 32)
 
         output1 = HummingMethod.forward_layer(
             layer=layer,
-            block_shape=block_shape,
-            warp_shape=warp_shape,
             inputs=x,
             outputs=output1,
             topk_weights=topk_weights,
@@ -507,19 +511,19 @@ class HummingMoEMethod(FusedMoEMethodBase):
             expert_ids=expert_ids,
             num_tokens_post_padded=num_tokens_post_padded,
             sublayer_name="w13",
-            top_k=topk_ids.size(-1),
-            is_moe_down=False,
         )
 
+        # TODO: fused activation
         from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
 
-        apply_moe_activation(layer.activation, input2, output1)
-        # torch.ops._C.silu_and_mul(input2, output1)
+        apply_moe_activation(
+            layer.activation,
+            input2.view(-1, input2.size(-1)),
+            output1.view(-1, output1.size(-1)),
+        )
 
         output2 = HummingMethod.forward_layer(
             layer=layer,
-            block_shape=block_shape,
-            warp_shape=warp_shape,
             inputs=input2,
             outputs=None,
             topk_weights=topk_weights,
@@ -527,8 +531,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             expert_ids=expert_ids,
             num_tokens_post_padded=num_tokens_post_padded,
             sublayer_name="w2",
-            is_moe_down=True,
-            top_k=topk_ids.size(-1),
         )
 
-        return output2.view(x.size(0), topk_ids.size(-1), -1).sum(1)
+        return output2.sum(1)
