@@ -7,7 +7,7 @@ SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
 
 RELEASE_VERSION=$(buildkite-agent meta-data get release-version)
-GIT_VERSION=$(git describe --exact-match --tags $BUILDKITE_COMMIT 2>/dev/null)
+GIT_VERSION=$(git describe --exact-match --tags "$BUILDKITE_COMMIT" 2>/dev/null)
 
 echo "Release version from Buildkite: $RELEASE_VERSION"
 
@@ -55,7 +55,7 @@ mkdir -p $DIST_DIR
 aws s3 cp --recursive --exclude "*" --include "vllm-${PURE_VERSION}*.whl" --exclude "*dev*" --exclude "*rc[0-9]*" "$S3_COMMIT_PREFIX" $DIST_DIR
 echo "Wheels copied to local directory"
 # generate source tarball
-git archive --format=tar.gz --output="$DIST_DIR/vllm-${PURE_VERSION}.tar.gz" $BUILDKITE_COMMIT
+git archive --format=tar.gz --output="$DIST_DIR/vllm-${PURE_VERSION}.tar.gz" "$BUILDKITE_COMMIT"
 ls -la $DIST_DIR
 
 # upload wheels to PyPI (only default variant, i.e. files without '+' in the name)
@@ -65,6 +65,6 @@ if [[ -z "$PYPI_WHEEL_FILES" ]]; then
   exit 1
 fi
 
-python3 -m twine check $PYPI_WHEEL_FILES
-python3 -m twine upload --non-interactive --verbose $PYPI_WHEEL_FILES
+python3 -m twine check "$PYPI_WHEEL_FILES"
+python3 -m twine upload --non-interactive --verbose "$PYPI_WHEEL_FILES"
 echo "Wheels uploaded to PyPI"

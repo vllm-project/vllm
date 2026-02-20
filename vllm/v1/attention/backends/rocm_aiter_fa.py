@@ -425,8 +425,13 @@ class AiterFlashAttentionMetadataBuilder(
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-        for layer in layers.values():
-            assert isinstance(layer.impl, AiterFlashAttentionImpl)
+        for name, layer in layers.items():
+            if name not in layer_names:
+                continue
+            assert isinstance(layer.impl, AiterFlashAttentionImpl), (
+                "Aiter Flash Attention Metadata Builder can only be used "
+                "with Aiter Flash Attention Impl."
+            )
             sliding_window_configs.add(layer.impl.sliding_window)
 
         while len(sliding_window_configs) > 0:
@@ -1071,9 +1076,14 @@ class AiterFlashAttentionImpl(AttentionImpl):
             # calculate for decodes
             if num_decodes > 0:
                 assert attn_metadata.decode_metadata is not None
-                if self.sliding_window[0] != -1:
+                decode_max_query_len = attn_metadata.decode_metadata.max_query_len
+
+                # Use unified_attention for speculative decoding (multi-token)
+                # or when sliding window is enabled
+                if self.sliding_window[0] != -1 or decode_max_query_len > 1:
                     assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "Sliding window with shuffle layout is not supported yet."
+                        "Shuffle KV cache layout is not supported with sliding "
+                        "window or speculative decoding (multi-token decode)."
                     )
                     from aiter.ops.triton.unified_attention import (
                         unified_attention,
@@ -1089,7 +1099,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         v=value_cache,
                         out=output[:num_decode_tokens],
                         cu_seqlens_q=attn_metadata.query_start_loc[:num_decodes],
-                        max_seqlen_q=1,  # optimize this
+                        max_seqlen_q=decode_max_query_len,
                         seqused_k=attn_metadata.seq_lens[:num_decodes],
                         max_seqlen_k=attn_metadata.max_seq_len,
                         softmax_scale=self.scale,
@@ -1103,7 +1113,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         v_descale=layer._v_scale.expand(descale_shape),
                     )
                     return
-                assert attn_metadata.decode_metadata is not None
 
                 if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
@@ -1172,6 +1181,8 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         layer._v_scale,
                         None,
                         _PARTITION_SIZE_ROCM,
+                        1,
+                        self.sliding_window[0] + 1,
                     )
         else:
             raise NotImplementedError(
