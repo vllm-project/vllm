@@ -9,7 +9,7 @@ import tempfile
 import threading
 import time
 from contextlib import contextmanager
-from dataclasses import is_dataclass, replace
+from dataclasses import is_dataclass
 from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
@@ -18,10 +18,8 @@ from typing import TYPE_CHECKING, Any, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
-from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
-from vllm.config.speculative import EagleModelTypes
 from vllm.logger import enable_trace_function_call, init_logger
 from vllm.transformers_utils.runai_utils import is_runai_obj_uri
 from vllm.utils import random_uuid
@@ -32,6 +30,7 @@ from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
 from .device import DeviceConfig
 from .ec_transfer import ECTransferConfig
+from .kernel import KernelConfig
 from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
@@ -41,9 +40,10 @@ from .observability import ObservabilityConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
-from .speculative import SpeculativeConfig
+from .speculative import EagleModelTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
-from .utils import SupportsHash, config
+from .utils import SupportsHash, config, replace
+from .weight_transfer import WeightTransferConfig
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -95,11 +95,35 @@ def enable_norm_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_act_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if either SiLU+Mul or quant FP8 custom op is active;
-    otherwise Inductor handles fusion."""
-    return cfg.compilation_config.is_custom_op_enabled(
-        "silu_and_mul"
-    ) or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+    """
+    Enable if either SiLU+Mul or quant FP8 custom op is active;
+    otherwise Inductor handles fusion.
+    Also enable for FP4 models as FP4 quant is always custom so Inductor cannot fuse it.
+    """
+    return (
+        cfg.compilation_config.is_custom_op_enabled("silu_and_mul")
+        or cfg.compilation_config.is_custom_op_enabled("quant_fp8")
+        or (cfg.model_config is not None and cfg.model_config.is_nvfp4_quantized())
+    )
+
+
+def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
+    from vllm.platforms import current_platform
+    from vllm.utils.flashinfer import has_flashinfer
+
+    return (
+        cfg.parallel_config.tensor_parallel_size > 1
+        and current_platform.is_cuda()
+        and has_flashinfer()
+        and (
+            current_platform.is_device_capability(100)
+            or current_platform.is_device_capability(90)
+        )
+        # tp-dp combination broken:
+        # https://github.com/vllm-project/vllm/issues/34458
+        and cfg.parallel_config.data_parallel_size == 1
+    )
 
 
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
@@ -110,6 +134,7 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
         envs.VLLM_ROCM_USE_AITER
         and envs.VLLM_ROCM_USE_AITER_RMSNORM
         and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
 
@@ -117,7 +142,6 @@ def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
-            "eliminate_noops": False,
             "fuse_norm_quant": False,
             "fuse_act_quant": False,
             "fuse_allreduce_rms": False,
@@ -129,11 +153,13 @@ OPTIMIZATION_LEVEL_00 = {
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "enable_flashinfer_autotune": False,
+    },
 }
 OPTIMIZATION_LEVEL_01 = {
     "compilation_config": {
         "pass_config": {
-            "eliminate_noops": True,
             "fuse_norm_quant": enable_norm_fusion,
             "fuse_act_quant": enable_act_fusion,
             "fuse_allreduce_rms": False,
@@ -145,14 +171,16 @@ OPTIMIZATION_LEVEL_01 = {
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
+    },
 }
 OPTIMIZATION_LEVEL_02 = {
     "compilation_config": {
         "pass_config": {
-            "eliminate_noops": True,
             "fuse_norm_quant": enable_norm_fusion,
             "fuse_act_quant": enable_act_fusion,
-            "fuse_allreduce_rms": False,
+            "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
@@ -161,14 +189,16 @@ OPTIMIZATION_LEVEL_02 = {
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
     },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
+    },
 }
 OPTIMIZATION_LEVEL_03 = {
     "compilation_config": {
         "pass_config": {
-            "eliminate_noops": True,
             "fuse_norm_quant": enable_norm_fusion,
             "fuse_act_quant": enable_act_fusion,
-            "fuse_allreduce_rms": False,
+            "fuse_allreduce_rms": enable_allreduce_rms_fusion,
             "fuse_attn_quant": IS_QUANTIZED,
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
@@ -176,6 +206,9 @@ OPTIMIZATION_LEVEL_03 = {
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
+    },
+    "kernel_config": {
+        "enable_flashinfer_autotune": True,
     },
 }
 
@@ -187,8 +220,7 @@ OPTIMIZATION_LEVEL_TO_CONFIG = {
 }
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class VllmConfig:
     """Dataclass which contains all vllm-related configuration. This
     simplifies passing around the distinct configurations in the codebase.
@@ -212,6 +244,8 @@ class VllmConfig:
     """Load configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
+    kernel_config: KernelConfig = Field(default_factory=KernelConfig)
+    """Kernel configuration."""
     lora_config: LoRAConfig | None = None
     """LoRA configuration."""
     speculative_config: SpeculativeConfig | None = None
@@ -255,8 +289,11 @@ class VllmConfig:
     optimization_level: OptimizationLevel = OptimizationLevel.O2
     """The optimization level. These levels trade startup time cost for
     performance, with -O0 having the best startup time and -O3 having the best
-    performance. -02 is used by defult. See  OptimizationLevel for full
+    performance. -O2 is used by default. See OptimizationLevel for full
     description."""
+
+    weight_transfer_config: WeightTransferConfig | None = None
+    """The configurations for weight transfer during RL training."""
 
     def compute_hash(self) -> str:
         """
@@ -603,10 +640,13 @@ class VllmConfig:
             # Currently, async scheduling only support eagle speculative
             # decoding.
             if self.speculative_config is not None:
-                if self.speculative_config.method not in get_args(EagleModelTypes):
+                if (
+                    self.speculative_config.method not in get_args(EagleModelTypes)
+                    and self.speculative_config.method != "draft_model"
+                ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP kind of speculative decoding."
+                        "with EAGLE/MTP/Draft Model kind of speculative decoding."
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
                     raise ValueError(
@@ -618,11 +658,6 @@ class VllmConfig:
                     "Currently, async scheduling only supports `mp`, `uni`, or "
                     "`external_launcher` distributed executor backend, but you chose "
                     f"`{executor_backend}`."
-                )
-            if self.cache_config.mamba_cache_mode != "none":
-                raise ValueError(
-                    "Currently, async scheduling is not compatible with "
-                    "prefix caching for Mamba models."
                 )
         elif self.scheduler_config.async_scheduling is None:
             # Enable async scheduling unless there is an incompatible option.
@@ -653,13 +688,6 @@ class VllmConfig:
                     "with the `%s` distributed executor backend (only `mp`, `uni`, and "
                     "`external_launcher` are supported).",
                     executor_backend,
-                    scope="local",
-                )
-                self.scheduler_config.async_scheduling = False
-            elif self.cache_config.mamba_cache_mode != "none":
-                logger.warning_once(
-                    "Async scheduling is not compatible with "
-                    "prefix caching for Mamba models and will be disabled.",
                     scope="local",
                 )
                 self.scheduler_config.async_scheduling = False
@@ -699,13 +727,13 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
-        if (
-            self.optimization_level > OptimizationLevel.O0
-            and self.model_config is not None
-            and self.model_config.enforce_eager
-        ):
-            logger.warning("Enforce eager set, overriding optimization level to -O0")
-            self.optimization_level = OptimizationLevel.O0
+        if self.model_config is not None and self.model_config.enforce_eager:
+            logger.warning(
+                "Enforce eager set, disabling torch.compile and CUDAGraphs. "
+                "This is equivalent to setting -cc.mode=none -cc.cudagraph_mode=none"
+            )
+            self.compilation_config.mode = CompilationMode.NONE
+            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
 
         if self.compilation_config.backend == "eager" or (
             self.compilation_config.mode is not None
@@ -751,6 +779,11 @@ class VllmConfig:
 
         default_config = OPTIMIZATION_LEVEL_TO_CONFIG[self.optimization_level]
         self._apply_optimization_level_defaults(default_config)
+        if self.kernel_config.enable_flashinfer_autotune is None:
+            raise ValueError(
+                "KernelConfig.enable_flashinfer_autotune must be set after applying "
+                "optimization level defaults."
+            )
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
@@ -769,12 +802,25 @@ class VllmConfig:
         if self.compilation_config.pass_config.fuse_gemm_comms:
             self.compilation_config.pass_config.enable_sp = True
         if self.compilation_config.pass_config.enable_sp:
-            if "-rms_norm" in self.compilation_config.custom_ops:
+            if self.parallel_config.tensor_parallel_size == 1:
+                logger.warning("Sequence Parallelism requires TP>1, disabling")
+                self.compilation_config.pass_config.enable_sp = False
+                self.compilation_config.pass_config.fuse_gemm_comms = False
+
+            elif "-rms_norm" in self.compilation_config.custom_ops:
                 logger.warning(
                     "RMS norm force disabled, sequence parallelism might break"
                 )
             else:
                 self.compilation_config.custom_ops.append("+rms_norm")
+
+        if self.compilation_config.fast_moe_cold_start is None:
+            # resolve default behavior: try to be as safe as possible
+            # this config is unsafe if any spec decoding draft model has a MOE.
+            # We'll conservatively turn it off if we see spec decoding.
+            self.compilation_config.fast_moe_cold_start = (
+                self.speculative_config is None
+            )
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
@@ -868,32 +914,6 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
-
-        # If DCP, ensure the block size is right.
-        if self.parallel_config.decode_context_parallel_size > 1:
-            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
-                self.parallel_config.cp_kv_cache_interleave_size
-                != self.parallel_config.dcp_kv_cache_interleave_size
-            ):
-                self.parallel_config.cp_kv_cache_interleave_size = (
-                    self.parallel_config.dcp_kv_cache_interleave_size
-                )
-                logger.warning_once(
-                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
-                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
-                    "deprecated when PCP is fully supported."
-                )
-            assert (
-                self.parallel_config.cp_kv_cache_interleave_size
-                <= self.cache_config.block_size
-                and self.cache_config.block_size
-                % self.parallel_config.cp_kv_cache_interleave_size
-                == 0
-            ), (
-                f"Block_size({self.cache_config.block_size}) should be greater "
-                "than or equal to and divisible by cp_kv_cache_interleave_size "
-                f"({self.parallel_config.cp_kv_cache_interleave_size})."
-            )
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
@@ -1062,17 +1082,6 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
-        if self.cache_config.mamba_cache_mode == "align":
-            if self.scheduler_config.long_prefill_token_threshold > 0:
-                assert (
-                    self.scheduler_config.long_prefill_token_threshold
-                    >= self.cache_config.block_size
-                )
-            assert not self.scheduler_config.disable_chunked_mm_input, (
-                "Chunked MM input is required because we need the flexibility to "
-                "schedule a multiple of block_size tokens even if they are in the "
-                "middle of a mm input"
-            )
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
@@ -1292,16 +1301,21 @@ class VllmConfig:
         computed_compile_ranges_split_points = []
 
         # The upper bound of the compile ranges is the max_num_batched_tokens.
-        # For speculative decoding with draft model, the compile range must be extended
-        # by 1 for each sequence.
+        # For speculative decoding, the compile range must be extended
+        # - Sequential: + 1 * max_num_seqs (one draft token per iteration)
+        # - Parallel draft: + num_speculative_tokens * max_num_seqs
         compile_range_end = self.scheduler_config.max_num_batched_tokens
         if compile_range_end is not None:
-            do_extend: bool = (
-                self.speculative_config is not None
-                and self.speculative_config.uses_draft_model()
-            )
-            if do_extend:
-                compile_range_end += self.scheduler_config.max_num_seqs
+            if self.speculative_config is not None and (
+                self.speculative_config.uses_draft_model()
+                or self.speculative_config.use_eagle()
+            ):
+                multiplier = (
+                    self.speculative_config.num_speculative_tokens
+                    if self.speculative_config.parallel_drafting
+                    else 1
+                )
+                compile_range_end += multiplier * self.scheduler_config.max_num_seqs
 
             computed_compile_ranges_split_points.append(compile_range_end)
 
@@ -1395,14 +1409,6 @@ class VllmConfig:
         path = self.compilation_config.debug_dump_path / append_path
         return path
 
-    def replace(self, **kwargs):
-        """
-        Replace attributes of the config, and 'recompute' the config.
-        dataclass.replace() calls __init__() and __post_init__(), source:
-        https://docs.python.org/3/library/dataclasses.html#dataclasses.replace
-        """
-        return replace(self, **kwargs)
-
     def __str__(self):
         return (
             f"model={self.model_config.model!r}, "
@@ -1435,6 +1441,57 @@ class VllmConfig:
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )
+
+    def validate_block_size(self) -> None:
+        """Validate block_size against DCP and mamba constraints.
+
+        Called after Platform.update_block_size_for_backend() has
+        finalised block_size, so that the checks see the real value
+        rather than the initial None sentinel.
+        """
+        block_size = self.cache_config.block_size
+        assert block_size is not None, (
+            "validate_block_size called before block_size was set"
+        )
+
+        # DCP interleave-size compatibility
+        if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.cp_kv_cache_interleave_size
+                != self.parallel_config.dcp_kv_cache_interleave_size
+            ):
+                self.parallel_config.cp_kv_cache_interleave_size = (
+                    self.parallel_config.dcp_kv_cache_interleave_size
+                )
+                logger.warning_once(
+                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                    "deprecated when PCP is fully supported."
+                )
+            assert (
+                self.parallel_config.cp_kv_cache_interleave_size <= block_size
+                and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
+            ), (
+                f"Block_size({block_size}) should be greater "
+                "than or equal to and divisible by cp_kv_cache_interleave_size "
+                f"({self.parallel_config.cp_kv_cache_interleave_size})."
+            )
+
+        # Mamba cache align-mode constraints
+        if self.cache_config.mamba_cache_mode == "align":
+            assert block_size <= self.scheduler_config.max_num_batched_tokens, (
+                "In Mamba cache align mode, block_size "
+                f"({block_size}) must be <= "
+                "max_num_batched_tokens "
+                f"({self.scheduler_config.max_num_batched_tokens})."
+            )
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert self.scheduler_config.long_prefill_token_threshold >= block_size
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility "
+                "to schedule a multiple of block_size tokens even if they are "
+                "in the middle of a mm input"
+            )
 
     @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":

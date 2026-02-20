@@ -35,7 +35,7 @@ class Eagle3ModelConfig:
     id: str = ""
     # Backends that are incompatible with this model (will be skipped)
     excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
-    # Pytest marks for this configuration (e.g., pytest.mark.optional)
+    # Pytest marks for this configuration
     marks: list = field(default_factory=list)
     # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
     rtol: float | None = None

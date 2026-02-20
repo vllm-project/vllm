@@ -166,10 +166,10 @@ main() {
         local kv_port=$((21001 + i))
 
         echo "  Prefill server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
-        CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
+        CUDA_VISIBLE_DEVICES=$gpu_id vllm serve "$MODEL" \
         --enforce-eager \
         --host 0.0.0.0 \
-        --port $port \
+        --port "$port" \
         --tensor-parallel-size 1 \
         --seed 1024 \
         --dtype float16 \
@@ -194,10 +194,10 @@ main() {
         local kv_port=$((22001 + i))
 
         echo "  Decode server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
-        CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
+        CUDA_VISIBLE_DEVICES=$gpu_id vllm serve "$MODEL" \
         --enforce-eager \
         --host 0.0.0.0 \
-        --port $port \
+        --port "$port" \
         --tensor-parallel-size 1 \
         --seed 1024 \
         --dtype float16 \
@@ -217,9 +217,10 @@ main() {
     echo ""
     echo "Waiting for all servers to start..."
     for port in "${PREFILL_PORT_ARRAY[@]}" "${DECODE_PORT_ARRAY[@]}"; do
-        if ! wait_for_server $port; then
+        if ! wait_for_server "$port"; then
             echo "Failed to start server on port $port"
             cleanup
+            # shellcheck disable=SC2317
             exit 1
         fi
     done
@@ -231,8 +232,8 @@ main() {
     # Run Benchmark
     # =============================================================================
     cd ../../../benchmarks/
-    vllm bench serve --port 10001 --seed $(date +%s) \
-        --model $MODEL \
+    vllm bench serve --port 10001 --seed "$(date +%s)" \
+        --model "$MODEL" \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
         --num-prompts 200 --burstiness 100 --request-rate 2 | tee benchmark.log
 
