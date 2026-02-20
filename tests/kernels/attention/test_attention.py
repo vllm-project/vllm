@@ -9,8 +9,7 @@ import torch
 from tests.kernels.allclose_default import get_default_atol, get_default_rtol
 from tests.kernels.utils import opcheck
 from vllm import _custom_ops as ops
-from vllm.attention.layer import Attention
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import get_max_shared_memory_bytes
 from vllm.utils.torch_utils import set_random_seed

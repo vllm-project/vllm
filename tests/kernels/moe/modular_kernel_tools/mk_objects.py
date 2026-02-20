@@ -7,9 +7,6 @@ import torch
 # Fused experts and PrepareFinalize imports
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe import TritonExperts
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.batched_deep_gemm_moe import (
     BatchedDeepGemmExperts,
 )
@@ -28,7 +25,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize import (
 from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
@@ -37,7 +34,13 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer_cutlass_fused_moe
-from vllm.utils.import_utils import has_deep_ep, has_deep_gemm, has_pplx
+from vllm.utils.import_utils import (
+    has_aiter,
+    has_deep_ep,
+    has_deep_gemm,
+    has_mori,
+    has_pplx,
+)
 
 
 @dataclass
@@ -66,6 +69,7 @@ class ExpertInfo:
     supports_expert_map: bool
     needs_matching_quant: bool = False
     needs_deep_gemm: bool = False
+    needs_aiter: bool = False
 
 
 PREPARE_FINALIZE_INFO: dict[mk.FusedMoEPrepareAndFinalize, PrepareFinalizeInfo] = {}
@@ -126,6 +130,7 @@ def register_experts(
     supports_expert_map: bool,
     needs_matching_quant: bool = False,
     needs_deep_gemm: bool = False,
+    needs_aiter: bool = False,
 ):
     global EXPERT_INFO
     global MK_FUSED_EXPERT_TYPES
@@ -139,6 +144,7 @@ def register_experts(
         supports_expert_map,
         needs_matching_quant,
         needs_deep_gemm,
+        needs_aiter,
     )
 
     MK_FUSED_EXPERT_TYPES.append(kind)
@@ -218,6 +224,20 @@ if has_deep_ep() and not current_platform.has_device_capability(100):
         backend="deepep_low_latency",
     )
 
+if has_mori():
+    from vllm.model_executor.layers.fused_moe.mori_prepare_finalize import (
+        MoriPrepareAndFinalize,
+    )
+
+    register_prepare_and_finalize(
+        MoriPrepareAndFinalize,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        backend="mori",
+        supports_apply_weight_on_input=False,
+    )
+
 if has_pplx():
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
@@ -232,12 +252,11 @@ if has_pplx():
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):
+    from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (  # noqa: E501
+        FlashInferCutlassMoEPrepareAndFinalize,
+    )
     from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
         FlashInferExperts,
-    )
-    from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-        FlashInferCutlassMoEPrepareAndFinalize,
-        create_flashinfer_prepare_finalize,
     )
 
     register_prepare_and_finalize(
@@ -261,6 +280,25 @@ if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability
     )
 else:
     FlashInferCutlassMoEPrepareAndFinalize = None
+    FlashInferExperts = None
+
+
+if has_aiter():
+    from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+        AiterExperts,
+    )
+
+    register_experts(
+        AiterExperts,
+        standard_format,
+        fp8_types,
+        blocked_quantization_support=True,
+        supports_chunking=True,
+        supports_expert_map=True,
+        needs_aiter=True,
+    )
+else:
+    AiterExperts = None
 
 if has_deep_gemm() and is_deep_gemm_supported():
     register_experts(
@@ -316,6 +354,9 @@ if cutlass_fp8_supported():
         supports_chunking=False,
         supports_expert_map=False,
     )
+else:
+    CutlassBatchedExpertsFp8 = None
+    CutlassExpertsFp8 = None
 
 if cutlass_fp4_supported():
     from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp4
@@ -328,6 +369,8 @@ if cutlass_fp4_supported():
         supports_chunking=True,
         supports_expert_map=False,
     )
+else:
+    CutlassExpertsFp4 = None
 
 MK_QUANT_CONFIGS: list[TestMoEQuantConfig | None] = [
     None,
@@ -380,24 +423,6 @@ if cutlass_fp4_supported() or has_flashinfer_cutlass_fused_moe():
             block_shape=None,
         ),
     ]
-
-
-def make_prepare_finalize(
-    prepare_finalize_type: mk.FusedMoEPrepareAndFinalize,
-    backend: str | None,
-    moe: FusedMoEConfig,
-    quant_config: FusedMoEQuantConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    if backend != "naive" and backend is not None:
-        prepare_finalize = maybe_make_prepare_finalize(moe, quant_config)
-        assert prepare_finalize is not None
-        return prepare_finalize
-    elif prepare_finalize_type == FlashInferCutlassMoEPrepareAndFinalize:
-        return create_flashinfer_prepare_finalize(
-            use_dp=moe.moe_parallel_config.dp_size > 1
-        )
-    else:
-        return MoEPrepareAndFinalizeNoEP()
 
 
 def _slice(rank: int, num_local_experts: int, t: torch.Tensor) -> torch.Tensor:

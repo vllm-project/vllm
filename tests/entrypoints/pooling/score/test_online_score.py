@@ -90,6 +90,35 @@ class TestModel:
         for i in range(len(vllm_outputs)):
             assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
 
+    def test_queries_str_items_str(
+        self, server: RemoteOpenAIServer, model: dict[str, Any], runner
+    ):
+        queries = "What is the capital of France?"
+        items = "The capital of France is Paris."
+
+        score_response = requests.post(
+            server.url_for("score"),
+            json={
+                "model": model["name"],
+                "queries": queries,
+                "items": items,
+            },
+        )
+        score_response.raise_for_status()
+        score = ScoreResponse.model_validate(score_response.json())
+
+        assert score.id is not None
+        assert score.data is not None
+        assert len(score.data) == 1
+
+        vllm_outputs = [d.score for d in score.data]
+
+        text_pairs = [[queries, items]]
+        hf_outputs = run_transformers(runner, model, text_pairs)
+
+        for i in range(len(vllm_outputs)):
+            assert hf_outputs[i] == pytest.approx(vllm_outputs[i], rel=0.01)
+
     def test_text_1_str_text_2_str(
         self, server: RemoteOpenAIServer, model: dict[str, Any], runner
     ):
@@ -247,7 +276,7 @@ class TestModel:
             },
         )
         assert score_response.status_code == 400
-        assert "Please, select a smaller truncation size." in score_response.text
+        assert "Please request a smaller truncation size." in score_response.text
 
     def test_invocations(self, server: RemoteOpenAIServer, model: dict[str, Any]):
         queries = "What is the capital of France?"

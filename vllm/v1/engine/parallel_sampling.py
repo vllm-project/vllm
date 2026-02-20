@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from copy import copy
-from typing import Optional, cast
+from typing import cast
 
 from vllm.outputs import CompletionOutput
 from vllm.sampling_params import RequestOutputKind, SamplingParams
@@ -133,7 +133,7 @@ class ParentRequest:
 
     @staticmethod
     def observe_finished_request(
-        parent_req: Optional["ParentRequest"],
+        parent_req: "ParentRequest | None",
         iteration_stats: IterationStats,
         num_generation_tokens: int,
     ):

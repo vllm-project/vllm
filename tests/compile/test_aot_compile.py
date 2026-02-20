@@ -90,9 +90,7 @@ def use_vllm_config(vllm_config: VllmConfig):
         yield
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_no_dynamo_cache_entry(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         vllm_config = make_vllm_config()
@@ -116,9 +114,7 @@ def test_no_dynamo_cache_entry(monkeypatch: pytest.MonkeyPatch):
             assert torch.allclose(actual, expected)
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_force_aot_load(monkeypatch: pytest.MonkeyPatch):
     with tempfile.TemporaryDirectory() as tmpdirname, monkeypatch.context() as m:
         args = (torch.randn(10, 10),)
@@ -132,9 +128,7 @@ def test_force_aot_load(monkeypatch: pytest.MonkeyPatch):
             CompiledMod(vllm_config=vllm_config)(*args)
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
     with monkeypatch.context() as m:
         args = (torch.randn(10, 10),)
@@ -162,9 +156,7 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
             assert torch.allclose(ret, expected)
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_cache_load_returns_tuple_consistency(monkeypatch: pytest.MonkeyPatch):
     """
     Test that cache loading correctly handles the returns_tuple logic.
@@ -223,9 +215,7 @@ def test_cache_load_returns_tuple_consistency(monkeypatch: pytest.MonkeyPatch):
             )
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_cache_load_returns_tuple_consistency_tuple_output(
     monkeypatch: pytest.MonkeyPatch,
 ):
@@ -294,9 +284,7 @@ def test_cache_load_returns_tuple_consistency_tuple_output(
             )
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_shape_env(monkeypatch: pytest.MonkeyPatch):
     """
     Test that the shape environment is correctly serialized and preserved
@@ -333,9 +321,7 @@ def test_shape_env(monkeypatch: pytest.MonkeyPatch):
                 assert guards_string == " - s77 <= 42\n - Eq(Mod(s77, 2), 0)"
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_partition_wrapper_applied_on_aot_load(
     monkeypatch: pytest.MonkeyPatch, vllm_tmp_cache: Path, mocker
 ):
@@ -426,9 +412,7 @@ def test_partition_wrapper_applied_on_aot_load(
         )
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
     """
@@ -492,9 +476,7 @@ def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
         symbolic_shapes_module.make_symbol = original_make_symbol
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 class TestStandaloneCompiledArtifacts:
     def test_init(self):
         cache = StandaloneCompiledArtifacts()
@@ -668,9 +650,7 @@ class TestStandaloneCompiledArtifacts:
         assert len(restored_cache.loaded_submodule_store) == 0
 
 
-@pytest.mark.skipif(
-    not is_torch_equal_or_newer("2.10.0.dev"), reason="requires torch 2.10"
-)
+@pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 class TestStandaloneCompiledArtifactsIntegration:
     def test_add_pickle_unpickle(self):
         cache = StandaloneCompiledArtifacts()

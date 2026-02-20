@@ -5,6 +5,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
@@ -78,24 +79,20 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # - skip input activation quantization (kernel applies scaling)
         self.use_deepseek_fp8_block_scale = quant_config.is_block_quantized
 
-    @staticmethod
-    def expects_unquantized_inputs(
-        moe_config: mk.FusedMoEConfig, quant_config: FusedMoEQuantConfig
-    ) -> bool:
-        # NVFP4 TP kernels and FP8 block-quantized kernels apply
-        # input quantization inside FusedMoEPermuteExpertsUnpermute.
-        return (
-            quant_config.use_nvfp4_w4a4
-            and not moe_config.moe_parallel_config.use_all2all_kernels
-        ) or (quant_config.use_fp8_w8a8 and quant_config.is_block_quantized)
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return self.quant_config.use_fp8_w8a8 and self.quant_config.is_block_quantized
 
     @staticmethod
     def _supports_current_device() -> bool:
+        p = current_platform
         return (
-            current_platform.is_cuda()
+            p.is_cuda()
             and (
-                current_platform.is_device_capability((9, 0))
-                or current_platform.is_device_capability_family(100)
+                p.is_device_capability(90)
+                or p.is_device_capability_family(100)
+                or p.is_device_capability_family(110)
+                or p.is_device_capability_family(120)
             )
             and has_flashinfer_cutlass_fused_moe()
         )
@@ -109,45 +106,41 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        # The following are supported by FlashInferExperts:
-        #   * unquantized
-        #   * fp8 static per-tensor on 9.0+
-        #   * fp8 block on 9.0
-        #   * nvfp4 on 10.0+
-
         p = current_platform
         scheme = (weight_key, activation_key)
+        # The following are supported by FlashInferExperts:
         return (
+            # unquantized and fp8 static per-tensor on 9.0+
             (
                 scheme
                 in [
                     (None, None),
                     (kFp8StaticTensorSym, kFp8StaticTensorSym),
                 ]
+                and p.has_device_capability(90)
             )
+            # fp8 block-scale on 9.0
             or (
-                (scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym))
-                and (p.is_device_capability((9, 0)))
+                scheme == (kFp8Static128BlockSym, kFp8Dynamic128Sym)
+                and p.is_device_capability(90)
             )
+            # nvfp4 on 10.0+
             or (
-                (scheme == (kNvfp4Static, kNvfp4Dynamic))
-                and (p.is_device_capability_family(100))
+                scheme == (kNvfp4Static, kNvfp4Dynamic) and p.has_device_capability(100)
             )
         )
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
-        return activation in ["silu", "relu2_no_mul"]
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         # FLASHINFER_CUTLASS currently uses its down P/F, which does not
         # work with SP. This will be removed in follow up after we get
         # rid of the FlashInfer specific P/F function.
-        return (
-            moe_parallel_config.dp_size == 1
-            or moe_parallel_config.dp_size == moe_parallel_config.ep_size
-        )
+        # TODO: the per-tensor fp8 kernels don't work with MNNVL FI A2As.
+        return True
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -172,7 +165,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # We use global_num_experts due to how moe_align_block_size handles
         # expert_maps.
@@ -194,8 +187,9 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         """
         workspace1 = (M, K)
         workspace2 = (0,)
-        # For TP, the quantization is fused with fused_moe call.
-        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" and self.use_dp else K)
+        # For NVFP4, the output is stored in a packed int8 format,
+        # so the actual hidden dim is 2x the size of K here.
+        output_shape = (M, K * 2 if self.quant_dtype == "nvfp4" else K)
         # The workspace is determined by `aq`, since it comes after any
         # potential communication op and is involved in the expert computation.
         return (workspace1, workspace2, output_shape)
@@ -208,7 +202,7 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -221,8 +215,8 @@ class FlashInferExperts(mk.FusedMoEPermuteExpertsUnpermute):
         from flashinfer.fused_moe.core import ActivationType
 
         activation_str_to_value_map = {
-            "silu": ActivationType.Swiglu,  # This is the default
-            "relu2_no_mul": ActivationType.Relu2,
+            MoEActivation.SILU: ActivationType.Swiglu,  # This is the default
+            MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         }
         assert activation in activation_str_to_value_map, (
             f"{activation=} missing from {activation_str_to_value_map.keys()=}"
