@@ -11,3 +11,6 @@ torchaudio==2.10.0
 torchvision==0.25.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 # FlashInfer should be updated together with the Dockerfile
 flashinfer-python==0.6.3
+
+# NCCL Python bindings for collective communications
+nccl4py[cu12]

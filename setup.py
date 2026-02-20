@@ -942,6 +942,9 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            # Handle nccl4py CUDA variant based on installed CUDA version
+            if "nccl4py[cu" in req:
+                req = f"nccl4py[cu{cuda_major}]"
             modified_requirements.append(req)
         requirements = modified_requirements
     elif _is_hip():
