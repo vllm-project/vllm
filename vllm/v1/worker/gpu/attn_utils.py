@@ -12,7 +12,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
@@ -144,28 +143,6 @@ def build_slot_mappings_by_layer(
     return slot_mappings_by_layer
 
 
-def prepare_dcp_local_seq_lens(
-    dcp_local_seq_lens: torch.Tensor,
-    seq_lens: torch.Tensor,
-    num_reqs: int,
-    dcp_size: int,
-    dcp_rank: int,
-    cp_kv_cache_interleave_size: int,
-) -> None:
-    """Populate the persistent DCP local seq_lens buffer (CUDA graph safe)."""
-    if dcp_size <= 1:
-        return
-
-    local_seq_lens = get_dcp_local_seq_lens(
-        seq_lens[:num_reqs],
-        dcp_size=dcp_size,
-        dcp_rank=dcp_rank,
-        cp_kv_cache_interleave_size=cp_kv_cache_interleave_size,
-    )
-    dcp_local_seq_lens[:num_reqs].copy_(local_seq_lens, non_blocking=True)
-    dcp_local_seq_lens[num_reqs:].zero_()
-
-
 def build_attn_metadata(
     attn_metadata_builders: list[AttentionMetadataBuilder],
     num_reqs: int,
@@ -181,7 +158,6 @@ def build_attn_metadata(
     dcp_local_seq_lens: torch.Tensor | None = None,
 ) -> dict[str, Any]:
     seq_lens = seq_lens[:num_reqs]
-
     if dcp_local_seq_lens is not None:
         dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
 
