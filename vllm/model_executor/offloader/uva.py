@@ -48,8 +48,7 @@ class UVAOffloader(BaseOffloader):
             and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
         )
         self.uva_offloading = (
-            is_uva_available()
-            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
+            is_uva_available() and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_UVA
         )
 
     def wrap_modules(
@@ -63,9 +62,7 @@ class UVAOffloader(BaseOffloader):
         Note: UVA offloading operates at module level, so submodule_accessor
         and whitelist_param_names_creator are ignored.
         """
-        modules = [
-            self._maybe_offload_to_cpu(module) for module in modules_generator
-        ]
+        modules = [self._maybe_offload_to_cpu(module) for module in modules_generator]
         if self.cpu_offload_bytes > 0:
             logger.info(
                 "Total CPU offloaded parameters: %s",
@@ -101,8 +98,7 @@ class UVAOffloader(BaseOffloader):
                 # e.g., "experts.w2_weight" matches "mlp.experts.w2_weight"
                 # but not "mlp.experts.w2_weight_scale"
                 should_offload = any(
-                    f".{param}." in f".{name}."
-                    for param in self.cpu_offload_params
+                    f".{param}." in f".{name}." for param in self.cpu_offload_params
                 )
                 if not should_offload:
                     continue

@@ -498,11 +498,12 @@ class _ModuleOffloader:
                 gpu_buffer = offloader._gpu_buffer
                 assert cpu_storage is not None, "CPU storage not initialized"
                 assert gpu_buffer is not None, "GPU buffer not assigned"
-                assert not is_pin_memory_available() or cpu_storage.is_pinned(), \
-                    f"CPU storage for {name} is not pinned! " \
-                    "non_blocking=True H2D copy from non-pinned memory " \
-                    "causes stream synchronization that breaks " \
+                assert not is_pin_memory_available() or cpu_storage.is_pinned(), (
+                    f"CPU storage for {name} is not pinned! "
+                    "non_blocking=True H2D copy from non-pinned memory "
+                    "causes stream synchronization that breaks "
                     "event-based fork synchronization."
+                )
                 gpu_buffer.copy_(cpu_storage, non_blocking=True)
 
         # Record completion event for _wait_for_layer to use

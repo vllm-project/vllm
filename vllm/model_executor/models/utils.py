@@ -12,7 +12,6 @@ import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
-import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
