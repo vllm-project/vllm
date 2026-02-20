@@ -280,9 +280,9 @@ def dcp_lse_combine_triton(
 
 
 def dcp_a2a_lse_reduce(
-    local_output: torch.Tensor,
-    local_lse: torch.Tensor,
-    dcp_group: GroupCoordinator,
+    cp_attn_out: torch.Tensor,
+    cp_attn_lse: torch.Tensor,
+    cp_group: GroupCoordinator,
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
     is_lse_base_on_e=True,
@@ -297,15 +297,16 @@ def dcp_a2a_lse_reduce(
     3. Combines them with exact LSE-weighted reduction (Triton kernel)
 
     Tensor flow:
-        Input:  local_output [B, H, D] - all heads, local KV shard
+        Input:  cp_attn_out [B, H, D] - all heads, local KV shard
         Reshape: [N, B, H/N, D] - split heads across ranks
         A2A:    Two all_to_all_single calls (output and LSE)
         Combine: recv [N, B, H/N, D] + lse [N, B, H/N] -> [B, H/N, D]
 
     Args:
-        local_output: [B, H, D] where B=num_tokens, H=total_heads, D=head_dim
-        local_lse: [B, H] log-sum-exp values (fp32)
-        dcp_group: GroupCoordinator for DCP communication
+        cp_attn_out: [B, H, D] where B=num_tokens, H=total_heads, D=head_dim
+        cp_attn_lse: [B, H] log-sum-exp values (fp32)
+        cp_group: GroupCoordinator for DCP communication
+        ctx: CPTritonContext (unused, for signature compatibility)
         return_lse: If True, also return the combined global LSE
         is_lse_base_on_e: If True, LSE is base e; if False, base 2
 
@@ -313,15 +314,15 @@ def dcp_a2a_lse_reduce(
         Combined output [B, H/N, D] (head-scattered)
         If return_lse=True, also returns global_lse [B, H/N]
     """
-    world_size = dcp_group.world_size
+    world_size = cp_group.world_size
 
     if world_size == 1:
         if return_lse:
-            return local_output, local_lse
-        return local_output
+            return cp_attn_out, cp_attn_lse
+        return cp_attn_out
 
-    local_output = local_output.contiguous()
-    local_lse = local_lse.contiguous()
+    local_output = cp_attn_out.contiguous()
+    local_lse = cp_attn_lse.contiguous()
 
     B, H, D = local_output.shape
     H_per_rank = H // world_size
@@ -341,13 +342,13 @@ def dcp_a2a_lse_reduce(
     work_output = dist.all_to_all_single(
         recv_output.view(-1),
         send_output.view(-1),
-        group=dcp_group.device_group,
+        group=cp_group.device_group,
         async_op=True,
     )
     work_lse = dist.all_to_all_single(
         recv_lse.view(-1),
         send_lse.view(-1),
-        group=dcp_group.device_group,
+        group=cp_group.device_group,
         async_op=True,
     )
     work_output.wait()
