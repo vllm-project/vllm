@@ -89,6 +89,7 @@ async def test_basic_audio_with_lora(mary_had_lamb, rocm_aiter_fa_attention):
     assert "mary had a little lamb" in out_text
     assert out_usage["seconds"] == 16, out_usage["seconds"]
 
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_name", ["google/gemma-3n-E2B-it", "Qwen/Qwen3-ASR-0.6B"]
