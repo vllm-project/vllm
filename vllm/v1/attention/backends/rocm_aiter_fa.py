@@ -466,6 +466,7 @@ class AiterFlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> "AiterFlashAttentionMetadata":
+        assert self.reorder_batch_threshold is not None
         split_ret = split_decodes_prefills_and_extends(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
@@ -696,9 +697,7 @@ class AiterFlashAttentionMetadataBuilder(
             max_query_len=common_attn_metadata.max_query_len,
             min_query_len=common_attn_metadata.max_query_len,  # uniform batch
             max_seq_len=common_attn_metadata.max_seq_len,
-            query_start_loc=common_attn_metadata.query_start_loc[
-                : num_reqs + 1
-            ],
+            query_start_loc=common_attn_metadata.query_start_loc,
         )
 
         return AiterFlashAttentionMetadata(
@@ -725,7 +724,7 @@ class AiterFlashAttentionMetadataBuilder(
             k_scale=self.scale,
             v_scale=self.scale,
         )
-    
+
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False
 
