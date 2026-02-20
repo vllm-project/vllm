@@ -25,6 +25,9 @@ class DeepSeekR1ReasoningParser(BaseThinkingReasoningParser):
         """The token that ends reasoning content."""
         return "</think>"
 
+    def is_reasoning_end_streaming(self, all_token_ids, new_token_ids):
+        return self.end_token_id in new_token_ids
+
     def extract_reasoning_streaming(
         self,
         previous_text: str,
