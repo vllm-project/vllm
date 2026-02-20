@@ -320,6 +320,13 @@ class ParallelConfig:
         should only be set by API server scale-out.
     """
 
+    @field_validator("moe_backend", mode="before")
+    @classmethod
+    def _normalize_moe_backend(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.lower().replace("-", "_")
+        return value
+
     @field_validator("disable_nccl_for_dp_synchronization", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:

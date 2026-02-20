@@ -878,7 +878,9 @@ class EngineArgs:
             "-ep",
             **parallel_kwargs["enable_expert_parallel"],
         )
-        parallel_group.add_argument("--moe-backend", **parallel_kwargs["moe_backend"])
+        moe_backend_kwargs = parallel_kwargs["moe_backend"]
+        moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        parallel_group.add_argument("--moe-backend", **moe_backend_kwargs)
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
