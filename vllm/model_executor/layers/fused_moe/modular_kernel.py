@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -529,24 +530,34 @@ class FusedMoEExperts(ABC):
             return f"kernel does not support {reason}"
 
         if not cls._supports_current_device():
-            return False, _make_reason("current device")
+            return False, _make_reason(f"current device {current_platform.device_name}")
         elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
             return False, _make_reason("no act_and_mul MLP layer")
         elif not cls._supports_activation(moe_config.activation):
             return False, _make_reason(f"{moe_config.activation} activation")
         elif not cls._supports_quant_scheme(weight_key, activation_key):
-            return False, _make_reason("quantization scheme")
+            return False, _make_reason(
+                f"quantization scheme {weight_key}x{activation_key}"
+            )
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
-            return False, _make_reason("parallel config")
+            return False, _make_reason(
+                f"parallel config {moe_config.moe_parallel_config}"
+            )
         elif not cls._supports_routing_method(
             moe_config.routing_method, weight_key, activation_key
         ):
-            return False, _make_reason("routing method")
+            return False, _make_reason(f"routing method {moe_config.routing_method}")
         elif not cls._supports_router_logits_dtype(
             moe_config.router_logits_dtype,
             moe_config.routing_method,
         ):
-            return False, _make_reason("router logits dtype")
+            return False, _make_reason(
+                f"router logits dtype {moe_config.router_logits_dtype}"
+            )
+        elif not cls._supports_shape(moe_config.hidden_dim):
+            return False, _make_reason(
+                f"{moe_config.hidden_dim} hidden dim is not supported"
+            )
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
         return True, None
@@ -620,6 +631,14 @@ class FusedMoEExperts(ABC):
 
         Can be overriden by monolithic kernels that execute the router
         in addition to the experts if certain dtypes are not supported.
+        """
+        return True
+
+    @staticmethod
+    def _supports_shape(hidden_dim: int) -> bool:
+        """
+        Whether a kernel supports a particular shape. Can be overridden if a kernel
+        has specific shape requirements.
         """
         return True
 
