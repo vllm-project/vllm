@@ -29,19 +29,6 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
-- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy (MI325)
-  timeout_in_minutes: 40
-  device: mi325_4
-  depends_on:
-  - image-build-amd
-  optional: true
-  working_dir: "/vllm-workspace/"
-  source_file_dependencies:
-  - .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh
-  - tests/evals/gsm8k/gsm8k_eval.py
-  commands:
-    - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
-
 - label: Prime-RL Integration (2 GPUs)
   timeout_in_minutes: 30
   optional: true

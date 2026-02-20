@@ -159,21 +159,6 @@ steps:
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
-- label: NixlConnector PD accuracy tests (Distributed)(MI325)
-  timeout_in_minutes: 60
-  device: mi325_4
-  depends_on:
-  - image-build-amd
-  working_dir: "/vllm-workspace/tests"
-  num_devices: 4
-  optional: true
-  source_file_dependencies:
-    - vllm/distributed/kv_transfer/kv_connector/v1/nixl_connector.py
-    - tests/v1/kv_connector/nixl_integration/
-  commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
-    - ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
-
 - label: 2 Node Test (4 GPUs)
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/tests"

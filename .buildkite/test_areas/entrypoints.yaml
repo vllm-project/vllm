@@ -11,11 +11,6 @@ steps:
   commands:
   - pytest -v -s entrypoints/openai/tool_parsers
   - pytest -v -s entrypoints/ --ignore=entrypoints/llm --ignore=entrypoints/rpc --ignore=entrypoints/sleep --ignore=entrypoints/instrumentator --ignore=entrypoints/openai --ignore=entrypoints/offline_mode --ignore=entrypoints/test_chat_utils.py  --ignore=entrypoints/pooling
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: Entrypoints Integration (LLM)
   timeout_in_minutes: 40
@@ -29,11 +24,6 @@ steps:
   - pytest -v -s entrypoints/llm --ignore=entrypoints/llm/test_generate.py --ignore=entrypoints/llm/test_collective_rpc.py
   - pytest -v -s entrypoints/llm/test_generate.py # it needs a clean process
   - pytest -v -s entrypoints/offline_mode # Needs to avoid interference with other tests
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: Entrypoints Integration (API Server 1)
   timeout_in_minutes: 130
@@ -46,11 +36,6 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: Entrypoints Integration (API Server 2)
   timeout_in_minutes: 130
@@ -65,11 +50,6 @@ steps:
   - pytest -v -s entrypoints/instrumentator
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: Entrypoints Integration (Pooling)
   timeout_in_minutes: 50
@@ -95,11 +75,6 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/responses
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: Entrypoints V1
   timeout_in_minutes: 50
@@ -108,11 +83,6 @@ steps:
     - tests/v1
   commands:
     - pytest -v -s v1/entrypoints
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
 
 - label: OpenAI API Correctness
   timeout_in_minutes: 30
@@ -122,12 +92,3 @@ steps:
   - vllm/model_executor/models/whisper.py
   commands: # LMEval+Transcription WER check
   - pytest -s entrypoints/openai/correctness/
-  mirror:
-    amd:
-      device: mi325_1
-      depends_on:
-      - image-build-amd
-      commands:
-      - bash ../tools/install_torchcodec_rocm.sh || exit 1
-      - pytest -s entrypoints/openai/correctness/
-
