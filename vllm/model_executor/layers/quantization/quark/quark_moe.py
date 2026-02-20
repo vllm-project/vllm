@@ -729,12 +729,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             get_current_vllm_config().model_config.hf_config, "model_type", None
         )
 
-        self._emulate = (
+        self.emulate = (
             not current_platform.supports_mx()
             or not self.ocp_mx_scheme.startswith("w_mxfp4")
         ) and (self.mxfp4_backend is None or not self.use_rocm_aiter_moe)
-
-        self.emulate = True if self.model_type == "gpt_oss" else self._emulate
 
         if self.emulate:
             logger.warning_once(
@@ -1019,30 +1017,20 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if not self.emulate:
-            if (
-                self.model_type == "gpt_oss"
-                and self.mxfp4_backend == Mxfp4Backend.TRITON
-            ):
-                raise NotImplementedError(
-                    "Triton kernel implemented fused MoE for GPT_OSS model "
-                    "in Quark(MoE) format is not integrated or provided yet."
-                )
+            from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
+                rocm_aiter_fused_experts,
+            )
 
-            else:
-                from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
-                    rocm_aiter_fused_experts,
-                )
-
-                return rocm_aiter_fused_experts(
-                    x,
-                    layer.w13_weight,
-                    layer.w2_weight,
-                    topk_weights=topk_weights,
-                    topk_ids=topk_ids,
-                    activation=layer.activation,
-                    quant_config=self.moe_quant_config,
-                    expert_map=layer.expert_map,
-                )
+            return rocm_aiter_fused_experts(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                activation=layer.activation,
+                quant_config=self.moe_quant_config,
+                expert_map=layer.expert_map,
+            )
         else:
             from vllm.model_executor.layers.fused_moe import fused_experts
 
