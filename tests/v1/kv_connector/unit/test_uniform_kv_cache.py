@@ -30,6 +30,8 @@ HEAD_SIZE = 64
 
 
 class _MockBackend:
+    """NHD backend: layers dim sits right after blocks."""
+
     @staticmethod
     def get_kv_cache_shape(
         num_blocks, block_size, num_kv_heads, head_size, cache_dtype_str=None
@@ -39,7 +41,21 @@ class _MockBackend:
     @staticmethod
     def get_kv_cache_stride_order(include_num_layers_dimension=False):
         if include_num_layers_dimension:
-            return (0, 1, 2, 3, 4, 5)
+            # logical_with_layers: (L, B, 2, H, bs, d)
+            # physical:            (B, L, 2, H, bs, d)
+            return (1, 0, 2, 3, 4, 5)
+        return (0, 1, 2, 3, 4)
+
+
+class _MockHNDBackend(_MockBackend):
+    """HND backend: heads come before layers in physical order."""
+
+    @staticmethod
+    def get_kv_cache_stride_order(include_num_layers_dimension=False):
+        if include_num_layers_dimension:
+            # logical_with_layers: (L, B, 2, H, bs, d)
+            # physical:            (B, H, L, 2, bs, d)
+            return (1, 3, 0, 2, 4, 5)
         return (0, 1, 2, 3, 4)
 
 
@@ -76,6 +92,45 @@ def _make_group(
             kv_cache_group_id=group_id,
         )
     ]
+
+
+def _allocate(
+    num_blocks,
+    num_layers,
+    backend=_MockBackend,
+    prefix="l",
+    kernel_block_sizes=None,
+    attn_groups=None,
+):
+    """Shorthand for allocate_uniform_kv_caches with FullAttentionSpec."""
+    spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=torch.float16,
+    )
+    names = [f"{prefix}.{i}" for i in range(num_layers)]
+    if attn_groups is None:
+        attn_groups = [_make_group(group_id=0, layer_names=names, backend=backend)]
+    if kernel_block_sizes is None:
+        kernel_block_sizes = [BLOCK_SIZE] * len(attn_groups)
+    return KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+        kv_cache_config=KVCacheConfig(
+            num_blocks=num_blocks,
+            kv_cache_tensors=[
+                KVCacheTensor(
+                    size=spec.page_size_bytes * num_blocks,
+                    shared_by=[n],
+                )
+                for n in names
+            ],
+            kv_cache_groups=[],
+        ),
+        attn_groups=attn_groups,
+        cache_dtype="auto",
+        device=torch.device("cpu"),
+        kernel_block_sizes=kernel_block_sizes,
+    )
 
 
 def _use_uniform(attn_groups):
@@ -148,7 +203,8 @@ def test_allocate_multi_group_shared_tensors():
 
     assert len(kv_caches) == 8
     assert len(cross_layer_groups) == 1
-    assert not cross_layer_groups[0].tp_layout
+    # NHD backend -- default layout (blocks, layers, page_size)
+    assert cross_layer_groups[0].tensor.ndim == 3
     for i in range(num_positions):
         assert kv_caches[f"full.{i}"].data_ptr() == kv_caches[f"sw.{i}"].data_ptr()
 
@@ -187,7 +243,8 @@ def test_mamba_allocation():
     )
 
     assert len(groups) == 1
-    assert not groups[0].tp_layout
+    # Mamba -- default layout (blocks, layers, page_size)
+    assert groups[0].tensor.ndim == 3
     for n in ["m.0", "m.1"]:
         assert isinstance(kv[n], list) and len(kv[n]) == 2
         assert kv[n][0].shape == (nb, 4, 2)
@@ -202,118 +259,47 @@ def test_mamba_allocation():
     assert torch.all(kv["m.0"][0][1] == 0.0)
 
 
-def test_tp_layout_shape():
-    """With tp_size > 1, the backing tensor uses (NB, H, layers, per_head_page)."""
-    num_layers = 3
-    nb = 4
-    spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_SIZE,
-        dtype=torch.float16,
-    )
-
-    kv_caches, groups = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-        kv_cache_config=KVCacheConfig(
-            num_blocks=nb,
-            kv_cache_tensors=[
-                KVCacheTensor(size=spec.page_size_bytes * nb, shared_by=[f"layer.{i}"])
-                for i in range(num_layers)
-            ],
-            kv_cache_groups=[],
-        ),
-        attn_groups=[
-            _make_group(
-                group_id=0,
-                layer_names=[f"layer.{i}" for i in range(num_layers)],
-            )
-        ],
-        cache_dtype="auto",
-        device=torch.device("cpu"),
-        kernel_block_sizes=[BLOCK_SIZE],
-        tp=True,
+def test_hnd_backend_extracts_heads():
+    """HND backend: heads before layers in physical order."""
+    nb, num_layers = 4, 3
+    kv_caches, groups = _allocate(
+        nb, num_layers, backend=_MockHNDBackend, prefix="layer"
     )
 
     assert len(groups) == 1
     group = groups[0]
-    assert group.tp_layout
 
+    # HND backend -- heads-first layout (blocks, heads, layers, per_head_page)
+    spec = group.spec
     per_head_page = spec.page_size_bytes // NUM_KV_HEADS
     assert group.tensor.shape == (nb, NUM_KV_HEADS, num_layers, per_head_page)
 
-    # Per-layer views should match the backend's logical shape
-    # _MockBackend: (num_blocks, 2, num_kv_heads, block_size, head_size)
     expected = (nb, 2, NUM_KV_HEADS, BLOCK_SIZE, HEAD_SIZE)
     for i in range(num_layers):
         assert kv_caches[f"layer.{i}"].shape == expected
 
 
-def test_tp_layout_head_contiguity():
-    """Slicing a subset of heads from TP-layout tensor is contiguous."""
-    nb = 4
-    num_layers = 2
-    spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_SIZE,
-        dtype=torch.float16,
-    )
+def test_hnd_head_contiguity():
+    """One block + one head across all layers is contiguous in HND layout."""
+    _, groups = _allocate(4, 2, backend=_MockHNDBackend)
 
-    _, groups = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-        kv_cache_config=KVCacheConfig(
-            num_blocks=nb,
-            kv_cache_tensors=[
-                KVCacheTensor(size=spec.page_size_bytes * nb, shared_by=[f"l.{i}"])
-                for i in range(num_layers)
-            ],
-            kv_cache_groups=[],
-        ),
-        attn_groups=[
-            _make_group(
-                group_id=0,
-                layer_names=[f"l.{i}" for i in range(num_layers)],
-            )
-        ],
-        cache_dtype="auto",
-        device=torch.device("cpu"),
-        kernel_block_sizes=[BLOCK_SIZE],
-        tp=True,
-    )
-
-    # One block's per-head data (all layers) should be contiguous
     group = groups[0]
     block_head = group.tensor[0, 0]  # (layers, per_head_page)
     assert block_head.is_contiguous()
-    # And head dim comes before layers in memory (H varies slower)
+    # H varies slower than layers
     assert group.tensor.stride(1) > group.tensor.stride(2)
 
 
-def test_tp_size_1_default_layout():
-    """With tp_size=1, the tensor uses the default (NB, layers, page) layout."""
-    nb = 4
-    spec = FullAttentionSpec(
-        block_size=BLOCK_SIZE,
-        num_kv_heads=NUM_KV_HEADS,
-        head_size=HEAD_SIZE,
-        dtype=torch.float16,
-    )
-
-    _, groups = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
-        kv_cache_config=KVCacheConfig(
-            num_blocks=nb,
-            kv_cache_tensors=[
-                KVCacheTensor(size=spec.page_size_bytes * nb, shared_by=[f"l.{i}"])
-                for i in range(2)
-            ],
-            kv_cache_groups=[],
-        ),
-        attn_groups=[_make_group(group_id=0, layer_names=["l.0", "l.1"])],
-        cache_dtype="auto",
-        device=torch.device("cpu"),
-        kernel_block_sizes=[BLOCK_SIZE],
-        tp=False,
-    )
+def test_nhd_backend_uses_default_layout():
+    """NHD backend places layers right after blocks -- default layout."""
+    nb, num_layers = 4, 2
+    kv_caches, groups = _allocate(nb, num_layers, backend=_MockBackend)
 
     assert len(groups) == 1
-    assert not groups[0].tp_layout
-    assert groups[0].tensor.shape == (nb, 2, spec.page_size_bytes)
+    group = groups[0]
+    # NHD backend -- default layout (blocks, layers, page_size)
+    assert group.tensor.shape == (nb, num_layers, group.spec.page_size_bytes)
+
+    expected = (nb, 2, NUM_KV_HEADS, BLOCK_SIZE, HEAD_SIZE)
+    for i in range(num_layers):
+        assert kv_caches[f"l.{i}"].shape == expected

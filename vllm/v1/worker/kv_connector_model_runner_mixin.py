@@ -5,6 +5,7 @@ Define KV connector functionality mixin for model runners.
 """
 
 import copy
+import math
 from collections import defaultdict
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
@@ -48,9 +49,10 @@ class CrossLayerGroup:
     """One contiguous int8 tensor shared by layers with the same page size.
 
     Per-layer views reinterpret the raw bytes as the layer's dtype.
-    When tp_layout is True the tensor has shape
-    (num_blocks, num_kv_heads, num_layers, per_head_page_bytes) so that
-    head-based TP slicing is contiguous.
+    The tensor shape follows the backend's stride order up to the layers
+    dimension:
+    - ordered: (num_blocks, *prefix_dims, num_layers, remaining_bytes)
+    - default: (num_blocks, num_layers, page_size_bytes)
     """
 
     tensor: torch.Tensor
@@ -58,7 +60,6 @@ class CrossLayerGroup:
     page_size_bytes: int
     spec: KVCacheSpec
     backend: type[AttentionBackend]
-    tp_layout: bool = False
 
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
@@ -170,79 +171,102 @@ class KVConnectorModelRunnerMixin:
         return True
 
     @staticmethod
-    def _find_kv_cache_dims(
+    def _cross_layer_group_key(
+        spec: KVCacheSpec,
         backend: type[AttentionBackend],
-        kv_cache_spec: AttentionSpec,
         cache_dtype: CacheDType,
-    ) -> tuple[int, int]:
-        """Find which dims hold num_blocks and num_kv_heads.
+        tensor_idx: int,
+    ) -> tuple:
+        """Compute the grouping key for a layer.
 
-        Probes with sentinel values (same trick as kv_connector/utils.py).
-        Returns (blocks_dim, heads_dim) in the logical shape.
+        Examines the backend's stride order (with layers dimension) to
+        determine how this layer should be grouped:
+
+        - ``("solo", idx)``: blocks is not at physical position 0, so
+          this layer cannot share a cross-layer tensor efficiently.
+        - ``("ordered", prefix_sizes, remaining_bytes)``: blocks is first
+          and heads comes before layers.  ``prefix_sizes`` are the
+          dimension sizes between blocks and layers in physical order.
+          Layers with the same prefix share a tensor shaped
+          ``(num_blocks, *prefix_sizes, num_layers, remaining_bytes)``.
+        - ``("default", page_size_bytes)``: everything else (including
+          non-attention specs).  Layers share a tensor shaped
+          ``(num_blocks, num_layers, page_size_bytes)``.
         """
-        _BLOCKS = 1234
-        _HEADS = 5678
-        shape = backend.get_kv_cache_shape(
-            _BLOCKS,
-            kv_cache_spec.block_size,
-            _HEADS,
-            kv_cache_spec.head_size,
+        if not isinstance(spec, AttentionSpec):
+            return ("default", spec.page_size_bytes)
+
+        try:
+            stride_order_wl = backend.get_kv_cache_stride_order(
+                include_num_layers_dimension=True,
+            )
+            _B, _H = 1234, 5678
+            base_shape = backend.get_kv_cache_shape(
+                _B,
+                spec.block_size,
+                _H,
+                spec.head_size,
+                cache_dtype_str=cache_dtype,
+            )
+            blocks_base = base_shape.index(_B)
+            heads_base = base_shape.index(_H)
+        except (AttributeError, NotImplementedError, ValueError, AssertionError):
+            return ("default", spec.page_size_bytes)
+
+        # With layers prepended, every base dim index shifts up by 1.
+        log_to_phys = {dim: pos for pos, dim in enumerate(stride_order_wl)}
+        blocks_phys = log_to_phys[blocks_base + 1]
+        layers_phys = log_to_phys[0]
+        heads_phys = log_to_phys[heads_base + 1]
+
+        # Blocks must be outermost so one block = one contiguous chunk.
+        if blocks_phys != 0:
+            return ("solo", tensor_idx)
+
+        # Heads after layers means no useful prefix to extract.
+        if heads_phys >= layers_phys:
+            return ("default", spec.page_size_bytes)
+
+        # Heads come before layers -- figure out what sits between
+        # blocks and layers so we can replicate that prefix exactly.
+        actual_base = backend.get_kv_cache_shape(
+            1,
+            spec.block_size,
+            spec.num_kv_heads,
+            spec.head_size,
             cache_dtype_str=cache_dtype,
         )
-        return shape.index(_BLOCKS), shape.index(_HEADS)
-
-    @staticmethod
-    def _per_layer_permutation(
-        stride_order: tuple[int, ...],
-        *extracted_physical_dims: int,
-    ) -> tuple[int, ...]:
-        """Permutation to go from (*extracted_dims, *remaining_physical_dims)
-        back to the backend's logical dim order.
-
-        extracted_physical_dims are the physical positions that were pulled
-        to the front of the tensor, in order.  For default layout pass
-        just (blocks_physical,); for TP layout pass
-        (blocks_physical, heads_physical).
-        """
-        n = len(stride_order)
-        inv_stride = [0] * n
-        for i, j in enumerate(stride_order):
-            inv_stride[j] = i
-
-        extracted = extracted_physical_dims
-        k = len(extracted)
-
-        def phys_to_our(phys_dim: int) -> int:
-            # If this dim was extracted, it sits at its index in the tuple
-            if phys_dim in extracted:
-                return extracted.index(phys_dim)
-            # Otherwise it's after all extracted dims, shifted by
-            # how many extracted dims sit before it in physical order
-            offset = sum(1 for e in extracted if e < phys_dim)
-            return phys_dim - offset + k
-
-        return tuple(phys_to_our(inv_stride[j]) for j in range(n))
+        actual_wl = (1, *actual_base)  # prepend a dummy layers=1
+        prefix_sizes = tuple(
+            actual_wl[stride_order_wl[i]] for i in range(1, layers_phys)
+        )
+        remaining = spec.page_size_bytes // (
+            math.prod(prefix_sizes) if prefix_sizes else 1
+        )
+        return ("ordered", prefix_sizes, remaining)
 
     @staticmethod
     def _create_attention_layer_view(
-        cross_layer_tensor: torch.Tensor,
+        raw: torch.Tensor,
         layer_idx: int,
         num_layers: int,
+        num_blocks: int,
         spec: AttentionSpec,
         backend: type[AttentionBackend],
-        kernel_num_blocks: int,
         kernel_block_size: int,
         cache_dtype: CacheDType,
-        tp: bool = False,
     ) -> torch.Tensor:
-        """Carve one attention layer's view from the cross-layer tensor.
+        """Carve one attention layer's view from the raw int8 buffer.
 
-        When tp is False the input is (knb, num_layers, page_elements).
-        When tp is True the input is (knb, H, num_layers, per_head_elements).
-        Pipeline: view -> slice layer dim -> permute to logical shape.
+        Views the raw buffer following the backend's with-layers physical
+        layout, selects the requested layer, and permutes to the backend's
+        logical shape.
         """
-        logical_shape = backend.get_kv_cache_shape(
-            kernel_num_blocks,
+        npkb = spec.block_size // kernel_block_size
+        knb = num_blocks * npkb
+
+        base_logical = backend.get_kv_cache_shape(
+            knb,
             kernel_block_size,
             spec.num_kv_heads,
             spec.head_size,
@@ -250,39 +274,27 @@ class KVConnectorModelRunnerMixin:
         )
 
         try:
-            stride_order = backend.get_kv_cache_stride_order()
-            assert len(stride_order) == len(logical_shape)
+            stride_order_wl = backend.get_kv_cache_stride_order(
+                include_num_layers_dimension=True,
+            )
         except (AttributeError, NotImplementedError):
-            stride_order = tuple(range(len(logical_shape)))
+            stride_order_wl = tuple(range(len(base_logical) + 1))
 
-        physical_shape = tuple(logical_shape[j] for j in stride_order)
-
-        blocks_logical, heads_logical = KVConnectorModelRunnerMixin._find_kv_cache_dims(
-            backend, spec, cache_dtype
+        logical_wl = (num_layers, *base_logical)
+        physical_wl = tuple(
+            logical_wl[stride_order_wl[i]] for i in range(len(logical_wl))
         )
-        blocks_physical = stride_order[blocks_logical]
 
-        # Dims extracted to the front of the tensor
-        extracted: tuple[int, ...]
-        extracted_values: tuple[int, ...]
-        if tp:
-            heads_physical = stride_order[heads_logical]
-            extracted = (blocks_physical, heads_physical)
-            extracted_values = (kernel_num_blocks, spec.num_kv_heads)
-        else:
-            extracted = (blocks_physical,)
-            extracted_values = (kernel_num_blocks,)
+        typed = raw.view(spec.dtype).view(*physical_wl)
 
-        # Remove extracted dims from physical shape
-        remaining = list(physical_shape)
-        for d in sorted(extracted, reverse=True):
-            del remaining[d]
+        # Select the layer and permute back to base logical order.
+        log_to_phys = {dim: pos for pos, dim in enumerate(stride_order_wl)}
+        layers_phys = log_to_phys[0]
+        layer_slice = typed.select(layers_phys, layer_idx)
 
-        layer_view = cross_layer_tensor.view(*extracted_values, num_layers, *remaining)
-        # Layer dim sits right after the extracted dims
-        layer_slice = layer_view.select(len(extracted), layer_idx)
-        perm = KVConnectorModelRunnerMixin._per_layer_permutation(
-            stride_order, *extracted
+        perm = tuple(
+            log_to_phys[k + 1] - (1 if log_to_phys[k + 1] > layers_phys else 0)
+            for k in range(len(base_logical))
         )
         return layer_slice.permute(*perm)
 
@@ -300,29 +312,35 @@ class KVConnectorModelRunnerMixin:
         We use as_strided so each block's data across layers stays
         contiguous for efficient transfers.
         """
-        page_size_bytes = spec.page_size_bytes
+        page_bytes = spec.page_size_bytes
         state_tensors: list[torch.Tensor] = []
-        storage_offset_bytes = layer_idx * page_size_bytes
+        offset_bytes = layer_idx * page_bytes
 
         for shape, dtype in zip(spec.shapes, spec.dtypes):
-            dtype_size = torch.tensor([], dtype=dtype).element_size()
-            num_elements_per_page = page_size_bytes // dtype_size
-            block_stride = num_layers * num_elements_per_page
+            el = torch.empty((), dtype=dtype).element_size()
+            elements_per_page = page_bytes // el
+            state_elements = math.prod(shape)
 
             target_shape = (num_blocks, *shape)
-            inner_stride = torch.empty(target_shape).stride()
-            target_stride = (block_stride, *inner_stride[1:])
+            inner_strides = []
+            acc = 1
+            for s in reversed(shape):
+                inner_strides.append(acc)
+                acc *= s
+            inner_strides.reverse()
+            target_stride = (num_layers * elements_per_page, *inner_strides)
 
-            assert storage_offset_bytes % dtype_size == 0
+            assert offset_bytes % el == 0
             flat = cross_layer_tensor.view(torch.int8).view(dtype)
-            tensor = torch.as_strided(
-                flat,
-                size=target_shape,
-                stride=target_stride,
-                storage_offset=storage_offset_bytes // dtype_size,
+            state_tensors.append(
+                torch.as_strided(
+                    flat,
+                    size=target_shape,
+                    stride=target_stride,
+                    storage_offset=offset_bytes // el,
+                )
             )
-            state_tensors.append(tensor)
-            storage_offset_bytes += inner_stride[0] * dtype_size
+            offset_bytes += state_elements * el
 
         return state_tensors
 
@@ -333,26 +351,24 @@ class KVConnectorModelRunnerMixin:
         cache_dtype: CacheDType,
         device: torch.device,
         kernel_block_sizes: list[int],
-        tp: bool = False,
     ) -> tuple[
         dict[str, torch.Tensor | list[torch.Tensor]],
         list[CrossLayerGroup],
     ]:
-        """Allocate cross-layer KV caches, one tensor per page_size group.
+        """Allocate cross-layer KV caches, one tensor per group.
 
-        When tp is True, attention layers are laid out as
-        (num_blocks, num_kv_heads, num_layers, per_head_page_bytes) so
-        that head-based TP slicing is contiguous.
-        Otherwise the default layout is
-        (num_blocks, num_layers_in_group, page_size_bytes).
+        Each attention layer is classified via ``_cross_layer_group_key``
+        into one of three categories:
+
+        - **solo**: blocks not at physical position 0 — one layer per group.
+        - **ordered**: blocks first *and* heads before layers — layers with
+          matching stride-order prefix share a tensor shaped
+          ``(num_blocks, *prefix_dims, num_layers, remaining_bytes)``.
+        - **default**: everything else — grouped by ``page_size_bytes``
+          with shape ``(num_blocks, num_layers, page_size_bytes)``.
 
         Assumes use_uniform_kv_cache() returned True.
-
-        Returns (kv_caches, cross_layer_groups) where kv_caches maps
-        layer names to views and cross_layer_groups holds the backing
-        tensors with metadata.
         """
-        # Build layer_name -> (spec, backend, group_id) lookup
         layer_info: dict[str, tuple[KVCacheSpec, type[AttentionBackend], int]] = {}
         for subgroups in attn_groups:
             for attn_group in subgroups:
@@ -363,31 +379,21 @@ class KVConnectorModelRunnerMixin:
                         attn_group.kv_cache_group_id,
                     )
 
-        # Group KVCacheTensors.  When tp is set, attention layers are
-        # grouped by (num_kv_heads, per_head_page_size) so that all layers
-        # in a group share the same H dimension.
-        # Key is either ("tp", H, per_head) or ("default", page_size).
         grouped: dict[tuple, list[tuple[int, Any]]] = defaultdict(list)
         for tensor_idx, kv_tensor in enumerate(kv_cache_config.kv_cache_tensors):
-            spec = layer_info[kv_tensor.shared_by[0]][0]
-            key: tuple
-            if (
-                tp
-                and isinstance(spec, AttentionSpec)
-                and spec.page_size_bytes % spec.num_kv_heads == 0
-            ):
-                per_head = spec.page_size_bytes // spec.num_kv_heads
-                key = ("tp", spec.num_kv_heads, per_head)
-            else:
-                key = ("default", spec.page_size_bytes)
+            spec, backend, _ = layer_info[kv_tensor.shared_by[0]]
+            key = KVConnectorModelRunnerMixin._cross_layer_group_key(
+                spec,
+                backend,
+                cache_dtype,
+                tensor_idx,
+            )
             grouped[key].append((tensor_idx, kv_tensor))
 
-        # Allocate one cross-layer tensor per group
         kv_caches: dict[str, torch.Tensor | list[torch.Tensor]] = {}
         cross_layer_groups: list[CrossLayerGroup] = []
 
         for group_key, members in grouped.items():
-            use_tp_layout = group_key[0] == "tp"
             num_group_layers = len(members)
 
             first_size = members[0][1].size
@@ -402,33 +408,37 @@ class KVConnectorModelRunnerMixin:
             assert first_size % page_size == 0
             num_blocks = first_size // page_size
 
-            # Raw int8 buffer; per-layer views reinterpret as needed
             total_bytes = first_size * num_group_layers
             raw = torch.zeros(total_bytes, dtype=torch.int8, device=device)
 
-            if use_tp_layout:
-                assert isinstance(rep_spec, AttentionSpec)
-                num_kv_heads = rep_spec.num_kv_heads
-                per_head_page = page_size // num_kv_heads
+            if group_key[0] == "ordered":
+                prefix_sizes = group_key[1]
+                remaining = group_key[2]
                 cross_layer_tensor = raw.view(
-                    num_blocks, num_kv_heads, num_group_layers, per_head_page
+                    num_blocks,
+                    *prefix_sizes,
+                    num_group_layers,
+                    remaining,
                 )
             else:
-                cross_layer_tensor = raw.view(num_blocks, num_group_layers, page_size)
+                cross_layer_tensor = raw.view(
+                    num_blocks,
+                    num_group_layers,
+                    page_size,
+                )
 
             logger.info(
-                "Allocating a cross-layer KV cache of shape %s (tp_layout=%s)",
+                "Allocating a cross-layer KV cache of shape %s (group=%s)",
                 cross_layer_tensor.shape,
-                use_tp_layout,
+                group_key[0],
             )
 
-            # Create per-layer views, dispatching by spec type
-            layer_views: list[torch.Tensor | list[torch.Tensor]] = []
+            group_layer_names: list[str] = []
             for local_idx, (_, kv_tensor) in enumerate(members):
                 spec, backend, gid = layer_info[kv_tensor.shared_by[0]]
 
                 if isinstance(spec, MambaSpec):
-                    layer_views.append(
+                    view: torch.Tensor | list[torch.Tensor] = (
                         KVConnectorModelRunnerMixin._create_mamba_layer_views(
                             raw,
                             local_idx,
@@ -438,39 +448,15 @@ class KVConnectorModelRunnerMixin:
                         )
                     )
                 elif isinstance(spec, AttentionSpec):
-                    el = torch.tensor([], dtype=spec.dtype).element_size()
-                    kbs = kernel_block_sizes[gid]
-                    npkb = spec.block_size // kbs
-                    knb = num_blocks * npkb
-
-                    if use_tp_layout:
-                        pe = per_head_page // el // npkb
-                        typed = raw.view(spec.dtype).view(
-                            knb,
-                            spec.num_kv_heads,
-                            num_group_layers,
-                            pe,
-                        )
-                    else:
-                        pe = page_size // el // npkb
-                        typed = raw.view(spec.dtype).view(
-                            knb,
-                            num_group_layers,
-                            pe,
-                        )
-
-                    layer_views.append(
-                        KVConnectorModelRunnerMixin._create_attention_layer_view(
-                            typed,
-                            local_idx,
-                            num_group_layers,
-                            spec,
-                            backend,
-                            knb,
-                            kbs,
-                            cache_dtype,
-                            tp=use_tp_layout,
-                        )
+                    view = KVConnectorModelRunnerMixin._create_attention_layer_view(
+                        raw,
+                        local_idx,
+                        num_group_layers,
+                        num_blocks,
+                        spec,
+                        backend,
+                        kernel_block_sizes[gid],
+                        cache_dtype,
                     )
                 else:
                     raise NotImplementedError(
@@ -478,8 +464,6 @@ class KVConnectorModelRunnerMixin:
                         f"for spec type {type(spec).__name__}"
                     )
 
-            group_layer_names: list[str] = []
-            for (_, kv_tensor), view in zip(members, layer_views):
                 for name in kv_tensor.shared_by:
                     kv_caches[name] = view
                 group_layer_names.extend(kv_tensor.shared_by)
@@ -491,7 +475,6 @@ class KVConnectorModelRunnerMixin:
                     page_size_bytes=page_size,
                     spec=rep_spec,
                     backend=rep_backend,
-                    tp_layout=use_tp_layout,
                 )
             )
 
