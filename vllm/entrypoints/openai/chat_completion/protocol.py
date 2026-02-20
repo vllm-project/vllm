@@ -5,7 +5,6 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
-from dataclasses import replace
 from typing import Annotated, Any, ClassVar, Literal
 
 import torch
@@ -32,6 +31,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ToolCall,
     UsageInfo,
 )
+from vllm.entrypoints.openai.structured_outputs import merge_structured_outputs
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -434,6 +434,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
 
+        structured_outputs = self.structured_outputs
         response_format = self.response_format
         if response_format is not None:
             structured_outputs_kwargs = dict[str, Any]()
@@ -460,10 +461,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
             # If structured outputs wasn't already enabled,
             # we must enable it for these features to work
             if len(structured_outputs_kwargs) > 0:
-                self.structured_outputs = (
-                    StructuredOutputsParams(**structured_outputs_kwargs)
-                    if self.structured_outputs is None
-                    else replace(self.structured_outputs, **structured_outputs_kwargs)
+                structured_outputs = merge_structured_outputs(
+                    structured_outputs, structured_outputs_kwargs
                 )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
@@ -494,7 +493,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
-            structured_outputs=self.structured_outputs,
+            structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
             bad_words=self.bad_words,
             allowed_token_ids=self.allowed_token_ids,

@@ -1,0 +1,42 @@
+[
+  {
+    "role": "assistant",
+    "name": null,
+    "channel": "analysis",
+    "recipient": null,
+    "content_type": null,
+    "content": [
+      "The user wants a Harmony tool call for file_search with query \"work\"."
+    ]
+  },
+  {
+    "role": "assistant",
+    "name": null,
+    "channel": "commentary",
+    "recipient": "functions.file_search",
+    "content_type": "<|constrain|>json",
+    "content": [
+      "{\"query\":\"work\"}"
+    ]
+  },
+  {
+    "role": "tool",
+    "name": "functions.file_search",
+    "channel": "commentary",
+    "recipient": "assistant",
+    "content_type": null,
+    "content": [
+      "{\"results\":[{\"file_id\":\"file-918be6a698e44dee8f5e961a5e225858\",\"filename\":\"https://www.paulgraham.com/greatwork.html\",\"score\":0.0027,\"attributes\":{\"filename\":\"https://www.paulgraham.com/greatwork.html\",\"chunk_id\":\"e916c2d7-de3b-bb5a-e722-9dd672e21f99\",\"document_id\":\"file-918be6a698e44dee8f5e961a5e225858\",\"token_count\":800.0,\"metadata_token_count\":18.0},\"content\":[{\"type\":\"text\",\"text\":\"trimmed result\"}]}]}"
+    ]
+  },
+  {
+    "role": "assistant",
+    "name": null,
+    "channel": "final",
+    "recipient": null,
+    "content_type": null,
+    "content": [
+      "{\"query\":\"work\"}"
+    ]
+  }
+]

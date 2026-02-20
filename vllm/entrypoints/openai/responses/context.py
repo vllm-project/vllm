@@ -3,6 +3,8 @@
 import asyncio
 import contextlib
 import copy
+import importlib
+import inspect
 import json
 import logging
 from abc import ABC, abstractmethod
@@ -15,6 +17,7 @@ from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
 from openai.types.responses.tool import Mcp
+from openai.types.responses.tool import Tool as ResponseTool
 from openai_harmony import Author, Message, Role, StreamState, TextContent
 
 from vllm import envs
@@ -61,6 +64,12 @@ _TOOL_NAME_TO_TYPE_MAP = {
     "container": "container",
 }
 
+# Allowlist of handler modules that can be safely imported.
+# This prevents arbitrary code execution via VLLM_GPT_OSS_FILE_SEARCH_HANDLER.
+# Add your handler module here if needed, for example:
+# "tools.llama_stack_file_search_demo",
+_ALLOWED_FILE_SEARCH_HANDLER_MODULES: set[str] = set()
+
 
 def _map_tool_name_to_tool_type(tool_name: str) -> str:
     if tool_name not in _TOOL_NAME_TO_TYPE_MAP:
@@ -70,6 +79,100 @@ def _map_tool_name_to_tool_type(tool_name: str) -> str:
             f"Available tools: {available_tools}"
         )
     return _TOOL_NAME_TO_TYPE_MAP[tool_name]
+
+
+def _file_search_placeholder_payload() -> dict:
+    return {"results": []}
+
+
+def _load_file_search_handler() -> Callable[[dict], object] | None:
+    handler_path = envs.VLLM_GPT_OSS_FILE_SEARCH_HANDLER
+    if not handler_path:
+        return None
+    if ":" not in handler_path:
+        logger.error(
+            "Invalid VLLM_GPT_OSS_FILE_SEARCH_HANDLER format: %s", handler_path
+        )
+        return None
+    module_path, attr_name = handler_path.split(":", 1)
+
+    # Security check: only allow importing from approved modules
+    if module_path not in _ALLOWED_FILE_SEARCH_HANDLER_MODULES:
+        available_modules = ", ".join(sorted(_ALLOWED_FILE_SEARCH_HANDLER_MODULES))
+        logger.error(
+            "file_search handler module '%s' not in allowlist. Available modules: %s",
+            module_path,
+            available_modules,
+        )
+        return None
+
+    try:
+        module = importlib.import_module(module_path)
+    except Exception:
+        logger.exception("Failed to import file_search handler module: %s", module_path)
+        return None
+    handler = getattr(module, attr_name, None)
+    if not callable(handler):
+        logger.error("file_search handler is not callable: %s", handler_path)
+        return None
+    return handler
+
+
+async def _run_file_search_handler(args: dict) -> dict:
+    handler = _load_file_search_handler()
+    if handler is None:
+        return _file_search_placeholder_payload()
+    try:
+        result = handler(args)
+        if inspect.isawaitable(result):
+            result = await result
+    except Exception:
+        logger.exception("file_search handler raised an exception")
+        return _file_search_placeholder_payload()
+    if not isinstance(result, dict):
+        logger.error("file_search handler returned non-dict: %s", type(result))
+        return _file_search_placeholder_payload()
+    if "results" not in result:
+        result = {**result, "results": []}
+    results = result.get("results")
+    if isinstance(results, list):
+        logger.warning(
+            "file_search handler results: query=%s vector_store_ids=%s count=%d",
+            args.get("query"),
+            args.get("vector_store_ids"),
+            len(results),
+        )
+    else:
+        logger.warning(
+            "file_search handler results: query=%s vector_store_ids=%s count=0",
+            args.get("query"),
+            args.get("vector_store_ids"),
+        )
+    return result
+
+
+def _merge_file_search_defaults(
+    args: dict,
+    tools: list[ResponseTool] | None,
+) -> dict:
+    if not tools:
+        return args
+    merged = dict(args)
+    for tool in tools:
+        if getattr(tool, "type", None) != "file_search":
+            continue
+        for key in (
+            "vector_store_ids",
+            "filters",
+            "max_num_results",
+            "ranking_options",
+        ):
+            if merged.get(key) in (None, [], {}):
+                value = getattr(tool, key, None)
+                if value is not None:
+                    merged[key] = value
+        break
+    return merged
 
 
 class TurnMetrics:
@@ -517,10 +620,12 @@ class HarmonyContext(ConversationContext):
         self,
         messages: list,
         available_tools: list[str],
+        tools: list[ResponseTool] | None = None,
     ):
         self._messages = messages
         self.finish_reason: str | None = None
         self.available_tools = available_tools
+        self.tools = tools or []
         self._tool_sessions: dict[str, ClientSession | Tool] = {}
         self.called_tools: set[str] = set()
 
@@ -669,6 +774,7 @@ class HarmonyContext(ConversationContext):
             recipient.startswith("browser.")
             or recipient.startswith("python")
             or recipient.startswith("container.")
+            or recipient.startswith("functions.file_search")
         )
 
     async def call_tool(self) -> list[Message]:
@@ -689,6 +795,23 @@ class HarmonyContext(ConversationContext):
                 return await self.call_container_tool(
                     self._tool_sessions["container"], last_msg
                 )
+            elif recipient.startswith("functions.file_search"):
+                try:
+                    args = json.loads(last_msg.content[0].text)
+                except json.JSONDecodeError:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                args = _merge_file_search_defaults(args, self.tools)
+                payload = await _run_file_search_handler(args)
+                return [
+                    Message(
+                        author=Author(role=Role.TOOL, name="functions.file_search"),
+                        content=[TextContent(text=json.dumps(payload))],
+                        recipient=Role.ASSISTANT,
+                        channel=last_msg.channel,
+                    )
+                ]
         raise ValueError("No tool call found")
 
     def render_for_completion(self) -> list[int]:
