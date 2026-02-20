@@ -308,16 +308,15 @@ class AdapterLogitsProcessor(LogitsProcessor):
 
         """
         if req_lp := self.new_req_logits_processor(params):
-            if prompt_ids is None:
-                raise ValueError(
-                    "Prompt token ids must be provided if "
-                    "logits processor is applicable to request"
-                )
-            args = (
-                [prompt_ids, output_ids]
-                if (len(inspect.signature(req_lp).parameters) == 3)
-                else [output_ids]
-            )
+            if len(inspect.signature(req_lp).parameters) == 3:
+                if prompt_ids is None:
+                    raise ValueError(
+                        "Prompt token ids are required for this "
+                        "logits processor but were not provided."
+                    )
+                args = [prompt_ids, output_ids]
+            else:
+                args = [output_ids]
             return partial(req_lp, *args)
         return None
 
