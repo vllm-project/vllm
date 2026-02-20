@@ -46,7 +46,7 @@ def _make_manager_with_budgets(budgets: list[int]) -> EncoderCudaGraphManager:
 
 
 # ---------------------------------------------------------------------------
-# _find_budget_graph
+# _find_smallest_fitting_budget_given_tokens
 # ---------------------------------------------------------------------------
 
 class TestFindBudgetGraph:
@@ -71,7 +71,7 @@ class TestFindBudgetGraph:
     ])
     def test_find_budget(self, total_tokens, budgets, expected):
         mgr = _make_manager_with_budgets(budgets)
-        result = mgr._find_budget_graph(total_tokens)
+        result = mgr._find_smallest_fitting_budget_given_tokens(total_tokens)
         assert result == expected
 
     def test_budgets_are_sorted(self):
@@ -79,7 +79,7 @@ class TestFindBudgetGraph:
         mgr = _make_manager_with_budgets([8192, 2048, 4096])
         assert mgr.token_budgets == [2048, 4096, 8192]
         # Budget selection still works correctly after sorting
-        assert mgr._find_budget_graph(3000) == 4096
+        assert mgr._find_smallest_fitting_budget_given_tokens(3000) == 4096
 
 
 # ---------------------------------------------------------------------------

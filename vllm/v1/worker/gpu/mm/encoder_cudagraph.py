@@ -211,7 +211,7 @@ class EncoderCudaGraphManager:
 
         return dummy_pixel_values, grid_config
 
-    def _find_budget_graph(self, total_tokens: int) -> Optional[int]:
+    def _find_smallest_fitting_budget_given_tokens(self, total_tokens: int) -> Optional[int]:
         """Find smallest budget >= total_tokens.
 
         Returns:
@@ -318,7 +318,7 @@ class EncoderCudaGraphManager:
 
         total_tokens = _count_output_tokens(grid_thw_list, spatial_merge_size)
 
-        token_budget = self._find_budget_graph(total_tokens)
+        token_budget = self._find_smallest_fitting_budget_given_tokens(total_tokens)
         if token_budget is None:
             logger.debug(
                 "Encoder CUDA graph fallback to eager: no budget found for %d tokens from %d images",
