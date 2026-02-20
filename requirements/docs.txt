@@ -1,4 +1,4 @@
-mkdocs
+mkdocs<2.0.0
 mkdocs-api-autonav
 mkdocs-material
 mkdocstrings-python
