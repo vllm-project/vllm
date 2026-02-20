@@ -796,6 +796,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building ES MXFP8 grouped kernels as no compatible archs found "
                      "in CUDA target architectures.")
     endif()
+  endif()
 
   # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
