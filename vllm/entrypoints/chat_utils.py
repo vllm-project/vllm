@@ -1396,7 +1396,9 @@ def _parse_chat_message_content_part(
                 "Content part type '%s' is not supported "
                 "in '%s' messages. Only text content is accepted "
                 "for '%s' role messages. Skipping this content part.",
-                label, role, role,
+                label,
+                role,
+                role,
             )
             return None
 

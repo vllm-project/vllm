@@ -2728,6 +2728,7 @@ def test_system_message_warns_on_non_text_content(
     ]
 
     import logging
+
     with caplog.at_level(logging.WARNING, logger="vllm.entrypoints.chat_utils"):
         conversation, _, _ = parse_chat_messages(
             messages,
@@ -2790,6 +2791,7 @@ def test_system_message_warns_on_mm_content_without_type_key(
     ]
 
     import logging
+
     with caplog.at_level(logging.WARNING, logger="vllm.entrypoints.chat_utils"):
         conversation, _, _ = parse_chat_messages(
             messages,
