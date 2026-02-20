@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+import os
 from importlib.util import find_spec
 from types import ModuleType
 
@@ -84,6 +85,16 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
 if flashinfer_comm is not None:
     _FI_WORKSPACE = None
     MiB = 1024 * 1024
+    _AR_RMS_DEBUG_ONESHOT_DECISION = (
+        os.getenv("VLLM_DEBUG_AR_RMS_ONESHOT_DECISION", "0") == "1"
+    )
+    _AR_RMS_FORCE_ONESHOT = os.getenv("VLLM_DEBUG_AR_RMS_FORCE_ONESHOT", "0") == "1"
+    _AR_RMS_FORCE_NO_ONESHOT = (
+        os.getenv("VLLM_DEBUG_AR_RMS_FORCE_NO_ONESHOT", "0") == "1"
+    )
+    _AR_RMS_ONESHOT_DECISION_LOGGED = False
+    _AR_RMS_FORCE_CONFLICT_WARNED = False
+    _AR_RMS_FORCE_NO_ONESHOT_FALLBACK_WARNED = False
 
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
@@ -100,6 +111,8 @@ if flashinfer_comm is not None:
         scale_out: torch.Tensor | None = None,
         scale_factor: torch.Tensor | None = None,
     ) -> None:
+        global _AR_RMS_ONESHOT_DECISION_LOGGED, _AR_RMS_FORCE_CONFLICT_WARNED
+        global _AR_RMS_FORCE_NO_ONESHOT_FALLBACK_WARNED
         num_tokens, hidden_size = allreduce_in.shape
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
@@ -121,6 +134,53 @@ if flashinfer_comm is not None:
         use_oneshot = (
             max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
         )
+        # FlashInfer non-one-shot path requires sequence length > TP size.
+        can_disable_oneshot = num_tokens > world_size
+        if _AR_RMS_FORCE_ONESHOT and _AR_RMS_FORCE_NO_ONESHOT:
+            if not _AR_RMS_FORCE_CONFLICT_WARNED:
+                logger.warning(
+                    "Both VLLM_DEBUG_AR_RMS_FORCE_ONESHOT=1 and "
+                    "VLLM_DEBUG_AR_RMS_FORCE_NO_ONESHOT=1 are set. "
+                    "Prioritizing FORCE_NO_ONESHOT when sequence length allows it."
+                )
+                _AR_RMS_FORCE_CONFLICT_WARNED = True
+            use_oneshot = not can_disable_oneshot
+        elif _AR_RMS_FORCE_NO_ONESHOT:
+            use_oneshot = not can_disable_oneshot
+        elif _AR_RMS_FORCE_ONESHOT:
+            use_oneshot = True
+
+        if (
+            _AR_RMS_FORCE_NO_ONESHOT
+            and not can_disable_oneshot
+            and not _AR_RMS_FORCE_NO_ONESHOT_FALLBACK_WARNED
+        ):
+            logger.warning(
+                "VLLM_DEBUG_AR_RMS_FORCE_NO_ONESHOT=1 requested, but "
+                "sequence length (%d) <= TP size (%d). Falling back to "
+                "oneshot to avoid FlashInfer assertion.",
+                num_tokens,
+                world_size,
+            )
+            _AR_RMS_FORCE_NO_ONESHOT_FALLBACK_WARNED = True
+
+        if _AR_RMS_DEBUG_ONESHOT_DECISION and not _AR_RMS_ONESHOT_DECISION_LOGGED:
+            logger.warning(
+                "AR_RMS_ONESHOT_DECISION rank=%d pattern=%s world_size=%d "
+                "device_capability=%s max_one_shot_size_mb=%s "
+                "num_tokens=%d can_disable_oneshot=%s "
+                "current_tensor_size_bytes=%d use_oneshot=%s",
+                get_tensor_model_parallel_rank(),
+                pattern_code,
+                world_size,
+                device_capability,
+                max_one_shot_size,
+                num_tokens,
+                can_disable_oneshot,
+                current_tensor_size,
+                use_oneshot,
+            )
+            _AR_RMS_ONESHOT_DECISION_LOGGED = True
 
         assert _FI_WORKSPACE is not None, (
             "Flashinfer must be enabled when using flashinfer"
@@ -133,6 +193,7 @@ if flashinfer_comm is not None:
             # as flashinfer does not support rms_norm
             # and allreduce_out together
             residual_out = allreduce_in
+
         # For the sizes that are smaller than the max size,
         # we only use flashinfer one shot allreduce
         flashinfer_comm.allreduce_fusion(
