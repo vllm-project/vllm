@@ -156,15 +156,7 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         )
 
         self.layer_idx = int(prefix.split(sep=".")[-1])
-        quant_config = self.get_quant_config(vllm_config)
         config = config or vllm_config.model_config.hf_config
-
-        do_fusion = getattr(
-            quant_config, "enable_quantization_scaling_fusion", False
-        ) and vllm_config.cache_config.cache_dtype.startswith("fp8")
-        if do_fusion:
-            self.input_layernorm.quant_scaling_from = self.self_attn.qkv_proj
-            self.post_attention_layernorm.quant_scaling_from = self.mlp.gate_up_proj
 
         if getattr(config, "ada_rms_norm_t_cond", False):
             self.ada_rms_norm_t_cond = nn.Sequential(

@@ -15,6 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.tasks import SupportedTask
+from vllm.tracing import instrument
 from vllm.utils.import_utils import resolve_obj_by_qualname
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.engine import ReconfigureDistributedRequest
@@ -84,6 +85,7 @@ class Executor(ABC):
             )
         return executor_class
 
+    @instrument(span_name="Executor init")
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -236,8 +238,8 @@ class Executor(ABC):
     def max_concurrent_batches(self) -> int:
         return 1
 
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start,))
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.collective_rpc("profile", args=(is_start, profile_prefix))
 
     def save_sharded_state(
         self,
@@ -293,6 +295,10 @@ class Executor(ABC):
     def reset_mm_cache(self) -> None:
         """Reset the multi-modal cache in each worker."""
         self.collective_rpc("reset_mm_cache")
+
+    def reset_encoder_cache(self) -> None:
+        """Reset the encoder cache in each worker to clear cached encoder outputs."""
+        self.collective_rpc("reset_encoder_cache")
 
     def sleep(self, level: int = 1):
         if self.is_sleeping:

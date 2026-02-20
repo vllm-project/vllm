@@ -39,6 +39,9 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKer
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
     TritonInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.layers.quantization.kernels.scaled_mm.xpu import (
+    XPUFP8ScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
@@ -71,6 +74,9 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
     PlatformEnum.CPU: [
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUFP8ScaledMMLinearKernel,
     ],
 }
 
@@ -119,7 +125,7 @@ def choose_scaled_mm_linear_kernel(
         config (_KernelConfigT): Description of the linear layer
             to be implemented.
         possible_kernels (dict[PlatformEnum, list[_KernelT]]): A
-            dictionary of platforms and their list list of possible kernels.
+            dictionary of platforms and their list of possible kernels.
         compute_capability (Optional[int], optional): The compute capability of
             the target device, if None uses `current_platform` to get the
             compute capability. Defaults to None.

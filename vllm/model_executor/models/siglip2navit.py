@@ -13,7 +13,7 @@ from transformers.configuration_utils import PretrainedConfig
 
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -582,7 +582,6 @@ class Siglip2VisionTransformer(nn.Module):
         hidden_states = self.embeddings(pixel_values, grid_thws)
 
         last_hidden_state = self.encoder(hidden_states, grid_thws)
-        last_hidden_state = self.post_layernorm(last_hidden_state)
 
         return last_hidden_state
 
