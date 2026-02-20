@@ -323,6 +323,11 @@ class RocmPlatform(Platform):
             return AttentionBackendEnum.ROCM_ATTN.get_path()
 
         if selected_backend == AttentionBackendEnum.ROCM_AITER_FA:
+            if attn_selector_config.has_sink:
+                raise ValueError(
+                    f"The selected backend, {selected_backend.name}, "
+                    "does not support sinks."
+                )
             if on_gfx9():
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
