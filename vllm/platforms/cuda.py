@@ -163,11 +163,121 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
         parallel_config = vllm_config.parallel_config
         model_config = vllm_config.model_config
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+
+        cache_config = vllm_config.cache_config
+        if cache_config and cache_config.block_size is None:
+            cache_config.block_size = 16
+
+        # TODO(lucas): handle this more gracefully
+        # Note: model_config may be None during testing
+        # Note: block_size is initialized in
+        # HybridAttentionMambaModelConfig.verify_and_update_config
+        # for models with both attention and mamba,
+        # and doesn't need to be reinitialized here
+        if (
+            model_config is not None
+            and model_config.use_mla
+            and cache_config.block_size is not None
+        ):
+            use_sparse = hasattr(vllm_config.model_config.hf_config, "index_topk")
+            # If `--attention-config.backend` is not set and we are using MLA,
+            # then we default to FlashMLA backend for non-blackwell GPUs,
+            # else we default to CutlassMLA. For each case, we force the
+            # required block_size.
+            use_flashmla = False
+            use_cutlass_mla = False
+            use_flashinfer_mla = False
+            use_flashmla_sparse = False
+            use_flashinfer_mla_sparse = False
+
+            from vllm.v1.attention.ops.flashmla import is_flashmla_dense_supported
+
+            if vllm_config.attention_config.backend is None:
+                # Default case
+                hf_text_config = model_config.hf_text_config
+                qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
+                if (
+                    cls.is_device_capability_family(100)
+                    and not use_sparse
+                    and qk_nope_head_dim == 128
+                ):
+                    # Blackwell => Force FlashInfer MLA (unless sparse, i.e. DSv3.2)
+                    # and only if qk_nope_head_dim == 128 (kernel constraint)
+                    use_flashinfer_mla = True
+                    # Set the backend in AttentionConfig so it's used during
+                    # backend selection
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.FLASHINFER_MLA
+                    )
+                elif cls.is_device_capability_family(100) and not use_sparse:
+                    # Fall back to CUTLASS_MLA as 2nd priority on Blackwell
+                    use_cutlass_mla = True
+                elif is_flashmla_dense_supported()[0]:
+                    # Non-Blackwell with FlashMLA support
+                    use_flashmla = True
+                else:
+                    # Fallback: will use Triton MLA or other compatible backend
+                    pass
+            else:
+                # Forced case
+                backend = vllm_config.attention_config.backend
+                use_flashmla = backend == AttentionBackendEnum.FLASHMLA
+                use_cutlass_mla = backend == AttentionBackendEnum.CUTLASS_MLA
+                use_flashinfer_mla = backend == AttentionBackendEnum.FLASHINFER_MLA
+                use_flashmla_sparse = backend == AttentionBackendEnum.FLASHMLA_SPARSE
+                use_flashinfer_mla_sparse = (
+                    backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE
+                )
+
+            if (
+                use_flashmla
+                and is_flashmla_dense_supported()[0]
+                and cache_config.block_size % 64 != 0
+            ):
+                cache_config.block_size = 64
+                logger.info("Forcing kv cache block size to 64 for FlashMLA backend.")
+
+            if use_cutlass_mla and cache_config.block_size % 128 != 0:
+                cache_config.block_size = 128
+                logger.info(
+                    "Forcing kv cache block size to 128 for CUTLASS_MLA backend."
+                )
+
+            if (
+                use_flashinfer_mla
+                and cache_config.block_size != 32
+                and cache_config.block_size % 64 != 0
+            ):
+                cache_config.block_size = 64
+                logger.info(
+                    "Forcing kv cache block size to 64 for FlashInferMLA backend."
+                )
+
+            if use_sparse:
+                if not (use_flashmla_sparse or use_flashinfer_mla_sparse):
+                    use_flashmla_sparse = True
+
+                if use_flashmla_sparse and cache_config.block_size != 64:
+                    cache_config.block_size = 64
+                    logger.info(
+                        "Forcing kv cache block size to 64 for FlashMLASparse backend."
+                    )
+                elif use_flashinfer_mla_sparse and cache_config.block_size not in (
+                    32,
+                    64,
+                ):
+                    cache_config.block_size = 64
+                    logger.info(
+                        "Forcing kv cache block size to 64 for FlashInferMLASparse "
+                        "backend."
+                    )
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
@@ -182,49 +292,6 @@ class CudaPlatformBase(Platform):
                 "with multimodal-bidirectional attention."
             )
             scheduler_config.disable_chunked_mm_input = True
-
-    @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        cache_config = vllm_config.cache_config
-        if cache_config.block_size is not None:
-            # User specified --block-size; keep it.
-            return
-
-        model_config = vllm_config.model_config
-        # model_config may be None during testing.
-        # Skip hybrid models — their block_size is managed by
-        # HybridAttentionMambaModelConfig.
-        if model_config is None or model_config.is_hybrid:
-            cache_config.block_size = 16
-            return
-
-        from vllm.config.vllm import (
-            get_layers_from_vllm_config,
-            set_current_vllm_config,
-        )
-        from vllm.model_executor.layers.attention_layer_base import (
-            AttentionLayerBase,
-        )
-
-        attn_layers = get_layers_from_vllm_config(
-            vllm_config,
-            AttentionLayerBase,
-        )
-        if not attn_layers:
-            cache_config.block_size = 16
-            return
-
-        first_layer = next(iter(attn_layers.values()))
-        backend_cls = first_layer.get_attn_backend()
-        with set_current_vllm_config(vllm_config):
-            preferred = backend_cls.get_preferred_block_size(16)
-        if preferred != 16:
-            logger.info(
-                "Setting kv cache block size to %d for %s backend.",
-                preferred,
-                backend_cls.get_name(),
-            )
-        cache_config.block_size = preferred
 
     @classmethod
     def get_current_memory_usage(
@@ -242,10 +309,10 @@ class CudaPlatformBase(Platform):
         num_heads: int | None = None,
     ) -> tuple[
         list[tuple["AttentionBackendEnum", int]],
-        dict["AttentionBackendEnum", tuple[int, list[str]]],
+        dict["AttentionBackendEnum", list[str]],
     ]:
         valid_backends_priorities = []
-        invalid_reasons: dict[AttentionBackendEnum, tuple[int, list[str]]] = {}
+        invalid_reasons = {}
 
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
@@ -262,155 +329,84 @@ class CudaPlatformBase(Platform):
             except ImportError:
                 invalid_reasons_i = ["ImportError"]
             if invalid_reasons_i:
-                invalid_reasons[backend] = (priority, invalid_reasons_i)
+                invalid_reasons[backend] = invalid_reasons_i
             else:
                 valid_backends_priorities.append((backend, priority))
 
         return valid_backends_priorities, invalid_reasons
 
     @classmethod
-    def select_attention_backend(
-        cls,
-        selected_backend: "AttentionBackendEnum | None",
-        attn_selector_config: "AttentionSelectorConfig",
-        device_capability: "DeviceCapability",
-        raise_on_invalid: bool = True,
-        num_heads: int | None = None,
-    ) -> "AttentionBackendEnum | None":
-        """Select the best attention backend for the given configuration.
-
-        Args:
-            selected_backend: User-specified backend, or None for auto-selection
-            attn_selector_config: Configuration for attention selection
-            device_capability: Device capability info
-            raise_on_invalid: If True, raise ValueError when no valid backend
-            num_heads: Number of attention heads per GPU, used for backend
-                priority ordering on Blackwell GPUs
-
-        Returns:
-            The selected backend enum, or None if no valid backend found
-            and raise_on_invalid is False
-        """
-        # First try checking just the selected backend, if there is one.
-        if selected_backend is not None:
-            try:
-                backend_class = selected_backend.get_class()
-                validation_errors = backend_class.validate_configuration(
-                    device_capability=device_capability,
-                    **attn_selector_config._asdict(),
-                )
-            except ImportError:
-                validation_errors = ["ImportError"]
-            if validation_errors:
-                if raise_on_invalid:
-                    raise ValueError(
-                        f"Selected backend {selected_backend} is not valid for "
-                        f"this configuration. Reason: {validation_errors}"
-                    )
-                return None
-            return selected_backend
-
-        # No selected backend, so find the best valid one.
-        valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
-            device_capability=device_capability,
-            attn_selector_config=attn_selector_config,
-            num_heads=num_heads,
-        )
-
-        if len(valid_backends_priorities) == 0:
-            if raise_on_invalid:
-                reasons_str = (
-                    "{"
-                    + ", ".join(
-                        f"{backend.name}: [{', '.join(reasons)}]"
-                        for backend, (_, reasons) in invalid_reasons.items()
-                    )
-                    + "}"
-                )
-                config_str = attn_selector_config.__repr__()
-                raise ValueError(
-                    f"No valid attention backend found for {cls.device_name} "
-                    f"with {config_str}. Reasons: {reasons_str}."
-                )
-            return None
-
-        # Select the one with the highest priority (lowest index).
-        sorted_backends = sorted(valid_backends_priorities, key=lambda x: x[1])
-        chosen_backend, chosen_priority = sorted_backends[0]
-
-        # If the user specified --block-size (but not --attention-backend),
-        # check whether that constraint precluded any higher-priority backends.
-        if attn_selector_config.block_size is not None:
-            excluded = [
-                backend
-                for backend, (priority, reasons) in invalid_reasons.items()
-                if priority < chosen_priority
-                and reasons == ["block_size not supported"]
-            ]
-            if excluded:
-                names = ", ".join(b.name for b in excluded)
-                logger.warning(
-                    "--block-size %d excluded higher-priority backend(s) "
-                    "%s. Using %s instead, which may result in reduced "
-                    "performance. Consider removing --block-size to "
-                    "auto-select the optimal block size.",
-                    attn_selector_config.block_size,
-                    names,
-                    chosen_backend.name,
-                )
-
-        return chosen_backend
-
-    @classmethod
     def get_attn_backend_cls(
         cls,
-        selected_backend: "AttentionBackendEnum | None",
+        selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
         num_heads: int | None = None,
     ) -> str:
         device_capability = cls.get_device_capability()
         assert device_capability is not None
 
-        chosen_backend = cls.select_attention_backend(
-            selected_backend=selected_backend,
+        attn_selector_config = attn_selector_config._replace(block_size=None)
+        # First try checking just the selected backend, if there is one.
+        if selected_backend is not None:
+            try:
+                backend_class = selected_backend.get_class()
+                invalid_reasons = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if invalid_reasons:
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {invalid_reasons}"
+                )
+            else:
+                logger.info("Using %s backend.", selected_backend)
+                return selected_backend.get_path()
+
+        # No selected backend or the selected backend is invalid,
+        # so we try finding a valid backend.
+        valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
+            device_capability=device_capability,
             attn_selector_config=attn_selector_config,
             num_heads=num_heads,
-            device_capability=device_capability,
-            raise_on_invalid=True,
         )
-        assert chosen_backend is not None  # raise_on_invalid=True guarantees this
-
-        # Log the selection
-        if selected_backend is not None:
-            logger.info("Using %s backend.", chosen_backend)
-        else:
-            # Get all valid backends for logging
-            valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
-                device_capability=device_capability,
-                attn_selector_config=attn_selector_config,
-                num_heads=num_heads,
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{backend.name}: [{', '.join(reasons)}]"
+                for backend, reasons in invalid_reasons.items()
             )
-            reasons_str = (
-                "{"
-                + ", ".join(
-                    f"{backend.name}: [{', '.join(reasons)}]"
-                    for backend, (_, reasons) in invalid_reasons.items()
-                )
-                + "}"
-            )
-            config_str = attn_selector_config.__repr__()
-            logger.debug_once(
-                f"Some attention backends are not valid for {cls.device_name} with "
-                f"{config_str}. Reasons: {reasons_str}."
-            )
-            logger.info_once(
-                "Using %s attention backend out of potential backends: %s",
-                chosen_backend.name,
-                tuple(backend.name for backend, _ in valid_backends_priorities),
-                scope="local",
+            + "}"
+        )
+        config_str = attn_selector_config.__repr__()
+        logger.debug_once(
+            f"Some attention backends are not valid for {cls.device_name} with "
+            f"{config_str}. Reasons: {reasons_str}."
+        )
+        if len(valid_backends_priorities) == 0:
+            raise ValueError(
+                f"No valid attention backend found for {cls.device_name} "
+                f"with {config_str}. Reasons: {reasons_str}."
             )
 
-        return chosen_backend.get_path()
+        # We have found some valid backends. Select the one with the
+        # highest priority.
+        sorted_indices = sorted(
+            range(len(valid_backends_priorities)),
+            key=lambda i: valid_backends_priorities[i][1],
+        )
+        selected_index = sorted_indices[0]
+        selected_backend = valid_backends_priorities[selected_index][0]
+        logger.info_once(
+            "Using %s attention backend out of potential backends: %s.",
+            selected_backend.name,
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
+            scope="local",
+        )
+
+        return selected_backend.get_path()
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
