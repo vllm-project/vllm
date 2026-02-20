@@ -608,7 +608,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # without re-splitting graph modules. This reduces overhead during model
     # loading by using reconstruct_serializable_fn_from_mega_artifact.
     "VLLM_USE_MEGA_AOT_ARTIFACT": lambda: os.environ.get(
-        "VLLM_USE_MEGA_AOT_ARTIFACT", "0"
+        "VLLM_USE_MEGA_AOT_ARTIFACT", "1"
     )
     == "1",
     # local rank of the process in the distributed setting, used to determine
