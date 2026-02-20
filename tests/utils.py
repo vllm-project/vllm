@@ -190,7 +190,7 @@ class RemoteOpenAIServer:
             model_loader.download_model(model_config)
 
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 240
+        max_wait_seconds = max_wait_seconds or 360
         self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
 
     def __enter__(self):
