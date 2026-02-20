@@ -35,7 +35,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
     """Pluggable MLA layer which allows OOT backends to add
     custom implementations of the outer MLA layer (including rope & o_proj).
     Note that currently oot platforms can still use CustomOp.register_oot to
-    replace MLA layer entirly, although we use PluggableLayer to register
+    replace MLA layer entirely, although we use PluggableLayer to register
     this layer now.
 
     This class takes positions and hidden_states as input.

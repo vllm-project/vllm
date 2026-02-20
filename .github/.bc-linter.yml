@@ -3,7 +3,7 @@ version: 1
 paths:
 # We temporarily disable globally, and will only enable with `annotations.include`
 # include:
-#   - "vllm/v1/attetion/*.py"
+#   - "vllm/v1/attention/*.py"
 #   - "vllm/v1/core/*.py"
 exclude:
   - "**/*.py"

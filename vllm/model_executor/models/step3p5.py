@@ -351,7 +351,7 @@ class FusedMoEBlock(nn.Module):
         if swiglu_limit not in (None, 0):
             swiglu_limit = float(swiglu_limit)
             assert swiglu_limit == 7.0, (
-                "Swiglu limit in fused moe block only suport 7.0 now."
+                "Swiglu limit in fused moe block only support 7.0 now."
             )
             activation = "swiglustep"
             logger.debug(

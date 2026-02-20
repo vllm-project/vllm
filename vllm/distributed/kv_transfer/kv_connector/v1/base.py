@@ -129,7 +129,7 @@ class KVConnectorRole(enum.Enum):
 class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
     """
     Metadata used for out of band connector handshake between
-    P/D workers. This needs to serializeable.
+    P/D workers. This needs to serializable.
     """
 
     pass

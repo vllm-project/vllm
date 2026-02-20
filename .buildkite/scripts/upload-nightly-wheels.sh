@@ -72,7 +72,7 @@ obj_json="objects.json"
 aws s3api list-objects-v2 --bucket "$BUCKET" --prefix "$SUBPATH/" --delimiter / --output json > "$obj_json"
 mkdir -p "$INDICES_OUTPUT_DIR"
 
-# call script to generate indicies for all existing wheels
+# call script to generate indices for all existing wheels
 # this indices have relative paths that could work as long as it is next to the wheel directory in s3
 # i.e., the wheels are always in s3://vllm-wheels/<commit>/
 # and indices can be placed in /<commit>/, or /nightly/, or /<version>/

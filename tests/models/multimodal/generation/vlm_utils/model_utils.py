@@ -719,7 +719,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         # Convert to tuple or None
         all_hidden_states = tuple(hidden_states_list) if output_hidden_states else None
 
-        # Include hiden_states for compatibility with hidden_states_to_seq_logprobs()
+        # Include hidden_states for compatibility with hidden_states_to_seq_logprobs()
         return BaseModelOutputWithPast(
             last_hidden_state=hidden_states,
             past_key_values=past_key_values,
@@ -1226,7 +1226,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
        dicts (accepting ``url``, ``path``, or ``base64`` audio) rather than
        the standard ``processor(text=, audio=, sampling_rate=)`` interface.
     2. HfRunner.get_inputs cannot handle multi-audio per prompt because it
-       mis-unpacks ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
+       incorrect unpacking ``[(arr1, sr1), (arr2, sr2)]`` via a ``len == 2`` check.
 
     We override ``get_inputs`` to build conversation dicts and call
     ``apply_chat_template`` directly, bypassing both issues. We also wrap

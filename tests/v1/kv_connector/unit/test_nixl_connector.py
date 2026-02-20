@@ -460,9 +460,9 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
 
         # When remote tp_size > local tp_size, handshake with multiple
         # remote ranks.
-        num_hanshakes = 1 if tp_ratio > 0 else -tp_ratio
+        num_handshakes = 1 if tp_ratio > 0 else -tp_ratio
         remote_agents: dict[int, str] = {}
-        for remote_tp_rank in range(num_hanshakes):
+        for remote_tp_rank in range(num_handshakes):
             remote_agent_name = self.add_remote_agent(
                 NixlAgentMetadata(
                     engine_id=self.REMOTE_ENGINE_ID,
@@ -688,7 +688,7 @@ class TestNixlHandshake:
         )
         check_handshake(2)
 
-        # NOTE flexiblity: a second remote with higher number of ranks is
+        # NOTE flexibility: a second remote with higher number of ranks is
         # discovered. This is not a scenario we actively support right now, but
         # the connector allows it.
         worker.REMOTE_ENGINE_ID = "remote_engine_2"
@@ -1766,7 +1766,7 @@ def test_aborted_request_removed_from_worker_in_batch(default_vllm_config, dist_
     req = create_request(request_id=1, do_remote_decode=True, max_tokens=1)
     scheduler.add_request(req)
 
-    # First scheduling pass - examinate build_connector_meta output
+    # First scheduling pass - examine build_connector_meta output
     sched_out = scheduler.schedule()
     kv_meta = sched_out.kv_connector_metadata
     assert kv_meta is not None

@@ -18,7 +18,7 @@ logger = init_logger(__name__)
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):
     """
     Reasoning parser for Ernie45 thinking model.
-    The Ernie45 thinking model ouput format is
+    The Ernie45 thinking model output format is
         abc\n</think>\n\n<response>\ndef\n</response>\n
     or  abc\n</think>\ndef
     """
@@ -73,7 +73,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
         Extract reasoning content from a delta message.
         Handles streaming output where previous + delta = current.
         Uses token IDs for faster processing.
-        The Ernie45 thinking model ouput format is
+        The Ernie45 thinking model output format is
             abc\n</think>\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
         - 'abc' goes to reasoning
@@ -148,7 +148,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.
-        The Ernie45 thinking model ouput format is
+        The Ernie45 thinking model output format is
             abc\n</think>\n\n\n<response>\ndef\n</response>\n
         or  abc\n</think>\ndef
         - 'abc' goes to reasoning

@@ -175,7 +175,7 @@ class DPMetadata:
     # Get the cumulative tokens across sequence parallel ranks.
     # In this case the input to the MoEs will be distributed w.r.t both
     # DP and TP rank.
-    # When sp_size==1, this is just the cummulative num tokens across DP.
+    # When sp_size==1, this is just the cumulative num tokens across DP.
     def cu_tokens_across_sp(self, sp_size: int) -> torch.Tensor:
         num_tokens_across_sp_cpu = (
             self.num_tokens_across_dp_cpu - 1 + sp_size

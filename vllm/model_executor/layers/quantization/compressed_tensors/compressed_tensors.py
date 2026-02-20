@@ -191,7 +191,7 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
-        targetting 'Linear' needs to also match
+        targeting 'Linear' needs to also match
         FusedMoE modules.
         """
         if (
