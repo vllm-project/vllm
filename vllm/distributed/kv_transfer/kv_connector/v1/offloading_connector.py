@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import time
 from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -106,6 +107,14 @@ class OffloadingConnectorStats(KVConnectorStats):
         else:
             self.data[transfer_type_key] = [op]
 
+    def record_request_load_time(self, load_time: float):
+        """Record per-request CPU offload load time for metrics."""
+        # Store under special key for per-request load timing
+        op = OffloadingOperationMetrics(op_size=0, op_time=load_time)
+        if "request_load_time" in self.data:
+            self.data["request_load_time"].append(op)
+        else:
+            self.data["request_load_time"] = [op]
 
 @dataclass
 class OffloadingConnectorMetadata(KVConnectorMetadata):
@@ -214,9 +223,15 @@ class OffloadingConnector(KVConnectorBase_V1):
         return self.connector_scheduler.take_events()
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        if self.connector_worker is None:
-            return None  # We only emit stats from the worker-side
-        return self.connector_worker.get_kv_connector_stats()
+        # Return stats from whichever side this connector represents.
+        # Scheduler-side: returns scheduler stats
+        # Worker-side: returns worker stats
+        # The scheduler aggregates both at scheduler.py:1244-1247.
+        if self.connector_scheduler is not None:
+            return self.connector_scheduler.get_kv_connector_stats()
+        elif self.connector_worker is not None:
+            return self.connector_worker.get_kv_connector_stats()
+        return None
 
     @classmethod
     def build_kv_connector_stats(
@@ -267,6 +282,10 @@ class OffloadingConnectorScheduler:
         # request ID -> set(block hashes being stored/load)
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
+
+        # Track when requests start loading blocks (req_id -> timestamp)
+        self._req_load_start_times: dict[ReqId, float] = {}
+        self.kv_connector_stats = OffloadingConnectorStats()
 
     def _get_block_hashes(
         self,
@@ -398,6 +417,9 @@ class OffloadingConnectorScheduler:
         req_blocks_being_loaded.update(block_hashes)
         self._next_stored_block_idx[request.request_id] = num_blocks
 
+        # Record start time for this request starting to load blocks
+        self._req_load_start_times[request.request_id] = time.monotonic()
+
         if self._blocks_being_loaded is not None:
             self._blocks_being_loaded.update(req_blocks_being_loaded)
 
@@ -507,6 +529,11 @@ class OffloadingConnectorScheduler:
         for req_id in connector_output.finished_recving or []:
             block_hashes = self._reqs_being_loaded.pop(req_id, None)
             if block_hashes:
+                # Record load time for this request finishing its block load
+                if req_id in self._req_load_start_times:
+                    load_time = time.monotonic() - self._req_load_start_times.pop(req_id)
+                    self.kv_connector_stats.record_request_load_time(load_time)
+
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(block_hashes)
                 self.manager.complete_load(block_hashes)
@@ -553,6 +580,18 @@ class OffloadingConnectorScheduler:
                     medium=event.medium,
                     lora_name=None,
                 )
+
+    def get_kv_connector_stats(self) -> KVConnectorStats | None:
+        """
+        Get the KV connector stats collected on the scheduler side.
+        Returns stats and resets the internal accumulator for the next interval.
+        """
+        if self.kv_connector_stats.is_empty():
+            return None
+        # Return current stats and reset for next interval
+        kv_connector_stats = self.kv_connector_stats
+        self.kv_connector_stats = OffloadingConnectorStats()
+        return kv_connector_stats
 
 
 class OffloadingConnectorWorker:
@@ -724,6 +763,8 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
         self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
+        # engine_idx -> (histogram with bounded labels) for per-request load time
+        self.histogram_request_load_time: dict[int, PromMetricT] = {}
         buckets = [  # In bytes
             1e6,
             5e6,
@@ -756,6 +797,21 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             labelnames=labelnames + ["transfer_type"],
         )
 
+        # Per-request CPU offload load time histogram
+        self._histogram_request_load_time = self._histogram_cls(
+            name="vllm:request_cpu_offload_load_time_seconds",
+            documentation=(
+                "Histogram of per-request CPU offload KV cache load time in seconds. "
+                "Measures time from when a request enters WAITING_FOR_REMOTE_KVS "
+                "until all its KV blocks are loaded from CPU memory to GPU."
+            ),
+            buckets=[
+                0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
+                1.0, 2.0, 5.0, 10.0, 20.0, 30.0, 60.0,
+            ],
+            labelnames=labelnames,
+        )
+
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         """
         Observe transfer statistics from the new data structure.
@@ -765,7 +821,24 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         """
 
         for transfer_type, ops in transfer_stats_data.items():
-            # Cache:
+            # Handle per-request load time separately
+            if transfer_type == "request_load_time":
+                # Lazy initialize the histogram with bound labels
+                if engine_idx not in self.histogram_request_load_time:
+                    self.histogram_request_load_time[engine_idx] = (
+                        self._histogram_request_load_time.labels(
+                            *self.per_engine_labelvalues[engine_idx]
+                        )
+                    )
+
+                # Observe per-request load times
+                assert isinstance(ops, list)
+                for op in ops:
+                    assert isinstance(op, dict)
+                    self.histogram_request_load_time[engine_idx].observe(op["op_time"])
+                continue
+
+            # Cache transfer type metrics:
             if (engine_idx, transfer_type) not in self.histogram_transfer_size:
                 self.histogram_transfer_size[(engine_idx, transfer_type)] = (
                     self._histogram_transfer_size.labels(

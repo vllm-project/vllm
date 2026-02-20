@@ -17,6 +17,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
     OffloadingConnectorMetadata,
     OffloadingConnectorStats,
+    OffloadingOperationMetrics,
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
@@ -783,6 +784,64 @@ def test_abort_loading_requests(request_runner):
     assert req_id not in runner.scheduler.requests
 
 
+def test_request_load_time_tracking(request_runner):
+    """Test that per-request load times are tracked during CPU offloading."""
+    offloaded_block_size = 12
+    gpu_block_size = 4
+    num_gpu_blocks = 100
+
+    runner = request_runner(
+        offloaded_block_size=offloaded_block_size,
+        gpu_block_size=gpu_block_size,
+        num_gpu_blocks=num_gpu_blocks,
+    )
+
+    # Store 2 blocks to CPU
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output(block_hashes)
+    )
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_stored_gpu_block_indexes=(0, 1, 2, 3, 4, 5),
+    )
+
+    # Reset prefix cache to force a reload from CPU
+    runner.scheduler.reset_prefix_cache()
+    runner.new_request(token_ids=[0] * offloaded_block_size * 2)
+    runner.manager.lookup.return_value = 2
+    runner.manager.prepare_store.side_effect = (
+        lambda block_hashes: generate_store_output([])
+    )
+
+    # Clear any previous stats before the load test
+    runner.scheduler_connector.get_kv_connector_stats()
+
+    # Run and trigger CPU→GPU load
+    runner.run(
+        decoded_tokens=[EOS_TOKEN_ID],
+        expected_loaded_gpu_block_indexes=(0, 1, 2, 3, 4, 5),
+    )
+
+    # Get stats and verify request load time was recorded
+    stats = runner.scheduler_connector.get_kv_connector_stats()
+    assert stats is not None
+    assert isinstance(stats, OffloadingConnectorStats)
+    assert "request_load_time" in stats.data
+
+    # Verify we have at least one load time recorded
+    request_load_times = stats.data["request_load_time"]
+    assert len(request_load_times) > 0
+
+    # Verify each load time entry has the expected structure
+    for load_time_entry in request_load_times:
+        assert isinstance(load_time_entry, OffloadingOperationMetrics)
+        # op_time should be >= 0 (recorded time in seconds)
+        assert load_time_entry.op_time >= 0
+        # op_size is 0 for request load times (not block-level)
+        assert load_time_entry.op_size == 0
+
+
 class TestOffloadingConnectorStats:
     """Tests for OffloadingConnector stats reconstruction and operations."""
 
@@ -922,3 +981,60 @@ class TestOffloadingConnectorStats:
         # After reset, stats should be empty
         assert offload_connector_stats.is_empty()
         assert len(offload_connector_stats.data) == 0
+
+    def test_request_load_time_reduce(self):
+        """Test that request_load_time stats are properly reduced."""
+        stats = OffloadingConnectorStats(
+            data={
+                "request_load_time": [
+                    {"op_size": 0, "op_time": 0.025},
+                    {"op_size": 0, "op_time": 0.030},
+                    {"op_size": 0, "op_time": 0.050},
+                ],
+            }
+        )
+
+        reduced = stats.reduce()
+
+        assert isinstance(reduced, dict)
+        # Check that request load time stats were reduced
+        assert "request_load_time_total_bytes" in reduced
+        assert "request_load_time_total_time" in reduced
+        assert reduced["request_load_time_total_bytes"] == 0  # op_size is 0 for request metrics
+        assert abs(reduced["request_load_time_total_time"] - 0.105) < 1e-9
+
+    def test_request_load_time_aggregation_with_other_stats(self):
+        """Test that request_load_time aggregates properly with other transfer stats."""
+        stats1 = OffloadingConnectorStats(
+            data={
+                "CPU_to_GPU": [
+                    {"op_size": 16, "op_time": 1.0},
+                ],
+                "request_load_time": [
+                    {"op_size": 0, "op_time": 0.025},
+                    {"op_size": 0, "op_time": 0.030},
+                ],
+            }
+        )
+
+        stats2 = OffloadingConnectorStats(
+            data={
+                "CPU_to_GPU": [
+                    {"op_size": 8, "op_time": 0.5},
+                ],
+                "request_load_time": [
+                    {"op_size": 0, "op_time": 0.040},
+                ],
+            }
+        )
+
+        result = stats1.aggregate(stats2)
+
+        assert result is stats1  # Should return self
+        # Verify both block-level and request-level stats are aggregated
+        assert len(result.data["CPU_to_GPU"]) == 2
+        assert len(result.data["request_load_time"]) == 3
+
+        # Verify the values
+        load_times = [op["op_time"] for op in result.data["request_load_time"]]
+        assert load_times == [0.025, 0.030, 0.040]
