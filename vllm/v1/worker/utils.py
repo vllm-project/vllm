@@ -130,6 +130,9 @@ def add_kv_sharing_layers_to_kv_cache_groups(
             from the KV cache of `shared_kv_cache_layers[layer_name]`.
         kv_cache_groups: The KV cache groups of the model.
     """
+    if not shared_kv_cache_layers:
+        return
+
     layer_to_kv_cache_group: dict[str, KVCacheGroupSpec] = {}
     for kv_cache_group in kv_cache_groups:
         for layer_name in kv_cache_group.layer_names:
