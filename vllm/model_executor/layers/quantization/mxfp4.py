@@ -18,6 +18,7 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
     Mxfp4MoeBackend,
+    convert_to_mxfp4_moe_kernel_format,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
     mxfp4_round_up_hidden_size_and_intermediate_size,
@@ -33,7 +34,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _can_support_mxfp4,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
-from vllm.model_executor.utils import set_weight_attrs
+from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -121,7 +122,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # Initialized in process_weights_after_loading for CUTLASS/SM90 backends
         self.moe_mk: mk.FusedMoEModularKernel | None = None
 
-        # we round up the parameter here to ensure a2a kernel allocate the correct memory size
+        # we round up the parameter here to ensure a2a kernel allocate the correct memory size # noqa: E501
         self.moe.hidden_dim, self.moe.intermediate_size_per_partition = (
             mxfp4_round_up_hidden_size_and_intermediate_size(
                 self.mxfp4_backend,
@@ -153,6 +154,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         mxfp4_block = 32
 
+        # Directly use padded size from config
         self.intermediate_size = intermediate_size_per_partition_after_pad = (
             self.moe.intermediate_size_per_partition
         )
@@ -241,13 +243,37 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w13_bias: torch.Tensor | None = None,
         w2_bias: torch.Tensor | None = None,
     ) -> None:
+        w13, w2, w13_scale, w2_scale, w13_bias, w2_bias = (
+            convert_to_mxfp4_moe_kernel_format(
+                mxfp4_backend=self.mxfp4_backend,
+                layer=layer,
+                w13_weight=w13,
+                w2_weight=w2,
+                w13_weight_scale=w13_scale,
+                w2_weight_scale=w2_scale,
+                w13_bias=w13_bias,
+                w2_bias=w2_bias,
+            )
+        )
+        replace_parameter(layer, "w13_weight", w13)
+        replace_parameter(layer, "w2_weight", w2)
+        replace_parameter(layer, "w13_weight_scale", w13_scale)
+        replace_parameter(layer, "w2_weight_scale", w2_scale)
+        if w13_bias is not None and w2_bias is not None:
+            replace_parameter(layer, "w13_bias", w13_bias)
+            replace_parameter(layer, "w2_bias", w2_bias)
+
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
+        # TRITON_MONILITHIC need configs but can't make mk
+        if (
+            self.moe_quant_config
+            and self.mxfp4_backend != Mxfp4MoeBackend.TRITON_MONOLITHIC
+        ):
             assert self.experts_cls is not None
             self.moe_mk = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
+                mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._maybe_init_expert_routing_tables(),
                 shared_experts=layer.shared_experts,
@@ -271,6 +297,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             w2_bias,
         )
 
+        layer._already_called_process_weights_after_loading = True
+
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
@@ -283,6 +311,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             Mxfp4MoeBackend.TRITON_UNFUSED,
             Mxfp4MoeBackend.TRITON_MONOLITHIC,
         ):
+            assert self.w13_precision_config is not None
+            assert self.w2_precision_config is not None
+
             w1_scale = self.w13_precision_config
             w2_scale = self.w2_precision_config
 
@@ -298,7 +329,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self,
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute: ...
+    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+        raise ValueError(
+            f"{self.__class__.__name__} uses the new modular kernel initialization "
+            "logic. This function should not be called."
+        )
 
     @property
     def is_monolithic(self) -> bool:

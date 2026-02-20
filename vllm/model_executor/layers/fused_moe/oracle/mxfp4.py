@@ -300,12 +300,19 @@ def convert_to_mxfp4_moe_kernel_format(
     layer: torch.nn.Module,
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
+    w13_weight_scale: torch.Tensor,
+    w2_weight_scale: torch.Tensor,
     w13_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     _cache_permute_indices: dict[torch.Size, torch.Tensor] | None = None,
-):
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    type[torch.Tensor] | None,
+    type[torch.Tensor] | None,
+]:
     assert _cache_permute_indices is not None
 
     num_experts = layer.num_experts
@@ -313,6 +320,8 @@ def convert_to_mxfp4_moe_kernel_format(
     hidden_size = layer.hidden_size
 
     sf_block_size = 32  # mxfp4 block size
+
+    assert w13_bias is not None and w2_bias is not None
 
     assert (
         w13_weight.dim() == 3
@@ -349,14 +358,34 @@ def convert_to_mxfp4_moe_kernel_format(
     )
 
     if mxfp4_backend in (Mxfp4MoeBackend.MARLIN, Mxfp4MoeBackend.BATCHED_MARLIN):
-        from vllm.model_executor.layers.quantization.utils.marlin_utils import (
-            get_marlin_input_dtype,
-        )
         from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-            prepare_moe_fp4_layer_for_marlin,
+            prepare_moe_mxfp4_layer_for_marlin,
         )
 
-        prepare_moe_fp4_layer_for_marlin(layer, input_dtype=get_marlin_input_dtype())
+        (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        ) = prepare_moe_mxfp4_layer_for_marlin(
+            layer,
+            w13=w13_weight,
+            w13_scale=w13_weight_scale,
+            w13_bias=w13_bias,
+            w2=w2_weight,
+            w2_scale=w2_weight_scale,
+            w2_bias=w2_bias,
+        )
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
+        )
     elif mxfp4_backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
@@ -379,12 +408,12 @@ def convert_to_mxfp4_moe_kernel_format(
             requires_grad=False,
         )
 
-        w13_weight_scale = layer.w13_weight_scale.data
-        w2_weight_scale = layer.w2_weight_scale.data
-        w13_weight = layer.w13_weight.data
-        w2_weight = layer.w2_weight.data
-        w13_bias = layer.w13_bias.data.to(torch.float32)
-        w2_bias = layer.w2_bias.data.to(torch.float32)
+        w13_weight = w13_weight.data
+        w2_weight = w2_weight.data
+        w13_weight_scale = w13_weight_scale.data
+        w2_weight_scale = w2_weight_scale.data
+        w13_bias = w13_bias.data.to(torch.float32)
+        w2_bias = w2_bias.data.to(torch.float32)
 
         # Swap w1 and w3 as the definition of
         # swiglu is different in the trtllm-gen
@@ -515,37 +544,36 @@ def convert_to_mxfp4_moe_kernel_format(
             )
             .view(torch.float8_e4m3fn)
         )
+        w13_bias = torch.stack(gemm1_bias_shuffled).reshape(num_experts, -1)
+        w2_bias = torch.stack(gemm2_bias_shuffled).reshape(num_experts, -1)
 
-        layer.w13_weight = Parameter(w13_weight, requires_grad=False)
-        layer.w13_weight_scale = Parameter(w13_weight_scale, requires_grad=False)
-        layer.w2_weight = Parameter(w2_weight, requires_grad=False)
-        layer.w2_weight_scale = Parameter(w2_weight_scale, requires_grad=False)
-        layer.w13_bias = Parameter(
-            torch.stack(gemm1_bias_shuffled).reshape(num_experts, -1),
-            requires_grad=False,
+        return (
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            w13_bias,
+            w2_bias,
         )
-        layer.w2_bias = Parameter(
-            torch.stack(gemm2_bias_shuffled).reshape(num_experts, -1),
-            requires_grad=False,
-        )
+
     elif mxfp4_backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
     ):
         # De-interleave and swap for w13 weight, bias, and scales
-        w13_w = layer.w13_weight.data
+        w13_w = w13_weight.data
         gate_w, up_w = w13_w[:, ::2, :], w13_w[:, 1::2, :]
         deinterleaved_w13_w = torch.cat([gate_w, up_w], dim=1)
         w1_w, w3_w = torch.chunk(deinterleaved_w13_w, 2, dim=1)
         w13_weight_swapped = torch.cat([w3_w, w1_w], dim=1)
 
-        w13_b = layer.w13_bias.data.to(torch.float32)
+        w13_b = w13_bias.data.to(torch.float32)
         gate_b, up_b = w13_b[:, ::2], w13_b[:, 1::2]
         deinterleaved_w13_b = torch.cat([gate_b, up_b], dim=1)
         b1, b3 = torch.chunk(deinterleaved_w13_b, 2, dim=-1)
         w13_bias_swapped = torch.cat([b3, b1], dim=-1).to(torch.bfloat16)
 
-        w13_s = layer.w13_weight_scale.data
+        w13_s = w13_weight_scale.data
         gate_s, up_s = w13_s[:, ::2, :], w13_s[:, 1::2, :]
         deinterleaved_w13_s = torch.cat([gate_s, up_s], dim=1)
         s1, s3 = torch.chunk(deinterleaved_w13_s, 2, dim=1)
@@ -559,18 +587,26 @@ def convert_to_mxfp4_moe_kernel_format(
                 w13_scale_swapped.view(torch.uint8)
             ).reshape(orig_shape)
 
-            w2_s = layer.w2_weight_scale.data
+            w2_s = w2_weight_scale.data
             orig_shape = w2_s.shape
             w2_scale_interleaved = block_scale_interleave(
                 w2_s.view(torch.uint8)
             ).reshape(orig_shape)
 
-            layer.w13_weight = Parameter(w13_weight_swapped, requires_grad=False)
-            layer.w13_weight_scale = Parameter(
-                w13_scale_interleaved, requires_grad=False
+            w13_weight = w13_weight_swapped
+            w13_weight_scale = w13_scale_interleaved
+            w13_bias = w13_bias_swapped
+            w2_weight_scale = w2_scale_interleaved
+
+            return (
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+                w13_bias,
+                w2_bias,
             )
-            layer.w13_bias = Parameter(w13_bias_swapped, requires_grad=False)
-            layer.w2_weight_scale = Parameter(w2_scale_interleaved, requires_grad=False)
+
         elif mxfp4_backend == Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16:
 
             def _interleave_mxfp4_cutlass_sm90(w):
@@ -586,18 +622,21 @@ def convert_to_mxfp4_moe_kernel_format(
             w31_scales_interleaved = _interleave_mxfp4_cutlass_sm90(w31_scales)
 
             w2_weight_scale = layer.w2_weight_scale.data
-            w2_scales = w2_weight_scale.to(torch.uint8).view(torch.uint8)
-            w2_scales_interleaved = _interleave_mxfp4_cutlass_sm90(w2_scales)
+            w2_scale = w2_weight_scale.to(torch.uint8).view(torch.uint8)
+            w2_scale_interleaved = _interleave_mxfp4_cutlass_sm90(w2_scale)
 
-            layer.w13_weight = torch.nn.Parameter(
-                torch.cat([w3_w, w1_w], dim=1), requires_grad=False
-            )
-            layer.w13_bias = torch.nn.Parameter(w13_bias_swapped, requires_grad=False)
-            layer.w13_weight_scale = torch.nn.Parameter(
-                w31_scales_interleaved, requires_grad=False
-            )
-            layer.w2_weight_scale = torch.nn.Parameter(
-                w2_scales_interleaved, requires_grad=False
+            w13_weight = torch.cat([w3_w, w1_w], dim=1)
+            w13_bias = w13_bias_swapped
+            w13_weight_scale = w31_scales_interleaved
+            w2_weight_scale = w2_scale_interleaved
+
+            return (
+                w13_weight,
+                w2_weight,
+                w13_weight_scale,
+                w2_weight_scale,
+                w13_bias,
+                w2_bias,
             )
 
     elif mxfp4_backend in (
@@ -633,13 +672,21 @@ def convert_to_mxfp4_moe_kernel_format(
         w2_weight = w2_weight
         del layer.w13_weight
         del layer.w2_weight
-        layer.w13_weight = w13_weight
-        layer.w2_weight = w2_weight
+
+        return w13_weight, w2_weight, w13_scale, w2_scale, w13_bias, w2_bias
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend: {mxfp4_backend}: "
             f"should be one of: {list(Mxfp4MoeBackend)}."
         )
+    return (
+        w13_weight,
+        w2_weight,
+        w13_weight_scale,
+        w2_weight_scale,
+        w13_bias,
+        w2_bias,
+    )
 
 
 def mxfp4_round_up_hidden_size_and_intermediate_size(
