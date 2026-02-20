@@ -345,7 +345,12 @@ class RocmPlatform(Platform):
 
             # Priority 2: Check for AITER MHA (Flash Attention)
             # Only use if explicitly enabled (not just VLLM_ROCM_USE_AITER=1)
-            if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA and on_gfx9():
+            if (
+                envs.VLLM_ROCM_USE_AITER
+                and envs.VLLM_ROCM_USE_AITER_MHA
+                and on_gfx9()
+                and not attn_selector_config.has_sink
+            ):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
 
@@ -365,7 +370,8 @@ class RocmPlatform(Platform):
             if (
                 envs.VLLM_ROCM_USE_AITER
                 and on_gfx9()
-                and envs.VLLM_ROCM_USE_AITER_MHA is not False
+                and envs.VLLM_ROCM_USE_AITER_MHA
+                and not attn_selector_config.has_sink
             ):
                 logger.info("Using Aiter Flash Attention backend.")
                 return AttentionBackendEnum.ROCM_AITER_FA.get_path()
