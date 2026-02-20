@@ -115,9 +115,6 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
 
     def build_attn_metadata(self, batch_size: int) -> CommonAttentionMetadata:
         """Initialize attention metadata."""
-
-        # TODO (Rohan138) reuse utils from vllm/v1/worker/gpu/attn_utils.py
-
         # Create common attn metadata
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
         common_attn_metadata = create_common_attn_metadata(

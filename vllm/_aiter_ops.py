@@ -1529,20 +1529,14 @@ class rocm_aiter_ops:
         key_cache: torch.Tensor,
         value_cache: torch.Tensor,
         layer_slot_mapping: torch.Tensor,
-        kv_cache_dtype: str,
-        fp8_dtype: torch.dtype,
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
         flash_layout: bool,
+        apply_scale: bool,
     ):
         from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
-        is_fp8_kv_cache = kv_cache_dtype.startswith("fp8")
-        if is_fp8_kv_cache:
-            key_cache = key_cache.view(fp8_dtype)
-            value_cache = value_cache.view(fp8_dtype)
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
-
         fused_qk_rope_reshape_and_cache(
             query,
             key,
@@ -1557,7 +1551,7 @@ class rocm_aiter_ops:
             v_scale,
             is_neox,
             flash_layout=flash_layout,
-            apply_scale=is_fp8_kv_cache,
+            apply_scale=apply_scale,
             q_out=query,
             k_out=key,
             output_zeros=False,

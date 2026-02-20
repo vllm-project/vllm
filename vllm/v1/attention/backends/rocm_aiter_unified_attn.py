@@ -227,6 +227,11 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         key_cache, value_cache = kv_cache.unbind(0)
         flash_layout = True
 
+        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+
         rocm_aiter_ops.triton_rope_and_cache(
             query,
             key,
@@ -237,9 +242,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
             key_cache,
             value_cache,
             layer_slot_mapping,
-            self.kv_cache_dtype,
-            self.fp8_dtype,
             layer._k_scale,
             layer._v_scale,
             flash_layout,
+            is_fp8_kv_cache,
         )
