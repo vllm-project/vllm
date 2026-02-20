@@ -121,8 +121,8 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
         return (
             current_platform.is_cuda()
             and current_platform.is_device_capability_family(100)
-            and hasattr(torch.ops._C, "es_sm100_mxfp8_blockscaled_grouped_quant")
-            and hasattr(torch.ops._C, "es_sm100_mxfp8_blockscaled_grouped_mm")
+            and hasattr(torch.ops._C, "mxfp8_experts_quant")
+            and hasattr(torch.ops._C, "cutlass_mxfp8_grouped_mm")
         )
 
     def __init__(self, quant_config: Mxfp8Config, layer: torch.nn.Module):
@@ -291,7 +291,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
             dtype=torch.uint8,
             device=weight.device,
         )
-        ops.es_sm100_mxfp8_blockscaled_grouped_quant(
+        ops.mxfp8_experts_quant(
             flat_weight,
             problem_sizes,
             expert_offsets,
@@ -417,7 +417,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
             dtype=torch.uint8,
             device=device,
         )
-        ops.es_sm100_mxfp8_blockscaled_grouped_quant(
+        ops.mxfp8_experts_quant(
             rep_a,
             problem_sizes1,
             expert_offsets[:-1],
@@ -431,7 +431,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
         )
         # Kernel expects B and B scales in column-major layout.
         # Keep transposed view strides; do not call contiguous() here.
-        ops.es_sm100_mxfp8_blockscaled_grouped_mm(
+        ops.cutlass_mxfp8_grouped_mm(
             rep_a_q,
             layer.w13_weight.transpose(1, 2),
             rep_a1_scales,
@@ -453,7 +453,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
             dtype=torch.uint8,
             device=device,
         )
-        ops.es_sm100_mxfp8_blockscaled_grouped_quant(
+        ops.mxfp8_experts_quant(
             intermediate,
             problem_sizes2,
             expert_offsets[:-1],
@@ -463,7 +463,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
         )
 
         c2 = torch.empty((m_tokens * topk, k_hidden), device=device, dtype=out_dtype)
-        ops.es_sm100_mxfp8_blockscaled_grouped_mm(
+        ops.cutlass_mxfp8_grouped_mm(
             intermediate_q,
             layer.w2_weight.transpose(1, 2),
             rep_a2_scales,
