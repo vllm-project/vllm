@@ -308,12 +308,17 @@ class AdapterLogitsProcessor(LogitsProcessor):
 
         """
         if req_lp := self.new_req_logits_processor(params):
+            if prompt_ids is None:
+                raise ValueError(
+                    "Prompt token ids must be provided if "
+                    "logits processor is applicable to request"
+                )
             args = (
                 [prompt_ids, output_ids]
                 if (len(inspect.signature(req_lp).parameters) == 3)
                 else [output_ids]
             )
-            return partial(req_lp, *args)  # type: ignore[misc]
+            return partial(req_lp, *args)
         return None
 
     def update_state(self, batch_update: BatchUpdate | None):
