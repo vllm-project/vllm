@@ -104,7 +104,7 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
 
-def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend | None:
+def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
     """Map user's MoEBackend to NvFp4MoeBackend."""
     mapping = {
         "cutlass": NvFp4MoeBackend.VLLM_CUTLASS,
@@ -113,7 +113,12 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend | None:
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         "marlin": NvFp4MoeBackend.MARLIN,
     }
-    return mapping.get(runner_backend)
+    if backend := mapping.get(runner_backend):
+        return backend
+    raise ValueError(
+        f"moe_backend='{runner_backend}' is not supported for NvFP4 MoE. "
+        f"Expected one of {list(mapping.keys())}."
+    )
 
 
 def select_nvfp4_moe_backend(
@@ -187,25 +192,18 @@ def select_nvfp4_moe_backend(
     runner_backend = config.moe_parallel_config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_nvfp4_backend(runner_backend)
-        if requested_backend is not None:
-            if requested_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-                supported, reason = is_supported_config_trtllm(
-                    config, weight_key, activation_key, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(requested_backend))
-                    return requested_backend, None
-                raise ValueError(_make_log_unsupported(requested_backend, reason))
+        if requested_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+            supported, reason = is_supported_config_trtllm(
+                config, weight_key, activation_key, activation_format
+            )
+            if supported:
+                logger.info_once(_make_log_backend(requested_backend))
+                return requested_backend, None
+            raise ValueError(_make_log_unsupported(requested_backend, reason))
 
-            return _return_or_raise(
-                requested_backend, config, weight_key, activation_key, activation_format
-            )
-        else:
-            logger.warning(
-                "moe_backend='%s' is not supported for NvFP4 quantization, "
-                "falling back to auto selection.",
-                runner_backend,
-            )
+        return _return_or_raise(
+            requested_backend, config, weight_key, activation_key, activation_format
+        )
 
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP4"):
         if not envs.VLLM_USE_FLASHINFER_MOE_FP4:

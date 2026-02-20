@@ -181,7 +181,7 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown FP8 MoE backend: {backend.value}")
 
 
-def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend | None:
+def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
     """Map user's MoEBackend to Fp8MoeBackend."""
     mapping = {
         "triton": Fp8MoeBackend.TRITON,
@@ -192,7 +192,12 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend | None:
         "marlin": Fp8MoeBackend.MARLIN,
         "aiter": Fp8MoeBackend.AITER,
     }
-    return mapping.get(runner_backend)
+    if backend := mapping.get(runner_backend):
+        return backend
+    raise ValueError(
+        f"moe_backend='{runner_backend}' is not supported for FP8 MoE. "
+        f"Expected one of {list(mapping.keys())}."
+    )
 
 
 def select_fp8_moe_backend(
@@ -261,47 +266,40 @@ def select_fp8_moe_backend(
     runner_backend = config.moe_parallel_config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_fp8_backend(runner_backend)
-        if requested_backend is not None:
-            # For batched activation format, use batched variants if available.
-            if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
-                if requested_backend == Fp8MoeBackend.DEEPGEMM:
-                    requested_backend = Fp8MoeBackend.BATCHED_DEEPGEMM
-                elif requested_backend == Fp8MoeBackend.TRITON:
-                    requested_backend = Fp8MoeBackend.BATCHED_TRITON
-                elif requested_backend == Fp8MoeBackend.VLLM_CUTLASS:
-                    requested_backend = Fp8MoeBackend.BATCHED_VLLM_CUTLASS
+        # For batched activation format, use batched variants if available.
+        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+            if requested_backend == Fp8MoeBackend.DEEPGEMM:
+                requested_backend = Fp8MoeBackend.BATCHED_DEEPGEMM
+            elif requested_backend == Fp8MoeBackend.TRITON:
+                requested_backend = Fp8MoeBackend.BATCHED_TRITON
+            elif requested_backend == Fp8MoeBackend.VLLM_CUTLASS:
+                requested_backend = Fp8MoeBackend.BATCHED_VLLM_CUTLASS
 
-            if (
-                requested_backend
-                in [
-                    Fp8MoeBackend.VLLM_CUTLASS,
-                    Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
-                ]
-                and not allow_vllm_cutlass
-            ):
-                raise ValueError(
-                    "vLLM CUTLASS FP8 MoE backend is disabled for this configuration."
-                )
-
-            # Handle FLASHINFER_TRTLLM specially (no kernel class).
-            if requested_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
-                supported, reason = is_supported_config_trtllm_fp8(
-                    config, weight_key, activation_key, activation_format
-                )
-                if supported:
-                    logger.info_once(_make_log_backend(requested_backend))
-                    return requested_backend, None
-                raise ValueError(_make_log_unsupported(requested_backend, reason))
-
-            return _return_or_raise(
-                requested_backend, config, weight_key, activation_key, activation_format
+        if (
+            requested_backend
+            in [
+                Fp8MoeBackend.VLLM_CUTLASS,
+                Fp8MoeBackend.BATCHED_VLLM_CUTLASS,
+            ]
+            and not allow_vllm_cutlass
+        ):
+            raise ValueError(
+                "vLLM CUTLASS FP8 MoE backend is disabled for this configuration."
             )
-        else:
-            logger.warning(
-                "moe_backend='%s' is not supported for FP8 quantization, "
-                "falling back to auto selection.",
-                runner_backend,
+
+        # Handle FLASHINFER_TRTLLM specially (no kernel class).
+        if requested_backend == Fp8MoeBackend.FLASHINFER_TRTLLM:
+            supported, reason = is_supported_config_trtllm_fp8(
+                config, weight_key, activation_key, activation_format
             )
+            if supported:
+                logger.info_once(_make_log_backend(requested_backend))
+                return requested_backend, None
+            raise ValueError(_make_log_unsupported(requested_backend, reason))
+
+        return _return_or_raise(
+            requested_backend, config, weight_key, activation_key, activation_format
+        )
 
     # Handle explicit FlashInfer FP8 configuration.
     if envs.is_set("VLLM_USE_FLASHINFER_MOE_FP8"):

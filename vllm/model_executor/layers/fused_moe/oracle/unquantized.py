@@ -52,7 +52,7 @@ UNSUPPORTED_BACKEND = [
 ]
 
 
-def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend | None:
+def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend:
     """Map user's MoEBackend to UnquantizedMoeBackend."""
     mapping = {
         "triton": UnquantizedMoeBackend.TRITON,
@@ -60,7 +60,12 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
         "aiter": UnquantizedMoeBackend.AITER,
     }
-    return mapping.get(runner_backend)
+    if backend := mapping.get(runner_backend):
+        return backend
+    raise ValueError(
+        f"moe_backend='{runner_backend}' is not supported for unquantized MoE. "
+        f"Expected one of {list(mapping.keys())}."
+    )
 
 
 def select_unquantized_moe_backend(
@@ -109,33 +114,26 @@ def select_unquantized_moe_backend(
     runner_backend = moe_config.moe_parallel_config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_unquantized_backend(runner_backend)
-        if requested_backend is not None:
-            if requested_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
-                if not flashinfer_trtllm_available:
-                    raise ValueError(
-                        "FlashInfer TRTLLM MoE backend is not available for this "
-                        "configuration."
-                    )
-            elif requested_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
-                if not flashinfer_cutlass_available:
-                    raise ValueError(
-                        "FlashInfer CUTLASS MoE backend is not available for this "
-                        "configuration."
-                    )
-            elif requested_backend == UnquantizedMoeBackend.AITER and not (
-                current_platform.is_rocm() and rocm_aiter_moe_enabled
-            ):
+        if requested_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:
+            if not flashinfer_trtllm_available:
                 raise ValueError(
-                    "ROCm AITer MoE backend is not available for this configuration."
+                    "FlashInfer TRTLLM MoE backend is not available for this "
+                    "configuration."
                 )
-            logger.info_once(_make_log_backend(requested_backend), scope="local")
-            return requested_backend
-        else:
-            logger.warning(
-                "moe_backend='%s' is not supported for unquantized MoE, "
-                "falling back to auto selection.",
-                runner_backend,
+        elif requested_backend == UnquantizedMoeBackend.FLASHINFER_CUTLASS:
+            if not flashinfer_cutlass_available:
+                raise ValueError(
+                    "FlashInfer CUTLASS MoE backend is not available for this "
+                    "configuration."
+                )
+        elif requested_backend == UnquantizedMoeBackend.AITER and not (
+            current_platform.is_rocm() and rocm_aiter_moe_enabled
+        ):
+            raise ValueError(
+                "ROCm AITer MoE backend is not available for this configuration."
             )
+        logger.info_once(_make_log_backend(requested_backend), scope="local")
+        return requested_backend
 
     if current_platform.is_rocm():
         if rocm_aiter_moe_enabled:
