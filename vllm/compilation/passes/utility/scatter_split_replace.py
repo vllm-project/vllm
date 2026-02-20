@@ -34,7 +34,27 @@ logger = init_logger(__name__)
 
 class ScatterSplitReplacementPass(VllmInductorPass):
     """Replace getitem+slice_scatter+split nodes with a single getitem when
-    the inplace subtensor written to by the slice_scatter has no other users."""
+    the inplace subtensor written to by the slice_scatter has no other users.
+
+    Here's an example graph with q_size = 512, kv_size = 64:
+    split_with_sizes_1 = torch.ops.aten.split_with_sizes.default(qkv, (512, 64, 64), -1)
+    at = auto_functionalized(torch.ops._C.rotary_embedding.default(positions, q, k))
+    q = operator.getitem(at, 1)
+    k = operator.getitem(at, 2)
+    torch.ops.aten.slice_scatter.default(qkv, q, [0, 512], -1)
+    torch.ops.aten.slice_scatter.default(qkv, k, [512, 512 + 64], -1)
+    split_with_sizes_2 = torch.ops.aten.split_with_sizes.default(qkv, (512, 64, 64), -1)
+    q = operator.getitem(split_with_sizes_2, 0)
+    k = operator.getitem(split_with_sizes_2, 1)
+    v = operator.getitem(split_with_sizes_2, 2)
+
+    After this pass, this sequence of nodes is replaced with:
+    split_with_sizes_1 = torch.ops.aten.split_with_sizes.default(qkv, (512, 64, 64), -1)
+    at = auto_functionalized(torch.ops._C.rotary_embedding.default(positions, q, k))
+    q = operator.getitem(at, 1)
+    k = operator.getitem(at, 2)
+    v = operator.getitem(split_with_sizes_1, 2)
+    """
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
