@@ -541,20 +541,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
-        # Sparse MLA impls only support forward_mqa (decode-style attention)
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
 
-        if is_sparse_impl:
-            num_mqa_tokens = q.size(0)
-            num_mha_tokens = 0
-        else:
-            assert (
-                attn_metadata.num_decodes is not None
-                and attn_metadata.num_prefills is not None
-                and attn_metadata.num_decode_tokens is not None
-            )
-            num_mqa_tokens = attn_metadata.num_decode_tokens
-            num_mha_tokens = q.size(0) - num_mqa_tokens
+        assert (
+            attn_metadata.num_decodes is not None
+            and attn_metadata.num_prefills is not None
+            and attn_metadata.num_decode_tokens is not None
+        )
+        num_mqa_tokens = attn_metadata.num_decode_tokens
+        num_mha_tokens = q.size(0) - num_mqa_tokens
 
         if num_mha_tokens > 0:
             self.impl.forward_mha(
@@ -1156,8 +1151,6 @@ def is_deepseek_r1_mla_compatible(vllm_config: VllmConfig) -> bool:
 
 @functools.cache
 def use_flashinfer_prefill() -> bool:
-    # For blackwell default to flashinfer prefill if it's available since
-    # it is faster than FA2.
     from vllm.config import get_current_vllm_config
 
     vllm_config = get_current_vllm_config()
@@ -2018,7 +2011,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             # RoCM and the latter has an additional parameter to control
             # FA2 vs FA3
             self.flash_attn_varlen_func = flash_attn_varlen_func
-            self.vllm_flash_attn_version = get_flash_attn_version()
+            self.vllm_flash_attn_version = get_flash_attn_version(
+                head_size=self.qk_head_dim
+            )
             if self.vllm_flash_attn_version is not None:
                 self.flash_attn_varlen_func = functools.partial(
                     flash_attn_varlen_func, fa_version=self.vllm_flash_attn_version
@@ -2026,13 +2021,16 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
             # For MLA the v head dim is smaller than qk head dim so we pad out
             # v with 0s to match the qk head dim for attention backends that do
-            # not support different headdims
-            # We don't need to pad V if we are on a hopper system with FA3
+            # not support different headdims.
+            # FA3 on Hopper (SM90) and FA4 natively handle diff headdims.
             device_capability = current_platform.get_device_capability()
             self._pad_v = self.vllm_flash_attn_version is None or not (
-                self.vllm_flash_attn_version == 3
-                and device_capability is not None
-                and device_capability[0] == 9
+                (
+                    self.vllm_flash_attn_version == 3
+                    and device_capability is not None
+                    and device_capability[0] == 9
+                )
+                or self.vllm_flash_attn_version == 4
             )
 
         self.dcp_world_size: int = -1
