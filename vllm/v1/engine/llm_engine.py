@@ -77,7 +77,7 @@ class LLMEngine:
             parallel_config.data_parallel_size > 1
             and executor_backend == "external_launcher"
         )
-        # important: init dp group before init the engine_core
+        # important: init dp group before init the engine_core_client
         # In the decoupled engine case this is handled in EngineCoreProc.
         if (
             not multiprocess_mode
