@@ -498,6 +498,11 @@ class _ModuleOffloader:
                 gpu_buffer = offloader._gpu_buffer
                 assert cpu_storage is not None, "CPU storage not initialized"
                 assert gpu_buffer is not None, "GPU buffer not assigned"
+                assert not is_pin_memory_available() or cpu_storage.is_pinned(), \
+                    f"CPU storage for {name} is not pinned! " \
+                    "non_blocking=True H2D copy from non-pinned memory " \
+                    "causes stream synchronization that breaks " \
+                    "event-based fork synchronization."
                 gpu_buffer.copy_(cpu_storage, non_blocking=True)
 
         # Record completion event for _wait_for_layer to use
@@ -599,6 +604,40 @@ class _CpuParamOffloader(_BaseParamOffloader):
         # and frees GPU memory when the original GPU tensor is garbage collected
         param.data = self._cpu_storage
 
+    def _update_cpu_storage_from_param(self) -> None:
+        """Update _cpu_storage from current param.data, ensuring pinned memory.
+
+        After process_weights_after_loading, device_loading_context creates
+        non-pinned CPU tensors via `p.data = p.data.to("cpu")`. Using
+        non-pinned memory with `copy_(src, non_blocking=True)` causes CUDA to
+        perform a stream synchronization before the copy, breaking the
+        event-based fork synchronization and potentially allowing the copy
+        to overwrite the GPU buffer while the compute stream still reads it.
+
+        This method ensures _cpu_storage always uses pinned memory when
+        available, re-pinning if necessary.
+        """
+        param = self._param
+
+        if param.data.device.type == "cpu":
+            if is_pin_memory_available() and not param.data.is_pinned():
+                pinned = torch.empty_strided(
+                    size=param.data.size(),
+                    stride=param.data.stride(),
+                    dtype=param.data.dtype,
+                    layout=param.data.layout,
+                    device="cpu",
+                    pin_memory=True,
+                )
+                pinned.copy_(param.data)
+                self._cpu_storage = pinned
+            else:
+                self._cpu_storage = param.data
+        else:
+            # param.data is on GPU - copy to existing CPU storage
+            assert self._cpu_storage is not None
+            self._cpu_storage.copy_(param.data)
+
     def assign_static_buffer(self, gpu_buffer: torch.Tensor) -> None:
         """Point parameter data to GPU static buffer.
 
@@ -622,12 +661,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         # 1. process_weights_after_loading may transform weights (quantization)
         # 2. device_loading_context creates NEW CPU tensors when moving back
         # 3. Our old _cpu_storage would have pre-processed or stale data
-        if param.data.device.type == "cpu":
-            # param.data is already on CPU - use it as our CPU storage
-            self._cpu_storage = param.data
-        else:
-            # param.data is on GPU - copy to our CPU storage
-            self._cpu_storage.copy_(param.data)
+        self._update_cpu_storage_from_param()
 
         # Store reference to GPU buffer for use in start_onload
         self._gpu_buffer = gpu_buffer
@@ -644,15 +678,7 @@ class _CpuParamOffloader(_BaseParamOffloader):
         2. device_loading_context creates NEW CPU tensors when moving back
         3. Our old _cpu_storage would have pre-processed or stale data
         """
-        param = self._param
-
-        if param.data.device.type == "cpu":
-            # param.data is already on CPU - use it as our CPU storage
-            self._cpu_storage = param.data
-        else:
-            # param.data is on GPU - copy to existing CPU storage
-            assert self._cpu_storage is not None
-            self._cpu_storage.copy_(param.data)
+        self._update_cpu_storage_from_param()
 
     def post_init(self):
         """No-op: offloading done in offload_to_cpu/assign_static_buffer."""
