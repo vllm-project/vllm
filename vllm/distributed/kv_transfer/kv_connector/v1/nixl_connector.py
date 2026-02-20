@@ -209,6 +209,7 @@ class RemoteMeta:
     port: int
     engine_id: str
     request_id: str
+    dcp_size: int = 1
 
 
 @dataclass
@@ -263,6 +264,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             request_id=kv_transfer_params["remote_request_id"],
             host=kv_transfer_params["remote_host"],
             port=kv_transfer_params["remote_port"],
+            dcp_size=kv_transfer_params.get("remote_dcp_size", 1),
         )
         self.reqs_to_recv[request_id] = req
 
@@ -776,6 +778,7 @@ class NixlConnectorScheduler:
             remote_host=self.side_channel_host,
             remote_port=self.side_channel_port,
             tp_size=self.vllm_config.parallel_config.tensor_parallel_size,
+            remote_dcp_size=self.vllm_config.parallel_config.decode_context_parallel_size,
         )
 
 
@@ -886,7 +889,7 @@ class NixlConnectorWorker:
         self.src_xfer_side_handle: int = 0
         self.src_xfer_side_handles: dict[int, int] = {}
         # Map of engine_id -> nixl_prepped_dlist_handle (int)].
-        self.dst_xfer_side_handles: dict[EngineId, int] = {}
+        self.dst_xfer_side_handles: dict[tuple[EngineId, int] | EngineId, int] = {}
 
         # Map of engine_id -> num_blocks. All ranks in the same deployment will
         # have the same number of blocks.
@@ -952,6 +955,7 @@ class NixlConnectorWorker:
 
         self._tp_size: dict[EngineId, int] = {self.engine_id: self.world_size}
         self._block_size: dict[EngineId, int] = {self.engine_id: self.block_size}
+        self._dcp_size: dict[EngineId, int] = {self.engine_id: 1}
         # With heterogeneous TP, P must wait for all assigned D TP workers to
         # finish reading before safely freeing the blocks.
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
@@ -962,6 +966,7 @@ class NixlConnectorWorker:
             engine_id=self.engine_id,
             remote_tp_size=self._tp_size,  # shared state
             remote_block_size=self._block_size,  # shared state
+            remote_dcp_size=self._dcp_size,  # shared state
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=backend,
@@ -975,105 +980,117 @@ class NixlConnectorWorker:
         port: int,
         remote_tp_size: int,
         expected_engine_id: str,
+        remote_dcp_size: int = 1,
     ) -> dict[int, str]:
-        """Do a NIXL handshake with a remote instance."""
+        """Do a NIXL handshake with a remote instance.
+
+        With DCP, each decode worker handshakes with all DCP ranks that
+        hold blocks for its KV head group. Without DCP (dcp_size=1),
+        behavior is unchanged — one handshake with one remote rank.
+        """
 
         start_time = time.perf_counter()
 
-        # NOTE(rob): we need each rank to have a unique port. This is
-        # a hack to keep us moving. We will switch when moving to etcd
-        # or where we have a single ZMQ socket in the scheduler.
 
-        # Handshake only with the remote TP rank that current local rank will
-        # pull from. With homogeneous TP it happens to be the same rank_i.
-        p_remote_rank = self.kv_topo.get_target_remote_rank(remote_tp_size)
-        path = make_zmq_path("tcp", host, port)
-        logger.debug(
-            "Querying metadata on path: %s at remote tp rank %s", path, p_remote_rank
+        # Base remote rank (KV group index) this decode worker reads from.
+        # With DCP, this is the DCP group index, not the raw TP rank.
+        p_remote_rank = self.kv_topo.get_target_remote_rank(
+            remote_tp_size, remote_dcp_size
         )
 
-        # Send query for the request.
-        with zmq_ctx(zmq.REQ, path) as sock:
-            msg = msgspec.msgpack.encode((GET_META_MSG, p_remote_rank))
-            # Set receive timeout to 5 seconds to avoid hanging on dead server
-            sock.setsockopt(zmq.RCVTIMEO, 5000)  # milliseconds
-            sock.send(msg)
-            handshake_bytes = sock.recv()
+        # With DCP, we need to handshake with all DCP ranks in our group.
+        # Assume DCP ranks are contiguous: [p_remote_rank * dcp_size, ...,
+        #                             p_remote_rank * dcp_size + dcp_size - 1]
+        if remote_dcp_size > 1:
+            dcp_base = p_remote_rank * remote_dcp_size
+            remote_ranks = [dcp_base + d for d in range(remote_dcp_size)]
+        else:
+            remote_ranks = [p_remote_rank]
 
-            # Decode handshake payload to get compatibility hash
-            handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
-            try:
-                handshake_payload = handshake_decoder.decode(handshake_bytes)
-            except (msgspec.DecodeError, msgspec.ValidationError) as e:
-                raise RuntimeError(
-                    f"Failed to decode NixlHandshakePayload. This likely indicates "
-                    f"an incompatibility between connector version. Error: {e}"
-                ) from e
+        path = make_zmq_path("tcp", host, port)
+        result: dict[int, str] = {}
 
-            got_metadata_time = time.perf_counter()
+        for p_rank in remote_ranks:
             logger.debug(
-                "NIXL handshake: get metadata took: %s", got_metadata_time - start_time
+                "Querying metadata on path: %s at remote tp rank %s",
+                path, p_rank,
             )
 
-            # Check compatibility hash BEFORE decoding agent metadata
-            if (
-                self.enforce_compat_hash
-                and handshake_payload.compatibility_hash != self.compat_hash
-            ):
-                raise RuntimeError(
-                    f"NIXL compatibility hash mismatch. "
-                    f"Local: {self.compat_hash}, "
-                    f"Remote: {handshake_payload.compatibility_hash}. "
-                    f"Prefill and decode instances have incompatible configurations. "
-                    f"This may be due to: different vLLM versions, models, dtypes, "
-                    f"KV cache layouts, attention backends, etc. "
-                    f"Both instances must use identical configurations."
-                    f"Disable this check using "
-                    f'--kv-transfer-config \'{{"kv_connector_extra_config": '
-                    f'{{"enforce_handshake_compat": false}}}}\''
-                )
+            with zmq_ctx(zmq.REQ, path) as sock:
+                msg = msgspec.msgpack.encode((GET_META_MSG, p_rank))
+                sock.setsockopt(zmq.RCVTIMEO, 5000)
+                sock.send(msg)
+                handshake_bytes = sock.recv()
 
+                handshake_decoder = msgspec.msgpack.Decoder(NixlHandshakePayload)
+                try:
+                    handshake_payload = handshake_decoder.decode(handshake_bytes)
+                except (msgspec.DecodeError, msgspec.ValidationError) as e:
+                    raise RuntimeError(
+                        f"Failed to decode NixlHandshakePayload. This likely "
+                        f"indicates an incompatibility between connector "
+                        f"version. Error: {e}"
+                    ) from e
+
+                if (
+                    self.enforce_compat_hash
+                    and handshake_payload.compatibility_hash != self.compat_hash
+                ):
+                    raise RuntimeError(
+                        f"NIXL compatibility hash mismatch. "
+                        f"Local: {self.compat_hash}, "
+                        f"Remote: {handshake_payload.compatibility_hash}. "
+                        f"Prefill and decode instances have incompatible "
+                        f"configurations. "
+                        f"This may be due to: different vLLM versions, models,"
+                        f" dtypes, KV cache layouts, attention backends, etc. "
+                        f"Both instances must use identical configurations."
+                        f"Disable this check using "
+                        f'--kv-transfer-config \'{{"kv_connector_extra_config'
+                        f'": {{"enforce_handshake_compat": false}}}}\''
+                    )
+
+                metadata_decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
+                try:
+                    metadata = metadata_decoder.decode(
+                        handshake_payload.agent_metadata_bytes
+                    )
+                except (msgspec.DecodeError, msgspec.ValidationError) as e:
+                    raise RuntimeError(
+                        f"Failed to decode NixlAgentMetadata. Error: {e}"
+                    ) from e
+
+                if metadata.engine_id != expected_engine_id:
+                    raise RuntimeError(
+                        f"Remote NIXL agent engine ID mismatch. "
+                        f"Expected {expected_engine_id},"
+                        f"received {metadata.engine_id}."
+                    )
+
+                assert metadata.block_size <= self.block_size, (
+                    "nP > nD is not supported yet."
+                )
+                remote_agent_name = self.add_remote_agent(
+                    metadata, p_rank, remote_tp_size, remote_dcp_size
+                )
+                result[p_rank] = remote_agent_name
+
+        if remote_dcp_size > 1:
             logger.info(
-                "NIXL compatibility check passed (hash: %s)",
-                handshake_payload.compatibility_hash,
+                "NIXL DCP handshake: connected to %d DCP ranks %s",
+                remote_dcp_size, list(result.keys()),
             )
 
-            # Decode agent metadata
-            metadata_decoder = msgspec.msgpack.Decoder(NixlAgentMetadata)
-            try:
-                metadata = metadata_decoder.decode(
-                    handshake_payload.agent_metadata_bytes
-                )
-            except (msgspec.DecodeError, msgspec.ValidationError) as e:
-                # This should not happen if hash matched
-                raise RuntimeError(
-                    f"Failed to decode NixlAgentMetadata. Error: {e}"
-                ) from e
+        logger.info(
+            "NIXL compatibility check passed (hash: %s)",
+            self.compat_hash,
+        )
+        logger.debug(
+            "NIXL handshake took: %s",
+            time.perf_counter() - start_time,
+        )
 
-            # Ensure engine id matches.
-            if metadata.engine_id != expected_engine_id:
-                raise RuntimeError(
-                    f"Remote NIXL agent engine ID mismatch. "
-                    f"Expected {expected_engine_id},"
-                    f"received {metadata.engine_id}."
-                )
-
-            # Register Remote agent.
-            assert metadata.block_size <= self.block_size, (
-                "nP > nD is not supported yet."
-            )
-            remote_agent_name = self.add_remote_agent(
-                metadata, p_remote_rank, remote_tp_size
-            )
-
-            setup_agent_time = time.perf_counter()
-            logger.debug(
-                "NIXL handshake: add agent took: %s",
-                setup_agent_time - got_metadata_time,
-            )
-
-        # Remote rank -> agent name.
-        return {p_remote_rank: remote_agent_name}
+        return result
 
     def initialize_host_xfer_buffer(self, kv_caches: dict[str, torch.Tensor]) -> None:
         """
@@ -1144,6 +1161,7 @@ class NixlConnectorWorker:
                 meta.remote.port,
                 meta.tp_size,
                 remote_engine_id,
+                meta.remote.dcp_size,
             )
             self._handshake_futures[remote_engine_id] = fut
 
@@ -1414,6 +1432,7 @@ class NixlConnectorWorker:
         nixl_agent_meta: NixlAgentMetadata,
         remote_tp_rank: int = 0,
         remote_tp_size: int = 1,
+        remote_dcp_size: int = 1,
     ) -> str:
         """
         Add the remote NIXL agent and prepare the descriptors for reading cache
@@ -1469,6 +1488,8 @@ class NixlConnectorWorker:
             self._tp_size[engine_id] = remote_tp_size
         if engine_id not in self._block_size:
             self._block_size[engine_id] = nixl_agent_meta.block_size
+        if engine_id not in self._dcp_size:
+            self._dcp_size[engine_id] = remote_dcp_size
 
         remote_agent_name = self.nixl_wrapper.add_remote_agent(
             nixl_agent_meta.agent_metadata
@@ -1546,13 +1567,15 @@ class NixlConnectorWorker:
 
         # Register with NIXL.
         descs = self.nixl_wrapper.get_xfer_descs(blocks_data, self.nixl_memory_type)
-        self.dst_xfer_side_handles[engine_id] = self.nixl_wrapper.prep_xfer_dlist(
-            remote_agent_name, descs
+        # Key by (engine_id, remote_tp_rank) to support DCP where we
+        # connect to multiple remote ranks for the same engine.
+        self.dst_xfer_side_handles[(engine_id, remote_tp_rank)] = (
+            self.nixl_wrapper.prep_xfer_dlist(remote_agent_name, descs)
         )
 
         if block_size_ratio > 1:
             # when prefill with smaller block_size, we need to init a
-            # new handler with same block_len to match
+            # new handler with same block_len to matc
             self.src_xfer_side_handles[nixl_agent_meta.block_size] = (
                 self.register_local_xfer_handler(nixl_agent_meta.block_size)
             )
@@ -1987,13 +2010,59 @@ class NixlConnectorWorker:
             meta.remote.engine_id,
             req_id,
         )
-        self._read_blocks(
-            request_id=req_id,
-            dst_engine_id=meta.remote.engine_id,
-            remote_request_id=meta.remote.request_id,
-            local_block_ids=meta.local_physical_block_ids,
-            remote_block_ids=meta.remote.block_ids,
-        )
+        remote_dcp_size = meta.remote.dcp_size
+        if remote_dcp_size <= 1:
+            # Standard non-DCP path: single transfer from one remote rank.
+            self._read_blocks(
+                request_id=req_id,
+                dst_engine_id=meta.remote.engine_id,
+                remote_request_id=meta.remote.request_id,
+                local_block_ids=meta.local_physical_block_ids,
+                remote_block_ids=meta.remote.block_ids,
+            )
+        else:
+            # DCP path (interleave_size == block_size):
+            # Each remote block_id is a "virtual block" covering
+            # dcp_size physical blocks (one per DCP rank).
+            # The prefill scheduler inflates block_size by dcp_size,
+            # so each remote block_id maps to the same physical
+            # block_id on every DCP rank, each holding block_size
+            # tokens.
+            #
+            # Example: remote_block_ids=[B0,B1], dcp=2, block_size=16
+            #   DCP rank 0: block B0 has tokens 0-15,  B1 has 32-47
+            #   DCP rank 1: block B0 has tokens 16-31, B1 has 48-63
+            #   local_block_ids=[L0,L1,L2,L3] (4 blocks of 16 tokens)
+            #   DCP rank 0 → local [L0, L2], remote [B0, B1]
+            #   DCP rank 1 → local [L1, L3], remote [B0, B1]
+            p_base_rank = self.kv_topo.get_target_remote_rank(
+                meta.tp_size, remote_dcp_size
+            )
+            num_local = len(meta.local_physical_block_ids)
+            num_remote = len(meta.remote.block_ids)
+            for dcp_rank in range(remote_dcp_size):
+                remote_tp_rank = p_base_rank * remote_dcp_size + dcp_rank
+                # Each DCP rank holds data for every remote block.
+                # Local blocks are interleaved: block[i*dcp+d] gets
+                # data from remote block[i] on DCP rank d.
+                rank_local_ids = []
+                rank_remote_ids = []
+                for i in range(num_remote):
+                    local_idx = i * remote_dcp_size + dcp_rank
+                    if local_idx < num_local:
+                        rank_local_ids.append(
+                            meta.local_physical_block_ids[local_idx])
+                        rank_remote_ids.append(meta.remote.block_ids[i])
+                if not rank_remote_ids:
+                    continue
+                self._read_blocks(
+                    request_id=req_id,
+                    dst_engine_id=meta.remote.engine_id,
+                    remote_request_id=meta.remote.request_id,
+                    local_block_ids=rank_local_ids,
+                    remote_block_ids=rank_remote_ids,
+                    remote_tp_rank=remote_tp_rank,
+                )
 
     def _read_blocks(
         self,
@@ -2002,6 +2071,7 @@ class NixlConnectorWorker:
         dst_engine_id: str,
         request_id: str,
         remote_request_id: str,
+        remote_tp_rank: int | None = None,
     ):
         block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
         if block_size_ratio > 1:
@@ -2040,9 +2110,12 @@ class NixlConnectorWorker:
         # just notify P worker that we have the blocks we need.
         num_local_blocks = len(local_block_ids)
         if num_local_blocks == 0:
-            remote_rank = self.kv_topo.get_target_remote_rank_from_engine_id(
-                dst_engine_id
-            )
+            if remote_tp_rank is not None:
+                remote_rank = remote_tp_rank
+            else:
+                remote_rank = self.kv_topo.get_target_remote_rank_from_engine_id(
+                    dst_engine_id
+                )
             agent_name = self._remote_agents[dst_engine_id][remote_rank]
             try:
                 self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
@@ -2067,7 +2140,18 @@ class NixlConnectorWorker:
         local_xfer_side_handle = self.src_xfer_side_handles.get(
             remote_block_size, self.src_xfer_side_handle
         )
-        remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
+        # Look up remote handle by (engine_id, rank) for DCP support.
+        # Fall back to finding any handle for this engine_id (non-DCP).
+        if remote_tp_rank is not None:
+            remote_xfer_side_handle = self.dst_xfer_side_handles[
+                (dst_engine_id, remote_tp_rank)
+            ]
+        else:
+            # Non-DCP: find the single handle for this engine.
+            remote_xfer_side_handle = next(
+                v for k, v in self.dst_xfer_side_handles.items()
+                if isinstance(k, tuple) and k[0] == dst_engine_id
+            )
 
         # NOTE (nicolo) With homogeneous TP, each TP worker loads KV from
         # corresponding rank. With heterogeneous TP, fixing D>P, the D tp
