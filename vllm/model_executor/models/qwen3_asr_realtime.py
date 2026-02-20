@@ -168,6 +168,10 @@ class Qwen3ASRRealtimeMultiModalProcessor(Qwen3ASRMultiModalProcessor):
         return expanded_ids, {"audio": [features_info]}
 
 
+# NOTE: A separate model class is required here because the multimodal
+# processor registry binds one processor per model class. The realtime
+# endpoint needs a different processor (Qwen3ASRRealtimeMultiModalProcessor)
+# than the base transcription endpoint, so we register it on this subclass.
 @MULTIMODAL_REGISTRY.register_processor(
     Qwen3ASRRealtimeMultiModalProcessor,
     info=Qwen3ASRProcessingInfo,
