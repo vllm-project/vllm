@@ -23,6 +23,7 @@ from vllm.v1.attention.backends.fa_utils import (
     is_flash_attn_varlen_func_available,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 if is_flash_attn_varlen_func_available():
@@ -601,6 +602,19 @@ class FlashAttentionImpl(AttentionImpl):
             else False
         )
 
+        try:
+            parallel_config = get_current_vllm_config().parallel_config
+            dcp_a2a = (
+                parallel_config.decode_context_parallel_size > 1
+                and parallel_config.dcp_comm_backend == "a2a"
+            )
+        except AttributeError:
+            dcp_a2a = False
+        if dcp_a2a:
+            self.dcp_combine = dcp_a2a_lse_reduce
+        else:
+            self.dcp_combine = cp_lse_ag_out_rs
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -848,10 +862,11 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
         )
-        # FA returns LSE in shape [ H, B ] but cp_lse_ag_out_rs wants [ B, H ]
-        context_attn_out_cor, context_lse_cor = cp_lse_ag_out_rs(
+        # FA returns LSE in shape [ H, B ] but combine functions want [ B, H ]
+        context_lse_bh = context_lse.transpose(0, 1)
+        context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
-            context_lse.transpose(0, 1),
+            context_lse_bh,
             get_dcp_group(),
             return_lse=True,
         )

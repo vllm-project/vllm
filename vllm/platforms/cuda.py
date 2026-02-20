@@ -169,6 +169,56 @@ class CudaPlatformBase(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
+        # FlashInferMLA does not return softmax LSE needed for DCP.
+        # When DCP is enabled with MLA, force CUTLASS_MLA on Blackwell
+        # or let other backends (FlashMLA on Hopper) be selected.
+        dcp_size = parallel_config.decode_context_parallel_size
+        if dcp_size > 1 and model_config is not None and model_config.use_mla:
+            user_backend = vllm_config.attention_config.backend
+            if user_backend == AttentionBackendEnum.FLASHINFER_MLA:
+                raise ValueError(
+                    "FlashInferMLA does not return softmax LSE for decode, "
+                    "which is required by DCP to combine partial attention "
+                    "results. Use --attention-backend CUTLASS_MLA instead."
+                )
+            if user_backend is None and cls.is_device_capability_family(100):
+                vllm_config.attention_config.backend = AttentionBackendEnum.CUTLASS_MLA
+                logger.info(
+                    "DCP enabled with MLA on Blackwell: using CUTLASS_MLA "
+                    "backend (FlashInferMLA does not return LSE for DCP)."
+                )
+
+        # DCP is incompatible with FULL CUDA graphs for GQA models because
+        # dcp_context_kv_lens tensor gets captured as a static constant
+        # during graph capture, causing incorrect output during decode.
+        # MLA models are not affected (they handle DCP differently).
+        if dcp_size > 1 and model_config is not None:
+            from vllm.config.compilation import CUDAGraphMode
+
+            compilation_config = vllm_config.compilation_config
+            if (
+                not model_config.use_mla
+                and compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE
+            ):
+                logger.info(
+                    "DCP with GQA requires PIECEWISE CUDA graphs. "
+                    "Forcing cudagraph_mode=PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+        # PCP also requires PIECEWISE CUDA graphs
+        pcp_size = parallel_config.prefill_context_parallel_size
+        if pcp_size > 1:
+            from vllm.config.compilation import CUDAGraphMode
+
+            compilation_config = vllm_config.compilation_config
+            if compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE:
+                logger.info(
+                    "PCP requires PIECEWISE CUDA graphs. "
+                    "Forcing cudagraph_mode=PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
         if (
