@@ -249,6 +249,7 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
+        num_applied = 0
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
@@ -259,6 +260,16 @@ class LoRAModelManager:
                 index,
                 module_lora.lora_a,
                 module_lora.lora_b,
+            )
+            num_applied += 1
+
+        if num_applied == 0 and self.modules:
+            logger.warning(
+                "LoRA adapter %d was activated but none of its weights "
+                "matched any LoRA-eligible module. The adapter will have "
+                "no effect. This usually means the model class is missing "
+                "an hf_to_vllm_mapper attribute.",
+                lora_model.id,
             )
 
         return True
