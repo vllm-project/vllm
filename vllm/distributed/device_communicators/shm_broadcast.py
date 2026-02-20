@@ -513,8 +513,8 @@ class MessageQueue:
         assert self._is_local_reader, "Only readers can acquire read"
         start_time = time.monotonic()
         n_warning = 1
-        while True:
-            with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+        with self.buffer.get_metadata(self.current_idx) as metadata_buffer:
+            while True:
                 # Memory fence ensures we see the latest writes from the writer.
                 # Without this, we may read stale flags from our CPU cache
                 # and spin indefinitely even though writer has updated them.

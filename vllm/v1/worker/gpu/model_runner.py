@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import gc
 import time
 from copy import deepcopy
@@ -238,6 +239,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def get_model(self) -> nn.Module:
         return self.model
+
+    @functools.cached_property
+    def main_stream(self) -> torch.cuda.Stream:
+        # Cache the default CUDA stream to avoid lookup overhead.
+        return torch.cuda.current_stream(self.device)
 
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
@@ -1065,6 +1071,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
             num_sampled_tokens=num_sampled,
+            main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
         )
