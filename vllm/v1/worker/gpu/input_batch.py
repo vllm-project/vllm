@@ -27,6 +27,10 @@ class InputBuffers:
             max_num_reqs + 1, dtype=torch.int32, device=device
         )
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        # DCP: per-request local seq_lens buffer
+        self.dcp_local_seq_lens = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
 
 
 @dataclass
@@ -108,7 +112,7 @@ class InputBatch:
         query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
-        input_buffers.query_start_loc[0] = 0
+        input_buffers.query_start_loc[:1] = 0
         torch.cumsum(
             seq_lens, dim=0, out=input_buffers.query_start_loc[1 : num_reqs + 1]
         )

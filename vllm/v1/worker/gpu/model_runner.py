@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import gc
 import time
 from copy import deepcopy
@@ -11,10 +12,11 @@ import torch.nn as nn
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
+    get_dcp_group,
     get_pp_group,
     prepare_communication_buffer_for_model,
 )
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -24,6 +26,7 @@ from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -34,6 +37,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
+from vllm.v1.worker.gpu.cp_utils import prepare_dcp_local_seq_lens
 from vllm.v1.worker.gpu.cudagraph_utils import CudaGraphManager
 from vllm.v1.worker.gpu.dp_utils import (
     get_cudagraph_and_dp_padding,
@@ -57,7 +61,7 @@ from vllm.v1.worker.gpu.kv_connector import (
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
-from vllm.v1.worker.gpu.pp_handler import PPHandler, get_pp_handler
+from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -137,7 +141,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.do_spec_decode = False
             self.num_speculative_steps = 0
             self.speculator = None
-
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -155,9 +158,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_reqs=self.max_num_reqs,
             vocab_size=self.vocab_size,
             device=self.device,
-            all_token_ids=self.req_states.all_token_ids.gpu,
-            prompt_len=self.req_states.prompt_len.gpu,
-            total_len=self.req_states.total_len.gpu,
+            req_states=self.req_states,
             logprobs_mode=self.model_config.logprobs_mode,
             num_speculative_tokens=self.num_speculative_steps + 1,
         )
@@ -184,9 +185,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Pipeline parallelism.
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
-        self.pp_handler: PPHandler | None = (
-            get_pp_handler(self.parallel_config) if self.use_pp else None
-        )
+        if self.use_pp:
+            self.is_first_pp_rank = get_pp_group().is_first_rank
+            self.is_last_pp_rank = get_pp_group().is_last_rank
+        else:
+            self.is_first_pp_rank = True
+            self.is_last_pp_rank = True
+
+        # Decode context parallelism.
+        self.dcp_size = self.parallel_config.decode_context_parallel_size
+        self.use_dcp = self.dcp_size > 1
+        self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
+        self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -230,6 +240,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def get_model(self) -> nn.Module:
         return self.model
 
+    @functools.cached_property
+    def main_stream(self) -> torch.cuda.Stream:
+        # Cache the default CUDA stream to avoid lookup overhead.
+        return torch.cuda.current_stream(self.device)
+
     def get_kv_cache_spec(self):
         return get_kv_cache_spec(self.vllm_config)
 
@@ -247,11 +262,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_batched_tokens=self.max_num_tokens,
             max_model_len=self.max_model_len,
             device=self.device,
+            cp_size=self.dcp_size,
+            cp_rank=self.dcp_rank,
+            cp_interleave=self.cp_interleave,
         )
 
         self.attn_backends, self.attn_metadata_builders = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
+        check_attention_cp_compatibility(self.vllm_config)
         if self.do_spec_decode:
             # HACK(woosuk)
             self.speculator.set_attn(
@@ -293,6 +312,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            dcp_local_seq_lens=self.input_buffers.dcp_local_seq_lens,
         )
         input_batch.attn_metadata = attn_metadata
         input_batch.slot_mappings = slot_mappings_by_layer
@@ -318,7 +338,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # For non-first PP ranks, create dummy intermediate_tensors.
         intermediate_tensors = None
-        if self.use_pp and not get_pp_group().is_first_rank:
+        if not self.is_first_pp_rank:
             intermediate_tensors = self.model.make_empty_intermediate_tensors(
                 batch_size=num_tokens,
                 dtype=self.model_config.dtype,
@@ -335,7 +355,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
-        if self.use_pp and not get_pp_group().is_last_rank:
+        if not self.is_last_pp_rank:
             return None, None
 
         assert self.execute_model_state is not None
@@ -373,20 +393,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, sample_hidden_states = self._dummy_run(
             self.max_num_tokens, skip_attn=True
         )
+
         # Only run sampler on last PP rank (non-last ranks return None).
-        if not self.use_pp or get_pp_group().is_last_rank:
+        if self.is_last_pp_rank:
             assert sample_hidden_states is not None
             self._dummy_sampler_run(sample_hidden_states)
-        if self.do_spec_decode:
-            num_tokens_across_dp = make_num_tokens_across_dp(
-                self.parallel_config.data_parallel_size, self.max_num_tokens
-            )
-            self.speculator.run_model(
-                self.max_num_tokens,
-                attn_metadata=None,
-                slot_mappings=None,
-                num_tokens_across_dp=num_tokens_across_dp,
-            )
+
+            if self.do_spec_decode:
+                num_tokens_across_dp = make_num_tokens_across_dp(
+                    self.parallel_config.data_parallel_size, self.max_num_tokens
+                )
+                self.speculator.run_model(
+                    self.max_num_tokens,
+                    attn_metadata=None,
+                    slot_mappings=None,
+                    num_tokens_across_dp=num_tokens_across_dp,
+                )
+
         torch.cuda.synchronize()
         del hidden_states, sample_hidden_states
         gc.collect()
@@ -440,6 +463,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables=self.block_tables,
                 attn_metadata_builders=self.attn_metadata_builders,
                 kv_cache_config=self.kv_cache_config,
+                has_lora=self.lora_config is not None,
             )
             if self.do_spec_decode:
                 self.speculator.capture_model()
@@ -520,11 +544,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
-            self.sampler.apply_staged_writes(
-                self.req_states.all_token_ids.gpu,
-                self.req_states.prefill_len.np,
-                self.req_states.prompt_len.np,
-            )
+            self.sampler.apply_staged_writes()
             if self.uses_mrope:
                 self.mrope_states.apply_staged_writes()
 
@@ -606,16 +626,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
         max_query_len = num_scheduled_tokens.max().item()
 
-        # Get prefill tokens.
-        prepare_prefill_inputs(
-            self.input_buffers.input_ids,
-            self.req_states.next_prefill_tokens,
-            idx_mapping,
-            query_start_loc,
-            self.req_states.all_token_ids.gpu,
-            self.req_states.prefill_len.gpu,
-            self.req_states.num_computed_tokens.gpu,
-        )
+        # Get prefill tokens if any.
+        if self.req_states.any_prefills(idx_mapping_np):
+            prepare_prefill_inputs(
+                self.input_buffers.input_ids,
+                self.req_states.next_prefill_tokens,
+                idx_mapping,
+                query_start_loc,
+                self.req_states.all_token_ids.gpu,
+                self.req_states.prefill_len.gpu,
+                self.req_states.num_computed_tokens.gpu,
+            )
 
         # Prepare positions and seq_lens.
         prepare_pos_seq_lens(
@@ -626,6 +647,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs]
+
+        if self.use_dcp:
+            # Prepare dcp local seq_lens.
+            prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
+                self.input_buffers.seq_lens,
+                num_reqs,
+                self.dcp_size,
+                self.dcp_rank,
+                self.cp_interleave,
+            )
+        dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs]
 
         # Prepare M-RoPE positions.
         if self.uses_mrope:
@@ -674,6 +707,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
+            dcp_local_seq_lens=dcp_local_seq_lens,
         )
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
@@ -856,19 +890,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 empty_output = self.kv_connector.no_forward(scheduler_output)
                 return empty_output
 
-        # Get the CUDA graph size. None means no CUDA graph is used.
-        cudagraph_size = self.cudagraph_manager.get_cudagraph_size(
-            scheduler_output.total_num_scheduled_tokens,
-            scheduler_output.num_scheduled_tokens.values(),
+        # Get local cudagraph mode and size.
+        local_cudagraph_mode, local_cudagraph_size = (
+            self.cudagraph_manager.get_cudagraph_runtime_mode(
+                num_reqs=len(scheduler_output.num_scheduled_tokens),
+                num_tokens=scheduler_output.total_num_scheduled_tokens,
+                max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
+            )
         )
-        use_cudagraph, num_tokens_after_padding, num_tokens_across_dp = (
+
+        # DP sync: num_tokens + cudagraph_size + cudagraph_mode
+        num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
             get_cudagraph_and_dp_padding(
                 scheduler_output.total_num_scheduled_tokens,
-                cudagraph_size,
+                local_cudagraph_size,
+                local_cudagraph_mode.value,
                 self.parallel_config.data_parallel_size,
                 self.parallel_config.data_parallel_rank,
             )
         )
+        cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if num_tokens_after_padding == 0:
             # All DP ranks have zero tokens to run.
             empty_output = self.kv_connector.no_forward(scheduler_output)
@@ -890,9 +931,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self._set_active_loras(*lora_inputs)
 
             # Only first PP rank prepares multimodal embeddings.
-            if self.supports_mm_inputs and (
-                not self.use_pp or get_pp_group().is_first_rank
-            ):
+            if self.supports_mm_inputs and self.is_first_pp_rank:
                 mm_embeds, is_mm_embed = self.get_mm_embeddings(
                     scheduler_output.scheduled_encoder_inputs, input_batch
                 )
@@ -920,50 +959,55 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # FIXME(woosuk): Fix warmup for LoRA.
 
         # Run model.
-        if use_cudagraph:
-            # Run CUDA graph.
+        if cudagraph_runtime_mode == CUDAGraphMode.FULL:
+            # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             self.kv_connector.pre_forward(scheduler_output)
-            hidden_states = self.cudagraph_manager.run(
+            hidden_states = self.cudagraph_manager.run_fullgraph(
                 input_batch.num_tokens_after_padding
             )
         else:
-            # Run PyTorch model in eager mode.
+            # For piecewise and eager mode, just call model().
             positions = input_batch.positions
             if self.uses_mrope:
                 assert input_batch.mrope_positions is not None
                 positions = input_batch.mrope_positions
 
+            if self.is_first_pp_rank:
+                input_ids = input_batch.input_ids
+                inputs_embeds = input_batch.inputs_embeds
+                assert intermediate_tensors is None
+            else:
+                input_ids = None
+                inputs_embeds = None
+                assert intermediate_tensors is not None
+
+            batch_descriptor = BatchDescriptor(
+                num_tokens=input_batch.num_tokens_after_padding,
+                has_lora=self.lora_config is not None,
+            )
+
             with set_forward_context(
                 input_batch.attn_metadata,
                 self.vllm_config,
                 num_tokens=input_batch.num_tokens_after_padding,
-                # TODO(woosuk): Support piecewise CUDA graph.
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                cudagraph_runtime_mode=cudagraph_runtime_mode,
                 num_tokens_across_dp=num_tokens_across_dp,
+                batch_descriptor=batch_descriptor,
                 slot_mapping=input_batch.slot_mappings,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
-                if self.use_pp and not get_pp_group().is_first_rank:
-                    # Non-first PP rank: forward with intermediate tensors.
-                    assert intermediate_tensors is not None
-                    hidden_states = self.model(
-                        input_ids=None,
-                        positions=positions,
-                        inputs_embeds=None,
-                        intermediate_tensors=intermediate_tensors,
-                    )
-                else:
-                    hidden_states = self.model(
-                        input_ids=input_batch.input_ids,
-                        positions=positions,
-                        inputs_embeds=input_batch.inputs_embeds,
-                    )
+                hidden_states = self.model(
+                    input_ids=input_ids,
+                    positions=positions,
+                    inputs_embeds=inputs_embeds,
+                    intermediate_tensors=intermediate_tensors,
+                )
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
 
-        if self.use_pp and not get_pp_group().is_last_rank:
+        if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert isinstance(hidden_states, IntermediateTensors)
             hidden_states.kv_connector_output = kv_connector_output
@@ -983,19 +1027,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         hidden_states, input_batch, kv_connector_output = self.execute_model_state
         self.execute_model_state = None  # type: ignore
 
-        # Non-last PP rank: hidden_states is None because this rank produced
-        # IntermediateTensors instead of final hidden states. Receive the
-        # sampled tokens broadcast by the last rank and update local state.
-        if self.use_pp and not get_pp_group().is_last_rank:
-            assert self.pp_handler is not None
-            received = self.pp_handler.maybe_receive_sampled_tokens(
-                input_batch.num_reqs,
-                self.device,
-                max_sample_len=self.num_speculative_steps + 1,
+        if not self.is_last_pp_rank:
+            # Non-last PP rank: hidden_states is None because this rank produced
+            # IntermediateTensors instead of final hidden states. Receive the
+            # sampled tokens broadcast from the last rank and update local state.
+            sampled, num_sampled, num_rejected = pp_receive(
+                input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
-            if received is not None:
-                sampled, num_sampled, num_rejected = received
-                self.postprocess(input_batch, sampled, num_sampled, num_rejected)
+            self.postprocess(input_batch, sampled, num_sampled, num_rejected)
             return None
 
         # Last rank: sample tokens
@@ -1003,12 +1042,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states, input_batch, grammar_output
         )
 
-        # Broadcast to non-last PP ranks (handles spec decode multi-token).
         if self.use_pp:
-            assert self.pp_handler is not None
-            self.pp_handler.maybe_broadcast_sampled_tokens(
-                sampler_output, num_sampled, num_rejected
-            )
+            # Broadcast to non-last PP ranks (handles spec decode multi-token).
+            pp_broadcast(sampler_output.sampled_token_ids, num_sampled, num_rejected)
 
         prompt_logprobs_dict = self.prompt_logprobs_worker.compute_prompt_logprobs(
             self.model.compute_logits,
@@ -1035,6 +1071,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             model_runner_output=model_runner_output,
             sampler_output=sampler_output,
             num_sampled_tokens=num_sampled,
+            main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
         )
