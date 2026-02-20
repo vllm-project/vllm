@@ -3,9 +3,8 @@
 """Attention layer with FlashAttention."""
 
 import copy
-from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import ClassVar
 
 import numpy as np
 import torch
@@ -611,9 +610,7 @@ class FlashAttentionImpl(AttentionImpl):
             )
         except AttributeError:
             dcp_a2a = False
-        self.dcp_combine: Callable[..., Any] = (
-            dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
-        )
+        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
     def forward(
         self,
