@@ -8,6 +8,7 @@ import os
 import tempfile
 import threading
 import time
+from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import is_dataclass
 from datetime import datetime
@@ -2219,7 +2220,7 @@ T = TypeVar("T")
 def get_layers_from_vllm_config(
     vllm_config: VllmConfig,
     layer_type: type[T],
-    layer_names: list[str] | None = None,
+    layer_names: Iterable[str] | None = None,
 ) -> dict[str, T]:
     """
     Get layers from the vLLM config.
@@ -2230,14 +2231,12 @@ def get_layers_from_vllm_config(
         layer_names: The names of the layers to get. If None, return all layers.
     """
 
-    if layer_names is None:
-        layer_names = list(vllm_config.compilation_config.static_forward_context.keys())
-
     forward_context = vllm_config.compilation_config.static_forward_context
+    if layer_names is None:
+        layer_names = forward_context.keys()
 
     return {
-        layer_name: forward_context[layer_name]
+        layer_name: layer
         for layer_name in layer_names
-        if layer_name in forward_context
-        and isinstance(forward_context[layer_name], layer_type)
+        if isinstance(layer := forward_context.get(layer_name), layer_type)
     }
