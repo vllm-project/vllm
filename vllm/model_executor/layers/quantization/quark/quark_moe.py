@@ -858,7 +858,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer):
-        if self.static_input_scales:
+        if self.static_input_scales and self.input_dtype == "fp8":
             # firstly, process activations if fp8 static input
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
                 raise ValueError(
@@ -883,14 +883,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             if current_platform.is_fp8_fnuz():
                 # Normalize the weights and scales
                 _, _, w13_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    torch.empty_like(layer.w13_weight, dtype=torch.float8_e4m3fnuz),
+                    torch.empty_like(layer.w13_weight, dtype=torch.float8_e4m3fn),
                     torch.empty_like(
                         layer.w13_weight_scale, dtype=layer.w13_weight_scale.dtype
                     ),
                     layer.w13_input_scale,
                 )
                 _, _, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    torch.empty_like(layer.w2_weight, dtype=torch.float8_e4m3fnuz),
+                    torch.empty_like(layer.w2_weight, dtype=torch.float8_e4m3fn),
                     torch.empty_like(
                         layer.w2_weight_scale, dtype=layer.w13_weight_scale.dtype
                     ),
