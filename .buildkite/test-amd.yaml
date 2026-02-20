@@ -45,66 +45,6 @@
 #                                                                                                                                   #
 #-----------------------------------------------------------------------------------------------------------------------------------#
 #                                                                                                                                   #
-# TODOs:                                                                                                                            #
-#   * Enable `grade: Blocking` for more tests                                                                                       #
-#   * Tailor the "V1 Test attetion (MI325)" test group to MI325                                                                     #
-#   * Tailor the "V1 Test attetion (MI355)" test group to MI355                                                                     #
-#   * [Distributed Tests (4 GPUs)]:                                                                                                 #
-#       - Remove `TORCH_NCCL_BLOCKING_WAIT=1` when HIP bug https://github.com/ROCm/hip/issues/3876 is fixed in a future             #
-#         ROCm release.                                                                                                             #
-#       - Create a dedicated test section for multi-GPU example tests when we have multiple distributed example tests.              #
-#   * [Distributed Tests (8 GPUs)]: Remove `TORCH_NCCL_BLOCKING_WAIT=1` when HIP bug https://github.com/ROCm/hip/issues/3876 is     #
-#                                   fixed in a future ROCm release.                                                                 #
-#   * [Kernels Attention Test %N]: Remove [this](`vllm/model_executor/layers/attention`) dependency. See:                           #
-#                                  https://github.com/vllm-project/vllm/issues/32267                                                #
-#   * [Kernels DeepGEMM Test (H100)]: Implement a ROCm-specific kernels test group similar to this CUDA-specific kernels            #
-#                                     test group.                                                                                   #
-#   * [Quantization Test]: Temporarily install `torchao` inside the test since we need nightly. Will move to                        #
-#                          `requirements/test.in` after `torchao==0.12` release, and pin a working version of torchao               #
-#                          nightly in the test. Since `torchao` nightly is only compatible with `torch` nightly currently           #
-#                          https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now. We can          #
-#                          only upgrade after this is resolved. @(jerryzh168) is working on resolution.                             #
-#   * [Blackwell Test]: Implement similar test group for MI355 agents. Categories include:                                          #
-#     - Attention kernels (e.g., FlashInfer, CUTLASS MLA, and selector tests)                                                       #
-#     - Quantization kernels (e.g., FP8/FP4 matrix multiplication, CUTLASS quantization, and FlashInfer quantization tests)         #
-#     - Mixture of Experts (MoE) kernels (e.g., MoE matrix multiplication and fused MoE tests)]                                     #
-#   * [Blackwell Fusion and Compile Tests]: Implement similar test group for MI355 agents. Categories include:                      #
-#     - Compilation passes (e.g., attention fusion, quantization fusion, and distributed all reduce tests)                          #
-#     - Full graph compilation (e.g., test_fp8_kv_scale_compile in test_full_graph.py)                                              #
-#   * [Blackwell GPT-OSS Eval]: Implement similar test group for MI355 agents. This test group will focus on evaluating             #
-#                               the correctness of GPT-OSS 20B model using the GPQA benchmark.                                      #
-#   * [Blackwell Quantized MoE Test]: Implement similar test group for MI355 agents. This test group should evaluate                #
-#                                     quantization of MoE models on MI355 hardware.                                                 #
-#   * [Blackwell LM Eval Small Models]: Implement similar test group for MI355 agents. The test must cover the correctness          #
-#                                       of small models on LM Eval Harness. Definitions of those models can be found at:            #
-#                                       - Qwen3-0.6B-FP8.yaml                                                                       #
-#                                       - Qwen2.5-VL-3B-Instruct-FP8-dynamic.yaml                                                   #
-#                                       - Qwen1.5-MoE-W4A16-CT.yaml                                                                 #
-#                                       - DeepSeek-V2-Lite-Instruct-FP8.yaml                                                        #
-#                                       - Qwen3-30B-A3B-NVFP4.yaml                                                                  #
-#                                       - Qwen3-Next-80B-A3B-NVFP4-EP2.yaml                                                         #
-#                                       - Qwen3-Next-FP8-EP2.yaml                                                                   #
-#   * [Distributed Tests (2 GPUs)]: Remove `TORCH_NCCL_BLOCKING_WAIT=1` when HIP bug https://github.com/ROCm/hip/issues/3876 is     #
-#                                   fixed in a future ROCm release.                                                                 #
-#   * [LoRA TP Test (Distributed)]: Find out which code initialize cuda before running the test before the fix, we need             #
-#                                   to use `export VLLM_WORKER_MULTIPROC_METHOD=spawn` to test it.                                  #
-#   * [Distributed Tests (MI300)]:                                                                                                  #
-#     - Remove `TORCH_NCCL_BLOCKING_WAIT=1` when HIP bug https://github.com/ROCm/hip/issues/3876 is fixed in a future               #
-#       ROCm release.                                                                                                               #
-#     - Modify the test suite to use mi300_4 agent and change `TARGET_TEST_SUITE=A100` setting.                                     #
-#   * [LM Eval Large Models (MI325)]: Replace `models-large-hopper.txt` with a `gfx942`-specific definition.                        #
-#   * [Weight Loading Multiple GPU Test - Large Models]: Either duplicate on MI300 or just test on MI300 since this is an A100      #
-#                                                        test on NVIDIA side.                                                       #
-#   * Check whether we should tailor the MI325 `Distributed Tests (MI325)` test group that runs distributed tests on MI325          #
-#     hardware, or whether the current one is sufficient. Similarly check rest of MIXXX-specific test groups.                       #
-#   * [Distributed Tests (MI355)]: Modify this test group for MI355 distributed tests, following B200 pattern.                      #
-#   * [Distributed Tests (MI355) Legacy ]: Deprecate this test group and tailor the "Distributed Tests (MI355)" test group          #
-#                                          for all MI355-specific distributed tests.                                                #
-#   * Update timeout settings for `MI355` agents when we have more data on how long the tests take on that hardware. Timeout is     #
-#     computed using `average test time + [.5x to 1x] buffer`, i.e., around 1.5x of the average test time.                          #
-#                                                                                                                                   #
-#-----------------------------------------------------------------------------------------------------------------------------------#
-#                                                                                                                                   #
 # NOTES:                                                                                                                            #
 #   * [Pytorch Nightly Dependency Override Check]: if this test fails, it means the nightly torch version is not compatible with    #
 #                                                  some of the dependencies. Please check the error message and add the package to  #
@@ -156,11 +96,11 @@
 #     - There is some Tensor Parallelism related processing logic in LoRA that requires multi-GPU testing for validation.           #
 #     - {`pytest -v -s -x lora/test_gptoss_tp.py`}: Disabled for now because MXFP4 backend on non-cuda platform doesn't support     #
 #                                                   LoRA yet.                                                                       #
-#   * [Distributed Tests (MI300)]: Don't test llama model here, it seems hf implementation is buggy. See:                           #
-#                                  https://github.com/vllm-project/vllm/pull/5689                                                   #
-#   * [Distributed Tests (MI325)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293 in            #
-#                                  favor of new tests in fusions_e2e. We avoid replicating the new jobs in                          #
-#                                  this file as it's deprecated.                                                                    #
+#   * [Distributed Tests (A100/MI300)]: Don't test llama model here, it seems hf implementation is buggy. See:                      #
+#                                       https://github.com/vllm-project/vllm/pull/5689                                              #
+#   * [Distributed Tests (H100/MI325)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293 in       #
+#                                       favor of new tests in fusions_e2e. We avoid replicating the new jobs in                     #
+#                                       this file as it's deprecated.                                                               #
 #                                                                                                                                   #
 #####################################################################################################################################
 
@@ -180,6 +120,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
+  optional: true
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
@@ -248,7 +189,7 @@ steps:
 
 - label: Basic Correctness Test # 25.4m
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
   fast_check: true
@@ -282,7 +223,7 @@ steps:
 
 - label: Entrypoints Integration Test (LLM) # 13.1m
   timeout_in_minutes: 22
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
   fast_check: true
@@ -303,6 +244,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -338,8 +280,9 @@ steps:
 
 - label: Entrypoints Integration Test (Pooling) # 22.8m
   timeout_in_minutes: 48
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   grade: Blocking
   fast_check: true
   torch_nightly: true
@@ -372,6 +315,7 @@ steps:
   timeout_in_minutes: 145
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
+  optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -423,6 +367,7 @@ steps:
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_8
+  optional: true
   grade: Blocking
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -516,7 +461,7 @@ steps:
 
 - label: V1 Test e2e + engine # 1h 33m
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_8
   grade: Blocking
   source_file_dependencies:
@@ -582,6 +527,7 @@ steps:
   timeout_in_minutes: 12
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   grade: Blocking
   source_file_dependencies:
     - vllm/v1/attention
@@ -596,8 +542,9 @@ steps:
 
 - label: V1 Test others (CPU) # 10.4m
   timeout_in_minutes: 28
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   no_gpu: true
   grade: Blocking
   source_file_dependencies:
@@ -659,7 +606,7 @@ steps:
 
 - label: Samplers Test # 14.3m
   timeout_in_minutes: 23
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -930,7 +877,7 @@ steps:
 
 - label: Basic Models Tests (Extra Initialization) %N # 26.2m
   timeout_in_minutes: 46
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
   torch_nightly: true
@@ -993,6 +940,7 @@ steps:
   timeout_in_minutes: 26
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   grade: Blocking
   torch_nightly: true
   parallelism: 2
@@ -1029,8 +977,9 @@ steps:
 
 - label: Language Models Test (Extended Generation) # 32.2m
   timeout_in_minutes: 55
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
+  optional: true
   grade: Blocking
   optional: true
   source_file_dependencies:
@@ -1047,7 +996,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
-  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation_ppl_test
@@ -1057,9 +1005,8 @@ steps:
 
 - label: Language Models Test (Extended Pooling)  # 38.2m
   timeout_in_minutes: 68
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
-  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/pooling
@@ -1398,7 +1345,6 @@ steps:
   agent_pool: mi325_2
   grade: Blocking
   num_gpus: 2
-  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/
@@ -1457,7 +1403,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi325_4
   num_gpus: 4
-  optional: true
   source_file_dependencies:
   - vllm/
   commands:
@@ -1472,9 +1417,9 @@ steps:
   timeout_in_minutes: 27
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
+  optional: true
   grade: Blocking
   num_gpus: 4
-  optional: true
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   source_file_dependencies:
   - csrc/
@@ -1504,7 +1449,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
   num_gpus: 2
-  optional: true
   working_dir: "/vllm-workspace/"
   commands:
     - VLLM_TEST_CLEAN_GPU_MEMORY=1 pytest -v -s tests/compile/passes/distributed/test_async_tp.py
@@ -1548,6 +1492,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdmi325]
   agent_pool: mi325_8
+  optional: true
   num_gpus: 8
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
   commands:
@@ -1618,6 +1563,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
@@ -1672,6 +1618,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - tests/standalone_tests/python_only_compile.sh
   - setup.py
@@ -1715,6 +1662,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1750,6 +1698,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1784,6 +1733,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -1868,6 +1818,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/eplb
@@ -1880,6 +1831,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
+  optional: true
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1894,6 +1846,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
+  optional: true
   num_gpus: 2
   source_file_dependencies:
   - vllm/
@@ -2000,6 +1953,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
     - vllm/v1/attention
     - vllm/model_executor/layers
@@ -2331,6 +2285,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   parallelism: 2
   source_file_dependencies:
@@ -2348,6 +2303,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -2362,6 +2318,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   no_gpu: true
   torch_nightly: true
   source_file_dependencies:
@@ -2426,7 +2383,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
-  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/generation
@@ -2452,7 +2408,6 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
-  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/language/pooling
@@ -2476,6 +2431,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -2489,6 +2445,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/models/multimodal
@@ -2605,6 +2562,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
+  optional: true
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   source_file_dependencies:
