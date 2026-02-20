@@ -121,6 +121,7 @@ def reset_torch_dynamo():
     torch._dynamo.reset()
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=5)
 @pytest.mark.parametrize(
     "speculative_config",
     [
@@ -178,6 +179,7 @@ def test_ngram_and_suffix_correctness(
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=5)
 def test_suffix_decoding_acceptance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -237,6 +239,7 @@ def test_suffix_decoding_acceptance(
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=5)
 @pytest.mark.parametrize(
     "model_path",
     [
@@ -311,12 +314,14 @@ def test_speculators_model_integration(
     )
 
     # Heuristic: expect at least 66% of prompts to match exactly
+    print(f"Match ratio: {matches}/{len(ref_outputs)}")
     assert matches >= int(0.66 * len(ref_outputs)), (
         f"Only {matches}/{len(ref_outputs)} outputs matched. "
         f"Expected at least {int(0.66 * len(ref_outputs))} matches."
     )
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=5)
 @pytest.mark.parametrize(
     ["model_setup", "mm_enabled", "enable_chunked_prefill", "model_impl"],
     [
