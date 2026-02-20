@@ -99,21 +99,12 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
             and self.kv_events_config.enable_kv_cache_events
         )
-
-        if self.vllm_config.speculative_config is not None:
-            # vLLM Config increases the max_num_scheduled_tokens to account for
-            # extra slots needed for speculative decoding. Here we need to decrease it
-            # back to get the actual token scheduling budget for the scheduler.
-            self.max_num_scheduled_tokens -= (
-                self.vllm_config.speculative_config.max_num_new_slots_for_drafting
-                * self.scheduler_config.max_num_seqs
-            )
 
         # Create KVConnector for the Scheduler. Note that each Worker
         # will have a corresponding KVConnector with Role=WORKER.

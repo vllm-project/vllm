@@ -822,7 +822,7 @@ class VllmConfig:
                 self.speculative_config is None
             )
 
-        self._extend_max_num_batched_tokens_for_drafting()
+        self._set_max_num_scheduled_tokens()
 
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
@@ -1141,24 +1141,36 @@ class VllmConfig:
             if size % self.parallel_config.tensor_parallel_size == 0
         ]
 
-    def _extend_max_num_batched_tokens_for_drafting(self):
+    def _set_max_num_scheduled_tokens(self):
         """
-        For some speculative decoding methods, the drafter model may insert additional
-        slots into the batch when drafting. To account for this, we need to extend the
-        max_num_batched_tokens by an upper bound on the number of slots that can be
-        added.
-
-        We need to avoid the scenario where the scheduler issues a full batch of tokens
-        and the drafter tries to insert additional tokens but exceeds
-        the limit, leading to buffer overflows. We both extend the value on the config
-        and also modify the value when initializing the scheduler to make the scheduling
-        consistent with the actual limit.
+        In most cases, the scheduler may schedule a batch with as many tokens as the
+        worker is configured to handle. However for some speculative decoding methods,
+        the drafter model may insert additional slots into the batch when drafting.
+        To account for this, we need to decrease the max_num_scheduled_tokens by an
+        upper bound on the number of slots that can be added.
         """
         if self.speculative_config is not None:
-            self.scheduler_config.max_num_batched_tokens += (
+            scheduled_token_delta = (
                 self.speculative_config.max_num_new_slots_for_drafting
                 * self.scheduler_config.max_num_seqs
             )
+            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+            if self.scheduler_config.max_num_scheduled_tokens is None:
+                self.scheduler_config.max_num_scheduled_tokens = (
+                    max_num_batched_tokens - scheduled_token_delta
+                )
+
+            max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
+            if max_num_batched_tokens < max_num_scheduled_tokens + (
+                self.speculative_config.max_num_new_slots_for_drafting
+                * self.scheduler_config.max_num_seqs
+            ):
+                raise ValueError(
+                    f"VllmConfig received max_num_scheduled_tokens but it does not have"
+                    " enough slots to support the speculative decoding settings."
+                    f" It should be greater by at least {scheduled_token_delta}, but"
+                    f" got {max_num_batched_tokens=} and {max_num_scheduled_tokens=}."
+                )
 
     def _set_cudagraph_sizes(self):
         """
