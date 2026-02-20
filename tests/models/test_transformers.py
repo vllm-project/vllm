@@ -129,6 +129,7 @@ def test_distributed(
                 "quantization": "bitsandbytes",
             },
         ),
+        ("unsloth/tinyllama-bnb-4bit", {}),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
@@ -156,50 +157,6 @@ def test_quantization(
         model_impl="transformers",
         enforce_eager=True,
         **quantization_kwargs,  # type: ignore[arg-type]
-    ) as vllm_model:
-        model_config = vllm_model.llm.llm_engine.model_config
-        assert model_config.using_transformers_backend()
-
-        transformers_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
-        )
-
-    check_logprobs_close(
-        outputs_0_lst=transformers_outputs,
-        outputs_1_lst=vllm_outputs,
-        name_0="transformers",
-        name_1="vllm",
-    )
-
-
-@pytest.mark.parametrize(
-    "model",
-    [
-        ("unsloth/tinyllama-bnb-4bit"),
-    ],
-)
-@pytest.mark.parametrize("max_tokens", [32])
-@pytest.mark.parametrize("num_logprobs", [5])
-def test_bitsandbytes_pre_quantized(
-    vllm_runner: type[VllmRunner],
-    example_prompts: list[str],
-    model: str,
-    max_tokens: int,
-    num_logprobs: int,
-) -> None:
-    with vllm_runner(
-        model,
-        model_impl="auto",
-        enforce_eager=True,
-    ) as vllm_model:
-        vllm_outputs = vllm_model.generate_greedy_logprobs(
-            example_prompts, max_tokens=max_tokens, num_logprobs=num_logprobs
-        )
-
-    with vllm_runner(
-        model,
-        model_impl="transformers",
-        enforce_eager=True,
     ) as vllm_model:
         model_config = vllm_model.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
