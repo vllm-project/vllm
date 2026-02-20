@@ -18,6 +18,12 @@ void mxfp8_experts_quant(const torch::Tensor& input,
   TORCH_CHECK(input.size(1) % 128 == 0, "k must align to 128");
   TORCH_CHECK(input.strides()[1] == 1, "input must be row major");
   TORCH_CHECK(problem_sizes.dim() == 2, "problem_sizes must be 2D tensor");
+  TORCH_CHECK(problem_sizes.dtype() == torch::kInt32,
+              "problem_sizes must be int32");
+  TORCH_CHECK(expert_offsets.dtype() == torch::kInt32,
+              "expert_offsets must be int32");
+  TORCH_CHECK(blockscale_offsets.dtype() == torch::kInt32,
+              "blockscale_offsets must be int32");
 
   auto groups = problem_sizes.size(0);
   TORCH_CHECK(

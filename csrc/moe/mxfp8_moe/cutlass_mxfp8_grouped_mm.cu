@@ -21,6 +21,10 @@ void cutlass_mxfp8_grouped_mm(const torch::Tensor& a, const torch::Tensor& b,
               "Number of experts in problem_sizes must match expert_offsets");
   TORCH_CHECK(problem_sizes.dtype() == torch::kInt32,
               "problem_sizes must be int32");
+  TORCH_CHECK(expert_offsets.dtype() == torch::kInt32,
+              "expert_offsets must be int32");
+  TORCH_CHECK(blockscale_offsets.dtype() == torch::kInt32,
+              "blockscale_offsets must be int32");
   TORCH_CHECK(a.dim() == 2, "a must be a 2D tensor of shape (num_tokens, k)");
   TORCH_CHECK(b.dim() == 3,
               "b must be a 3D tensor of shape (num_experts, k, n)");
