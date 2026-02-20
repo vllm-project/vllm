@@ -1115,7 +1115,7 @@ class GroupCoordinator:
             return hidden_states
 
 
-_WORLD: "GroupCoordinator | StatelessGroupCoordinator | None" = None
+_WORLD: GroupCoordinator | None = None
 _INNER_DP_WORLD: GroupCoordinator | None = None
 _NODE_COUNT: int | None = None
 
@@ -1160,6 +1160,55 @@ def init_model_parallel_group(
     )
 
 
+def _init_stateless_group(
+    group_ranks: list[list[int]],
+    group_name: str,
+    group_ports: list[list[int]],
+    host: str,
+    backend: str,
+    use_device_communicator: bool = True,
+) -> "StatelessGroupCoordinator":
+    """Create a StatelessGroupCoordinator with the given parameters."""
+    from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+
+    world = get_world_group()
+    return StatelessGroupCoordinator(
+        group_ranks=group_ranks,
+        local_rank=world.local_rank,
+        torch_distributed_backend=backend,
+        use_device_communicator=use_device_communicator,
+        group_name=group_name,
+        host=host,
+        group_ports=group_ports,
+        global_rank=world.rank,
+        global_world_size=world.world_size,
+    )
+
+
+def _replace_active_groups(
+    *,
+    world: GroupCoordinator | None,
+    dp: GroupCoordinator | None,
+    ep: GroupCoordinator | None,
+    eplb: GroupCoordinator | None,
+    node_count: int | None,
+) -> None:
+    """Destroy the current DP/EP/WORLD/EPLB groups and replace them.
+
+    Destruction is collective — all ranks in the old groups must call this
+    function together.  Pass all-``None`` to tear down without replacement.
+    """
+    global _WORLD, _DP, _EP, _EPLB, _NODE_COUNT
+    for group in (_DP, _EP, _WORLD, _EPLB):
+        if group is not None:
+            group.destroy()
+    _WORLD = world
+    _DP = dp
+    _EP = ep
+    _EPLB = eplb
+    _NODE_COUNT = node_count
+
+
 _TP: GroupCoordinator | None = None
 
 
@@ -1182,12 +1231,12 @@ get_context_model_parallel_group = get_dcp_group
 _PP: GroupCoordinator | None = None
 
 
-def get_pp_group() -> "GroupCoordinator | StatelessGroupCoordinator":
+def get_pp_group() -> GroupCoordinator:
     assert _PP is not None, "pipeline model parallel group is not initialized"
     return _PP
 
 
-_DP: "GroupCoordinator | StatelessGroupCoordinator | None" = None
+_DP: GroupCoordinator | None = None
 
 
 def get_dp_group() -> GroupCoordinator:
@@ -1195,10 +1244,10 @@ def get_dp_group() -> GroupCoordinator:
     return _DP
 
 
-_EP: "GroupCoordinator | StatelessGroupCoordinator | None" = None
+_EP: GroupCoordinator | None = None
 
 
-def get_ep_group() -> "GroupCoordinator | StatelessGroupCoordinator":
+def get_ep_group() -> GroupCoordinator:
     assert _EP is not None, (
         "expert parallel group is not initialized. "
         "EP group is only created for MoE models with num_experts > 0. "
@@ -1225,29 +1274,6 @@ _PCP: GroupCoordinator | None = None
 def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
-
-
-_STANDBY_DP: "StatelessGroupCoordinator | None" = None
-_STANDBY_EP: "StatelessGroupCoordinator | None" = None
-_STANDBY_EPLB: "StatelessGroupCoordinator | None" = None
-_STANDBY_WORLD: "StatelessGroupCoordinator | None" = None
-_STANDBY_WORLD_NODE_COUNT: int | None = None
-
-
-def get_standby_dp_group() -> "StatelessGroupCoordinator | None":
-    return _STANDBY_DP
-
-
-def get_standby_ep_group() -> "StatelessGroupCoordinator | None":
-    return _STANDBY_EP
-
-
-def get_standby_eplb_group() -> "StatelessGroupCoordinator | None":
-    return _STANDBY_EPLB
-
-
-def get_standby_world_group() -> "StatelessGroupCoordinator | None":
-    return _STANDBY_WORLD
 
 
 @contextmanager
@@ -1278,6 +1304,39 @@ _ENABLE_CUSTOM_ALL_REDUCE = True
 def set_custom_all_reduce(enable: bool):
     global _ENABLE_CUSTOM_ALL_REDUCE
     _ENABLE_CUSTOM_ALL_REDUCE = enable
+
+
+def _init_elastic_ep_world(
+    config, local_rank: int, backend: str, rank: int, world_size: int
+) -> None:
+    from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
+
+    global _WORLD, _NODE_COUNT
+    assert _WORLD is None, "world group already initialized"
+    parallel_config = config.parallel_config
+    global_rank = parallel_config.data_parallel_rank * world_size + rank
+    global_world_size = parallel_config.world_size_across_dp
+    all_ranks = list(range(global_world_size))
+    group_ranks = [all_ranks[i : i + 1] for i in range(global_world_size)]
+    if global_rank in all_ranks:
+        group_ranks = [all_ranks]
+    group_ports = [parallel_config.get_next_stateless_world_group_port()]
+    world = StatelessGroupCoordinator(
+        group_ranks=group_ranks,
+        local_rank=local_rank,
+        torch_distributed_backend=backend,
+        use_device_communicator=False,
+        group_name="world",
+        host=parallel_config.data_parallel_master_ip,
+        group_ports=group_ports,
+        global_rank=global_rank,
+        global_world_size=global_world_size,
+    )
+    assert parallel_config.nnodes_within_dp == 1, (
+        "Elastic EP is not supported with multi-node TP/PP"
+    )
+    _NODE_COUNT = _node_count(world.tcp_store_group)
+    _WORLD = world
 
 
 def init_distributed_environment(
@@ -1382,34 +1441,7 @@ def init_distributed_environment(
         local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if enable_elastic_ep:
-        from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
-
-        # Create stateless world group with all ranks
-        assert _WORLD is None, "world group already initialized"
-        assert config is not None
-        parallel_config = config.parallel_config
-        global_rank = parallel_config.data_parallel_rank * world_size + rank
-        global_world_size = parallel_config.world_size_across_dp
-        all_ranks = list(range(global_world_size))
-        group_ranks = [all_ranks[i : i + 1] for i in range(global_world_size)]
-        if global_rank in all_ranks:
-            group_ranks = [all_ranks]
-        group_ports = [parallel_config.get_next_stateless_world_group_port()]
-        _WORLD = StatelessGroupCoordinator(
-            group_ranks=group_ranks,
-            local_rank=local_rank,
-            torch_distributed_backend=backend,
-            use_device_communicator=False,
-            group_name="world",
-            host=parallel_config.data_parallel_master_ip,
-            group_ports=group_ports,
-            global_rank=global_rank,
-            global_world_size=global_world_size,
-        )
-        assert config.parallel_config.nnodes_within_dp == 1, (
-            "Elastic EP is not supported with multi-node TP/PP"
-        )
-        _NODE_COUNT = _node_count(_WORLD.tcp_store_group)  # type: ignore[union-attr]
+        _init_elastic_ep_world(config, local_rank, backend, rank, world_size)
         return
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))
@@ -1630,22 +1662,16 @@ def initialize_model_parallel(
     group_ranks = all_ranks.transpose(1, 4).reshape(-1, data_parallel_size).unbind(0)
     group_ranks = [x.tolist() for x in group_ranks]
     if enable_elastic_ep:
-        from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
-
         parallel_config = config.parallel_config
-        group_ports = [
+        dp_ports = [
             parallel_config.get_next_stateless_dp_group_port() for _ in group_ranks
         ]
-        _DP = StatelessGroupCoordinator(
-            group_ranks=group_ranks,
-            local_rank=get_world_group().local_rank,
-            torch_distributed_backend=backend,
-            use_device_communicator=True,
-            group_name="dp",
-            host=parallel_config.data_parallel_master_ip,
-            group_ports=group_ports,
-            global_rank=get_world_group().rank,
-            global_world_size=get_world_group().world_size,
+        _DP = _init_stateless_group(
+            group_ranks,
+            "dp",
+            dp_ports,
+            parallel_config.data_parallel_master_ip,
+            backend,
         )
     else:
         _DP = init_model_parallel_group(
@@ -1668,22 +1694,16 @@ def initialize_model_parallel(
         )
         group_ranks = [x.tolist() for x in group_ranks]
         if enable_elastic_ep:
-            from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
-
             parallel_config = config.parallel_config
-            group_ports = [
+            ep_ports = [
                 parallel_config.get_next_stateless_ep_group_port() for _ in group_ranks
             ]
-            _EP = StatelessGroupCoordinator(
-                group_ranks=group_ranks,
-                local_rank=get_world_group().local_rank,
-                torch_distributed_backend=backend,
-                use_device_communicator=True,
-                group_name="ep",
-                host=parallel_config.data_parallel_master_ip,
-                group_ports=group_ports,
-                global_rank=get_world_group().rank,
-                global_world_size=get_world_group().world_size,
+            _EP = _init_stateless_group(
+                group_ranks,
+                "ep",
+                ep_ports,
+                parallel_config.data_parallel_master_ip,
+                backend,
             )
         else:
             _EP = init_model_parallel_group(
@@ -1702,20 +1722,16 @@ def initialize_model_parallel(
             and config.parallel_config.enable_eplb
         ):
             if enable_elastic_ep:
-                eplb_group_ports = [
+                eplb_ports = [
                     parallel_config.get_next_stateless_eplb_group_port()
                     for _ in group_ranks
                 ]
-                _EPLB = StatelessGroupCoordinator(
-                    group_ranks=group_ranks,
-                    local_rank=get_world_group().local_rank,
-                    torch_distributed_backend=backend,
-                    use_device_communicator=True,
-                    group_name="eplb",
-                    host=parallel_config.data_parallel_master_ip,
-                    group_ports=eplb_group_ports,
-                    global_rank=get_world_group().rank,
-                    global_world_size=get_world_group().world_size,
+                _EPLB = _init_stateless_group(
+                    group_ranks,
+                    "eplb",
+                    eplb_ports,
+                    parallel_config.data_parallel_master_ip,
+                    backend,
                 )
             else:
                 _EPLB = init_model_parallel_group(
@@ -1753,10 +1769,8 @@ def ensure_model_parallel_initialized(
     or ensure tensor-parallel and pipeline-parallel sizes are equal to expected
     values if the model parallel groups are initialized.
     """
-    from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
-
     world_group = get_world_group()
-    if isinstance(world_group, StatelessGroupCoordinator):
+    if hasattr(world_group, "backend"):
         backend = backend or world_group.backend
     else:
         backend = backend or torch.distributed.get_backend(world_group.device_group)
@@ -1787,133 +1801,6 @@ def ensure_model_parallel_initialized(
         f"{pcp_world_size=} vs. "
         f"{prefill_context_model_parallel_size=}"
     )
-
-
-def create_standby_groups(
-    new_dp_size: int,
-    new_world_size_across_dp: int,
-    master_ip: str,
-    world_group_ports: list[list[int]],
-    dp_group_ports: list[list[int]],
-    ep_group_ports: list[list[int]],
-    eplb_group_ports: list[list[int]] | None = None,
-    backend: str | None = None,
-) -> None:
-    from vllm.distributed.stateless_coordinator import StatelessGroupCoordinator
-
-    global \
-        _STANDBY_WORLD, \
-        _STANDBY_WORLD_NODE_COUNT, \
-        _STANDBY_DP, \
-        _STANDBY_EP, \
-        _STANDBY_EPLB
-
-    assert new_world_size_across_dp == torch.distributed.get_world_size() * new_dp_size
-    world_group = get_world_group()
-    assert isinstance(world_group, StatelessGroupCoordinator)
-    backend = backend or world_group.backend
-    local_rank = world_group.local_rank
-    global_rank = world_group.rank
-
-    standby_world_ranks = [list(range(new_world_size_across_dp))]
-    _STANDBY_WORLD = StatelessGroupCoordinator(
-        group_ranks=standby_world_ranks,
-        local_rank=local_rank,
-        torch_distributed_backend=backend,
-        use_device_communicator=False,
-        group_name="world",
-        host=master_ip,
-        group_ports=world_group_ports,
-        global_rank=global_rank,
-        global_world_size=new_world_size_across_dp,
-    )
-    _STANDBY_WORLD_NODE_COUNT = _node_count(_STANDBY_WORLD.tcp_store_group)
-
-    tp_size = get_tp_group().world_size
-    pp_size = get_pp_group().world_size
-
-    all_ranks = torch.arange(new_world_size_across_dp).reshape(
-        -1, new_dp_size, pp_size, tp_size
-    )
-    standby_dp_ranks = all_ranks.transpose(1, 3).reshape(-1, new_dp_size).unbind(0)
-    standby_dp_ranks = [x.tolist() for x in standby_dp_ranks]
-    _STANDBY_DP = StatelessGroupCoordinator(
-        group_ranks=standby_dp_ranks,
-        local_rank=local_rank,
-        torch_distributed_backend=backend,
-        use_device_communicator=True,
-        group_name="dp",
-        host=master_ip,
-        group_ports=dp_group_ports,
-        global_rank=global_rank,
-        global_world_size=new_world_size_across_dp,
-    )
-
-    standby_ep_ranks = (
-        all_ranks.transpose(1, 2).reshape(-1, new_dp_size * tp_size).unbind(0)
-    )
-    standby_ep_ranks = [x.tolist() for x in standby_ep_ranks]
-    _STANDBY_EP = StatelessGroupCoordinator(
-        group_ranks=standby_ep_ranks,
-        local_rank=local_rank,
-        torch_distributed_backend=backend,
-        use_device_communicator=True,
-        group_name="ep",
-        host=master_ip,
-        group_ports=ep_group_ports,
-        global_rank=global_rank,
-        global_world_size=new_world_size_across_dp,
-    )
-
-    if eplb_group_ports is not None:
-        _STANDBY_EPLB = StatelessGroupCoordinator(
-            group_ranks=standby_ep_ranks,
-            local_rank=local_rank,
-            torch_distributed_backend=backend,
-            use_device_communicator=True,
-            group_name="eplb",
-            host=master_ip,
-            group_ports=eplb_group_ports,
-            global_rank=global_rank,
-            global_world_size=new_world_size_across_dp,
-        )
-
-
-def destroy_old_comm_groups() -> None:
-    """Destroy old communication groups.
-
-    Some group resources require collective teardown across all ranks.
-    All ranks in the old groups must call this function, and it may block
-    until every rank has entered.
-    """
-    global _DP, _EP, _WORLD, _EPLB
-    if _DP is not None:
-        _DP.destroy()
-    if _EP is not None:
-        _EP.destroy()
-    if _WORLD is not None:
-        _WORLD.destroy()
-    if _EPLB is not None:
-        _EPLB.destroy()
-
-
-def switch_to_standby_groups() -> None:
-    """Switch active groups to the previously created standby groups.
-
-    Callers must call destroy_old_comm_groups() before this function.
-    """
-    global _WORLD, _STANDBY_WORLD, _NODE_COUNT, _STANDBY_WORLD_NODE_COUNT
-    global _DP, _EP, _STANDBY_DP, _STANDBY_EP, _EPLB, _STANDBY_EPLB
-    _DP = _STANDBY_DP
-    _EP = _STANDBY_EP
-    _EPLB = _STANDBY_EPLB
-    _WORLD = _STANDBY_WORLD
-    _NODE_COUNT = _STANDBY_WORLD_NODE_COUNT
-    _STANDBY_DP = None
-    _STANDBY_EP = None
-    _STANDBY_EPLB = None
-    _STANDBY_WORLD = None
-    _STANDBY_WORLD_NODE_COUNT = None
 
 
 def prepare_communication_buffer_for_model(model: torch.nn.Module):

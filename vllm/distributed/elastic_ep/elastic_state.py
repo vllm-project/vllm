@@ -382,7 +382,7 @@ class ElasticEPScalingState:
                 return False
             assert self.old_dp_group.rank() > 0
             self._eplb_reshuffle_before_scale_down()
-            self._destroy_old_comm_groups()
+            self._switch_and_remove()
             self.state = ScaleDownRemovingEngineState.COMPLETE
             self.engine_core._eep_send_engine_core_notification(
                 EEPNotificationType.SHUTDOWN_COMPLETE
@@ -513,9 +513,9 @@ class ElasticEPScalingState:
         if self.old_dp_group.rank() == 0:
             logger.info("[Elastic EP] EPLB reshuffle completed")
 
-    def _destroy_old_comm_groups(self):
+    def _switch_and_remove(self):
         self.model_executor.collective_rpc(
-            "elastic_ep_execute", args=("destroy_old_comm_groups",)
+            "elastic_ep_execute", args=("switch_and_remove",)
         )
 
     def _update_parallel_config(self):
