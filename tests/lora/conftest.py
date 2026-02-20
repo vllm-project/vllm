@@ -286,6 +286,11 @@ def llama32_lora_files(llama32_lora_huggingface_id):
     return snapshot_download(repo_id=llama32_lora_huggingface_id)
 
 
+@pytest.fixture(scope="session")
+def whisper_lora_files():
+    return snapshot_download(repo_id="chengyili2005/whisper-small-mandarin-lora")
+
+
 @pytest.fixture
 def reset_default_device():
     """
