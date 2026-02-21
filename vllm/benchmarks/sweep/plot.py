@@ -19,11 +19,17 @@ from .utils import sanitize_filename
 
 try:
     import matplotlib.pyplot as plt
-    import pandas as pd
-    import seaborn as sns
 except ImportError:
     plt = PlaceholderModule("matplotlib").placeholder_attr("pyplot")
+
+try:
+    import pandas as pd
+except ImportError:
     pd = PlaceholderModule("pandas")
+
+try:
+    import seaborn as sns
+except ImportError:
     seaborn = PlaceholderModule("seaborn")
 
 
