@@ -130,6 +130,24 @@ class WorkerLoRAManager:
                 skip_prefixes=lora_skip_prefixes,
             )
 
+            # Check that at least some loaded LoRA modules will match
+            # the model's module names.  When hf_to_vllm_mapper is
+            # missing, LoRA weights may load successfully but with
+            # wrong module paths, causing them to be silently ignored.
+            model_module_names = {name for name, _ in model.named_modules()}
+            matched = any(
+                module_name in model_module_names for module_name in lora.loras
+            )
+            if lora.loras and not matched:
+                logger.warning(
+                    "None of the LoRA modules in adapter '%s' matched "
+                    "any module in %s. The adapter weights will have no "
+                    "effect. This is usually caused by a missing "
+                    "hf_to_vllm_mapper on the model class.",
+                    lora_request.lora_name,
+                    model.__class__.__name__,
+                )
+
         except FileNotFoundError as e:
             # FileNotFoundError should be raised if both
             # - No adapter found to download from huggingface (or in
