@@ -184,6 +184,53 @@ def test_sliding_window_possible_cached_prefix():
         8,
     )
 
+    # Additional test cases for skip optimization:
+    # sliding_window=4, block_size=2 => sliding_window_contiguous_blocks=2
+    # Need 2 consecutive hits to satisfy sliding window requirement
+
+    # Case: [True, False, True, True] - find [True, True] at indices 2,3
+    # i=3: hit, c=1; i=2: hit, c=2 >= 2, match found
+    run_one_case([True, False, True, True], 4)
+
+    # Case: [True, False, False, True, True] - find [True, True] at indices 3,4
+    run_one_case([True, False, False, True, True], 5)
+
+    # Case: [False, False, False, True, True] - find [True, True] at indices 3,4
+    run_one_case([False, False, False, True, True], 5)
+
+    # Case: [True, True, False, False, True, True] - find rightmost [True, True]
+    # i=5: hit, c=1; i=4: hit, c=2, match found
+    run_one_case([True, True, False, False, True, True], 6)
+
+    # Case: [True, True, True, False, True, True] - find rightmost 2 consecutive
+    run_one_case([True, True, True, False, True, True], 6)
+
+    # Case: single hit block at the start - partial match is preserved
+    # i=4: miss, c=0; i=3: miss, c=0; i=2: miss, c=0; i=1: miss, c=0; i=0: hit, c=1
+    # Loop ends with num_contiguous_blocks=1, del[1:] keeps index 0
+    run_one_case([True, False, False, False, False], 1)
+
+    # Case: single hit block at the end
+    # i=4: hit, c=1; i=3: miss, c=0; ... all remaining are miss
+    # Loop ends with num_contiguous_blocks=0, del[0:] deletes all
+    run_one_case([False, False, False, False, True], 0)
+
+    # Case: scattered hits with no 2 consecutive hits
+    # Returns the rightmost contiguous sequence found
+    # For [True, False, True, False, True, False]:
+    #   i=5: miss, i=4: hit(c=1), i=3: miss(reset), i=2: hit(c=1), i=1: miss(reset),
+    #   i=0: hit(c=1)
+    #   Ends with num_contiguous_blocks=1, del[1:] keeps index 0
+    run_one_case([True, False, True, False, True, False], 1)
+
+    # For [False, True, False, True, False, True]:
+    #   i=5: hit(c=1), i=4: miss(reset), ... i=0: miss
+    #   Ends with num_contiguous_blocks=0, del[0:] deletes all
+    run_one_case([False, True, False, True, False, True], 0)
+
+    # Case: [False, True, True] - 2 consecutive at the end
+    run_one_case([False, True, True], 3)
+
 
 def test_chunked_local_attention_remove_skipped_blocks():
     attention_spec = ChunkedLocalAttentionSpec(
