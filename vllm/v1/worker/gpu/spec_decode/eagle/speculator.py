@@ -9,7 +9,6 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.model_loader import get_model
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -20,7 +19,8 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
-from vllm.v1.worker.gpu.spec_decode.eagle_cudagraph import EagleCudaGraphManager
+from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
+from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
 
 logger = init_logger(__name__)
 
@@ -73,18 +73,7 @@ class EagleSpeculator:
         self.cudagraph_manager = EagleCudaGraphManager(vllm_config, device)
 
     def load_model(self, target_model: nn.Module) -> None:
-        from vllm.compilation.backends import set_model_tag
-
-        with set_model_tag("eagle_head"):
-            self.model = get_model(
-                vllm_config=self.vllm_config, model_config=self.draft_model_config
-            )
-
-        share_lm_head = True
-        if share_lm_head and hasattr(target_model, "lm_head"):
-            if hasattr(self.model, "lm_head"):
-                del self.model.lm_head
-            self.model.lm_head = target_model.lm_head
+        self.model = load_eagle_model(target_model, self.vllm_config)
 
     def set_attn(
         self,
