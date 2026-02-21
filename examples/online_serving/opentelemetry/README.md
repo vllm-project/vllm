@@ -1,14 +1,6 @@
 # Setup OpenTelemetry POC
 
-1. Install OpenTelemetry packages:
-
-    ```bash
-    pip install \
-      'opentelemetry-sdk>=1.26.0,<1.27.0' \
-      'opentelemetry-api>=1.26.0,<1.27.0' \
-      'opentelemetry-exporter-otlp>=1.26.0,<1.27.0' \
-      'opentelemetry-semantic-conventions-ai>=0.4.1,<0.5.0'
-    ```
+> **Note:** The core OpenTelemetry packages (`opentelemetry-sdk`, `opentelemetry-api`, `opentelemetry-exporter-otlp`, `opentelemetry-semantic-conventions-ai`) are bundled with vLLM. Manual installation is not required.
 
 1. Start Jaeger in a docker container:
 
