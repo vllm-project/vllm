@@ -166,6 +166,7 @@ def test_prepare_next_token_ids():
         block_size=16,
         device=device,
     )
+    seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
 
     expected_valid_sampled_tokens_count = torch.tensor(
         [2, 5, 0, 0], dtype=torch.int32, device=device
@@ -173,7 +174,7 @@ def test_prepare_next_token_ids():
 
     next_token_ids_from_padded, valid_sampled_tokens_count = (
         proposer.prepare_next_token_ids_padded(
-            common_attn_metadata,
+            seq_lens_cpu,
             sampled_token_ids_tensor,
             mock_requests,
             mock_input_batch,

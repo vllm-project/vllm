@@ -85,26 +85,25 @@ def create_cross_attention_backend(
             new_metadata.causal = False
             max_encoder_len = int(new_metadata.encoder_seq_lens_cpu.max())
             new_metadata.max_seq_len = max_encoder_len
-            # Any computed tokens indicated decode step>1 (no chunked prefill)
-            num_cache_decodes = (
-                (common_attn_metadata.num_computed_tokens_cpu > 0).sum().item()
+            seq_lens_cpu = common_attn_metadata.seq_lens.cpu()
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1:]
+                - common_attn_metadata.query_start_loc_cpu[:-1]
             )
-            if num_cache_decodes > 0:
+            # Any computed tokens indicated decode step>1 (no chunked prefill)
+            is_decode = seq_lens_cpu > query_lens_cpu
+            if torch.any(is_decode):
                 # CrossAttn KV cache has already been populated on first decoder step,
                 # skip slot_mapping calculation for requests that do not need
                 # reshape_and_cache.
-                num_tokens = common_attn_metadata.num_computed_tokens_cpu.numpy()
                 new_metadata.encoder_seq_lens_cpu = np.where(
-                    num_tokens > 0, 0, new_metadata.encoder_seq_lens_cpu
+                    is_decode, 0, new_metadata.encoder_seq_lens_cpu
                 )
 
             # seq_lens is provided by model runner: initial encoder input length is
             # needed here to know how many tokens to attend to from the cached
             # cross-attention KV cache.
             new_metadata.seq_lens = common_attn_metadata.encoder_seq_lens
-            new_metadata._seq_lens_cpu = torch.from_numpy(
-                common_attn_metadata.encoder_seq_lens_cpu
-            )
 
             # NOTE (NickLucche) use `new_metadata` instead of `common_*` (initial) here
             slot_mapping = _get_cross_slot_mapping(
