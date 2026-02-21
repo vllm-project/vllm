@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import operator
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from contextlib import AbstractContextManager
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, TypeAlias, TypeVar, cast
 
@@ -17,6 +19,11 @@ from vllm.distributed.device_communicators.shm_object_storage import (
     SingleWriterShmRingBuffer,
 )
 from vllm.logger import init_logger
+from vllm.multimodal.lmdb_cache import (
+    LmdbMultiModalCache,
+    LmdbReadTransaction,
+    LmdbWriteTransaction,
+)
 from vllm.utils.cache import CacheInfo, LRUCache
 from vllm.utils.jsontree import json_count_leaves, json_map_leaves, json_reduce_leaves
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
@@ -263,6 +270,10 @@ class BaseMultiModalProcessorCache(
     BaseMultiModalCache[MultiModalProcessorCacheInItem, MultiModalProcessorCacheOutItem]
 ):
     """The required interface for caches on P0."""
+
+    def begin(self) -> "AbstractContextManager[BaseMultiModalProcessorCache]":
+        """Context manager for batch cache operations."""
+        return contextlib.nullcontext(self)
 
     @abstractmethod
     def is_cached_item(self, mm_hash: str) -> bool:
@@ -570,6 +581,10 @@ class BaseMultiModalReceiverCache(
 ):
     """The required interface for caches on P1."""
 
+    def begin(self) -> "AbstractContextManager[BaseMultiModalReceiverCache]":
+        """Context manager for batch cache operations."""
+        return contextlib.nullcontext(self)
+
     def get_and_update_features(
         self,
         mm_features: list["MultiModalFeatureSpec"],
@@ -723,3 +738,194 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
     @override
     def clear_cache(self) -> None:
         self._shm_cache.clear()
+
+
+class _LmdbSenderTransaction(BaseMultiModalProcessorCache, AbstractContextManager):
+    def __init__(self, parent: "LmdbObjectStoreSenderCache", txn: LmdbWriteTransaction):
+        self._parent = parent
+        self._txn = txn
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._txn.__exit__(exc_type, exc_value, traceback)
+
+    @override
+    def is_cached_item(self, mm_hash: str) -> bool:
+        return self._txn.is_cached_item(mm_hash)
+
+    @override
+    def get_and_update_item(self, mm_item, mm_hash) -> MultiModalProcessorCacheOutItem:
+        if mm_item is None:
+            self._parent._hits += 1
+        self._parent._total += 1
+        return self._txn.get_and_update_item(mm_item, mm_hash)
+
+    @override
+    def clear_cache(self) -> None:
+        # Handled by the engine-side cache.
+        pass
+
+    @override
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        # Not required.
+        pass
+
+    @override
+    def make_stats(self, *, delta=False):
+        return self._parent.make_stats(delta=delta)
+
+
+class LmdbObjectStoreSenderCache(BaseMultiModalProcessorCache):
+    """
+    The P0 cache which writes items to the LMDB-backed cache.
+    """
+
+    def __init__(
+        self,
+        cache: LmdbMultiModalCache,
+    ) -> None:
+        super().__init__()
+        self._cache = cache
+        self._hits = 0
+        self._total = 0
+        self._last_info = CacheInfo(hits=0, total=0)
+
+    @override
+    def make_stats(self, *, delta=False):
+        info = CacheInfo(hits=self._hits, total=self._total)
+
+        if delta:
+            info_delta = info - self._last_info
+            self._last_info = info
+            info = info_delta
+
+        return info
+
+    @override
+    def begin(self) -> AbstractContextManager[BaseMultiModalProcessorCache]:
+        return _LmdbSenderTransaction(self, self._cache.begin_write())
+
+    @override
+    def is_cached_item(self, mm_hash: str) -> bool:
+        raise ValueError("Requires a transaction.")
+
+    @override
+    def clear_cache(self) -> None:
+        # Handled by the engine-side cache.
+        pass
+
+    @override
+    def get_and_update_item(self, mm_item, mm_hash) -> MultiModalProcessorCacheOutItem:
+        raise ValueError("Requires a transaction.")
+
+    @override
+    def touch_sender_cache_item(self, mm_hash: str) -> None:
+        raise ValueError("Requires a transaction.")
+
+
+class LmdbObjectStoreEngineReceiverCache(BaseMultiModalReceiverCache):
+    """
+    A dummy cache for the engine process that owns the evictor process
+    and file lock.
+    """
+
+    def __init__(self, cache: LmdbMultiModalCache) -> None:
+        super().__init__()
+
+        self._cache = cache
+        self._file_lock = self._cache.lock_and_clear_stale_caches()
+        if self._file_lock is not None:
+            self._evictor = self._cache.start_evictor()
+
+    @override
+    def clear_cache(self):
+        # If we don't have the file lock, another engine process owns the cache.
+        if self._file_lock is not None:
+            self._cache.clear()
+
+    @override
+    def get_and_update_features(
+        self,
+        mm_features: list["MultiModalFeatureSpec"],
+    ) -> list["MultiModalFeatureSpec"]:
+        return mm_features
+
+    @override
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        raise NotImplementedError()
+
+    @override
+    def get_and_update_item(
+        self,
+        mm_item: MultiModalKwargsItem | None,
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        raise NotImplementedError()
+
+
+class _LmdbWorkerTransaction(BaseMultiModalReceiverCache, AbstractContextManager):
+    def __init__(self, txn: LmdbReadTransaction):
+        self._txn = txn
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._txn.__exit__(exc_type, exc_value, traceback)
+
+    @override
+    def get_and_update_item(
+        self,
+        mm_item: MultiModalKwargsItem | None,
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        return self._txn.get_item(mm_hash) if mm_item is None else mm_item
+
+    @override
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        # Not necessary; nothing can be evicted under a transaction.
+        pass
+
+    @override
+    def clear_cache(self) -> None:
+        # Handled by the engine-side cache.
+        pass
+
+
+class LmdbObjectStoreWorkerReceiverCache(BaseMultiModalReceiverCache):
+    """
+    The worker process cache which reads items from the LMDB cache.
+    """
+
+    def __init__(self, cache: LmdbMultiModalCache) -> None:
+        super().__init__()
+        self._cache = cache
+
+    @override
+    def begin(self):
+        return _LmdbWorkerTransaction(self._cache.begin_read())
+
+    @override
+    def get_and_update_item(
+        self,
+        mm_item: MultiModalKwargsItem | None,
+        mm_hash: str,
+    ) -> MultiModalKwargsItem:
+        raise ValueError("Requires a transaction.")
+
+    @override
+    def touch_receiver_cache_item(
+        self,
+        mm_hash: str,
+        mm_item: MultiModalKwargsItem | None = None,
+    ) -> None:
+        raise ValueError("Requires a transaction.")
+
+    @override
+    def clear_cache(self) -> None:
+        # Handled by the engine-side cache.
+        pass
