@@ -690,10 +690,14 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        # SILU uses a fused silu+mul+fp4_quant kernel path.
+        # Other gated activations use the generic apply_moe_activation()
+        # fallback + separate fp4 quantization in run_cutlass_moe_fp4().
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
         ]
 
     @staticmethod
