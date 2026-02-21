@@ -108,6 +108,15 @@ QUANT_CONFIGS = [
         "thread_m_blocks": THREAD_M_BLOCKS,
         "group_blocks": [2],
     },
+    # MXFP8
+    {
+        "a_type": ["kBFloat16"],
+        "b_type": "kFE4M3fn",
+        "s_type": "kFE8M0fnu",
+        "thread_configs": THREAD_CONFIGS,
+        "thread_m_blocks": THREAD_M_BLOCKS,
+        "group_blocks": [2],
+    },
     # AWQ-INT4 with INT8 activation
     {
         "a_type": ["kS8"],

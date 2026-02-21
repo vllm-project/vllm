@@ -336,6 +336,123 @@ def pack_fp8_to_int32(
     return int32_tensor.T.contiguous() if size_k_first else int32_tensor
 
 
+def mxfp8_marlin_process_scales(marlin_scales):
+    """Reorder scales for e8m0 kernel layout and convert to float8_e8m0fnu.
+
+    Same reordering as mxfp4_marlin_process_scales but without the FP8
+    activation bias adjustment (MXFP8 is BF16-activation only).
+    """
+    # fit the layout of fp8 dequantization
+    marlin_scales = marlin_scales.view(-1, 4)[:, [0, 2, 1, 3]].view(
+        marlin_scales.size(0), -1
+    )
+    marlin_scales = marlin_scales.to(torch.float8_e8m0fnu)
+    return marlin_scales
+
+
+def apply_mxfp8_marlin_linear(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    weight_scale: torch.Tensor,
+    workspace: torch.Tensor,
+    size_n: int,
+    size_k: int,
+    bias: torch.Tensor | None = None,
+    use_fp32_reduce: bool = USE_FP32_REDUCE_DEFAULT,
+) -> torch.Tensor:
+    reshaped_x = input.reshape(-1, input.shape[-1])
+    out_shape = input.shape[:-1] + (size_n,)
+
+    use_atomic_add = should_use_atomic_add_reduce(
+        m=reshaped_x.size(0),
+        n=size_n,
+        k=size_k,
+        device=input.device,
+        dtype=input.dtype,
+    )
+
+    output = ops.marlin_gemm(
+        a=reshaped_x,
+        c=None,
+        b_q_weight=weight,
+        b_bias=bias,
+        b_scales=weight_scale,
+        a_scales=None,
+        global_scale=None,
+        b_zeros=None,
+        g_idx=None,
+        perm=None,
+        workspace=workspace,
+        b_q_type=scalar_types.float8_e4m3fn,
+        size_m=reshaped_x.size(0),
+        size_n=size_n,
+        size_k=size_k,
+        use_atomic_add=use_atomic_add,
+        use_fp32_reduce=use_fp32_reduce,
+    )
+
+    return output.reshape(out_shape)
+
+
+def prepare_mxfp8_layer_for_marlin(layer: torch.nn.Module) -> None:
+    """Repack MXFP8 weights and scales into Marlin kernel format.
+
+    Expects the layer to have:
+      - weight: [N, K] float8_e4m3fn
+      - weight_scale: [N, K//32] uint8 (e8m0 encoded)
+      - orig_dtype: the model parameter dtype (e.g. bfloat16)
+      - input_size_per_partition / output_size_per_partition
+    """
+    part_size_n = layer.output_size_per_partition
+    part_size_k = layer.input_size_per_partition
+    group_size = 32  # MX standard block size
+
+    device = layer.weight.device
+
+    # WORKSPACE
+    layer.workspace = marlin_make_workspace_new(device)
+
+    # WEIGHT - repack FP8 weights to Marlin format
+    perm = torch.empty(0, dtype=torch.int, device=device)
+    qweight = pack_fp8_to_int32(layer.weight, size_k_first=False)
+    qweight = qweight.T.contiguous()
+
+    marlin_qweight = ops.gptq_marlin_repack(
+        b_q_weight=qweight,
+        perm=perm,
+        size_k=part_size_k,
+        size_n=part_size_n,
+        num_bits=8,
+    )
+    replace_parameter(layer, "weight", marlin_qweight)
+
+    # WEIGHT SCALES
+    # Convert uint8 scales -> e8m0fnu -> param_dtype for permutation
+    # Scales are [N, K//32], need [K//32, N] for marlin_permute_scales
+    scales = layer.weight_scale.data[:part_size_n, : part_size_k // group_size]
+    scales = scales.contiguous()
+    scales = scales.view(torch.float8_e8m0fnu).to(layer.orig_dtype)
+    scales = scales.T.contiguous()
+
+    # Permute scales to Marlin layout
+    marlin_scales = marlin_permute_scales(
+        s=scales,
+        size_k=part_size_k,
+        size_n=part_size_n,
+        group_size=group_size,
+    )
+
+    # Reorder for e8m0 kernel layout and convert back to e8m0fnu
+    marlin_scales = mxfp8_marlin_process_scales(marlin_scales)
+    replace_parameter(layer, "weight_scale", marlin_scales)
+
+    # BIAS
+    if hasattr(layer, "bias") and layer.bias is not None:
+        assert layer.bias.shape == (part_size_n,)
+        bias = marlin_permute_bias(layer.bias)
+        replace_parameter(layer, "bias", bias)
+
+
 def marlin_quant_fp8_torch(weight, group_size, input_dtype=None):
     is_a_8bit = input_dtype is not None and input_dtype.itemsize == 1
     if is_a_8bit:

@@ -1600,8 +1600,8 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        # MXFP8 hardware acceleration requires Blackwell (SM100) or newer
-        return 100
+        # Marlin kernel supports MXFP8 on SM80+
+        return 80
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
@@ -1689,9 +1689,16 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        backend: Mxfp8LinearBackend = Mxfp8LinearBackend.EMULATION
-        self.mxfp8_linear_op = Mxfp8LinearOp(backend=backend)
-        logger.info_once("Using %s backend for MXFP8 GEMM", backend.value)
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+            is_fp8_marlin_supported,
+        )
+
+        if is_fp8_marlin_supported():
+            self.backend = Mxfp8LinearBackend.MARLIN
+        else:
+            self.backend = Mxfp8LinearBackend.EMULATION
+            self.mxfp8_linear_op = Mxfp8LinearOp(backend=self.backend)
+        logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
 
     def create_weights(
         self,
@@ -1763,15 +1770,25 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 f"quantized with MXFP8."
             )
 
-        weight = layer.weight.data  # [N, K]
-        N, K = weight.shape
-        scale_k = K // MXFP8_BLOCK_SIZE
+        if self.backend == Mxfp8LinearBackend.MARLIN:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+                prepare_mxfp8_layer_for_marlin,
+            )
 
-        # Slice weight_scale to match weight dimensions (handles padding)
-        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+            layer.orig_dtype = torch.get_default_dtype()
+            layer.marlin_size_n = layer.output_size_per_partition
+            layer.marlin_size_k = layer.input_size_per_partition
+            prepare_mxfp8_layer_for_marlin(layer)
+        else:
+            weight = layer.weight.data  # [N, K]
+            N, K = weight.shape
+            scale_k = K // MXFP8_BLOCK_SIZE
 
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+            # Slice weight_scale to match weight dimensions (handles padding)
+            weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+
+            layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+            layer.weight_scale = Parameter(weight_scale, requires_grad=False)
 
     def apply(
         self,
@@ -1779,6 +1796,21 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.backend == Mxfp8LinearBackend.MARLIN:
+            from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
+                apply_mxfp8_marlin_linear,
+            )
+
+            return apply_mxfp8_marlin_linear(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                workspace=layer.workspace,
+                size_n=layer.marlin_size_n,
+                size_k=layer.marlin_size_k,
+                bias=bias,
+            )
+
         if layer.weight.dtype != MXFP8_VALUE_DTYPE:
             raise ValueError(
                 f"Weight dtype {layer.weight.dtype} != expected {MXFP8_VALUE_DTYPE}"
