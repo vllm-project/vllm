@@ -201,6 +201,7 @@ llm = ray.remote(
     max_model_len=8192,
     distributed_executor_backend="ray",
     attention_backend="FLASH_ATTN",
+    gpu_memory_utilization=0.75,
     weight_transfer_config=WeightTransferConfig(backend="nccl"),
 )
 
@@ -314,6 +315,7 @@ llm_v2 = ray.remote(
     model=MODEL_NAME_V2,
     enforce_eager=True,
     max_model_len=8192,
+    gpu_memory_utilization=0.75,
     distributed_executor_backend="ray",
     attention_backend="FLASH_ATTN",
 )
