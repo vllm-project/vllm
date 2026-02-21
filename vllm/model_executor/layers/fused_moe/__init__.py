@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoeWeightScaleSupported,
+    find_fused_moe_submodule,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEActivationFormat,
@@ -68,6 +69,7 @@ __all__ = [
     "SharedFusedMoE",
     "ZeroExpertFusedMoE",
     "activation_without_mul",
+    "find_fused_moe_submodule",
     "apply_moe_activation",
     "override_config",
     "get_config",

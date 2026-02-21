@@ -20,6 +20,7 @@ from vllm.forward_context import (
     override_forward_context,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
@@ -239,6 +240,11 @@ class UBatchWrapper:
                 set_graph_pool_id(self.graph_pool)
             else:
                 set_graph_pool_id(current_platform.graph_pool_handle())
+
+            # Sync offloader's copy stream before capture.
+            # Ensure any pre-capture prefetches from offloader are complete.
+            get_offloader().sync_prev_onload()
+
             with torch.cuda.graph(
                 cudagraph_metadata.cudagraph,
                 stream=compute_stream,
@@ -250,6 +256,10 @@ class UBatchWrapper:
                 sorted_results = [value for position, value in sorted(results)]
                 result = torch.cat(sorted_results, dim=0)
                 cudagraph_metadata.outputs = result
+                # Join offloader's copy stream after forward to avoid unjoined
+                # stream error. The last layer's start_prefetch forks copy_stream,
+                # but wait_prefetch only happens in the next forward pass.
+                get_offloader().join_after_forward()
             self.cudagraphs[num_tokens] = cudagraph_metadata
         return cudagraph_metadata.outputs
 
@@ -461,6 +471,9 @@ class UBatchWrapper:
             and cudagraph_runtime_mode is CUDAGraphMode.FULL
         ):
             cudagraph_metadata = self.cudagraphs[num_tokens]
+            # Sync offloader before replay - ensures any external dependencies
+            # from pre-capture prefetches are satisfied.
+            get_offloader().sync_prev_onload()
             cudagraph_metadata.cudagraph.replay()
             return cudagraph_metadata.outputs
         else:
