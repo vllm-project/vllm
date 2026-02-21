@@ -12,6 +12,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.deepseek_v32 import DeepseekV32Tokenizer
+from vllm.utils.async_utils import make_async
 
 from .base import BaseRenderer
 from .inputs import DictPrompt
@@ -39,19 +40,32 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
 
         return cls(config, tokenizer)
 
+    def __init__(
+        self,
+        config: VllmConfig,
+        tokenizer: DeepseekV32Tokenizer | None,
+    ) -> None:
+        super().__init__(config, tokenizer)
+
+        self._apply_chat_template_async = make_async(
+            self._apply_chat_template, executor=self._executor
+        )
+
+    def _apply_chat_template(self, *args, **kwargs):
+        return self.get_tokenizer().apply_chat_template(*args, **kwargs)
+
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = parse_chat_messages(
             messages,
             self.model_config,
             content_format="string",
         )
 
-        prompt_raw = tokenizer.apply_chat_template(
+        prompt_raw = self._apply_chat_template(
             conversation=conversation,
             messages=messages,
             **params.get_apply_chat_template_kwargs(),
@@ -70,14 +84,13 @@ class DeepseekV32Renderer(BaseRenderer[DeepseekV32Tokenizer]):
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
     ) -> tuple[list[ConversationMessage], DictPrompt]:
-        tokenizer = self.get_tokenizer()
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
             messages,
             self.model_config,
             content_format="string",
         )
 
-        prompt_raw = tokenizer.apply_chat_template(
+        prompt_raw = await self._apply_chat_template_async(
             conversation=conversation,
             messages=messages,
             **params.get_apply_chat_template_kwargs(),
