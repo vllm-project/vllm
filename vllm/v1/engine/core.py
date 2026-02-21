@@ -5,6 +5,7 @@ import queue
 import signal
 import threading
 import time
+import traceback
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -54,6 +55,8 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.base_sentinel import BaseSentinel
+from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
@@ -71,10 +74,124 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
+
+
+class EngineCoreSentinel(BaseSentinel):
+    """
+    EngineCoreSentinel monitors a single EngineCore instance, responsible for receiving
+    fault signals (exceptions raised in EngineCore busy loop) and reporting them to
+    ClientSentinel.
+    """
+
+    def __init__(
+        self,
+        engine_index: int,
+        fault_signal_q: queue.Queue,
+        busy_loop_active: threading.Event,
+        engine_fault_socket_addr: str,
+        sentinel_identity: bytes,
+        vllm_config: VllmConfig,
+    ):
+        self.engine_index = engine_index
+        super().__init__(
+            sentinel_identity=sentinel_identity,
+            sentinel_tag=f"DP_{engine_index}",
+            vllm_config=vllm_config,
+        )
+
+        self.fault_signal_q = fault_signal_q
+        self.busy_loop_active = busy_loop_active
+        parallel_config = vllm_config.parallel_config
+        self.tp_size = parallel_config.tensor_parallel_size
+        self.pp_size = parallel_config.pipeline_parallel_size
+        self.dp_size = parallel_config.data_parallel_size
+
+        # Client <-> EngineCoreSentinel sockets
+        self.engine_fault_socket = make_zmq_socket(
+            self.ctx,
+            engine_fault_socket_addr,
+            zmq.DEALER,
+            bind=False,
+            identity=sentinel_identity,
+        )
+
+        self.poller = zmq.Poller()
+        self.engine_running = True
+        threading.Thread(
+            target=self.run, daemon=True, name="EngineCoreSentinelMonitorThread"
+        ).start()
+
+    def run(self):
+        """
+        Loop to fetch exception information from the fault_signal_q queue.
+        Keep retrieving exception data continuously until an exception is detected or
+        a command from ClientSentinel is dispatched; after that, switch to the command
+        listening state.
+        """
+        while not self.sentinel_dead:
+            # Check for engine fault signals
+            self.poll_and_report_fault_events()
+
+    def poll_and_report_fault_events(self):
+        try:
+            engine_exception = self.fault_signal_q.get(timeout=1)
+            self.logger(
+                "Detected exception %s: %s\n Call Stack:\n%s",
+                type(engine_exception).__name__,
+                engine_exception,
+                "".join(traceback.format_tb(engine_exception.__traceback__)),
+                level="error",
+            )
+            self._report_exception_to_client_sentinel(engine_exception)
+            self.engine_running = False
+        except queue.Empty:
+            pass
+
+    def _report_exception_to_client_sentinel(self, exception: Exception) -> None:
+        msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
+        msg_bytes = msg.encode("utf-8")
+        self.engine_fault_socket.send_multipart([b"", msg_bytes])
+
+    def shutdown(self):
+        if self.engine_fault_socket is not None:
+            self.engine_fault_socket.close(linger=0)
+        super().shutdown()
+
+
+def busy_loop_wrapper(busy_loop_func):
+    """
+    Wrap the busy loop function to perform fault tolerance.
+    """
+
+    def run_with_fault_tolerance(self):
+        while True:
+            try:
+                if self.enable_fault_tolerance:
+                    self.busy_loop_active.set()
+                busy_loop_func(self)
+            except SystemExit:
+                raise
+            except Exception as original_exc:
+                if self.enable_fault_tolerance:
+                    self.busy_loop_active.clear()
+                    self.fault_signal_q.put(original_exc)
+                    logger.warning(
+                        "[BusyLoopWrapper] EngineCore busy loop raised an exception. "
+                    )
+                    # todo: Currently only wait a certain time before shutting
+                    #  down the engine. Will implement fault tolerance methods
+                    #  in the upcoming PRs.
+                    time.sleep(self.engine_recovery_timeout)
+
+                # Fault tolerance not enabled OR no instruction received
+                # before timeout. Re-raise the original exception
+                # for upper level handling.
+                raise original_exc
+
+    return run_with_fault_tolerance
 
 
 class EngineCore:
@@ -723,10 +840,6 @@ class EngineCoreProc(EngineCore):
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
-        executor_fail_callback = lambda: self.input_queue.put_nowait(
-            (EngineCoreRequestType.EXECUTOR_FAILED, b"")
-        )
-
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
@@ -759,6 +872,34 @@ class EngineCoreProc(EngineCore):
             self.publish_dp_lb_stats = internal_dp_balancing
 
             self._init_data_parallel(vllm_config)
+
+            # Initialize fault tolerance settings.
+            ft_config = vllm_config.fault_tolerance_config
+            self.enable_fault_tolerance = ft_config.enable_fault_tolerance
+            if self.enable_fault_tolerance:
+                # Track whether the busy loop is currently active.
+                self.busy_loop_active = threading.Event()
+                self.fault_signal_q: queue.Queue[Exception] = queue.Queue()
+                self.engine_recovery_timeout = ft_config.engine_recovery_timeout
+                engine_core_sentinel_ids = addresses.engine_core_sentinel_identities
+                assert engine_core_sentinel_ids is not None
+                assert addresses.engine_fault_socket_addr is not None
+                self.engine_core_sentinel = EngineCoreSentinel(
+                    engine_index=self.engine_index,
+                    fault_signal_q=self.fault_signal_q,
+                    busy_loop_active=self.busy_loop_active,
+                    engine_fault_socket_addr=addresses.engine_fault_socket_addr,
+                    sentinel_identity=engine_core_sentinel_ids[self.engine_index],
+                    vllm_config=vllm_config,
+                )
+                # Do not shut down the engine immediately upon failure.
+                executor_fail_callback = lambda: self.fault_signal_q.put(
+                    RuntimeError(f"Executor on EngineCore {self.engine_index} failed.")
+                )
+            else:
+                executor_fail_callback = lambda: self.input_queue.put_nowait(
+                    (EngineCoreRequestType.EXECUTOR_FAILED, b"")
+                )
 
             super().__init__(
                 vllm_config,
@@ -1038,6 +1179,7 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
+    @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
@@ -1426,6 +1568,11 @@ class EngineCoreProc(EngineCore):
         """Return whether the scheduler is in any pause state."""
         return self.scheduler.pause_state != PauseState.UNPAUSED
 
+    def shutdown(self):
+        super().shutdown()
+        if self.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            self.engine_core_sentinel.shutdown()
+
 
 class DPEngineCoreProc(EngineCoreProc):
     """ZMQ-wrapper for running EngineCore in background process
@@ -1521,6 +1668,7 @@ class DPEngineCoreProc(EngineCoreProc):
             )
             self.output_queue.put_nowait((-1, EngineCoreOutputs(scheduler_stats=stats)))
 
+    @busy_loop_wrapper
     def run_busy_loop(self):
         """Core busy loop of the EngineCore for data parallel case."""
 

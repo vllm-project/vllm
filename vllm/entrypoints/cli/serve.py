@@ -209,7 +209,12 @@ def run_headless(args: argparse.Namespace):
     )
 
     try:
-        engine_manager.join_first()
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            engine_manager.monitor_engine_liveness(
+                engine_down_callback=engine_manager.notify_engine_down
+            )
+        else:
+            engine_manager.join_first()
     finally:
         logger.info("Shutting down.")
         engine_manager.close()
@@ -261,6 +266,9 @@ def run_multi_api_server(args: argparse.Namespace):
             stats_update_address=coordinator.get_stats_publish_address()
             if coordinator
             else None,
+            engine_fault_socket_addr=addresses.engine_fault_socket_addr,
+            engine_core_sentinel_identities=addresses.engine_core_sentinel_identities,
+            fault_state_pub_socket_addr=addresses.fault_state_pub_socket_addr,
         )
 
         # For dp ranks > 0 in external/hybrid DP LB modes, we must delay the
