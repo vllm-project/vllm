@@ -197,7 +197,7 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             transfer = self._transfers.popleft()
             transfer_time = (
                 transfer.start_event.elapsed_time(transfer.end_event) * 1e-3
-            )  # elapsed_time is in miliseconds
+            )  # elapsed_time is in milliseconds
             result = TransferResult(
                 job_id=transfer.job_id,
                 success=True,

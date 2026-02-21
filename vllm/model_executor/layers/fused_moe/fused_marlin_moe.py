@@ -409,7 +409,7 @@ def batched_fused_marlin_moe(
     Note that the moe_align_block_size function indicates,
         - What rows of the A matrix (hidden_states) to access during the
         matmul, via sorted_ids output.
-        - What expert_id to use for each block matmul, via expert_ids ouptut.
+        - What expert_id to use for each block matmul, via expert_ids output.
 
     In the batched version, the tokens are already grouped/batched by experts
     they subscribe to. Due to this, we can represent the batched hidden_states

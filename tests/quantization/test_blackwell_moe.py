@@ -25,7 +25,7 @@ def set_test_environment():
     os.environ["FLASHINFER_NVCC_THREADS"] = "16"
 
 
-# Overide the backbone layers to 4 for faster startup
+# Override the backbone layers to 4 for faster startup
 HF_OVERRIDE_TEXT = {
     "num_layers": 4,
     "num_hidden_layers": 4,

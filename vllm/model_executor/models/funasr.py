@@ -116,7 +116,7 @@ class EncoderLayerSANM(nn.Module):
         hidden_states: torch.Tensor,
         mask: torch.Tensor | None = None,
         cache=None,
-        mask_shfit_chunk=None,
+        mask_shift_chunk=None,
         mask_att_chunk_encoder=None,
     ):
         residual = hidden_states
@@ -126,14 +126,14 @@ class EncoderLayerSANM(nn.Module):
             hidden_states = residual + self.self_attn(
                 hidden_states,
                 mask,
-                mask_shfit_chunk=mask_shfit_chunk,
+                mask_shift_chunk=mask_shift_chunk,
                 mask_att_chunk_encoder=mask_att_chunk_encoder,
             )
         else:
             hidden_states = self.self_attn(
                 hidden_states,
                 mask,
-                mask_shfit_chunk=mask_shfit_chunk,
+                mask_shift_chunk=mask_shift_chunk,
                 mask_att_chunk_encoder=mask_att_chunk_encoder,
             )
 
@@ -141,7 +141,7 @@ class EncoderLayerSANM(nn.Module):
         hidden_states = self.norm2(hidden_states)
         hidden_states = residual + self.feed_forward(hidden_states)
 
-        return hidden_states, mask, cache, mask_shfit_chunk, mask_att_chunk_encoder
+        return hidden_states, mask, cache, mask_shift_chunk, mask_att_chunk_encoder
 
 
 class MultiHeadedAttentionSANM(nn.Module):
@@ -184,13 +184,13 @@ class MultiHeadedAttentionSANM(nn.Module):
         self,
         inputs: torch.Tensor,
         mask: torch.Tensor,
-        mask_shfit_chunk: torch.Tensor = None,
+        mask_shift_chunk: torch.Tensor = None,
     ):
         b, t, d = inputs.size()
         if mask is not None:
             mask = torch.reshape(mask, (b, -1, 1))
-            if mask_shfit_chunk is not None:
-                mask = mask * mask_shfit_chunk
+            if mask_shift_chunk is not None:
+                mask = mask * mask_shift_chunk
             inputs = inputs * mask
 
         x = inputs.transpose(1, 2)
@@ -244,11 +244,11 @@ class MultiHeadedAttentionSANM(nn.Module):
         self,
         hidden_states: torch.Tensor,
         mask: torch.Tensor,
-        mask_shfit_chunk: torch.Tensor = None,
+        mask_shift_chunk: torch.Tensor = None,
         mask_att_chunk_encoder: torch.Tensor = None,
     ):
         q_h, k_h, v_h, v = self.forward_qkv(hidden_states)
-        fsmn_memory = self.forward_fsmn(v, mask, mask_shfit_chunk)
+        fsmn_memory = self.forward_fsmn(v, mask, mask_shift_chunk)
         q_h = q_h * self.d_k ** (-0.5)
         scores = torch.matmul(q_h, k_h.transpose(-2, -1))
         att_outs = self.forward_attention(v_h, scores, mask, mask_att_chunk_encoder)

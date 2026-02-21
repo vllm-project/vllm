@@ -35,11 +35,11 @@ __global__ void batched_moe_align_block_size_kernel(
   int32_t const block_ids_size = sorted_ids_size / block_size;
   int32_t const SENTINEL =
       num_batches * max_tokens_per_batch;  // To denote invalid entries.
-  // Intialize sorted_ids
+  // Initialize sorted_ids
   for (size_t i = threadIdx.x; i < sorted_ids_size; i += stride) {
     sorted_ids[i] = SENTINEL;
   }
-  // Intialize expert_ids with -1
+  // Initialize expert_ids with -1
   for (size_t i = threadIdx.x; i < block_ids_size; i += stride) {
     block_ids[i] = -1;
   }
