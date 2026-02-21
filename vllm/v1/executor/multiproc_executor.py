@@ -102,7 +102,6 @@ class MultiprocExecutor(Executor):
         # and ensure workers will be terminated.
         self._finalizer = weakref.finalize(self, self.shutdown)
         self.is_failed = False
-        self.shutdown_event = threading.Event()
         self.failure_callback: FailureCallback | None = None
 
         tp_size, pp_size, pcp_size = self._get_parallel_sizes()
@@ -340,8 +339,6 @@ class MultiprocExecutor(Executor):
         if output_rank is not None:
             response_mqs = (response_mqs[output_rank],)
 
-        shutdown_event = self.shutdown_event
-
         def get_response():
             responses = []
             for mq in response_mqs:
@@ -349,9 +346,7 @@ class MultiprocExecutor(Executor):
                     None if deadline is None else (deadline - time.monotonic())
                 )
                 try:
-                    status, result = mq.dequeue(
-                        timeout=dequeue_timeout, cancel=shutdown_event
-                    )
+                    status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
@@ -419,8 +414,6 @@ class MultiprocExecutor(Executor):
                         w.death_writer = None
                     w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
-
-            self.shutdown_event.set()
 
         self.rpc_broadcast_mq = None
 
@@ -686,11 +679,33 @@ class WorkerProc:
         return cast(list[WorkerProcHandle], ready_proc_handles)
 
     def shutdown(self):
+        if self.rpc_broadcast_mq is not None:
+            self.rpc_broadcast_mq.shutdown()
+        if self.worker_response_mq is not None:
+            self.worker_response_mq.shutdown()
         self.worker.shutdown()
         self.rpc_broadcast_mq = None
         self.worker_response_mq = None
         destroy_model_parallel()
         destroy_distributed_environment()
+
+    def monitor_death_pipe(self, death_pipe, shutdown_requested: threading.Event):
+        if death_pipe is None:
+            return
+
+        def death_pipe_monitor():
+            try:
+                # This will block until parent process exits (pipe closes)
+                death_pipe.recv()
+            except EOFError:
+                # Parent process has exited, terminate this worker
+                logger.info_once("Parent process exited, terminating worker")
+                shutdown_requested.set()
+                self.shutdown()
+            except Exception as e:
+                logger.warning("Death monitoring error: %s", e)
+
+        Thread(target=death_pipe_monitor, daemon=True, name="DeathPipeMonitor").start()
 
     @staticmethod
     def worker_main(*args, **kwargs):
@@ -700,12 +715,12 @@ class WorkerProc:
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
-        shutdown_requested = False
+        shutdown_requested = threading.Event()
 
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
+            if not shutdown_requested.is_set():
+                shutdown_requested.set()
                 logger.debug(
                     "WorkerProc handling signal %d, raising SystemExit", signum
                 )
@@ -719,26 +734,6 @@ class WorkerProc:
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
         death_pipe: Connection | None = kwargs.pop("death_pipe", None)
-        shutdown_event = threading.Event()
-        # Start death monitoring thread if death_pipe is provided
-        if death_pipe is not None:
-
-            def monitor_parent_death():
-                try:
-                    # This will block until parent process exits (pipe closes)
-                    death_pipe.recv()
-                except EOFError:
-                    # Parent process has exited, terminate this worker
-                    logger.info_once("Parent process exited, terminating worker")
-                    # Send signal to self to trigger clean shutdown
-                    shutdown_event.set()
-                except Exception as e:
-                    logger.warning("Death monitoring error: %s", e)
-
-            death_monitor = Thread(
-                target=monitor_parent_death, daemon=True, name="WorkerDeathMonitor"
-            )
-            death_monitor.start()
 
         try:
             reader.close()
@@ -753,6 +748,8 @@ class WorkerProc:
 
             worker = WorkerProc(*args, **kwargs)
             assert worker.worker_response_mq is not None
+
+            worker.monitor_death_pipe(death_pipe, shutdown_requested)
 
             # Send READY once we know everything is loaded
             ready_writer.send(
@@ -771,7 +768,7 @@ class WorkerProc:
             ready_writer.close()
             ready_writer = None
 
-            worker.worker_busy_loop(cancel=shutdown_event)
+            worker.worker_busy_loop()
 
         except Exception:
             # NOTE: if an Exception arises in busy_loop, we send
@@ -781,7 +778,7 @@ class WorkerProc:
 
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
-            elif shutdown_event.is_set():
+            elif shutdown_requested.is_set():
                 logger.info("WorkerProc shutting down.")
             else:
                 logger.exception("WorkerProc failed.")
@@ -789,7 +786,7 @@ class WorkerProc:
             # The parent sends a SIGTERM to all worker processes if
             # any worker dies. Set this value so we don't re-throw
             # SystemExit() to avoid zmq exceptions in __del__.
-            shutdown_requested = True
+            shutdown_requested.set()
 
         except SystemExit as e:
             # SystemExit is raised on SIGTERM or SIGKILL, which usually indicates that
@@ -842,12 +839,12 @@ class WorkerProc:
             output = self.async_output_queue.get()
             self.enqueue_output(output)
 
-    def worker_busy_loop(self, cancel: threading.Event | None = None):
+    def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         assert self.rpc_broadcast_mq is not None
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue(
-                cancel=cancel, indefinite=True
+                indefinite=True
             )
             try:
                 if isinstance(method, str):
