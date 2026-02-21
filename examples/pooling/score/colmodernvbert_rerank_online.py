@@ -134,8 +134,7 @@ def rerank_multimodal():
         "model": MODEL,
         "query": "A colorful logo with transparency",
         "documents": [
-            {"content": [{"type": "image_url",
-                          "image_url": {"url": IMAGE_URL}}]},
+            {"content": [{"type": "image_url", "image_url": {"url": IMAGE_URL}}]},
             "Python is a programming language.",
             "The weather today is sunny.",
         ],
