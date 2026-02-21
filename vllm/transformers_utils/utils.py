@@ -23,8 +23,12 @@ def is_gcs(model_or_path: str) -> bool:
     return model_or_path.lower().startswith("gs://")
 
 
+def is_azure(model_or_path: str) -> bool:
+    return model_or_path.lower().startswith("az://")
+
+
 def is_cloud_storage(model_or_path: str) -> bool:
-    return is_s3(model_or_path) or is_gcs(model_or_path)
+    return is_s3(model_or_path) or is_gcs(model_or_path) or is_azure(model_or_path)
 
 
 def modelscope_list_repo_files(
