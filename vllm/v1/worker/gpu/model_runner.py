@@ -137,7 +137,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.output_copy_event = torch.cuda.Event()
 
         # Pipeline parallelism.
-        self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        self.pp_size = self.parallel_config.pipeline_parallel_size
+        self.use_pp = self.pp_size > 1
         if self.use_pp:
             self.is_first_pp_rank = get_pp_group().is_first_rank
             self.is_last_pp_rank = get_pp_group().is_last_rank
@@ -158,10 +159,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
 
-            # EAGLE3 may require auxiliary hidden states from target model outputs.
-            self.use_aux_hidden_state_outputs = (
-                self.speculative_config.method == "eagle3"
-            )
+            if self.speculative_config.method == "eagle3":
+                # EAGLE3 may require auxiliary hidden states from target model outputs.
+                self.use_aux_hidden_state_outputs = True
+                if self.pp_size > 1:
+                    raise ValueError("EAGLE3 with pipeline parallel is not supported.")
         else:
             self.do_spec_decode = False
             self.num_speculative_steps = 0
@@ -441,16 +443,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def capture_model(self) -> int:
-        if (
-            self.use_aux_hidden_state_outputs
-            and self.cudagraph_manager.cudagraph_mode.has_full_cudagraphs()
-        ):
-            logger.warning_once(
-                "Skipping CUDA graph capture for Eagle3 aux hidden states "
-                "because FULL CUDA graph is not supported."
-            )
-            return 0
-
         if not self.cudagraph_manager.needs_capture():
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
@@ -921,13 +913,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
             )
         )
-        if (
-            self.use_aux_hidden_state_outputs
-            and local_cudagraph_mode == CUDAGraphMode.FULL
-        ):
-            # FULL graph replay path only returns hidden_states tensor.
-            local_cudagraph_mode = CUDAGraphMode.NONE
-            local_cudagraph_size = None
 
         # DP sync: num_tokens + cudagraph_size + cudagraph_mode
         num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
@@ -989,15 +974,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # FIXME(woosuk): Fix warmup for LoRA.
 
         # Run model.
-        aux_hidden_states = None
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
             # because they are already copied to the CUDA graph input buffers.
             self.kv_connector.pre_forward(scheduler_output)
-            hidden_states = self.cudagraph_manager.run_fullgraph(
+            model_output = self.cudagraph_manager.run_fullgraph(
                 input_batch.num_tokens_after_padding
             )
+            if self.use_aux_hidden_state_outputs:
+                hidden_states, aux_hidden_states = model_output
+            else:
+                hidden_states = model_output
+                aux_hidden_states = None
         else:
             # For piecewise and eager mode, just call model().
             positions = input_batch.positions
@@ -1035,10 +1024,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     inputs_embeds=inputs_embeds,
                     intermediate_tensors=intermediate_tensors,
                 )
-                if self.use_aux_hidden_state_outputs and self.is_last_pp_rank:
+                if self.use_aux_hidden_state_outputs:
                     hidden_states, aux_hidden_states = model_output
                 else:
                     hidden_states = model_output
+                    aux_hidden_states = None
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
 
