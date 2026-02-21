@@ -63,6 +63,127 @@ elif sys.platform.startswith("linux") and os.getenv("VLLM_TARGET_DEVICE") is Non
         VLLM_TARGET_DEVICE = "cpu"
 
 
+# =============================================================================
+# CUDA Toolchain Override
+# =============================================================================
+# Download nvcc from NVIDIA if system CUDA < MIN_NVCC_VERSION.
+# FlashMLA requires nvcc >= 12.9. Set VLLM_SKIP_NVCC_OVERRIDE=1 to disable.
+# Based on: https://github.com/Dao-AILab/flash-attention/blob/main/hopper/setup.py
+MIN_NVCC_VERSION = "12.9.86"  # Must exist on NVIDIA redist server
+NVCC_CACHE_DIR = ROOT_DIR / ".deps" / "nvcc"
+_nvcc_path_override: str | None = None
+
+
+def _download_nvcc(version: str) -> str:
+    """Download nvcc from NVIDIA, return path to binary. Caches in .deps/nvcc/"""
+    import platform
+    import stat
+    import tarfile
+    import urllib.request
+
+    cache_dir = NVCC_CACHE_DIR / version
+    cache_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check cache
+    for d in cache_dir.iterdir() if cache_dir.exists() else []:
+        nvcc = d / "bin" / "nvcc"
+        if nvcc.exists():
+            logger.info("Using cached nvcc: %s", nvcc)
+            return str(nvcc)
+
+    # Download nvcc
+    system = {"Linux": "linux", "Darwin": "linux"}.get(platform.system())
+    arch = {"arm64": "aarch64", "AMD64": "x86_64"}.get(
+        platform.machine(), platform.machine()
+    )
+    url = (
+        f"https://developer.download.nvidia.com/compute/cuda/redist/"
+        f"cuda_nvcc/{system}-{arch}/cuda_nvcc-{system}-{arch}-{version}-archive.tar.xz"
+    )
+    logger.info("Downloading nvcc %s from %s...", version, url)
+    with (
+        urllib.request.urlopen(url, timeout=300) as resp,
+        tarfile.open(fileobj=resp, mode="r|*") as tar,
+    ):
+        tar.extractall(path=cache_dir)
+
+    for d in cache_dir.iterdir():
+        nvcc = d / "bin" / "nvcc"
+        if nvcc.exists():
+            nvcc.chmod(nvcc.stat().st_mode | stat.S_IEXEC)
+            ptxas = d / "bin" / "ptxas"
+            if ptxas.exists():
+                ptxas.chmod(ptxas.stat().st_mode | stat.S_IEXEC)
+
+            # Modify nvcc.profile to include system CUDA headers and libs
+            # The nvcc redistributable doesn't include cuda_runtime.h or libs
+            if CUDA_HOME:
+                nvcc_profile = d / "bin" / "nvcc.profile"
+                if nvcc_profile.exists():
+                    sys_include = Path(CUDA_HOME) / "include"
+                    sys_lib = Path(CUDA_HOME) / "lib64"
+                    if sys_include.exists():
+                        with open(nvcc_profile, "a") as f:
+                            f.write(f'\nINCLUDES += "-I{sys_include}" $(_SPACE_)\n')
+                            if sys_lib.exists():
+                                f.write(f'LIBRARIES += $(_SPACE_) "-L{sys_lib}"\n')
+
+            return str(nvcc)
+    raise RuntimeError("nvcc not found in downloaded archive")
+
+
+def get_nvcc_path() -> str:
+    """Get path to nvcc, using override if downloaded."""
+    if _nvcc_path_override and os.path.exists(_nvcc_path_override):
+        return _nvcc_path_override
+    assert CUDA_HOME is not None, "CUDA_HOME is not set"
+    return os.path.join(CUDA_HOME, "bin", "nvcc")
+
+
+def get_nvcc_cuda_version() -> Version:
+    """Get the CUDA version from nvcc.
+
+    Uses the overridden nvcc path if a toolchain override is configured.
+
+    Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
+    """
+    nvcc_path = get_nvcc_path()
+    nvcc_output = subprocess.check_output([nvcc_path, "-V"], universal_newlines=True)
+    output = nvcc_output.split()
+    release_idx = output.index("release") + 1
+    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
+    return nvcc_cuda_version
+
+
+def _setup_nvcc_override():
+    """Download nvcc if system version < MIN_NVCC_VERSION."""
+    global _nvcc_path_override
+    if os.environ.get("VLLM_SKIP_NVCC_OVERRIDE", "0") == "1":
+        return
+
+    # Compare major.minor only (nvcc reports "release X.Y", not X.Y.Z)
+    min_ver = parse(".".join(MIN_NVCC_VERSION.split(".")[:2]))
+
+    try:
+        system_cuda = get_nvcc_cuda_version()
+        if system_cuda >= min_ver:
+            logger.info("System CUDA %s >= %s", system_cuda, min_ver)
+            return
+    except Exception:
+        pass
+
+    try:
+        _nvcc_path_override = _download_nvcc(MIN_NVCC_VERSION)
+        logger.info("Using nvcc override: %s", _nvcc_path_override)
+    except Exception as e:
+        logger.warning("nvcc download failed: %s", e)
+
+
+# Setup nvcc override at module load time for CUDA builds
+if VLLM_TARGET_DEVICE == "cuda" and not envs.VLLM_USE_PRECOMPILED:
+    _setup_nvcc_override()
+
+
 def is_sccache_available() -> bool:
     return which("sccache") is not None and not bool(
         int(os.getenv("VLLM_DISABLE_SCCACHE", "0"))
@@ -281,9 +402,16 @@ class cmake_build_ext(build_ext):
         else:
             # Default build tool to whatever cmake picks.
             build_tool = []
-        # Make sure we use the nvcc from CUDA_HOME
+        # Make sure we use the correct nvcc (override or CUDA_HOME)
         if _is_cuda() and CUDA_HOME is not None:
-            cmake_args += [f"-DCMAKE_CUDA_COMPILER={CUDA_HOME}/bin/nvcc"]
+            nvcc_path = get_nvcc_path()
+            cmake_args += [f"-DCMAKE_CUDA_COMPILER={nvcc_path}"]
+            # When using downloaded nvcc, explicitly set toolkit directories
+            if _nvcc_path_override:
+                cmake_args += [
+                    f"-DCUDAToolkit_INCLUDE_DIR={CUDA_HOME}/include",
+                    f"-DCUDAToolkit_LIBRARY_DIR={CUDA_HOME}/lib64",
+                ]
         elif _is_hip() and ROCM_HOME is not None:
             cmake_args += [f"-DROCM_PATH={ROCM_HOME}"]
 
@@ -853,21 +981,6 @@ def get_rocm_version():
         return None
     except Exception:
         return None
-
-
-def get_nvcc_cuda_version() -> Version:
-    """Get the CUDA version from nvcc.
-
-    Adapted from https://github.com/NVIDIA/apex/blob/8b7a1ff183741dd8f9b87e7bafd04cfde99cea28/setup.py
-    """
-    assert CUDA_HOME is not None, "CUDA_HOME is not set"
-    nvcc_output = subprocess.check_output(
-        [CUDA_HOME + "/bin/nvcc", "-V"], universal_newlines=True
-    )
-    output = nvcc_output.split()
-    release_idx = output.index("release") + 1
-    nvcc_cuda_version = parse(output[release_idx].split(",")[0])
-    return nvcc_cuda_version
 
 
 def get_vllm_version() -> str:

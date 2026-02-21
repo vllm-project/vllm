@@ -22,7 +22,11 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=12.8.1
+# NVCC_VERSION controls the nvcc compiler version downloaded from NVIDIA.
+# FlashMLA requires nvcc >= 12.9. We download nvcc separately so we can use
+# CUDA 12.8 base image (matching PyTorch cu128 wheels) with nvcc 12.9.
+ARG NVCC_VERSION=12.9.86
 ARG PYTHON_VERSION=3.12
 
 # By parameterizing the base images, we allow third-party to use their own
@@ -92,6 +96,7 @@ ARG INSTALL_KV_CONNECTORS=false
 FROM ${BUILD_BASE_IMAGE} AS base
 
 ARG CUDA_VERSION
+ARG NVCC_VERSION
 ARG PYTHON_VERSION
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -131,6 +136,22 @@ ENV UV_LINK_MODE=copy
 
 # Verify GCC version
 RUN gcc --version
+
+# Download nvcc from NVIDIA redistributables (FlashMLA requires nvcc >= 12.9)
+# This allows using CUDA 12.8 base image (matching PyTorch cu128) with nvcc 12.9
+ARG NVCC_VERSION
+RUN NVCC_MAJOR_MINOR=$(echo "$NVCC_VERSION" | cut -d. -f1,2) \
+    && ARCH=$(uname -m) \
+    && mkdir -p /opt/nvcc \
+    && curl -fsSL "https://developer.download.nvidia.com/compute/cuda/redist/cuda_nvcc/linux-${ARCH}/cuda_nvcc-linux-${ARCH}-${NVCC_VERSION}-archive.tar.xz" \
+        | tar -xJ -C /opt/nvcc --strip-components=1 \
+    && chmod +x /opt/nvcc/bin/nvcc /opt/nvcc/bin/ptxas \
+    && echo "INCLUDES += \"-I/usr/local/cuda/include\" \$(_SPACE_)" >> /opt/nvcc/bin/nvcc.profile \
+    && echo "LIBRARIES += \$(_SPACE_) \"-L/usr/local/cuda/lib64\"" >> /opt/nvcc/bin/nvcc.profile \
+    && /opt/nvcc/bin/nvcc --version
+
+# Add downloaded nvcc to PATH (before system CUDA)
+ENV PATH="/opt/nvcc/bin:$PATH"
 
 # Ensure CUDA compatibility library is loaded
 RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
@@ -309,7 +330,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # Build DeepGEMM, pplx-kernels, DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
-ARG CUDA_VERSION
+ARG NVCC_VERSION
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 ENV UV_HTTP_TIMEOUT=500
@@ -318,14 +339,15 @@ ENV UV_LINK_MODE=copy
 
 WORKDIR /workspace
 
-# Build DeepGEMM wheel
+# Build DeepGEMM wheel (uses downloaded nvcc from PATH)
 # Default moved here from tools/install_deepgemm.sh for centralized version management
 ARG DEEPGEMM_GIT_REF=477618cd51baffca09c4b0b87e97c03fe827ef03
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/deepgemm/dist && \
+    NVCC_MAJOR_MINOR=$(echo "$NVCC_VERSION" | cut -d. -f1,2) && \
     VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh \
-        --cuda-version "${CUDA_VERSION}" \
+        --cuda-version "${NVCC_MAJOR_MINOR}" \
         ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} \
         --wheel-dir /tmp/deepgemm/dist || \
     echo "DeepGEMM build skipped (CUDA version requirement not met)"
