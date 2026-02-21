@@ -9,6 +9,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
+    FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
@@ -62,6 +63,38 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         'weight_scale_2' pattern instead of the standard 'weight_scale' pattern.
         """
         return False
+
+    def maybe_roundup_sizes(
+        self,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        act_dtype: torch.dtype,
+        moe_parallel_config: FusedMoEParallelConfig,
+    ) -> tuple[int, int]:
+        """
+        Given layer hidden size and intermediate size per partition and MoE
+        configurations, round up hidden_size and intermediate_size_per_partition
+        if necessary.
+
+        Args:
+            hidden_size: Layer hidden-size
+            intermediate_size_per_partition: Intermediate size per partition for
+                the layer.
+            act_dtype: Data type of the layer activations.
+            moe_parallel_config: Fused MoE parallelization strategy configuration.
+
+        Return:
+            A tuple of (rounded_hidden_size, rounded_intermediate_size_per_partition),
+            where:
+                - rounded_hidden_size is the possibly rounded up hidden size.
+                - rounded_intermediate_size_per_partition is the possibly rounded
+                  up intermediate size per partition.
+        """
+        from .all2all_utils import maybe_roundup_layer_hidden_size
+
+        return maybe_roundup_layer_hidden_size(
+            hidden_size, act_dtype, moe_parallel_config
+        ), intermediate_size_per_partition
 
     def maybe_make_prepare_finalize(
         self,

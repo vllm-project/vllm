@@ -52,7 +52,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -208,66 +207,6 @@ def get_compressed_expert_map(expert_map: torch.Tensor) -> str:
         f"{local_index.item()}->{global_index.item()}"
         for local_index, global_index in zip(local_indices, global_indices)
     )
-
-
-# TODO(rob): move this down to the kernel.
-def maybe_roundup_hidden_size(
-    hidden_size: int,
-    act_dtype: torch.dtype,
-    moe_parallel_config: FusedMoEParallelConfig,
-    is_lora_enabled: bool,
-    model_type: str | None,
-    is_mxfp4_quant: bool,
-) -> int:
-    """
-    Given layer hidden size and MoE configurations, round up hidden_size
-    if necessary.
-
-    Args:
-        hidden_size: Layer hidden-size
-        act_dtype: Data type of the layer activations.
-        moe_parallel_config: Fused MoE parallelization strategy configuration.
-        is_lora_enabled: True if the engine is enabled with LoRA. This
-            is used in the case of mxfp4 quantization in selecting the
-            MxFP4Backend.
-        model_type: for checking if gpt-oss
-        is_mxfp4_quant: whether the layer is quantized with mxfp4
-
-    Return:
-        Rounded up hidden_size if rounding up is required based on the configs.
-        Original hidden size otherwise.
-    """
-    from vllm.model_executor.layers.fused_moe.all2all_utils import (
-        maybe_roundup_layer_hidden_size,
-    )
-
-    hidden_size = maybe_roundup_layer_hidden_size(
-        hidden_size, act_dtype, moe_parallel_config
-    )
-
-    # we are padding globally so EP buffer allocation works
-    if model_type == "gpt_oss" and is_mxfp4_quant:
-        from vllm.model_executor.layers.quantization.mxfp4 import (
-            Mxfp4Backend,
-            get_mxfp4_backend,
-        )
-
-        current_mxfp4_backend = get_mxfp4_backend(is_lora_enabled)
-
-        if (
-            current_mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        ):
-            hidden_size = round_up(hidden_size, 128)
-        elif (
-            current_platform.is_rocm()
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_TRTLLM
-            or current_mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_BF16
-            or current_mxfp4_backend == Mxfp4Backend.MARLIN
-        ):
-            hidden_size = round_up(hidden_size, 256)
-
-    return hidden_size
 
 
 # --8<-- [start:fused_moe]
@@ -522,23 +461,6 @@ class FusedMoE(CustomOp):
             indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
-
-        # Round up hidden size before creating moe_config.
-        # This way moe_config is created with the correct hidden_size from the start.
-        hidden_size = maybe_roundup_hidden_size(
-            hidden_size=hidden_size,
-            act_dtype=moe_in_dtype,
-            moe_parallel_config=self.moe_parallel_config,
-            is_lora_enabled=vllm_config.lora_config is not None,
-            model_type=(
-                self.vllm_config.model_config.hf_config.model_type
-                if self.vllm_config.model_config is not None
-                else None
-            ),
-            is_mxfp4_quant=(
-                quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
-            ),
-        )
         self.hidden_size = hidden_size
 
         self.moe_config: FusedMoEConfig = FusedMoEConfig(
@@ -622,6 +544,27 @@ class FusedMoE(CustomOp):
         ):
             moe_quant_params["intermediate_size_full"] = intermediate_size
 
+        # Round up hidden size and update moe_config.
+        self.hidden_size_original = hidden_size
+        self.intermediate_size_per_partition_original = (
+            self.intermediate_size_per_partition
+        )
+        self.hidden_size, self.intermediate_size_per_partition = (
+            self.quant_method.maybe_roundup_sizes(
+                hidden_size,
+                self.intermediate_size_per_partition,
+                moe_in_dtype,
+                self.moe_parallel_config,
+            )
+        )
+        self.moe_config.hidden_dim = self.hidden_size
+        self.moe_config.intermediate_size_per_partition = (
+            self.intermediate_size_per_partition
+        )
+        moe_quant_params["hidden_size"] = self.hidden_size
+        moe_quant_params["intermediate_size_per_partition"] = (
+            self.intermediate_size_per_partition
+        )
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
         # Disable shared expert overlap if:
