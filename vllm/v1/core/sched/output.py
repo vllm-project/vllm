@@ -45,7 +45,9 @@ class NewRequestData:
     # For gap recomputation (SPANS/block attention)
     is_gap_recompute: bool = False
     parent_req_id: str | None = None  # The original request ID for virtual gap requests
-    gap_start: int | None = None  # Start position of gap in parent request (for KV copy)
+    gap_start: int | None = (
+        None  # Start position of gap in parent request (for KV copy)
+    )
 
     @classmethod
     def from_request(

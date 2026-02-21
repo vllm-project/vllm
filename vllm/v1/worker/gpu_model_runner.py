@@ -14,7 +14,7 @@ from copy import copy, deepcopy
 from datetime import datetime
 from functools import reduce
 from typing import TYPE_CHECKING, Any, NamedTuple, TypeAlias, cast
-from vllm.model_executor.models.utils import PPMissingLayer
+
 import numpy as np
 import torch
 import torch.distributed
@@ -82,11 +82,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
-from vllm.model_executor.offloader import (
-    create_offloader,
-    get_offloader,
-    set_offloader,
-)
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
@@ -486,20 +482,28 @@ class GPUModelRunner(
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
         # KV Cache Hash Debugging Configuration
-        self._kv_hash_debug_enabled = os.getenv("VLLM_DEBUG_KV_HASH_ENABLED", "False").lower() == "true"
+        self._kv_hash_debug_enabled = (
+            os.getenv("VLLM_DEBUG_KV_HASH_ENABLED", "False").lower() == "true"
+        )
         self._kv_hash_debug_layer = int(os.getenv("VLLM_DEBUG_KV_HASH_LAYER", "1"))
         self._kv_hash_debug_req_ids = os.getenv("VLLM_DEBUG_KV_HASH_REQ_IDS", "")
-        self._kv_hash_debug_output_file = os.getenv("VLLM_DEBUG_KV_HASH_OUTPUT_FILE", "kv_cache.csv")
-        self._kv_hash_debug_log_interval = int(os.getenv("VLLM_DEBUG_KV_HASH_LOG_INTERVAL", "1"))
+        self._kv_hash_debug_output_file = os.getenv(
+            "VLLM_DEBUG_KV_HASH_OUTPUT_FILE", "kv_cache.csv"
+        )
+        self._kv_hash_debug_log_interval = int(
+            os.getenv("VLLM_DEBUG_KV_HASH_LOG_INTERVAL", "1")
+        )
         self._kv_hash_debug_counter = 0
-        
+
         if self._kv_hash_debug_enabled:
             logger.info(
                 "KV Cache Hash Debugging ENABLED: layer=%d, req_ids=%s, output_file=%s, log_interval=%d",
                 self._kv_hash_debug_layer,
                 self._kv_hash_debug_req_ids if self._kv_hash_debug_req_ids else "ALL",
-                self._kv_hash_debug_output_file if self._kv_hash_debug_output_file else "CONSOLE_ONLY",
-                self._kv_hash_debug_log_interval
+                self._kv_hash_debug_output_file
+                if self._kv_hash_debug_output_file
+                else "CONSOLE_ONLY",
+                self._kv_hash_debug_log_interval,
             )
 
         self.use_aux_hidden_state_outputs = False
@@ -1645,25 +1649,29 @@ class GPUModelRunner(
 
         self.input_batch.block_table.compute_slot_mapping(req_indices, positions_np)
         self.input_batch.block_table.commit_slot_mapping(total_num_scheduled_tokens)
-        
+
         # Debug: Print slot mapping for virtual requests created from gaps
         for req_idx in range(num_reqs):
             req_id = self.input_batch.req_ids[req_idx]
-            if req_id: # and "." in req_id:  # Virtual request from gap
+            if req_id:  # and "." in req_id:  # Virtual request from gap
                 # Get the slot mapping for this request
                 req_start_idx = cu_num_tokens[req_idx - 1] if req_idx > 0 else 0
                 req_end_idx = cu_num_tokens[req_idx]
                 req_num_tokens = num_scheduled_tokens[req_idx]
-                
+
                 # Get slot mapping from block table (it's computed but not yet in attention metadata)
-                slot_mapping_np = self.input_batch.block_table[0].slot_mapping.cpu[:total_num_scheduled_tokens]
+                slot_mapping_np = self.input_batch.block_table[0].slot_mapping.cpu[
+                    :total_num_scheduled_tokens
+                ]
                 req_slot_mapping = slot_mapping_np[req_start_idx:req_end_idx]
-                
-                print(f"[DEBUG] Virtual Request Slot Mapping (Model Runner):")
+
+                print("[DEBUG] Virtual Request Slot Mapping (Model Runner):")
                 print(f"  req_id: {req_id}")
                 print(f"  req_idx: {req_idx}")
                 print(f"  num_scheduled_tokens: {req_num_tokens}")
-                print(f"  num_computed_tokens: {self.input_batch.num_computed_tokens_cpu[req_idx]}")
+                print(
+                    f"  num_computed_tokens: {self.input_batch.num_computed_tokens_cpu[req_idx]}"
+                )
                 print(f"  token_range_in_batch: [{req_start_idx}, {req_end_idx})")
                 print(f"  slot_mapping (first 20): {req_slot_mapping[:20].tolist()}")
                 print(f"  slot_mapping (last 20): {req_slot_mapping[-20:].tolist()}")
@@ -1842,16 +1850,16 @@ class GPUModelRunner(
         slot_mapping_gid_0 = slot_mappings[0]
 
         block_table_gid_0, slot_mapping_gid_0 = _get_block_table_and_slot_mapping(0)
-        
+
         if not hasattr(self, "rotate"):
-                if not isinstance(self.model.model.layers[0], PPMissingLayer):
-                    self.rotate = self.model.model.layers[0].self_attn.rotary_emb
-                else:
-                    for lay in self.model.model.layers:
-                        if not isinstance(lay, PPMissingLayer):
-                            self.rotate = lay.self_attn.rotary_emb
-                            break
-                        
+            if not isinstance(self.model.model.layers[0], PPMissingLayer):
+                self.rotate = self.model.model.layers[0].self_attn.rotary_emb
+            else:
+                for lay in self.model.model.layers:
+                    if not isinstance(lay, PPMissingLayer):
+                        self.rotate = lay.self_attn.rotary_emb
+                        break
+
         if self.model_config.enable_return_routed_experts:
             self.slot_mapping = slot_mapping_gid_0[:num_tokens].cpu().numpy()
         cm_base = CommonAttentionMetadata(
@@ -1914,7 +1922,7 @@ class GPUModelRunner(
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
             cache_key = (kv_cache_spec, type(builder))
-            
+
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
                 if cascade_attn_prefix_lens
@@ -1964,7 +1972,6 @@ class GPUModelRunner(
 
             for layer_name in attn_group.layer_names:
                 attn_metadata_dict[layer_name] = attn_metadata_i
-            
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
@@ -3154,22 +3161,20 @@ class GPUModelRunner(
         """Check if KV hash debugging should be performed this step."""
         if not self._kv_hash_debug_enabled:
             return False
-        
+
         self._kv_hash_debug_counter += 1
         return self._kv_hash_debug_counter % self._kv_hash_debug_log_interval == 0
 
     def _compute_kv_cache_hash_for_layer(
-        self,
-        layer_idx: int,
-        req_ids: list[str] | None = None
+        self, layer_idx: int, req_ids: list[str] | None = None
     ) -> dict[str, tuple[str, str]]:
         """
         Compute SHA256 hash of K,V cache for a specific layer.
-        
+
         Args:
             layer_idx: Layer index to compute hash for (0-based)
             req_ids: Optional list of request IDs to filter
-            
+
         Returns:
             Dictionary mapping block_idx -> (k_hash, v_hash)
         """
@@ -3177,33 +3182,36 @@ class GPUModelRunner(
             if layer_idx >= len(self.kv_caches):
                 logger.warning(
                     "KV Hash Debug: Layer index %d out of range (total layers: %d)",
-                    layer_idx, len(self.kv_caches)
+                    layer_idx,
+                    len(self.kv_caches),
                 )
                 return {}
-            
+
             kv_cache = self.kv_caches[layer_idx]
-            
+
             if kv_cache is None:
-                logger.warning("KV Hash Debug: KV cache for layer %d is None", layer_idx)
+                logger.warning(
+                    "KV Hash Debug: KV cache for layer %d is None", layer_idx
+                )
                 return {}
-            
+
             # Move to CPU and convert dtype if needed
             kv_cache_cpu = kv_cache.detach().cpu()
             if kv_cache_cpu.dtype == torch.bfloat16:
                 kv_cache_cpu = kv_cache_cpu.to(torch.float32)
-            
+
             # Get shape info
             # Typical shape: [num_blocks, 2, num_kv_heads, block_size, head_dim]
             # where dim 1 has K at index 0 and V at index 1
             shape = kv_cache_cpu.shape
             num_blocks = shape[0] if len(shape) > 0 else 1
-            
+
             block_hashes = {}
-            
+
             # Compute hash for each block
             for block_idx in range(num_blocks):
                 block_tensor = kv_cache_cpu[block_idx]
-                
+
                 # Split K and V if they're in the same tensor
                 if len(shape) > 1 and shape[1] == 2:
                     # K is at index 0, V is at index 1
@@ -3213,96 +3221,120 @@ class GPUModelRunner(
                     # Assume entire block is K,V concatenated or single tensor
                     k_tensor = block_tensor
                     v_tensor = block_tensor
-                
+
                 # Compute hashes
                 k_bytes = k_tensor.numpy().tobytes()
                 v_bytes = v_tensor.numpy().tobytes()
                 k_hash = hashlib.sha256(k_bytes).hexdigest()[:16]  # First 16 chars
                 v_hash = hashlib.sha256(v_bytes).hexdigest()[:16]
-                
+
                 block_hashes[block_idx] = (k_hash, v_hash)
-            
+
             return block_hashes
-            
+
         except Exception as e:
-            logger.error("KV Hash Debug: Error computing hash for layer %d: %s", layer_idx, e)
+            logger.error(
+                "KV Hash Debug: Error computing hash for layer %d: %s", layer_idx, e
+            )
             import traceback
+
             traceback.print_exc()
             return {}
 
     def _debug_kv_cache_hash(self, scheduler_output: "SchedulerOutput") -> None:
         """
         Debug function to compute and log KV cache hashes after execute_model.
-        
+
         Args:
             scheduler_output: The scheduler output containing request information
         """
         try:
             layer_idx = self._kv_hash_debug_layer
-            
+
             # Get layer name if available
             layer_name = f"layer_{layer_idx}"
-            if hasattr(self, 'model') and hasattr(self.model, 'layers'):
+            if hasattr(self, "model") and hasattr(self.model, "layers"):
                 try:
                     # Try to get actual layer name from model
-                    attn_layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+                    attn_layers = get_layers_from_vllm_config(
+                        self.vllm_config, Attention
+                    )
                     layer_names = list(attn_layers.keys())
                     if layer_idx < len(layer_names):
                         layer_name = layer_names[layer_idx]
                 except Exception:
                     pass
-            
+
             # Compute hashes
             block_hashes = self._compute_kv_cache_hash_for_layer(layer_idx)
-            
+
             if not block_hashes:
-                logger.warning("KV Hash Debug: No hashes computed for layer %d", layer_idx)
+                logger.warning(
+                    "KV Hash Debug: No hashes computed for layer %d", layer_idx
+                )
                 return
-            
+
             # Prepare log message
             timestamp = datetime.now().isoformat()
             step = self._kv_hash_debug_counter
-            
+
             # Console output
-            logger.info("="*80)
-            logger.info("[KV_HASH_DEBUG] Step: %d, Layer: %d (%s)", step, layer_idx, layer_name)
+            logger.info("=" * 80)
+            logger.info(
+                "[KV_HASH_DEBUG] Step: %d, Layer: %d (%s)", step, layer_idx, layer_name
+            )
             logger.info("  Timestamp: %s", timestamp)
             logger.info("  Total blocks: %d", len(block_hashes))
-            
+
             # Log first few blocks to console
             max_console_blocks = 15
-            for block_idx, (k_hash, v_hash) in list(block_hashes.items())[:max_console_blocks]:
+            for block_idx, (k_hash, v_hash) in list(block_hashes.items())[
+                :max_console_blocks
+            ]:
                 logger.info("    Block %d: K=%s, V=%s", block_idx, k_hash, v_hash)
-            
+
             if len(block_hashes) > max_console_blocks:
-                logger.info("    ... (%d more blocks)", len(block_hashes) - max_console_blocks)
-            
-            logger.info("="*80)
-            
+                logger.info(
+                    "    ... (%d more blocks)", len(block_hashes) - max_console_blocks
+                )
+
+            logger.info("=" * 80)
+
             # File output (CSV format)
             if self._kv_hash_debug_output_file:
                 try:
                     # Check if file exists to determine if we need to write header
                     file_exists = os.path.exists(self._kv_hash_debug_output_file)
-                    
-                    with open(self._kv_hash_debug_output_file, 'a') as f:
+
+                    with open(self._kv_hash_debug_output_file, "a") as f:
                         # Write header if new file
                         if not file_exists:
-                            f.write("timestamp,step,layer_idx,layer_name,block_idx,k_hash,v_hash\n")
-                        
+                            f.write(
+                                "timestamp,step,layer_idx,layer_name,block_idx,k_hash,v_hash\n"
+                            )
+
                         # Write data for all blocks
                         for block_idx, (k_hash, v_hash) in block_hashes.items():
-                            f.write(f"{timestamp},{step},{layer_idx},{layer_name},{block_idx},{k_hash},{v_hash}\n")
-                    
-                    logger.info("KV Hash Debug: Data written to %s", self._kv_hash_debug_output_file)
-                    
+                            f.write(
+                                f"{timestamp},{step},{layer_idx},{layer_name},{block_idx},{k_hash},{v_hash}\n"
+                            )
+
+                    logger.info(
+                        "KV Hash Debug: Data written to %s",
+                        self._kv_hash_debug_output_file,
+                    )
+
                 except Exception as e:
-                    logger.error("KV Hash Debug: Error writing to file %s: %s",
-                               self._kv_hash_debug_output_file, e)
-        
+                    logger.error(
+                        "KV Hash Debug: Error writing to file %s: %s",
+                        self._kv_hash_debug_output_file,
+                        e,
+                    )
+
         except Exception as e:
             logger.error("KV Hash Debug: Error in _debug_kv_cache_hash: %s", e)
             import traceback
+
             traceback.print_exc()
 
     def _model_forward(
@@ -3811,7 +3843,7 @@ class GPUModelRunner(
                 inputs_embeds=inputs_embeds,
                 **model_kwargs,
             )
-        
+
         # === DEBUG: KV Cache Hash ===
         if self._should_debug_kv_hash():
             self._debug_kv_cache_hash(scheduler_output)
@@ -4077,30 +4109,11 @@ class GPUModelRunner(
                 cudagraph_stats=cudagraph_stats,
             )
 
-        # Handle virtual gap requests: copy KV to parent and cleanup
-        # This must happen AFTER _bookkeeping_sync because it accesses self.requests
+        # Handle virtual gap requests: cleanup only (KV written directly to parent)
+        # Virtual gap requests share parent's blocks and write directly to parent's
+        # KV cache during model execution. Only need cleanup.
         if scheduler_output.virtual_gap_req_ids is not None:
-            # Build lookup for virtual request data
-            virtual_req_data = {
-                nrd.req_id: nrd for nrd in scheduler_output.scheduled_new_reqs
-                if nrd.req_id in scheduler_output.virtual_gap_req_ids
-            }
             for req_id in scheduler_output.virtual_gap_req_ids:
-                req_data = virtual_req_data.get(req_id)
-                if req_data and req_data.parent_req_id and req_data.gap_start is not None:
-                    # CRITICAL: Virtual requests are new requests with num_computed_tokens=0.
-                    # We need to update num_computed_tokens to the actual number of tokens
-                    # computed so the KV copy knows how many tokens to copy.
-                    virtual_idx = self.input_batch.req_id_to_index.get(req_id)
-                    if virtual_idx is not None:
-                        num_scheduled = scheduler_output.num_scheduled_tokens.get(req_id, 0)
-                        if num_scheduled > 0:
-                            self.input_batch.num_computed_tokens_cpu[virtual_idx] = num_scheduled
-
-                    self._copy_virtual_request_kv_to_parent_v2(
-                        req_id, req_data.parent_req_id, req_data.gap_start
-                    )
-                # Remove virtual request state
                 self.requests.pop(req_id, None)
                 self.num_prompt_logprobs.pop(req_id, None)
                 self.input_batch.remove_request(req_id)
@@ -4190,7 +4203,9 @@ class GPUModelRunner(
         """
         logger.info(
             "[V2 KV Copy] Starting copy from %s to %s at position %d",
-            virtual_req_id, parent_req_id, gap_start
+            virtual_req_id,
+            parent_req_id,
+            gap_start,
         )
         try:
             # Get request indices from input_batch
@@ -4201,7 +4216,10 @@ class GPUModelRunner(
                 logger.warning(
                     "[V2 KV Copy] Could not find request indices for %s -> %s "
                     "(virtual_idx=%s, parent_idx=%s)",
-                    virtual_req_id, parent_req_id, virtual_idx, parent_idx
+                    virtual_req_id,
+                    parent_req_id,
+                    virtual_idx,
+                    parent_idx,
                 )
                 return
 
@@ -4213,7 +4231,9 @@ class GPUModelRunner(
 
             logger.info(
                 "[V2 KV Copy] virtual_idx=%d, parent_idx=%d, num_tokens=%d",
-                virtual_idx, parent_idx, num_tokens
+                virtual_idx,
+                parent_idx,
+                num_tokens,
             )
 
             # For each KV cache group, copy slot mappings
@@ -4240,13 +4260,17 @@ class GPUModelRunner(
 
                 logger.info(
                     "[V2 KV Copy] Group %d: virtual has %d blocks, parent has %d blocks",
-                    group_idx, virtual_num_blocks, parent_num_blocks
+                    group_idx,
+                    virtual_num_blocks,
+                    parent_num_blocks,
                 )
 
                 kv_cache = self.kv_caches[group_idx]
 
                 # Get the block IDs for both requests
-                virtual_blocks = block_table.block_table.np[virtual_idx, :virtual_num_blocks]
+                virtual_blocks = block_table.block_table.np[
+                    virtual_idx, :virtual_num_blocks
+                ]
                 # CRITICAL: gap_start is in tokens. We need to convert to kernel block index.
                 # The KV cache shape is [num_blocks, 2, num_heads, block_size, head_dim]
                 # where shape[3] is the kernel block size (may differ from allocation block size).
@@ -4254,18 +4278,27 @@ class GPUModelRunner(
                 # allocation block size (e.g., 16), and kernel block index = position // kernel_block_size.
                 kernel_block_size = kv_cache.shape[3]
                 parent_gap_block_idx = gap_start // kernel_block_size
-                parent_blocks_needed = (gap_start + num_tokens + kernel_block_size - 1) // kernel_block_size - parent_gap_block_idx
-                parent_blocks = block_table.block_table.np[parent_idx, parent_gap_block_idx:parent_gap_block_idx + parent_blocks_needed]
+                parent_blocks_needed = (
+                    gap_start + num_tokens + kernel_block_size - 1
+                ) // kernel_block_size - parent_gap_block_idx
+                parent_blocks = block_table.block_table.np[
+                    parent_idx,
+                    parent_gap_block_idx : parent_gap_block_idx + parent_blocks_needed,
+                ]
 
                 logger.info(
                     "[V2 KV Copy] DEBUG gap_start=%d, kernel_block_size=%d, "
                     "parent_gap_block_idx=%d, parent_blocks_needed=%d",
-                    gap_start, kernel_block_size,
-                    parent_gap_block_idx, parent_blocks_needed
+                    gap_start,
+                    kernel_block_size,
+                    parent_gap_block_idx,
+                    parent_blocks_needed,
                 )
                 logger.info(
                     "[V2 KV Copy] Group %d: virtual_blocks=%s, parent_blocks=%s",
-                    group_idx, virtual_blocks[:10], parent_blocks[:10]
+                    group_idx,
+                    virtual_blocks[:10],
+                    parent_blocks[:10],
                 )
 
                 # kernel_block_size extracted from kv_cache.shape[3] above
@@ -4282,41 +4315,71 @@ class GPUModelRunner(
                     # Parent position (gap_start + i)
                     parent_token_idx = gap_start + i
                     parent_block_idx_abs = parent_token_idx // kernel_block_size
-                    parent_block_idx_in_gap = parent_block_idx_abs - parent_gap_block_idx
+                    parent_block_idx_in_gap = (
+                        parent_block_idx_abs - parent_gap_block_idx
+                    )
                     parent_offset = parent_token_idx % kernel_block_size
 
                     if i < 5:
-                        logger.info("[V2 KV Copy] Token %d: parent_token_idx=%d, kernel_block_size=%d, parent_block_idx_abs=%d, parent_gap_block_idx=%d, parent_block_idx_in_gap=%d",
-                                   i, parent_token_idx, kernel_block_size, parent_block_idx_abs, parent_gap_block_idx, parent_block_idx_in_gap)
+                        logger.info(
+                            "[V2 KV Copy] Token %d: parent_token_idx=%d, kernel_block_size=%d, parent_block_idx_abs=%d, parent_gap_block_idx=%d, parent_block_idx_in_gap=%d",
+                            i,
+                            parent_token_idx,
+                            kernel_block_size,
+                            parent_block_idx_abs,
+                            parent_gap_block_idx,
+                            parent_block_idx_in_gap,
+                        )
 
-                    if virtual_block_idx < len(virtual_blocks) and parent_block_idx_in_gap < len(parent_blocks):
+                    if virtual_block_idx < len(
+                        virtual_blocks
+                    ) and parent_block_idx_in_gap < len(parent_blocks):
                         v_block_id = int(virtual_blocks[virtual_block_idx])
                         p_block_id = int(parent_blocks[parent_block_idx_in_gap])
 
                         if v_block_id >= 0 and p_block_id >= 0:
                             # Copy K and V
-                            kv_cache[p_block_id, 0, :, parent_offset, :] = kv_cache[v_block_id, 0, :, virtual_offset, :]
-                            kv_cache[p_block_id, 1, :, parent_offset, :] = kv_cache[v_block_id, 1, :, virtual_offset, :]
+                            kv_cache[p_block_id, 0, :, parent_offset, :] = kv_cache[
+                                v_block_id, 0, :, virtual_offset, :
+                            ]
+                            kv_cache[p_block_id, 1, :, parent_offset, :] = kv_cache[
+                                v_block_id, 1, :, virtual_offset, :
+                            ]
                             tokens_copied += 1
                         else:
-                            logger.info("[V2 KV Copy] Oi there's a bug :( v_block_id = %d, p_block_id = %d", v_block_id, p_block_id)
+                            logger.info(
+                                "[V2 KV Copy] Oi there's a bug :( v_block_id = %d, p_block_id = %d",
+                                v_block_id,
+                                p_block_id,
+                            )
                     else:
-                            logger.info("[V2 KV Copy] Oi there's a bug :( virtual_block_idx = %d, len(virtual_blocks) = %d, parent_block_idx_in_gap = %d, len(parent_blocks) = %d", virtual_block_idx, len(virtual_blocks), parent_block_idx_in_gap, len(parent_blocks))
-                        
+                        logger.info(
+                            "[V2 KV Copy] Oi there's a bug :( virtual_block_idx = %d, len(virtual_blocks) = %d, parent_block_idx_in_gap = %d, len(parent_blocks) = %d",
+                            virtual_block_idx,
+                            len(virtual_blocks),
+                            parent_block_idx_in_gap,
+                            len(parent_blocks),
+                        )
 
                 logger.info(
                     "[V2 KV Copy] Group %d: Copied %d/%d tokens",
-                    group_idx, tokens_copied, num_tokens
+                    group_idx,
+                    tokens_copied,
+                    num_tokens,
                 )
 
             logger.info(
                 "[V2 KV Copy] Successfully copied %d tokens from %s to %s at position %d",
-                num_tokens, virtual_req_id, parent_req_id, gap_start
+                num_tokens,
+                virtual_req_id,
+                parent_req_id,
+                gap_start,
             )
 
         except Exception as e:
             logger.error("[V2 KV Copy] Error copying KV for %s: %s", virtual_req_id, e)
             import traceback
+
             traceback.print_exc()
 
     def _copy_draft_token_ids_to_cpu(

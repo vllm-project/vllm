@@ -836,7 +836,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if virtual_idx is None or parent_idx is None:
                 logger.warning(
                     "KV Copy: Could not find request indices for %s -> %s",
-                    virtual_req_id, parent_req_id
+                    virtual_req_id,
+                    parent_req_id,
                 )
                 return
 
@@ -848,7 +849,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Get the slot mappings for both requests
             # slot_mapping shape: [num_kv_groups, max_num_tokens]
             virtual_slots = self.block_tables.slot_mappings[:, virtual_idx, :num_tokens]
-            parent_slots = self.block_tables.slot_mappings[:, parent_idx, gap_start:gap_start + num_tokens]
+            parent_slots = self.block_tables.slot_mappings[
+                :, parent_idx, gap_start : gap_start + num_tokens
+            ]
 
             # Copy KV from virtual slots to parent gap slots
             for layer_idx, kv_cache in enumerate(self.kv_caches):
@@ -856,17 +859,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # For each KV group, copy from virtual slots to parent slots
                 for group_idx in range(self.block_tables.num_kv_cache_groups):
                     v_slots = virtual_slots[group_idx]  # [num_tokens]
-                    p_slots = parent_slots[group_idx]   # [num_tokens]
+                    p_slots = parent_slots[group_idx]  # [num_tokens]
 
                     # Copy K and V separately
                     # kv_cache is [num_blocks, 2, block_size, num_heads, head_size]
                     # slot = block_idx * block_size + offset
-                    k_cache = kv_cache[:, 0]  # [num_blocks, block_size, num_heads, head_size]
-                    v_cache = kv_cache[:, 1]  # [num_blocks, block_size, num_heads, head_size]
+                    k_cache = kv_cache[
+                        :, 0
+                    ]  # [num_blocks, block_size, num_heads, head_size]
+                    v_cache = kv_cache[
+                        :, 1
+                    ]  # [num_blocks, block_size, num_heads, head_size]
 
                     # Flatten and copy
-                    k_cache_flat = k_cache.view(-1, k_cache.shape[-2], k_cache.shape[-1])
-                    v_cache_flat = v_cache.view(-1, v_cache.shape[-2], v_cache.shape[-1])
+                    k_cache_flat = k_cache.view(
+                        -1, k_cache.shape[-2], k_cache.shape[-1]
+                    )
+                    v_cache_flat = v_cache.view(
+                        -1, v_cache.shape[-2], v_cache.shape[-1]
+                    )
 
                     # Copy virtual slots to parent slots
                     for i in range(num_tokens):
@@ -878,7 +889,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
             logger.info(
                 "KV Copy: Copied %d tokens from %s to %s at position %d",
-                num_tokens, virtual_req_id, parent_req_id, gap_start
+                num_tokens,
+                virtual_req_id,
+                parent_req_id,
+                gap_start,
             )
 
         except Exception as e:
@@ -1036,43 +1050,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     hidden_states = model_output
                     aux_hidden_states = None
 
-        kv_connector_output = self.kv_connector.post_forward(scheduler_output)
-        self.execute_model_state = (
-            input_batch,
-            model_inputs,
-            attn_metadata,
-            slot_mappings_by_layer,
-            hidden_states,
-            aux_hidden_states,
-            kv_connector_output,
-        )
-
-        if not self.is_last_pp_rank:
-            # Non-last PP rank: return IntermediateTensors for sending.
-            assert isinstance(hidden_states, IntermediateTensors)
-            hidden_states.kv_connector_output = kv_connector_output
-            return hidden_states
-        # Last rank (or no PP): hidden_states is a tensor for sampling.
-        assert isinstance(hidden_states, torch.Tensor)
+        self.execute_model_state = hidden_states, input_batch, scheduler_output.virtual_gap_req_ids
         return None
 
     @torch.inference_mode()
     def sample_tokens(
-        self, grammar_output: GrammarOutput | None
-    ) -> AsyncOutput | ModelRunnerOutput | None:
-        if self.execute_model_state is None:
-            # The prior execute_model call must have failed.
-            return None
-        (
-            input_batch,
-            model_inputs,
-            attn_metadata,
-            slot_mappings_by_layer,
-            hidden_states,
-            aux_hidden_states,
-            kv_connector_output,
-        ) = self.execute_model_state
-        self.execute_model_state = None
+        self,
+        grammar_output: GrammarOutput | None,
+    ) -> AsyncOutput | ModelRunnerOutput:
+        assert self.execute_model_state is not None
+        hidden_states, input_batch, virtual_gap_req_ids = self.execute_model_state
+        self.execute_model_state = None  # type: ignore
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
@@ -1148,20 +1136,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
 
-        # Handle virtual gap requests: copy KV to parent and cleanup
-        if scheduler_output.virtual_gap_req_ids is not None:
-            # Build lookup for virtual request data
-            virtual_req_data = {
-                nrd.req_id: nrd for nrd in scheduler_output.scheduled_new_reqs
-                if nrd.req_id in scheduler_output.virtual_gap_req_ids
-            }
-            for req_id in scheduler_output.virtual_gap_req_ids:
-                req_data = virtual_req_data.get(req_id)
-                if req_data and req_data.parent_req_id and req_data.gap_start is not None:
-                    self._copy_virtual_request_kv_to_parent(
-                        req_id, req_data.parent_req_id, req_data.gap_start
-                    )
-                # Remove virtual request state
+        # Handle virtual gap requests: cleanup only (KV written directly to parent)
+        if virtual_gap_req_ids is not None:
+            # Virtual gap requests share parent's blocks and write directly
+            # to parent's KV cache during model execution. Only need cleanup.
+            for req_id in virtual_gap_req_ids:
                 self.req_states.remove_request(req_id)
                 if self.supports_mm_inputs:
                     self.encoder_runner.remove_request(req_id)
