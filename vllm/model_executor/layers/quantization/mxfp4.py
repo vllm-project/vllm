@@ -256,7 +256,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             "Please check your environment and try again."
         )
         self._cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
-        self.moe_mk: mk.FusedMoEModularKernel | None = None
+        self.moe_kernel: mk.FusedMoEKernel | None = None
 
     def create_weights(
         self,
@@ -426,7 +426,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
             assert prepare_finalize is not None
 
-            self.moe_mk = mk.FusedMoEModularKernel(
+            self.moe_kernel = mk.FusedMoEKernel(
                 prepare_finalize,
                 MarlinExperts(
                     self.moe,
@@ -867,9 +867,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
     def select_gemm_impl(
         self,
-        prepare_finalize: mk.FusedMoEPrepareAndFinalize,
+        prepare_finalize: mk.FusedMoEPrepareAndFinalizeModular,
         layer: torch.nn.Module,
-    ) -> mk.FusedMoEPermuteExpertsUnpermute:
+    ) -> mk.FusedMoEExpertsModular:
         if (
             prepare_finalize.activation_format
             == mk.FusedMoEActivationFormat.BatchedExperts
@@ -936,9 +936,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             raise NotImplementedError("EPLB is not supported for mxfp4")
 
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
-            assert self.moe_mk is not None
+            assert self.moe_kernel is not None
 
-            return self.moe_mk(
+            return self.moe_kernel.apply(
                 hidden_states=x,
                 w1=layer.w13_weight,
                 w2=layer.w2_weight,
@@ -948,6 +948,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
                 apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                shared_experts_input=shared_experts_input,
             )
         assert _can_support_mxfp4(
             layer.use_grouped_topk,

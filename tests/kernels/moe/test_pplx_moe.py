@@ -38,10 +38,11 @@ from tests.kernels.quant_utils import dequant
 from tests.kernels.utils import torch_experts
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.model_executor.layers.fused_moe import fused_topk, override_config
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_batched_moe import BatchedTritonExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import get_default_config
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
 )
@@ -588,7 +589,7 @@ def pplx_moe(
         moe_config=make_dummy_moe_config(),
     )
 
-    fused_experts = FusedMoEModularKernel(
+    fused_experts = FusedMoEKernel(
         prepare_finalize,
         experts,
         shared_experts,
@@ -608,13 +609,15 @@ def pplx_moe(
     else:
         _fused_experts = fused_experts
 
-    out = _fused_experts(
+    out = _fused_experts.apply(
         a_chunk,
         w1_chunk,
         w2_chunk,
         chunk_topk_weight,
         chunk_topk_ids,
         global_num_experts=num_experts,
+        activation=MoEActivation.SILU,
+        expert_map=None,
     )
 
     if use_cudagraphs:

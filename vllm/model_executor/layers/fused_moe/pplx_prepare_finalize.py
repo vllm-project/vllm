@@ -62,7 +62,7 @@ def pplx_hidden_dim_scale_bytes(
     )
 
 
-class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
+class PplxPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     """PPLX-based prepare and finalize for expert parallelism."""
 
     def __init__(

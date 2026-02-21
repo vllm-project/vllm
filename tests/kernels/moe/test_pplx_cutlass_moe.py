@@ -17,7 +17,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassBatchedExpertsFp8
-from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEModularKernel
+from vllm.model_executor.layers.fused_moe.modular_kernel import FusedMoEKernel
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import set_random_seed
@@ -171,7 +171,7 @@ def pplx_cutlass_moe(
         num_dispatchers=num_dispatchers,
     )
 
-    fused_cutlass_experts = FusedMoEModularKernel(
+    fused_cutlass_experts = FusedMoEKernel(
         prepare_finalize,
         experts,
         inplace=False,
@@ -183,14 +183,16 @@ def pplx_cutlass_moe(
         chunk_by_rank(topk_ids, rank, world_size).to(torch.uint32).to(device)
     )
 
-    out = fused_cutlass_experts(
+    out = fused_cutlass_experts.apply(
         a_chunk,
         chunk_by_rank(w1, rank, world_size),
         chunk_by_rank(w2, rank, world_size),
         chunk_topk_weight,
         chunk_topk_ids,
+        activation=MoEActivation.SILU,
         global_num_experts=num_experts,
         expert_map=None,  # TODO
+        apply_router_weight_on_input=False,
     )
 
     torch.cuda.synchronize()

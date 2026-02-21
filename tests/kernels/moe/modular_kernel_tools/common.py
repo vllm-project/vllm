@@ -67,7 +67,7 @@ class Config:
     quant_config: TestMoEQuantConfig | None
 
     prepare_finalize_type: mk.FusedMoEPrepareAndFinalize
-    fused_experts_type: mk.FusedMoEPermuteExpertsUnpermute
+    fused_experts_type: mk.FusedMoEExperts
 
     fused_moe_chunk_size: int | None
     world_size: int
@@ -573,7 +573,7 @@ def make_modular_kernel(
     config: Config,
     vllm_config: VllmConfig,
     quant_config: FusedMoEQuantConfig,
-) -> mk.FusedMoEModularKernel:
+) -> mk.FusedMoEKernel:
     def next_power_of_2(x):
         import math
 
@@ -620,7 +620,7 @@ def make_modular_kernel(
         config.N,
     )
 
-    modular_kernel = mk.FusedMoEModularKernel(
+    modular_kernel = mk.FusedMoEKernel(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
         inplace=False,
@@ -674,6 +674,7 @@ def run_modular_kernel(
         "w2": rank_weights.w2,
         "topk_weights": rank_tensors.topk_weights,
         "topk_ids": topk_ids,
+        "activation": MoEActivation.SILU,
         "expert_map": rank_tensors.expert_map,
         "global_num_experts": config.E,
         "apply_router_weight_on_input": config.topk == 1
@@ -691,6 +692,6 @@ def run_modular_kernel(
         num_tokens=num_tokens,
         num_tokens_across_dp=num_tokens_across_dp,
     ):
-        out = mk.forward(**mk_kwargs)
+        out = mk.apply(**mk_kwargs)
 
     return out
