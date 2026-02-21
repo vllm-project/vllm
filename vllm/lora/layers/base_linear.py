@@ -88,8 +88,8 @@ class BaseLinearLayerWithLoRA(BaseLayerWithLoRA):
 
     def reset_lora(self, index: int):
         for s_index in range(self.n_slices):
-            self.lora_a_stacked[s_index][index] = 0
-            self.lora_b_stacked[s_index][index] = 0
+            self.lora_a_stacked[s_index][index].zero_()
+            self.lora_b_stacked[s_index][index].zero_()
 
     def set_lora(
         self,
