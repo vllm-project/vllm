@@ -159,7 +159,7 @@ class ParserManager:
             if isinstance(name, str):
                 names = [name]
             elif is_list_of(name, str):
-                names = name
+                names = name  # type: ignore[assignment]
             else:
                 names = [class_name]
 
@@ -192,14 +192,40 @@ class ParserManager:
         tool_parser_name: str | None = None,
         enable_auto_tools: bool = False,
         model_name: str | None = None,
+        model_type: str | None = None,
     ) -> type[ToolParser] | None:
-        """Get the tool parser based on the name."""
+        """Get the tool parser based on the name.
+
+        When *tool_parser_name* is ``"auto"``, the parser is resolved
+        automatically from *model_type* and *model_name* using the
+        mapping tables in :mod:`vllm.tool_parsers`.
+        """
         from vllm.tool_parsers import ToolParserManager
 
         parser: type[ToolParser] | None = None
         if not enable_auto_tools or tool_parser_name is None:
             return parser
         logger.info('"auto" tool choice has been enabled.')
+
+        # Resolve "auto" to a concrete parser name.
+        if tool_parser_name == "auto":
+            from vllm.tool_parsers import get_auto_tool_parser
+
+            resolved = get_auto_tool_parser(model_type, model_name)
+            if resolved is None:
+                raise TypeError(
+                    "Error: --tool-call-parser=auto could not determine "
+                    f"the tool parser for model '{model_name}' "
+                    f"(model_type='{model_type}'). Please specify an "
+                    "explicit --tool-call-parser value."
+                )
+            logger.info(
+                "Auto-detected tool call parser '%s' for model '%s' (model_type='%s').",
+                resolved,
+                model_name,
+                model_type,
+            )
+            tool_parser_name = resolved
 
         try:
             if (
@@ -244,6 +270,7 @@ class ParserManager:
         reasoning_parser_name: str | None = None,
         enable_auto_tools: bool = False,
         model_name: str | None = None,
+        model_type: str | None = None,
     ) -> type[Parser] | None:
         """
         Get a unified Parser that handles both reasoning and tool parsing.
@@ -258,6 +285,7 @@ class ParserManager:
             reasoning_parser_name: The name of the reasoning parser.
             enable_auto_tools: Whether auto tool choice is enabled.
             model_name: The model name for parser-specific warnings.
+            model_type: The HuggingFace model_type for auto-detection.
 
         Returns:
             A Parser class, or None if neither parser is specified.
@@ -281,7 +309,7 @@ class ParserManager:
 
         # Strategy 2: Check for parser with either name
         for name in [tool_parser_name, reasoning_parser_name]:
-            if name:
+            if name and name != "auto":
                 try:
                     parser = cls.get_parser_internal(name)
                     logger.info(
@@ -295,7 +323,7 @@ class ParserManager:
         # Strategy 3: Create a DelegatingParser with the individual parser classes
         reasoning_parser_cls = cls.get_reasoning_parser(reasoning_parser_name)
         tool_parser_cls = cls.get_tool_parser(
-            tool_parser_name, enable_auto_tools, model_name
+            tool_parser_name, enable_auto_tools, model_name, model_type
         )
 
         if reasoning_parser_cls is None and tool_parser_cls is None:

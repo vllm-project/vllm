@@ -164,7 +164,8 @@ class FrontendArgs:
     tool_call_parser: str | None = None
     """Select the tool call parser depending on the model that you're using.
     This is used to parse the model-generated tool call into OpenAI API format.
-    Required for `--enable-auto-tool-choice`. You can choose any option from
+    Required for `--enable-auto-tool-choice`. Use 'auto' to automatically
+    detect the parser based on the model type. Alternatively, choose from
     the built-in parsers or register a plugin via `--tool-parser-plugin`."""
     tool_parser_plugin: str = ""
     """Special the tool parser plugin write to parse the model-generated tool
@@ -256,7 +257,7 @@ class FrontendArgs:
         valid_tool_parsers = list(ToolParserManager.list_registered())
         parsers_str = ",".join(valid_tool_parsers)
         frontend_kwargs["tool_call_parser"]["metavar"] = (
-            f"{{{parsers_str}}} or name registered in --tool-parser-plugin"
+            f"{{auto,{parsers_str}}} or name registered in --tool-parser-plugin"
         )
 
         frontend_group = parser.add_argument_group(
