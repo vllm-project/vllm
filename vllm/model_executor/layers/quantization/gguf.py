@@ -177,12 +177,15 @@ IMATRIX_QUANT_TYPES = {
     WeightType.IQ4_XS,
     WeightType.IQ4_NL,
 }
+MXFP4_TYPES = {WeightType.MXFP4}
 # TODO(Isotr0py): Currently, we don't have MMQ kernel for I-Matrix quantization.
 # Consolidate DEQUANT_TYPES, MMVQ_QUANT_TYPES and MMQ_QUANT_TYPES after we add
 # MMQ kernel for I-Matrix quantization.
-DEQUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
-MMVQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES
-MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
+DEQUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES | MXFP4_TYPES
+MMVQ_QUANT_TYPES = (
+    STANDARD_QUANT_TYPES | KQUANT_TYPES | IMATRIX_QUANT_TYPES | MXFP4_TYPES
+)
+MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES | MXFP4_TYPES
 
 
 def _fused_mul_mat_gguf(
@@ -527,7 +530,11 @@ class GGUFLinearMethod(LinearMethodBase):
 
         if shard_id:
             # dequantize shard weights respectively
-            shard_id = ["q", "k", "v"] if "q" in shard_id else shard_id
+            if "q" in shard_id:
+                shard_id = ["q", "k", "v"]
+            elif all(isinstance(i, int) for i in shard_id):
+                # Numeric shard IDs encode logical output order.
+                shard_id = sorted(shard_id)
             qweight = layer.qweight
             result = []
             for idx in shard_id:

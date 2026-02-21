@@ -235,7 +235,9 @@ class GGUFModelLoader(BaseModelLoader):
             if gguf_name is None:
                 return None
 
-            return gguf_name + "." + suffix
+            if suffix:
+                return gguf_name + "." + suffix
+            return gguf_name
 
         # Build mapping and track unmapped parameters
         unmapped_params = []
@@ -294,7 +296,7 @@ class GGUFModelLoader(BaseModelLoader):
         model_config: ModelConfig,
         model_name_or_path: str,
         gguf_to_hf_name_map: dict[str, str],
-    ) -> Generator[tuple[str, torch.Tensor], None, None]:
+    ) -> Generator[tuple[str, torch.Tensor]]:
         """
         Iterate over GGUF model weights, loading from both main model file and
         mmproj.gguf for multimodal Gemma3 models.
