@@ -150,6 +150,7 @@ async def test_bge_m3_api_server_sparse_embedding_corner_case(
 # Returns vocab-sized sparse vectors directly usable by vector databases,
 # without requiring a separate /tokenize call + client-side aggregation.
 
+
 async def aggregated_sparse_embeddings(
     client: openai.AsyncOpenAI, sentences: list[str]
 ) -> list[dict[int, float]]:
@@ -164,9 +165,7 @@ async def aggregated_sparse_embeddings(
     ret = []
     for emb in all_embeddings:
         # Convert dense vocab-sized vector to sparse dict {token_id: weight}
-        sparse_dict = {
-            i: v for i, v in enumerate(emb) if v > 0.0
-        }
+        sparse_dict = {i: v for i, v in enumerate(emb) if v > 0.0}
         ret.append(sparse_dict)
     return ret
 
@@ -190,9 +189,9 @@ async def test_bge_m3_embed_sparse_matches_token_classify(
         )
         # Same weights
         for token_id in tc_dict:
-            assert tc_dict[token_id] == pytest.approx(
-                agg_dict[token_id], rel=0.01
-            ), f"Weight mismatch for token {token_id}"
+            assert tc_dict[token_id] == pytest.approx(agg_dict[token_id], rel=0.01), (
+                f"Weight mismatch for token {token_id}"
+            )
 
 
 @pytest.mark.asyncio

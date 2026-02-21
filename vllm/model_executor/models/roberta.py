@@ -230,12 +230,10 @@ class BgeM3SparsePooler(Pooler):
 
         for i in range(B):
             L = int(lens[i])
-            hs = hidden_states[offset:offset + L]  # [L, hidden_size]
+            hs = hidden_states[offset : offset + L]  # [L, hidden_size]
 
             # Per-position sparse weights: ReLU(sparse_linear(H))
-            weights = torch.relu(
-                self.sparse_linear(hs)
-            ).squeeze(-1)  # [L]
+            weights = torch.relu(self.sparse_linear(hs)).squeeze(-1)  # [L]
 
             # Aggregate by token_id via max pooling (scatter_reduce)
             sparse_vec = hs.new_zeros(self.vocab_size)
@@ -296,11 +294,13 @@ class BgeM3EmbeddingModel(RobertaEmbeddingModel):
 
         # Collect special token IDs to zero out in sparse vectors
         special_token_ids = [
-            tid for tid in [
+            tid
+            for tid in [
                 self.bos_token_id,
                 self.eos_token_id,
                 self.pad_token_id,
-            ] if tid is not None and tid >= 0
+            ]
+            if tid is not None and tid >= 0
         ]
 
         return DispatchPooler(
