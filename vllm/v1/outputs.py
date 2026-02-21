@@ -195,6 +195,10 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
+    # Whether the drafter was skipped this step (e.g. input_fits_in_drafter was False).
+    # Used by the scheduler to exclude dummy/placeholder draft tokens from statistics.
+    drafting_was_skipped: bool = False
+
 
 # ModelRunnerOutput wrapper for async scheduling.
 class AsyncModelRunnerOutput(ABC):
