@@ -105,7 +105,7 @@ def chunk_fwd_kernel_o(
         # [BK, BT]
         b_k = tl.load(p_k, boundary_check=(0, 1))
         # [BV, BK]
-        b_h = tl.load(p_h, boundary_check=(0, 1))
+        b_h = tl.load(p_h, boundary_check=(0, 1)).to(b_q.dtype)
 
         # [BT, BK] @ [BK, BV] -> [BT, BV]
         b_o += tl.dot(b_q, tl.trans(b_h))
