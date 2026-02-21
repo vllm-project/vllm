@@ -1143,6 +1143,8 @@ class SupportsTranscription(Protocol):
         task_type: Literal["transcribe", "translate"],
         request_prompt: str,
         to_language: str | None,
+        decoder_prefix: str | None = None,
+        custom_task_tokens: list[str] | None = None,
     ) -> PromptType:
         """Get the prompt for the ASR model.
         The model has control over the construction, as long as it
