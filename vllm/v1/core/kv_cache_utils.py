@@ -3,6 +3,7 @@
 """KV-Cache Utilities."""
 
 import copy
+import hashlib
 import os
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
@@ -475,14 +476,19 @@ def _gen_prompt_embeds_extra_hash_keys(
         end_token_idx: The end token index of the block.
 
     Returns:
-        Return prompt embeddings data of the request if it has prompt embeds.
-        Return empty list otherwise.
+        Return a stable hash of the block prompt embeddings if prompt embeds
+        are present. Return empty list otherwise.
     """
     if request.prompt_embeds is None:
         return []
-    block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
-    embeds_bytes = tensor_data(block_prompt_embeds).tobytes()
-    return [embeds_bytes]
+    block_range = (start_token_idx, end_token_idx)
+    embeds_hash = request._prompt_embeds_per_block_hashes.get(block_range)
+    if embeds_hash is None:
+        block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
+        # Hash prompt embeds once per block and cache on request
+        embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
+        request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
+    return [embeds_hash]
 
 
 def generate_block_hash_extra_keys(
@@ -490,7 +496,7 @@ def generate_block_hash_extra_keys(
 ) -> tuple[tuple[Any, ...] | None, int]:
     """Generate extra keys for the block hash. The extra keys can come from
     the multi-modal inputs, request specific metadata (e.g., LoRA names), and
-    data from prompt embeddings.
+    hashed data from prompt embeddings.
 
     Args:
         request: The request object.

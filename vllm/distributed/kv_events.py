@@ -60,6 +60,13 @@ class BlockStored(KVCacheEvent):
     medium: str | None
     lora_name: str | None
 
+    extra_keys: list[tuple[Any, ...] | None] | None = None
+    """Extra keys used in block hash computation, one entry per block in
+    block_hashes. Each entry contains MM identifiers, LoRA name, cache_salt,
+    prompt embedding hashes, etc. for that specific block. Exposed for external
+    KV cache consumers to reconstruct block hashes.
+    """
+
     def __hash__(self) -> int:
         return hash(
             (
@@ -69,6 +76,7 @@ class BlockStored(KVCacheEvent):
                 self.block_size,
                 self.lora_id,
                 self.medium,
+                tuple(self.extra_keys) if self.extra_keys else None,
             )
         )
 
