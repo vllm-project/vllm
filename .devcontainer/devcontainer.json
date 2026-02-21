@@ -1,0 +1,7 @@
+{
+  "name": "vLLM Dev Container",
+  "build": {
+    "dockerfile": "../docker/Dockerfile",
+    "target": "dev"
+  }
+}
