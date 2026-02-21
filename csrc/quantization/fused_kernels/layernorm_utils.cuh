@@ -6,6 +6,7 @@
 
 #include "quantization/vectorization.cuh"
 #include "quantization/utils.cuh"
+#include "quantization/cuda_type_utils.cuh"
 #include "quant_conversions.cuh"
 
 #include "../../cub_helpers.h"
@@ -44,9 +45,9 @@ __device__ void compute_rms(float* rms, scalar_t const* __restrict__ input,
   *rms = s_rms;
 }
 
-__device__ float warpReduceMaxSpecialized(volatile float* val, int64_t tid,
-                                          int64_t thread_in_warp,
-                                          int64_t reduced_elems) {
+__device__ __forceinline__ float warpReduceMaxSpecialized(
+    volatile float* val, int64_t tid, int64_t thread_in_warp,
+    int64_t reduced_elems) {
   static_assert(WARP_SIZE == 32 || WARP_SIZE == 64);
   if constexpr (WARP_SIZE == 64) {
     if (thread_in_warp + 64 < reduced_elems)
@@ -542,5 +543,96 @@ __device__ void norm_and_quant(scalar_out_t* __restrict__ output,
 }
 
 }  // namespace vectorized
+
+// Compute sum of squares for a PackedVec (CVT_FP4_ELTS_PER_THREAD elements).
+// Used in RMSNorm variance calculation.
+template <class Type>
+__device__ __forceinline__ float compute_packed_sum_squares(
+    const PackedVec<Type>& vec) {
+  float sum = 0.0f;
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+    float2 fp2;
+    if constexpr (std::is_same_v<Type, half>) {
+      fp2 = __half22float2(vec.elts[i]);
+    } else {
+      fp2 = __bfloat1622float2(vec.elts[i]);
+    }
+    sum += fp2.x * fp2.x + fp2.y * fp2.y;
+  }
+  return sum;
+}
+
+// RMSNorm: output = input * rms_inv * weight
+// rms_inv = rsqrt(mean(x^2) + epsilon)
+// Match Python reference: cast to target dtype after rms_inv multiplication,
+// then multiply with weight in target dtype precision.
+template <class Type>
+__device__ __forceinline__ PackedVec<Type> compute_rms_norm(
+    const PackedVec<Type>& in_vec, const PackedVec<Type>& w_vec,
+    float rms_inv) {
+  PackedVec<Type> result{};
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+    float2 in_fp2, w_fp2;
+    if constexpr (std::is_same_v<Type, half>) {
+      in_fp2 = __half22float2(in_vec.elts[i]);
+      w_fp2 = __half22float2(w_vec.elts[i]);
+      // Cast to half after rms_inv, then multiply with weight in half
+      half2 normalized = __float22half2_rn(
+          make_float2(in_fp2.x * rms_inv, in_fp2.y * rms_inv));
+      result.elts[i] = __hmul2(normalized, w_vec.elts[i]);
+    } else {
+      in_fp2 = __bfloat1622float2(in_vec.elts[i]);
+      w_fp2 = __bfloat1622float2(w_vec.elts[i]);
+      // Cast to bfloat16 after rms_inv, then multiply with weight in bfloat16
+      __nv_bfloat162 normalized = __float22bfloat162_rn(
+          make_float2(in_fp2.x * rms_inv, in_fp2.y * rms_inv));
+      result.elts[i] = __hmul2(normalized, w_vec.elts[i]);
+    }
+  }
+  return result;
+}
+
+// Compute fused add for packed vectors: in_vec + res_vec
+// Both addition and result are in high precision (BF16/FP16).
+// __hadd2 is overloaded for both half2 and __nv_bfloat162 (SM80+).
+template <class Type>
+__device__ __forceinline__ PackedVec<Type> compute_packed_fused_add(
+    const PackedVec<Type>& in_vec, const PackedVec<Type>& res_vec) {
+  PackedVec<Type> result{};
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+    result.elts[i] = __hadd2(in_vec.elts[i], res_vec.elts[i]);
+  }
+  return result;
+}
+
+// Compute sum of squares for a PackedVec after fused add: (in_vec + res_vec)
+// Returns sum of squares and updates result with the added values.
+template <class Type>
+__device__ __forceinline__ float compute_packed_fused_add_sum_squares(
+    const PackedVec<Type>& in_vec, const PackedVec<Type>& res_vec,
+    PackedVec<Type>& result) {
+  float sum = 0.0f;
+#pragma unroll
+  for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
+    float2 in_fp2, res_fp2;
+    if constexpr (std::is_same_v<Type, half>) {
+      in_fp2 = __half22float2(in_vec.elts[i]);
+      res_fp2 = __half22float2(res_vec.elts[i]);
+      float2 added = make_float2(in_fp2.x + res_fp2.x, in_fp2.y + res_fp2.y);
+      result.elts[i] = __float22half2_rn(added);
+      sum += added.x * added.x + added.y * added.y;
+    } else {
+      in_fp2 = __bfloat1622float2(in_vec.elts[i]);
+      res_fp2 = __bfloat1622float2(res_vec.elts[i]);
+      float2 added = make_float2(in_fp2.x + res_fp2.x, in_fp2.y + res_fp2.y);
+      result.elts[i] = __float22bfloat162_rn(added);
+      sum += added.x * added.x + added.y * added.y;
+    }
+  }
+  return sum;
+}
 
 }  // namespace vllm
