@@ -6,7 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 import os
 from collections.abc import Callable
-from functools import cache, wraps
+from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, TypeVar
 
 import torch
@@ -152,6 +152,12 @@ class CudaPlatformBase(Platform):
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
         raise NotImplementedError
+
+    @classmethod
+    @lru_cache
+    def get_sm_count(self, device: torch.device) -> int:
+        props = torch.cuda.get_device_properties(device)
+        return props.multi_processor_count
 
     @classmethod
     def is_fully_connected(cls, device_ids: list[int]) -> bool:

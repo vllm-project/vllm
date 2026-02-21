@@ -482,6 +482,12 @@ class RocmPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
+    @lru_cache
+    def get_sm_count(self, device: torch.device) -> int:
+        props = torch.cuda.get_device_properties(device)
+        return props.multi_processor_count
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
         from vllm.config.compilation import CUDAGraphMode

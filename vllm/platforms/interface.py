@@ -627,6 +627,13 @@ class Platform:
         raise NotImplementedError
 
     @classmethod
+    def get_sm_count(cls, device: torch.device) -> int:
+        """
+        Get and cache the SM count for a given device.
+        """
+        raise NotImplementedError
+
+    @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         """
         Returns if the hybrid kv cache is supported by the current platform.
