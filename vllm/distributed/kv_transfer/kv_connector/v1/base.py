@@ -36,6 +36,8 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        build_connector_worker_meta() - builds metadata to be sent
+            back to the scheduler-side connector
 """
 
 import enum
@@ -52,7 +54,7 @@ from vllm.v1.outputs import KVConnectorOutput
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.distributed.kv_events import KVCacheEvent, KVConnectorKVEvents
+    from vllm.distributed.kv_events import KVCacheEvent
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
@@ -137,11 +139,32 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
 
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
-    Abstract Metadata used to communicate between the
-    Scheduler KVConnector and Worker KVConnector.
+    Abstract Metadata used to communicate
+    Scheduler KVConnector -> Worker KVConnector.
     """
 
     pass
+
+
+class KVConnectorWorkerMetadata(ABC):
+    """
+    Abstract Metadata used to communicate back
+    Worker KVConnector -> Scheduler KVConnector.
+
+    Each worker can output its own metadata.
+    For a single engine step, all metadata objects returned by workers
+    will be aggregated using the `aggregate` method below, before
+    being passed to the Scheduler KVConnector.
+    """
+
+    @abstractmethod
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        """
+        Aggregate metadata with another `KVConnectorWorkerMetadata` object.
+        """
+        pass
 
 
 class KVConnectorBase_V1(ABC):
@@ -389,14 +412,6 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
-    def get_kv_connector_kv_cache_events(self) -> "KVConnectorKVEvents | None":
-        """
-        Get the KV connector kv cache events collected during the last interval.
-        This function should be called by the model runner every time after the
-        model execution and before cleanup.
-        """
-        return None
-
     def get_handshake_metadata(self) -> KVConnectorHandshakeMetadata | None:
         """
         Get the KVConnector handshake metadata for this connector.
@@ -406,6 +421,16 @@ class KVConnectorBase_V1(ABC):
         Returns:
             KVConnectorHandshakeMetadata: the handshake metadata.
             None if no handshake metadata is available.
+        """
+        return None
+
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        """
+        Build the KVConnector worker metadata for this engine step.
+
+        Returns:
+            KVConnectorWorkerMetadata: the worker metadata.
+            None if no worker metadata is available.
         """
         return None
 

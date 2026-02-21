@@ -179,37 +179,6 @@ class KVEventAggregator:
         )
 
 
-class KVConnectorKVEvents(ABC):
-    """
-    Abstract base class for KV events.
-    Acts as a container for KV events from the connector.
-    """
-
-    @abstractmethod
-    def add_events(self, events: list[KVCacheEvent]) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def aggregate(self) -> "KVConnectorKVEvents":
-        raise NotImplementedError
-
-    @abstractmethod
-    def increment_workers(self, count: int = 1) -> None:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_all_events(self) -> list[KVCacheEvent]:
-        raise NotImplementedError
-
-    @abstractmethod
-    def get_number_of_workers(self) -> int:
-        raise NotImplementedError
-
-    @abstractmethod
-    def clear_events(self) -> None:
-        raise NotImplementedError
-
-
 class EventPublisher(ABC):
     """Lightweight publisher for EventBatch batches with data parallelism
     support.
