@@ -125,6 +125,7 @@ def _get_gcn_arch() -> str:
 _GCN_ARCH = _get_gcn_arch()
 
 _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
+_ON_GFX12 = "gfx12" in _GCN_ARCH
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX942 = "gfx942" in _GCN_ARCH
@@ -178,16 +179,19 @@ def use_rocm_custom_paged_attention(
         )
 
     else:
+        # gfx12 (RDNA4) supports FP8 KV cache via software dequant
+        fp8_ok = kv_cache_dtype in ("fp8", "fp8_e4m3") and _ON_GFX12
+        block_size_ok = block_size == 16 or (_ON_GFX12 and block_size == 32)
         return (
             _ON_GFX1X
             and (sliding_window == 0 or sliding_window == (-1, -1))
             and (qtype == torch.half or qtype == torch.bfloat16)
             and head_size == 128
-            and block_size == 16
-            and (gqa_ratio >= 3 and gqa_ratio <= 16)
+            and block_size_ok
+            and (gqa_ratio >= 1 and gqa_ratio <= 16)
             and max_seq_len <= 128 * 1024
             and alibi_slopes is None
-            and kv_cache_dtype == "auto"
+            and (kv_cache_dtype == "auto" or fp8_ok)
             and envs.VLLM_ROCM_CUSTOM_PAGED_ATTN
             and sinks is None
         )
