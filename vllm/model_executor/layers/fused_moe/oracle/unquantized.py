@@ -20,11 +20,12 @@ from vllm.model_executor.layers.fused_moe.flashinfer_trtllm_moe import (
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoEP,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import (
+    has_flashinfer,
+    has_flashinfer_cutlass_fused_moe,
     swap_w13_to_w31,
 )
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer, has_flashinfer_cutlass_fused_moe
 
 logger = init_logger(__name__)
 
