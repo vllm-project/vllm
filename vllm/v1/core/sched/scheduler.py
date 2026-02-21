@@ -796,7 +796,9 @@ class Scheduler(SchedulerInterface):
                     print(
                         f"   prompt_len: {len(nrd_copy.prompt_token_ids) if nrd_copy.prompt_token_ids else 0}"
                     )
-                    block_count = len(nrd_copy.block_ids[0]) if nrd_copy.block_ids else 0
+                    block_count = (
+                        len(nrd_copy.block_ids[0]) if nrd_copy.block_ids else 0
+                    )
                     print(f"   shares parent's blocks: {block_count} blocks")
                     new_reqs_data.append(nrd_copy)
                     # Track this virtual request ID for cleanup
