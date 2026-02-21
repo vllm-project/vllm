@@ -1,0 +1,68 @@
+{%- if messages[0]["role"] == "system" %}
+    {%- set system_message = messages[0]["content"] %}
+    {%- set loop_messages = messages[1:] %}
+{%- else %}
+    {%- set system_message = "You are Qwen, a helpful assistant." %}
+    {%- set loop_messages = messages %}
+{%- endif %}
+
+{{- "<|im_start|>system\n" + system_message }}
+{%- if tools is iterable and tools | length > 0 %}
+    {{- "\n\nAvailable tools:\n" }}
+    {%- for tool in tools %}
+        {%- if tool.function is defined %}
+            {%- set tool = tool.function %}
+        {%- endif %}
+        {{- tool | tojson }}
+        {{- "\n" }}
+    {%- endfor %}
+    {{- "\nWhen you need to call a tool, use <tools> tags like these examples:\n\n" }}
+    {{- "User: What's the weather in Tokyo?\n" }}
+    {{- 'Assistant: <tools>\n{"name": "get_weather", "arguments": {"city": "Tokyo"}}\n</tools>\n\n' }}
+    {{- "User: How about in Paris and Berlin?\n" }}
+    {{- 'Assistant: <tools>\n{"name": "get_weather", "arguments": {"city": "Paris"}}\n</tools>\n<tools>\n{"name": "get_weather", "arguments": {"city": "Berlin"}}\n</tools>' }}
+{%- endif %}
+{{- "<|im_end|>\n" }}
+{%- for message in loop_messages %}
+    {%- if message.role == "assistant" and message.tool_calls is defined and message.tool_calls | length > 0 %}
+        {{- "<|im_start|>assistant\n" }}
+        {%- if message.content is defined and message.content | trim | length > 0 %}
+            {{- message.content | trim }}
+        {%- endif %}
+        {%- for tool_call in message.tool_calls %}
+            {%- if tool_call.function is defined %}
+                {%- set tool_call = tool_call.function %}
+            {%- endif %}
+            {{- "<tools>\n" }}
+            {{- '{"name": ' ~ (tool_call.name | tojson) }}
+            {%- if tool_call.arguments is defined %}
+                {{- ', "arguments": ' }}
+                {%- if tool_call.arguments is string %}
+                    {{- tool_call.arguments }}
+                {%- else %}
+                    {{- tool_call.arguments | tojson }}
+                {%- endif %}
+            {%- endif %}
+            {{- "}\n" }}
+            {{- "</tools>\n" }}
+        {%- endfor %}
+        {{- "<|im_end|>\n" }}
+    {%- elif message.role == "tool" %}
+        {%- if loop.previtem and loop.previtem.role != "tool" %}
+            {{- "<|im_start|>tool\n" }}
+        {%- endif %}
+        {{- "<tool_response>\n" }}
+        {{- message.content }}
+        {{- "\n</tool_response>\n" }}
+        {%- if not loop.last and loop.nextitem.role != "tool" %}
+            {{- "<|im_end|>\n" }}
+        {%- elif loop.last %}
+            {{- "<|im_end|>\n" }}
+        {%- endif %}
+    {%- else %}
+        {{- "<|im_start|>" + message.role + "\n" + message.content + "<|im_end|>\n" }}
+    {%- endif %}
+{%- endfor %}
+{%- if add_generation_prompt %}
+    {{- "<|im_start|>assistant\n" }}
+{%- endif %}
