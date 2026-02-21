@@ -969,6 +969,10 @@ def test_vllm_config_callable_defaults():
     assert enable_if_sequential(config_quantized) is True
 
 
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="On platforms without static graph support, explicit overrides/defaults may be force-overwritten internally.",
+)
 def test_vllm_config_explicit_overrides():
     """Test that explicit property overrides work correctly with callable defaults.
 
