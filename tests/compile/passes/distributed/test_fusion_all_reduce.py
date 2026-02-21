@@ -323,3 +323,102 @@ def all_reduce_fusion_pass_on_test_model(
         backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
         backend.check_after_ops(model.ops_in_model_after())
         del all_reduce_fusion_pass
+
+
+@multi_gpu_test(num_gpus=4)
+@pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only test on CUDA")
+@pytest.mark.skip(
+    reason="Disabled until flashinfer fixes device_idx=tp_rank "
+    "in SymmDeviceMemory (wrong GPU in DP+TP configurations)",
+)
+def test_all_reduce_fusion_pass_dp_tp():
+    """Test AllReduceFusionPass with DP=2, TP=2 (4 GPUs total).
+
+    Regression test for https://github.com/vllm-project/vllm/issues/34401
+    where workspace creation used the global process group instead of the
+    TP-scoped group, causing NCCL errors in DP+TP configurations.
+    """
+    torch.multiprocessing.spawn(
+        all_reduce_fusion_pass_on_test_model_dp_tp,
+        args=(4,),
+        nprocs=4,
+    )
+
+
+def all_reduce_fusion_pass_on_test_model_dp_tp(
+    local_rank: int,
+    world_size: int,
+):
+    tp_size = 2
+    dtype = torch.bfloat16
+    hidden_size = 64
+    batch_size = 8
+    seq_len = 8
+
+    set_random_seed(0)
+
+    device = torch.device(f"cuda:{local_rank}")
+    torch.cuda.set_device(device)
+    torch.set_default_device(device)
+    torch.set_default_dtype(dtype)
+
+    update_environment_variables(
+        {
+            "RANK": str(local_rank),
+            "LOCAL_RANK": str(local_rank),
+            "WORLD_SIZE": str(world_size),
+            "MASTER_ADDR": "localhost",
+            "MASTER_PORT": "12346",
+        }
+    )
+
+    init_distributed_environment()
+
+    # Create vllm_config with dp_size=2 BEFORE initialize_model_parallel,
+    # because initialize_model_parallel reads data_parallel_size from
+    # the current vllm config.
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=[]
+        )
+    )
+    vllm_config.compilation_config.pass_config = PassConfig(
+        fuse_allreduce_rms=True, eliminate_noops=True
+    )
+    vllm_config.device_config = DeviceConfig(device=torch.device("cuda"))
+    vllm_config.parallel_config.rank = local_rank
+    vllm_config.parallel_config.data_parallel_size = 2
+
+    model_name = "RedHatAI/Llama-3.2-1B-Instruct-FP8"
+    vllm_config.model_config = ModelConfig(
+        model=model_name, trust_remote_code=True, dtype=dtype, seed=42
+    )
+    with set_current_vllm_config(vllm_config):
+        # With dp=2, tp=2 on 4 ranks, this creates:
+        # TP groups: [0,1], [2,3]
+        # DP groups: [0,2], [1,3]
+        initialize_model_parallel(tensor_model_parallel_size=tp_size)
+
+        all_reduce_fusion_pass = AllReduceFusionPass(vllm_config)
+        noop_pass = NoOpEliminationPass(vllm_config)
+        func_pass = FixFunctionalizationPass(vllm_config)
+        cleanup_pass = PostCleanupPass(vllm_config)
+
+        backend = TestBackend(
+            noop_pass, all_reduce_fusion_pass, func_pass, cleanup_pass
+        )
+
+        token_num = batch_size * seq_len
+        model = TestAllReduceRMSNormModel(hidden_size, token_num)
+
+        hidden_states = torch.randn((token_num, hidden_size), requires_grad=False)
+
+        compiled_model = torch.compile(model, backend=backend)
+        compiled_model(hidden_states)
+
+        assert all_reduce_fusion_pass.matched_count == 4, (
+            f"{all_reduce_fusion_pass.matched_count=}"
+        )
+        backend.check_before_ops(model.ops_in_model_before(), fully_replaced=False)
+        backend.check_after_ops(model.ops_in_model_after())
+        del all_reduce_fusion_pass
