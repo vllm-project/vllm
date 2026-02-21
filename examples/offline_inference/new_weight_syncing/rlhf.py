@@ -27,6 +27,7 @@ causes unexpected behavior.
 """
 
 import os
+import sys
 
 import ray
 from ray.util.placement_group import placement_group
@@ -38,7 +39,13 @@ from vllm.config import WeightTransferConfig
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLWeightTransferEngine,
 )
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
+
+if current_platform.is_rocm():
+    print("Skipping for ROCm: Ray with quantization is unsupported.")
+    sys.exit(0)
+
 
 MODEL_NAME = "facebook/opt-125m"
 # MODEL_NAME = "inference-optimization/Qwen3-0.6B-W4A16-G128"
