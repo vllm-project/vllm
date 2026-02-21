@@ -126,12 +126,23 @@ void cutlass_scaled_mm_azp_sm90(torch::Tensor& c, torch::Tensor const& a,
 #endif
 
 bool cutlass_scaled_mm_supports_fp8(int64_t cuda_device_capability) {
-  // CUTLASS FP8 kernels need at least
-  //   CUDA 12.0 on SM90 systems (Hopper)
-  //   CUDA 12.4 on SM89 systems (Lovelace)
+  // CUTLASS FP8 kernels require a minimum CUDA version AND the
+  // corresponding SM kernels to be compiled (ENABLE_SCALED_MM_*).
 
 #if defined CUDA_VERSION
-  if (cuda_device_capability >= 90) {
+  if (cuda_device_capability >= 120) {
+  #if defined ENABLE_SCALED_MM_SM120 && ENABLE_SCALED_MM_SM120
+    return CUDA_VERSION >= 12080;
+  #else
+    return false;
+  #endif
+  } else if (cuda_device_capability >= 100) {
+  #if defined ENABLE_SCALED_MM_SM100 && ENABLE_SCALED_MM_SM100
+    return CUDA_VERSION >= 12080;
+  #else
+    return false;
+  #endif
+  } else if (cuda_device_capability >= 90) {
     return CUDA_VERSION >= 12000;
   } else if (cuda_device_capability >= 89) {
     return CUDA_VERSION >= 12040;
