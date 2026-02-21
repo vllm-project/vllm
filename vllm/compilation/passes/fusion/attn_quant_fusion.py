@@ -26,7 +26,7 @@ from ..fx_utils import is_func
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherQuantFP8
-from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32, empty_i32
+from .rms_quant_fusion import QUANT_OPS, empty_bf16, empty_fp32
 
 logger = init_logger(__name__)
 P = ParamSpec("P")
@@ -230,8 +230,6 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             k: torch.Tensor,
             v: torch.Tensor,
             output_attn: torch.Tensor,
-            output_quant: torch.Tensor,
-            output_scale: torch.Tensor,
             input_scale: torch.Tensor,
             kv_cache_dummy_dep: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -249,27 +247,26 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             attn_out_view = RESHAPE_OP(
                 at1[1], [q.shape[0], self.num_heads * self.head_size]
             )
-            at2 = auto_functionalized(
-                self.QUANT_OP,
-                output=output_quant,
-                input=attn_out_view,
-                output_scale=output_scale,
-                input_scale=input_scale,
-                is_sf_swizzled_layout=True,
-            )
-            output_scale_view = torch.ops.aten.view.dtype(at2[2], FP8_DTYPE)
-            return at2[1], output_scale_view
+            # Functional variant returns [output, output_scale]
+            quant_out = self.QUANT_OP(attn_out_view, input_scale, True)
+            output_scale_view = torch.ops.aten.view.dtype(quant_out[1], FP8_DTYPE)
+            return quant_out[0], output_scale_view
 
         def replacement(
             q: torch.Tensor,
             k: torch.Tensor,
             v: torch.Tensor,
             output_attn: torch.Tensor,
-            output_quant: torch.Tensor,
-            output_scale: torch.Tensor,
             input_scale: torch.Tensor,
             kv_cache_dummy_dep: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor]:
+            # Allocate output_scale for the fused attention op
+            n = self.num_heads * self.head_size
+            output_scale = torch.empty(
+                (round_up(q.shape[0], 128), round_up(n // 16, 4) // 4),
+                device=q.device,
+                dtype=torch.int32,
+            )
             # attention output in quant_dtype
             output_attn = torch.ops.aten.full.default(
                 [q.shape[0], self.num_heads, self.head_size // 2],
@@ -298,10 +295,6 @@ class AttentionNvfp4QuantPattern(AttentionQuantPattern):
             empty_bf16(5, self.num_heads, self.head_size),  # k
             empty_bf16(5, self.num_heads, self.head_size),  # v
             empty_bf16(5, self.num_heads, self.head_size),  # output_attn
-            self.empty_quant(5, self.num_heads * self.head_size // 2),  # output_quant
-            empty_i32(
-                128, round_up(self.num_heads * self.head_size // 16, 4)
-            ),  # output_scale
             empty_fp32(1, 1),  # input_scale
             self.empty(0),  # kv_cache_dummy_dep
         ]
