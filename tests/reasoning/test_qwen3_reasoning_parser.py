@@ -66,6 +66,28 @@ ONLY_OPEN_TAG_STREAM = {
     "content": None,
 }
 
+# Prefix format: Qwen3-Thinking models add <think> as a prompt prefix,
+# so the model output only contains </think> without the opening tag.
+# This tests backward compatibility with standard Qwen3 models (e.g. Qwen3-8B)
+# while also supporting the Thinking variant (e.g. Qwen3-Next-*-Thinking).
+PREFIX_FORMAT = {
+    "output": "This is a reasoning section</think>This is the rest",
+    "reasoning": "This is a reasoning section",
+    "content": "This is the rest",
+}
+
+PREFIX_FORMAT_COMPLETE = {
+    "output": "This is a reasoning section</think>",
+    "reasoning": "This is a reasoning section",
+    "content": None,
+}
+
+PREFIX_FORMAT_MULTILINE = {
+    "output": "This is a reasoning\nsection</think>This is the rest\nThat",
+    "reasoning": "This is a reasoning\nsection",
+    "content": "This is the rest\nThat",
+}
+
 TEST_CASES = [
     pytest.param(
         False,
@@ -116,6 +138,22 @@ TEST_CASES = [
         True,
         ONLY_OPEN_TAG_STREAM,
         id="only_open_tag_stream",
+    ),
+    # Prefix format tests (Thinking models where <think> is in prompt prefix)
+    pytest.param(
+        False,
+        PREFIX_FORMAT,
+        id="prefix_format",
+    ),
+    pytest.param(
+        False,
+        PREFIX_FORMAT_COMPLETE,
+        id="prefix_format_complete",
+    ),
+    pytest.param(
+        False,
+        PREFIX_FORMAT_MULTILINE,
+        id="prefix_format_multiline",
     ),
 ]
 
