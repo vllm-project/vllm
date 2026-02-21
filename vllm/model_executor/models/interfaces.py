@@ -1063,6 +1063,10 @@ class SupportsRealtime(Protocol):
 
     supports_realtime: ClassVar[Literal[True]] = True
 
+    realtime_max_tokens: ClassVar[int] = 1
+    """Maximum tokens to generate per streaming audio segment.
+    Override in subclasses based on the model's expected output length."""
+
     @classmethod
     async def buffer_realtime_audio(
         cls,

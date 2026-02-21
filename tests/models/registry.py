@@ -603,6 +603,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "OpsColQwen3Model": _HfExamplesInfo(
         "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
     ),
+    "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
+        "nvidia/nemotron-colembed-vl-4b-v2",
+    ),
     "SiglipModel": _HfExamplesInfo("google/siglip-base-patch16-224"),
     "PrithviGeoSpatialMAE": _HfExamplesInfo(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
@@ -1021,6 +1024,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3-ASR-1.7B",
         max_model_len=4096,
         min_transformers_version="4.57",
+        is_available_online=False,
+    ),
+    "Qwen3ASRRealtimeGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3-ASR-1.7B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        enforce_eager=True,
+        hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
         is_available_online=False,
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),
