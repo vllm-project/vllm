@@ -14,14 +14,42 @@ from vllm.model_executor.layers.batch_invariant import (
 )
 from vllm.platforms import current_platform
 
+# PyTorch private APIs for symmetric memory and multicast support checking.
+# These provide low-level access to CUDA multicast capabilities.
 try:
     import torch.distributed._symmetric_memory as torch_symm_mem
+    from torch._C._autograd import DeviceType
+    from torch._C._distributed_c10d import _SymmetricMemory
 
     symm_mem_available = True
 except ImportError:
     symm_mem_available = False
+    DeviceType = None  # type: ignore[misc,assignment]
+    _SymmetricMemory = None  # type: ignore[misc,assignment]
 
 logger = init_logger(__name__)
+
+
+def _has_multicast_support(device_idx: int) -> bool:
+    """
+    Check if the GPU supports CUDA multicast operations.
+
+    Multicast support requires NVLink connectivity. PCIe-connected GPUs
+    (even high-end ones like H100 PCIe) do not support multicast.
+
+    Args:
+        device_idx: The CUDA device index to check.
+
+    Returns:
+        True if multicast is supported (NVLink), False otherwise (PCIe).
+    """
+    if _SymmetricMemory is None or DeviceType is None:
+        return False
+    try:
+        return _SymmetricMemory.has_multicast_support(DeviceType.CUDA, device_idx)
+    except Exception:
+        # If check fails, assume not supported to be safe
+        return False
 
 
 class SymmMemCommunicator:
@@ -55,6 +83,22 @@ class SymmMemCommunicator:
         self.device = device
         self.group = group
         self.world_size = dist.get_world_size(self.group)
+
+        # Check multicast support BEFORE any other checks.
+        # This prevents crashes on PCIe GPUs (Issue #26949).
+        # Multicast requires NVLink connectivity.
+        device_idx = self.device.index if self.device.index is not None else 0
+        if not _has_multicast_support(device_idx):
+            logger.warning_once(
+                "SymmMemCommunicator: GPU %d does not support CUDA multicast "
+                "(NVLink required). Symmetric memory requires NVLink-connected "
+                "GPUs (e.g., H100 SXM, H200, DGX systems). PCIe GPUs are not "
+                "supported. To suppress this warning, set "
+                "VLLM_ALLREDUCE_USE_SYMM_MEM=0",
+                device_idx,
+            )
+            return
+
         capability = current_platform.get_device_capability()
         if capability is None:
             logger.warning(
@@ -95,10 +139,10 @@ class SymmMemCommunicator:
                 dtype=self.dtype,
             )
             handle = torch_symm_mem.rendezvous(self.buffer, self.group.group_name)
-        except RuntimeError as e:
+        except Exception as e:
             logger.warning_once(
-                "SymmMemCommunicator: symmetric memory initialization failed: %s "
-                "Communicator is not available. To suppress this warning set "
+                "SymmMemCommunicator: symmetric memory initialization failed: %s. "
+                "Communicator is not available. To suppress this warning, set "
                 "VLLM_ALLREDUCE_USE_SYMM_MEM=0",
                 str(e),
             )
