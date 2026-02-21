@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, count
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -96,6 +96,7 @@ def create_vllm_config(
     cache_dtype: str = "auto",
     hf_overrides: dict[str, Any] | None = None,
     attention_backend: str | None = None,
+    kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -125,6 +126,7 @@ def create_vllm_config(
         kv_role="kv_both",
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
+        kv_load_failure_policy=kv_load_failure_policy,
     )
     attention_config = AttentionConfig(backend=attention_backend)
     return VllmConfig(
