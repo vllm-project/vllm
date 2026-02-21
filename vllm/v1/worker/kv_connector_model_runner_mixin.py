@@ -5,9 +5,12 @@ Define KV connector functionality mixin for model runners.
 """
 
 import copy
+import math
+from collections import defaultdict
 from collections.abc import Generator
 from contextlib import AbstractContextManager, contextmanager, nullcontext
-from typing import TYPE_CHECKING
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -22,7 +25,12 @@ from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    AttentionSpec,
+    KVCacheConfig,
+    KVCacheSpec,
+    MambaSpec,
+)
 from vllm.v1.outputs import (
     EMPTY_MODEL_RUNNER_OUTPUT,
     KVConnectorOutput,
@@ -34,6 +42,24 @@ if TYPE_CHECKING:
     from vllm.v1.core.sched.output import SchedulerOutput
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class CrossLayerGroup:
+    """One contiguous int8 tensor shared by layers with the same page size.
+
+    Per-layer views reinterpret the raw bytes as the layer's dtype.
+    The tensor shape follows the backend's stride order up to the layers
+    dimension:
+    - ordered: (num_blocks, *prefix_dims, num_layers, remaining_bytes)
+    - default: (num_blocks, num_layers, page_size_bytes)
+    """
+
+    tensor: torch.Tensor
+    layer_names: list[str]
+    page_size_bytes: int
+    spec: KVCacheSpec
+    backend: type[AttentionBackend]
 
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
@@ -115,33 +141,12 @@ class KVConnectorModelRunnerMixin:
         attn_groups: list[list[AttentionGroup]],
         cache_dtype: CacheDType,
     ) -> bool:
-        """
-        Determines whether a uniform KV layout should be used.
-        A uniform layout means all layers KV caches will share the same
-        underlying tensor, where for a given block number, the respective
-        KV data for all layers will be contiguous.
-        This will allow efficient KV transfer of per-block KV data for all
-        layers at once.
-        Note this layout will only be applied given 3 conditions:
-        1. The KV Cache config contains just a single group where all layers
-            have the same page size.
-        2. A KV connector is configured, and the KV connector instance prefers
-            to use this layout (prefer_cross_layer_blocks() returns True)
-        2. The flash attention backend supports this layout
-            (get_kv_cache_stride_order(True) includes a placement for a
-            num_layers dimension)
+        """Check if we should use a uniform cross-layer KV layout.
 
-        Note that the actual placement of the num_layers dimensions
-        in the unified layers tensors will be determined by the attention
-        backend.
-        Thus, the layers KV data may still not be contiguous per block
-        if the attention backend does not support it.
-
-        Args:
-            attn_groups: The list of attention groups for this model
-            cache_dtype: The KV cache dtype
-        Returns:
-            True if we should use a uniform KV cache layout.
+        When enabled, layers sharing the same page geometry are packed into
+        a single contiguous tensor for efficient per-block transfers.
+        Requires a KV connector that prefers cross-layer blocks and only
+        AttentionSpec/MambaSpec layers.
         """
 
         if not has_kv_transfer_group():
@@ -149,32 +154,195 @@ class KVConnectorModelRunnerMixin:
         if not get_kv_transfer_group().prefer_cross_layer_blocks:
             return False
 
-        if len(attn_groups) != 1 or len(attn_groups[0]) != 1:
+        if not attn_groups:
             return False
 
-        attn_group = attn_groups[0][0]
-        kv_cache_spec = attn_group.kv_cache_spec
-        if not isinstance(kv_cache_spec, AttentionSpec):
-            return False
+        for subgroups in attn_groups:
+            for attn_group in subgroups:
+                if not isinstance(attn_group.kv_cache_spec, (AttentionSpec, MambaSpec)):
+                    logger.warning(
+                        "Uniform KV cache layout not supported for "
+                        "spec type %s, falling back to per-layer "
+                        "allocation",
+                        type(attn_group.kv_cache_spec).__name__,
+                    )
+                    return False
 
-        attn_backend = attn_group.backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            1234,
-            kv_cache_spec.block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
+        return True
+
+    @staticmethod
+    def _cross_layer_group_key(
+        spec: KVCacheSpec,
+        backend: type[AttentionBackend],
+        cache_dtype: CacheDType,
+        tensor_idx: int,
+    ) -> tuple:
+        """Compute the grouping key for a layer.
+
+        Examines the backend's stride order (with layers dimension) to
+        determine how this layer should be grouped:
+
+        - ``("solo", idx)``: blocks is not at physical position 0, so
+          this layer cannot share a cross-layer tensor efficiently.
+        - ``("ordered", prefix_sizes, remaining_bytes)``: blocks is first
+          and heads comes before layers.  ``prefix_sizes`` are the
+          dimension sizes between blocks and layers in physical order.
+          Layers with the same prefix share a tensor shaped
+          ``(num_blocks, *prefix_sizes, num_layers, remaining_bytes)``.
+        - ``("default", page_size_bytes)``: everything else (including
+          non-attention specs).  Layers share a tensor shaped
+          ``(num_blocks, num_layers, page_size_bytes)``.
+        """
+        if not isinstance(spec, AttentionSpec):
+            return ("default", spec.page_size_bytes)
+
+        try:
+            stride_order_wl = backend.get_kv_cache_stride_order(
+                include_num_layers_dimension=True,
+            )
+            _B, _H = 1234, 5678
+            base_shape = backend.get_kv_cache_shape(
+                _B,
+                spec.block_size,
+                _H,
+                spec.head_size,
+                cache_dtype_str=cache_dtype,
+            )
+            blocks_base = base_shape.index(_B)
+            heads_base = base_shape.index(_H)
+        except (AttributeError, NotImplementedError, ValueError, AssertionError):
+            return ("default", spec.page_size_bytes)
+
+        # With layers prepended, every base dim index shifts up by 1.
+        log_to_phys = {dim: pos for pos, dim in enumerate(stride_order_wl)}
+        blocks_phys = log_to_phys[blocks_base + 1]
+        layers_phys = log_to_phys[0]
+        heads_phys = log_to_phys[heads_base + 1]
+
+        # Blocks must be outermost so one block = one contiguous chunk.
+        if blocks_phys != 0:
+            return ("solo", tensor_idx)
+
+        # Heads after layers means no useful prefix to extract.
+        if heads_phys >= layers_phys:
+            return ("default", spec.page_size_bytes)
+
+        # Heads come before layers -- figure out what sits between
+        # blocks and layers so we can replicate that prefix exactly.
+        actual_base = backend.get_kv_cache_shape(
+            1,
+            spec.block_size,
+            spec.num_kv_heads,
+            spec.head_size,
+            cache_dtype_str=cache_dtype,
+        )
+        actual_wl = (1, *actual_base)  # prepend a dummy layers=1
+        prefix_sizes = tuple(
+            actual_wl[stride_order_wl[i]] for i in range(1, layers_phys)
+        )
+        remaining = spec.page_size_bytes // (
+            math.prod(prefix_sizes) if prefix_sizes else 1
+        )
+        return ("ordered", prefix_sizes, remaining)
+
+    @staticmethod
+    def _create_attention_layer_view(
+        raw: torch.Tensor,
+        layer_idx: int,
+        num_layers: int,
+        num_blocks: int,
+        spec: AttentionSpec,
+        backend: type[AttentionBackend],
+        kernel_block_size: int,
+        cache_dtype: CacheDType,
+    ) -> torch.Tensor:
+        """Carve one attention layer's view from the raw int8 buffer.
+
+        Views the raw buffer following the backend's with-layers physical
+        layout, selects the requested layer, and permutes to the backend's
+        logical shape.
+        """
+        npkb = spec.block_size // kernel_block_size
+        knb = num_blocks * npkb
+
+        base_logical = backend.get_kv_cache_shape(
+            knb,
+            kernel_block_size,
+            spec.num_kv_heads,
+            spec.head_size,
             cache_dtype_str=cache_dtype,
         )
 
         try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
+            stride_order_wl = backend.get_kv_cache_stride_order(
+                include_num_layers_dimension=True,
             )
         except (AttributeError, NotImplementedError):
-            return False
+            stride_order_wl = tuple(range(len(base_logical) + 1))
 
-        # check that attention backend include a layers dimension
-        return len(kv_cache_stride_order) == len(kv_cache_shape) + 1
+        logical_wl = (num_layers, *base_logical)
+        physical_wl = tuple(
+            logical_wl[stride_order_wl[i]] for i in range(len(logical_wl))
+        )
+
+        typed = raw.view(spec.dtype).view(*physical_wl)
+
+        # Select the layer and permute back to base logical order.
+        log_to_phys = {dim: pos for pos, dim in enumerate(stride_order_wl)}
+        layers_phys = log_to_phys[0]
+        layer_slice = typed.select(layers_phys, layer_idx)
+
+        perm = tuple(
+            log_to_phys[k + 1] - (1 if log_to_phys[k + 1] > layers_phys else 0)
+            for k in range(len(base_logical))
+        )
+        return layer_slice.permute(*perm)
+
+    @staticmethod
+    def _create_mamba_layer_views(
+        cross_layer_tensor: torch.Tensor,
+        layer_idx: int,
+        num_layers: int,
+        spec: MambaSpec,
+        num_blocks: int,
+    ) -> list[torch.Tensor]:
+        """Carve one Mamba layer's state tensors from the cross-layer tensor.
+
+        Mamba packs multiple states (conv, ssm, ...) into one page.
+        We use as_strided so each block's data across layers stays
+        contiguous for efficient transfers.
+        """
+        page_bytes = spec.page_size_bytes
+        state_tensors: list[torch.Tensor] = []
+        offset_bytes = layer_idx * page_bytes
+
+        for shape, dtype in zip(spec.shapes, spec.dtypes):
+            el = torch.empty((), dtype=dtype).element_size()
+            elements_per_page = page_bytes // el
+            state_elements = math.prod(shape)
+
+            target_shape = (num_blocks, *shape)
+            inner_strides = []
+            acc = 1
+            for s in reversed(shape):
+                inner_strides.append(acc)
+                acc *= s
+            inner_strides.reverse()
+            target_stride = (num_layers * elements_per_page, *inner_strides)
+
+            assert offset_bytes % el == 0
+            flat = cross_layer_tensor.view(torch.int8).view(dtype)
+            state_tensors.append(
+                torch.as_strided(
+                    flat,
+                    size=target_shape,
+                    stride=target_stride,
+                    storage_offset=offset_bytes // el,
+                )
+            )
+            offset_bytes += state_elements * el
+
+        return state_tensors
 
     @staticmethod
     def allocate_uniform_kv_caches(
@@ -183,88 +351,131 @@ class KVConnectorModelRunnerMixin:
         cache_dtype: CacheDType,
         device: torch.device,
         kernel_block_sizes: list[int],
-    ) -> tuple[dict[str, torch.Tensor], torch.Tensor, type[AttentionBackend]]:
+    ) -> tuple[
+        dict[str, torch.Tensor | list[torch.Tensor]],
+        list[CrossLayerGroup],
+    ]:
+        """Allocate cross-layer KV caches, one tensor per group.
+
+        Each attention layer is classified via ``_cross_layer_group_key``
+        into one of three categories:
+
+        - **solo**: blocks not at physical position 0 — one layer per group.
+        - **ordered**: blocks first *and* heads before layers — layers with
+          matching stride-order prefix share a tensor shaped
+          ``(num_blocks, *prefix_dims, num_layers, remaining_bytes)``.
+        - **default**: everything else — grouped by ``page_size_bytes``
+          with shape ``(num_blocks, num_layers, page_size_bytes)``.
+
+        Assumes use_uniform_kv_cache() returned True.
         """
-        Initializes and reshapes KV caches for the simple case where all
-        layers have the same layout.
+        layer_info: dict[str, tuple[KVCacheSpec, type[AttentionBackend], int]] = {}
+        for subgroups in attn_groups:
+            for attn_group in subgroups:
+                for name in attn_group.layer_names:
+                    layer_info[name] = (
+                        attn_group.kv_cache_spec,
+                        attn_group.backend,
+                        attn_group.kv_cache_group_id,
+                    )
 
-        This function assumes use_uniform_kv_cache() returned True.
-
-        Args:
-            kv_cache_config: The KV cache config
-            attn_groups: The list of attention groups for this model
-            cache_dtype: The KV cache dtype
-            device: The torch device to allocate on.
-            kernel_block_sizes: The kernel block sizes for each KV cache group.
-        Returns:
-            A tuple (kv_caches, cross_layers_kv_cache, attn_backend) where:
-                kv_caches is a dict mapping between layer names to their
-                    corresponding memory buffer for KV cache.
-                cross_layers_kv_cache is the cross layers kv cache tensor
-                attn_backend is the attention backend matching this tensor
-        """
-        attn_group = attn_groups[0][0]
-        kv_cache_spec = attn_group.kv_cache_spec
-        assert isinstance(kv_cache_spec, AttentionSpec)
-
-        tensor_sizes = set(
-            kv_cache_tensor.size for kv_cache_tensor in kv_cache_config.kv_cache_tensors
-        )
-        assert len(tensor_sizes) == 1
-        tensor_size = tensor_sizes.pop()
-
-        page_size = kv_cache_spec.page_size_bytes
-        assert tensor_size % page_size == 0
-        num_blocks = tensor_size // page_size
-        num_layers = len(kv_cache_config.kv_cache_tensors)
-        total_size = tensor_size * num_layers
-
-        assert len(kernel_block_sizes) == 1
-        kernel_block_size = kernel_block_sizes[0]
-        num_blocks_per_kv_block = kv_cache_spec.block_size // kernel_block_size
-        kernel_num_blocks = num_blocks * num_blocks_per_kv_block
-
-        attn_backend = attn_group.backend
-        kv_cache_shape = attn_backend.get_kv_cache_shape(
-            kernel_num_blocks,
-            kernel_block_size,
-            kv_cache_spec.num_kv_heads,
-            kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
-        )
-
-        # prepend a num_layers dimension into the shape
-        kv_cache_shape = (num_layers,) + kv_cache_shape
-
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
+        grouped: dict[tuple, list[tuple[int, Any]]] = defaultdict(list)
+        for tensor_idx, kv_tensor in enumerate(kv_cache_config.kv_cache_tensors):
+            spec, backend, _ = layer_info[kv_tensor.shared_by[0]]
+            key = KVConnectorModelRunnerMixin._cross_layer_group_key(
+                spec,
+                backend,
+                cache_dtype,
+                tensor_idx,
             )
-            assert len(kv_cache_stride_order) == len(kv_cache_shape)
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+            grouped[key].append((tensor_idx, kv_tensor))
 
-        kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]] = {}
+        cross_layer_groups: list[CrossLayerGroup] = []
 
-        logger.info("Allocating a cross layer KV cache of shape %s", kv_cache_shape)
+        for group_key, members in grouped.items():
+            num_group_layers = len(members)
 
-        # allocate one contiguous buffer for all layers
-        cross_layers_kv_cache = (
-            torch.zeros(total_size, dtype=torch.int8, device=device)
-            .view(kv_cache_spec.dtype)
-            .view(kv_cache_shape)
-        )
+            first_size = members[0][1].size
+            assert all(m[1].size == first_size for m in members), (
+                "All KVCacheTensors in a cross-layer group must have the same size"
+            )
 
-        # Maintain original KV shape view.
-        inv_order = [
-            kv_cache_stride_order.index(i) for i in range(len(kv_cache_stride_order))
-        ]
-        permuted_kv_cache = cross_layers_kv_cache.permute(*inv_order)
+            rep_name = members[0][1].shared_by[0]
+            rep_spec, rep_backend, _ = layer_info[rep_name]
+            page_size = rep_spec.page_size_bytes
 
-        kv_caches = {}
-        for i, kv_cache_tensor in enumerate(kv_cache_config.kv_cache_tensors):
-            tensor = permuted_kv_cache[i]
-            for layer_name in kv_cache_tensor.shared_by:
-                kv_caches[layer_name] = tensor
+            assert first_size % page_size == 0
+            num_blocks = first_size // page_size
 
-        return kv_caches, cross_layers_kv_cache, attn_backend
+            total_bytes = first_size * num_group_layers
+            raw = torch.zeros(total_bytes, dtype=torch.int8, device=device)
+
+            if group_key[0] == "ordered":
+                prefix_sizes = group_key[1]
+                remaining = group_key[2]
+                cross_layer_tensor = raw.view(
+                    num_blocks,
+                    *prefix_sizes,
+                    num_group_layers,
+                    remaining,
+                )
+            else:
+                cross_layer_tensor = raw.view(
+                    num_blocks,
+                    num_group_layers,
+                    page_size,
+                )
+
+            logger.info(
+                "Allocating a cross-layer KV cache of shape %s (group=%s)",
+                cross_layer_tensor.shape,
+                group_key[0],
+            )
+
+            group_layer_names: list[str] = []
+            for local_idx, (_, kv_tensor) in enumerate(members):
+                spec, backend, gid = layer_info[kv_tensor.shared_by[0]]
+
+                if isinstance(spec, MambaSpec):
+                    view: torch.Tensor | list[torch.Tensor] = (
+                        KVConnectorModelRunnerMixin._create_mamba_layer_views(
+                            raw,
+                            local_idx,
+                            num_group_layers,
+                            spec,
+                            num_blocks,
+                        )
+                    )
+                elif isinstance(spec, AttentionSpec):
+                    view = KVConnectorModelRunnerMixin._create_attention_layer_view(
+                        raw,
+                        local_idx,
+                        num_group_layers,
+                        num_blocks,
+                        spec,
+                        backend,
+                        kernel_block_sizes[gid],
+                        cache_dtype,
+                    )
+                else:
+                    raise NotImplementedError(
+                        f"Uniform KV cache layout not implemented "
+                        f"for spec type {type(spec).__name__}"
+                    )
+
+                for name in kv_tensor.shared_by:
+                    kv_caches[name] = view
+                group_layer_names.extend(kv_tensor.shared_by)
+
+            cross_layer_groups.append(
+                CrossLayerGroup(
+                    tensor=cross_layer_tensor,
+                    layer_names=group_layer_names,
+                    page_size_bytes=page_size,
+                    spec=rep_spec,
+                    backend=rep_backend,
+                )
+            )
+
+        return kv_caches, cross_layer_groups
