@@ -71,10 +71,18 @@ class ConfigSet:
         platform_dict = self._configs.get(platform)
         if platform_dict is None:
             avail_platforms = self.get_platforms()
+            # TODO(@gmagogsfm): add a CLI/env override flag so users can
+            # directly specify a platform name instead of relying on
+            # auto-detection, and suggest it in this error message.
             raise KeyError(
                 f"Config not found for kernel '{self._kernel_name}': "
                 f"platform '{platform}' not found. "
-                f"Available platforms: {avail_platforms or '(none)'}"
+                f"Available platforms: {avail_platforms or '(none)'}. "
+                f"If your GPU is a variant of a supported platform, "
+                f"consider adding a mapping in _GPU_NAME_ALIASES in "
+                f"vllm/kernels/helion/utils.py, or run "
+                f"scripts/autotune_helion_kernels.py to generate configs "
+                f"for your platform."
             )
 
         config = platform_dict.get(config_key)
