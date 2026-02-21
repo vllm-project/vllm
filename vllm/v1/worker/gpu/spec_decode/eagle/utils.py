@@ -18,11 +18,9 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
 
     # Share target embeddings when the draft checkpoint does not include
     # its own vocab embedding table.
-    share_embeddings = False
+    share_embeddings = True
     if hasattr(eagle_model, "has_own_embed_tokens"):
         share_embeddings = not eagle_model.has_own_embed_tokens
-    else:
-        share_embeddings = True
     if share_embeddings:
         target_language_model = (
             target_model.get_language_model()
@@ -42,14 +40,9 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
             eagle_model.model.embed_tokens = target_embed_tokens
 
     # Only share target lm_head when the draft model does not own one.
-    # Eagle3 checkpoints often contain a distinct lm_head and overriding it
-    # can collapse acceptance.
-    share_lm_head = False
+    share_lm_head = True
     if hasattr(eagle_model, "has_own_lm_head"):
         share_lm_head = not eagle_model.has_own_lm_head
-    else:
-        # MTP-like drafters use shared lm_head.
-        share_lm_head = True
     if share_lm_head and hasattr(target_model, "lm_head"):
         if hasattr(eagle_model, "lm_head"):
             del eagle_model.lm_head
