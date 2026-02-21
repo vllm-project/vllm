@@ -85,19 +85,46 @@ def test_custom_op():
         _ = CompilationConfig(custom_ops=["quant_fp8"])
 
 
+def test_VLLM_DISABLE_COMPILE_CACHE_overrides_config(monkeypatch):
+    """Env var opt-out should override any config request to enable caching."""
+    import vllm.envs as envs
+
+    # Ensure env values are not cached across tests.
+    envs.disable_envs_cache()
+
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    cfg = CompilationConfig(vllm_enable_compile_cache=True)
+    assert cfg.vllm_enable_compile_cache is False
+
+    # Cleanup / isolation: remove env var and reset any caching wrappers.
+    monkeypatch.delenv("VLLM_DISABLE_COMPILE_CACHE", raising=False)
+    envs.disable_envs_cache()
+
+
+def test_is_compile_cache_enabled_respects_config_flag(monkeypatch):
+    """Disabling via config should always disable the compile cache."""
+    import vllm.envs as envs
+    from vllm.compilation.compiler_interface import is_compile_cache_enabled
+
+    envs.disable_envs_cache()
+    monkeypatch.delenv("VLLM_DISABLE_COMPILE_CACHE", raising=False)
+
+    assert is_compile_cache_enabled({}, vllm_enable_compile_cache=False) is False
+
+
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
-# NB: We don't test VLLM_DISABLE_COMPILE_CACHE=0 because that depends
+# NB: We don't test vllm_enable_compile_cache=True because that depends
 # on the state of the cache directory on the current machine, which
 # may be influenced by other tests.
-@pytest.mark.parametrize("val", ["1"])
-def test_VLLM_DISABLE_COMPILE_CACHE(vllm_runner, monkeypatch, val):
+@pytest.mark.parametrize("val", [False])
+def test_vllm_enable_compile_cache_disabled(vllm_runner, monkeypatch, val):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", val)
 
     compilation_config = {
         "cudagraph_mode": CUDAGraphMode.NONE,  # speed things up a bit
+        "vllm_enable_compile_cache": val,
     }
     with (
         compilation_counter.expect(
