@@ -1,0 +1,11 @@
+model_id,input_length,output_length,world_size,data_type,num_allocated_cpu,binding_policy
+meta-llama/Llama-3.1-405B-Instruct,128,4096,8,bf16,12,0
+meta-llama/Llama-3.1-405B-Instruct,2048,2048,8,bf16,12,0
+meta-llama/Llama-3.1-405B-Instruct,4096,128,8,bf16,12,0
+meta-llama/Llama-3.1-70B-Instruct,128,4096,4,bf16,8,0
+meta-llama/Llama-3.1-70B-Instruct,2048,2048,4,bf16,8,0
+meta-llama/Llama-3.1-70B-Instruct,4096,128,4,bf16,8,0
+meta-llama/Llama-3.1-8B-Instruct,128,4096,1,bf16,8,0
+meta-llama/Llama-3.1-8B-Instruct,2048,2048,1,bf16,8,0
+meta-llama/Llama-3.1-8B-Instruct,4096,128,1,bf16,8,0
+Qwen/Qwen2.5-14B-Instruct,2048,2048,1,bf16,8,0
