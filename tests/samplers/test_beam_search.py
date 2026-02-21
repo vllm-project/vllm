@@ -5,11 +5,16 @@
 Run `pytest tests/samplers/test_beam_search.py`.
 """
 
+import json
+
+import jsonschema
 import pytest
 from transformers import AutoModelForSeq2SeqLM
 
 from vllm.assets.audio import AudioAsset
+from vllm.entrypoints.llm import LLM
 from vllm.platforms import current_platform
+from vllm.sampling_params import BeamSearchParams, StructuredOutputsParams
 
 # Extra engine kwargs needed for numerically deterministic beam search.
 # On ROCm, floating-point reductions in attention and GEMM kernels are
@@ -219,3 +224,62 @@ def test_beam_search_passes_multimodal_data(
                 filtered_hf_output_ids = filtered_hf_output_ids[:-1]
 
             assert filtered_hf_output_ids == filtered_vllm_output_ids
+
+
+@pytest.mark.parametrize("model", MODELS)
+@pytest.mark.parametrize("dtype", ["half"])
+@pytest.mark.parametrize("beam_width", BEAM_WIDTHS)
+def test_beam_search_structured_output(
+    model: str,
+    dtype: str,
+    beam_width: int,
+) -> None:
+    """Ensure beam search with structured output produces valid JSON."""
+    json_schema = {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string"},
+            "age": {"type": "integer"},
+        },
+        "required": ["name", "age"],
+        "additionalProperties": False,
+    }
+
+    llm = LLM(
+        model=model,
+        dtype=dtype,
+        enforce_eager=True,
+        max_model_len=512,
+        structured_outputs_config=dict(
+            backend="xgrammar",
+            disable_any_whitespace=True,
+        ),
+        **EXTRA_ENGINE_KWARGS,
+    )
+
+    params = BeamSearchParams(
+        beam_width=beam_width,
+        max_tokens=64,
+        structured_outputs=StructuredOutputsParams(json=json_schema),
+    )
+
+    prompts = [
+        "Generate a JSON object for a person with name and age:",
+    ]
+
+    outputs = llm.beam_search(prompts, params)
+
+    assert len(outputs) == len(prompts)
+    for output in outputs:
+        assert len(output.sequences) > 0
+        for seq in output.sequences:
+            assert seq.text is not None
+            print(f"Full text: {seq.text!r}")
+            # seq.text includes the prompt, extract generated JSON.
+            gen_start = seq.text.find("{")
+            assert gen_start != -1, f"No JSON found in output: {seq.text!r}"
+            generated = seq.text[gen_start:]
+            generated = generated.replace("</s>", "").strip()
+            print(f"Generated JSON: {generated!r}")
+            parsed = json.loads(generated)
+            jsonschema.validate(instance=parsed, schema=json_schema)
