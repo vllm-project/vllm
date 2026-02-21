@@ -497,6 +497,7 @@ def selective_scan_fn(
     block_idx_first_scheduled_token=None,
     block_idx_last_scheduled_token=None,
     initial_state_idx=None,
+    chunk_start_offsets=None,
 ) -> torch.Tensor:
     """
     u: (dim, total_length) for varlen or (batch, dim, seqlen)
@@ -588,6 +589,7 @@ def selective_scan_fn(
         block_idx_first_scheduled_token,
         block_idx_last_scheduled_token,
         initial_state_idx,
+        chunk_start_offsets,
     )
 
     if z is None:

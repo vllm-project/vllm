@@ -72,6 +72,7 @@ struct SSMParamsBase {
     void *__restrict__ block_idx_first_scheduled_token_ptr;  // (batch,) - first block to write
     void *__restrict__ block_idx_last_scheduled_token_ptr;   // (batch,) - last block to write
     void *__restrict__ initial_state_idx_ptr;  // (batch,) - index of the initial state to use
+    void *__restrict__ chunk_start_offsets_ptr;  // (batch,) - offset within first block to start processing
 };
 
 
