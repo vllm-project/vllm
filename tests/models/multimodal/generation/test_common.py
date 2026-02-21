@@ -723,6 +723,38 @@ VLM_TEST_SETTINGS = {
         max_num_seqs=2,
         patch_hf_runner=model_utils.molmo_patch_hf_runner,
     ),
+    "moondream3": VLMTestInfo(
+        models=["moondream/moondream3-preview"],
+        test_type=(VLMTestType.IMAGE, VLMTestType.CUSTOM_INPUTS),
+        prompt_formatter=lambda img_prompt: f"<|endoftext|>{img_prompt}",
+        # Note: space after <image> is required for correct tokenization
+        img_idx_to_prompt=lambda idx: "<image> \n\n",
+        # Moondream3-specific prompts to test query and caption skills
+        single_image_prompts=IMAGE_ASSETS.prompts(
+            {
+                "stop_sign": "Question: What is this sign?\n\nAnswer:",
+                "cherry_blossom": "Question: What season is shown?\n\nAnswer:",
+            }
+        ),
+        max_model_len=2048,
+        max_num_seqs=2,
+        dtype="bfloat16",
+        patch_hf_runner=model_utils.moondream3_patch_hf_runner,
+        hf_model_kwargs={"trust_remote_code": True},
+        # Custom inputs to test Moondream3 query and caption skills
+        custom_test_opts=[
+            CustomTestOptions(
+                inputs=custom_inputs.moondream3_skill_inputs(),
+                limit_mm_per_prompt={"image": 1},
+            ),
+            CustomTestOptions(
+                inputs=custom_inputs.moondream3_multi_size_inputs(),
+                limit_mm_per_prompt={"image": 1},
+            ),
+        ],
+        # Moondream3 is 9B params with MoE, needs significant GPU memory
+        marks=[large_gpu_mark(min_gb=48)],
+    ),
     "ovis1_6-gemma2": VLMTestInfo(
         models=["AIDC-AI/Ovis1.6-Gemma2-9B"],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),

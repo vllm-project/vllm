@@ -895,6 +895,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         extras={"olmo": "allenai/Molmo-7B-O-0924"},
         trust_remote_code=True,
     ),
+    "Moondream3ForCausalLM": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        tokenizer="moondream/starmie-v1",
+        trust_remote_code=True,
+    ),
     "Molmo2ForConditionalGeneration": _HfExamplesInfo(
         "allenai/Molmo2-8B",
         extras={"olmo": "allenai/Molmo2-O-7B"},
@@ -902,6 +907,10 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         # required by current PrefixLM implementation
         max_num_batched_tokens=31872,
+    ),
+    "Moondream3ForCausalLM": _HfExamplesInfo(
+        "moondream/moondream3-preview",
+        trust_remote_code=True,
     ),
     "NVLM_D": _HfExamplesInfo("nvidia/NVLM-D-72B", trust_remote_code=True),
     "Llama_Nemotron_Nano_VL": _HfExamplesInfo(

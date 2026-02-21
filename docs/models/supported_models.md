@@ -724,6 +724,7 @@ These models primarily accept the [`LLM.generate`](./generative_models.md#llmgen
 | `Mistral3ForConditionalGeneration` | Mistral3 (HF Transformers) | T + I<sup>+</sup> | `mistralai/Mistral-Small-3.1-24B-Instruct-2503`, etc. | ✅︎ | ✅︎ |
 | `MolmoForCausalLM` | Molmo | T + I<sup>+</sup> | `allenai/Molmo-7B-D-0924`, `allenai/Molmo-7B-O-0924`, etc. | ✅︎ | ✅︎ |
 | `Molmo2ForConditionalGeneration` | Molmo2 | T + I<sup>+</sup> / V | `allenai/Molmo2-4B`, `allenai/Molmo2-8B`, `allenai/Molmo2-O-7B` | ✅︎ | ✅︎ |
+| `Moondream3ForCausalLM` | Moondream3 | T + I | `moondream/moondream3-preview` | | ✅︎ |
 | `NVLM_D_Model` | NVLM-D 1.0 | T + I<sup>+</sup> | `nvidia/NVLM-D-72B`, etc. | | ✅︎ |
 | `OpenCUAForConditionalGeneration` | OpenCUA-7B | T + I<sup>E+</sup> | `xlangai/OpenCUA-7B` | ✅︎ | ✅︎ |
 | `OpenPanguVLForConditionalGeneration` | openpangu-VL | T + I<sup>E+</sup> + V<sup>E+</sup> |`FreedomIntelligence/openPangu-VL-7B` | ✅︎ | ✅︎ |
@@ -765,7 +766,9 @@ Some models are supported only via the [Transformers modeling backend](#transfor
 <sup>^</sup> You need to set the architecture name via `--hf-overrides` to match the one in vLLM.
 &nbsp;&nbsp;&nbsp;&nbsp;• For example, to use DeepSeek-VL2 series models:
 &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;`--hf-overrides '{"architectures": ["DeepseekVLV2ForCausalLM"]}'`
+
 <sup>E</sup> Pre-computed embeddings can be inputted for this modality.
+
 <sup>+</sup> Multiple items can be inputted per text prompt for this modality.
 
 !!! note
