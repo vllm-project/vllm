@@ -287,9 +287,13 @@ greenlet==3.2.3
     # via sqlalchemy
 grpcio==1.78.0
     # via
+    #   -r requirements/test.in
+    #   grpcio-reflection
     #   grpcio-tools
     #   ray
     #   tensorboard
+grpcio-reflection==1.78.0
+    # via -r requirements/test.in
 grpcio-tools==1.78.0
     # via -r requirements/test.in
 h11==0.14.0
@@ -758,6 +762,7 @@ protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
+    #   grpcio-reflection
     #   grpcio-tools
     #   opentelemetry-proto
     #   proto-plus
