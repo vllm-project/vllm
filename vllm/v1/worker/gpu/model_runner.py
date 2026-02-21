@@ -816,6 +816,74 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
 
+    def _copy_virtual_request_kv_to_parent(
+        self,
+        virtual_req_id: str,
+        parent_req_id: str,
+        gap_start: int,
+    ) -> None:
+        """Copy KV cache from virtual gap request to parent's gap blocks.
+
+        Virtual requests write to their own allocated slots, but we need the
+        recomputed KV values to be in the parent's gap blocks for correct
+        attention computation.
+        """
+        try:
+            # Get request indices
+            virtual_idx = self.req_states.req_id_to_index.get(virtual_req_id)
+            parent_idx = self.req_states.req_id_to_index.get(parent_req_id)
+
+            if virtual_idx is None or parent_idx is None:
+                logger.warning(
+                    "KV Copy: Could not find request indices for %s -> %s",
+                    virtual_req_id, parent_req_id
+                )
+                return
+
+            # Get number of tokens computed by virtual request
+            num_tokens = self.req_states.num_computed_prefill_tokens[virtual_idx]
+            if num_tokens == 0:
+                return
+
+            # Get the slot mappings for both requests
+            # slot_mapping shape: [num_kv_groups, max_num_tokens]
+            virtual_slots = self.block_tables.slot_mappings[:, virtual_idx, :num_tokens]
+            parent_slots = self.block_tables.slot_mappings[:, parent_idx, gap_start:gap_start + num_tokens]
+
+            # Copy KV from virtual slots to parent gap slots
+            for layer_idx, kv_cache in enumerate(self.kv_caches):
+                # kv_cache shape: [num_blocks, 2, block_size, num_heads, head_dim]
+                # For each KV group, copy from virtual slots to parent slots
+                for group_idx in range(self.block_tables.num_kv_cache_groups):
+                    v_slots = virtual_slots[group_idx]  # [num_tokens]
+                    p_slots = parent_slots[group_idx]   # [num_tokens]
+
+                    # Copy K and V separately
+                    # kv_cache is [num_blocks, 2, block_size, num_heads, head_size]
+                    # slot = block_idx * block_size + offset
+                    k_cache = kv_cache[:, 0]  # [num_blocks, block_size, num_heads, head_size]
+                    v_cache = kv_cache[:, 1]  # [num_blocks, block_size, num_heads, head_size]
+
+                    # Flatten and copy
+                    k_cache_flat = k_cache.view(-1, k_cache.shape[-2], k_cache.shape[-1])
+                    v_cache_flat = v_cache.view(-1, v_cache.shape[-2], v_cache.shape[-1])
+
+                    # Copy virtual slots to parent slots
+                    for i in range(num_tokens):
+                        v_slot = int(v_slots[i].item())
+                        p_slot = int(p_slots[i].item())
+                        if v_slot >= 0 and p_slot >= 0:
+                            k_cache_flat[p_slot] = k_cache_flat[v_slot]
+                            v_cache_flat[p_slot] = v_cache_flat[v_slot]
+
+            logger.info(
+                "KV Copy: Copied %d tokens from %s to %s at position %d",
+                num_tokens, virtual_req_id, parent_req_id, gap_start
+            )
+
+        except Exception as e:
+            logger.error("KV Copy: Error copying KV for %s: %s", virtual_req_id, e)
+
     @torch.inference_mode()
     def execute_model(
         self,
@@ -1079,6 +1147,24 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
+
+        # Handle virtual gap requests: copy KV to parent and cleanup
+        if scheduler_output.virtual_gap_req_ids is not None:
+            # Build lookup for virtual request data
+            virtual_req_data = {
+                nrd.req_id: nrd for nrd in scheduler_output.scheduled_new_reqs
+                if nrd.req_id in scheduler_output.virtual_gap_req_ids
+            }
+            for req_id in scheduler_output.virtual_gap_req_ids:
+                req_data = virtual_req_data.get(req_id)
+                if req_data and req_data.parent_req_id and req_data.gap_start is not None:
+                    self._copy_virtual_request_kv_to_parent(
+                        req_id, req_data.parent_req_id, req_data.gap_start
+                    )
+                # Remove virtual request state
+                self.req_states.remove_request(req_id)
+                if self.supports_mm_inputs:
+                    self.encoder_runner.remove_request(req_id)
 
         if self.use_async_scheduling:
             return async_output

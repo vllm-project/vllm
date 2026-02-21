@@ -42,6 +42,11 @@ class NewRequestData:
     # Only used for v2 model runner.
     prefill_token_ids: list[int] | None = None
 
+    # For gap recomputation (SPANS/block attention)
+    is_gap_recompute: bool = False
+    parent_req_id: str | None = None  # The original request ID for virtual gap requests
+    gap_start: int | None = None  # Start position of gap in parent request (for KV copy)
+
     @classmethod
     def from_request(
         cls,
@@ -232,6 +237,11 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
+
+    # Virtual gap request IDs that should be cleaned up from model runner state
+    # without freeing their KV cache (since they share blocks with parent requests).
+    # Only used for v2 model runner.
+    virtual_gap_req_ids: set[str] | None = None
 
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
