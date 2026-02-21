@@ -141,6 +141,69 @@ class GGUFModelLoader(BaseModelLoader):
                         r"\.mlp\.experts\.[0-9]+\.(gate|up|down)_proj\.weight"
                     )
                 )
+        if model_type == "qwen3_next":
+            model_type = "qwen3next"
+            layer_types = getattr(config, "layer_types", None)
+            mlp_only_layers = getattr(config, "mlp_only_layers", []) or []
+            num_experts = getattr(config, "num_experts", 0)
+            decoder_sparse_step = getattr(config, "decoder_sparse_step", 1)
+            for idx in range(config.num_hidden_layers):
+                is_linear_attn = (
+                    layer_types[idx] == "linear_attention"
+                    if layer_types is not None
+                    else True
+                )
+                # dt_bias: GGUF stores as ssm_dt bias, HF names it dt_bias
+                if is_linear_attn:
+                    gguf_to_hf_name_map[f"blk.{idx}.ssm_dt.bias"] = (
+                        f"model.layers.{idx}.linear_attn.dt_bias"
+                    )
+                    # Some Qwen3-Next GGUF exports store qkv and z projections
+                    # as attn_qkv/attn_gate instead of ssm_in.
+                    # Map to synthetic names; model.load_weights will merge them
+                    # into linear_attn.in_proj_qkvz with shard IDs.
+                    gguf_to_hf_name_map[f"blk.{idx}.attn_qkv.weight"] = (
+                        f"model.layers.{idx}.linear_attn.attn_qkv.weight"
+                    )
+                    gguf_to_hf_name_map[f"blk.{idx}.attn_gate.weight"] = (
+                        f"model.layers.{idx}.linear_attn.attn_gate.weight"
+                    )
+                # MoE detection mirrors Qwen3NextDecoderLayer.__init__:
+                # a layer gets SparseMoeBlock when it has experts, isn't in
+                # mlp_only_layers, and satisfies the sparse step cadence.
+                # For Qwen3-Coder-Next (decoder_sparse_step=1,
+                # mlp_only_layers=[], num_experts=512) every layer is MoE.
+                is_moe = (
+                    num_experts > 0
+                    and idx not in mlp_only_layers
+                    and (idx + 1) % decoder_sparse_step == 0
+                )
+                if is_moe:
+                    # Expert weights: GGUF has separate gate/up/down,
+                    # HF dummy model has merged gate_up_proj and down_proj
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_down_exps.weight"] = (
+                        f"model.layers.{idx}.mlp.experts.0.down_proj.weight"
+                    )
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_gate_exps.weight"] = (
+                        f"model.layers.{idx}.mlp.experts.0.gate_proj.weight"
+                    )
+                    gguf_to_hf_name_map[f"blk.{idx}.ffn_up_exps.weight"] = (
+                        f"model.layers.{idx}.mlp.experts.0.up_proj.weight"
+                    )
+                    # Skip unmapped merged expert params from the dummy model
+                    sideload_params.append(
+                        re.compile(
+                            f"model\\.layers\\.{idx}"
+                            r"\.mlp\.experts\.(gate_up_proj|down_proj)"
+                        )
+                    )
+                    sideload_params.append(
+                        re.compile(
+                            f"model\\.layers\\.{idx}"
+                            r"\.mlp\.experts\.[0-9]+\."
+                            r"(gate|up|down)_proj\.weight"
+                        )
+                    )
 
         arch = None
         for key, value in gguf.MODEL_ARCH_NAMES.items():

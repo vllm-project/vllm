@@ -216,11 +216,20 @@ class Qwen3NextConfig(PretrainedConfig):
         router_aux_loss_coef=0.001,
         mlp_only_layers=None,
         layer_types=None,
+        bos_token_id=None,
+        eos_token_id=None,
+        pad_token_id=None,
         **kwargs,
     ):
         if mlp_only_layers is None:
             mlp_only_layers = []
-        super().__init__(tie_word_embeddings=tie_word_embeddings, **kwargs)
+        super().__init__(
+            bos_token_id=bos_token_id,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            tie_word_embeddings=tie_word_embeddings,
+            **kwargs,
+        )
         self.vocab_size = vocab_size
         self.max_position_embeddings = max_position_embeddings
         self.hidden_size = hidden_size

@@ -8,6 +8,7 @@ from itertools import islice
 import torch
 from einops import rearrange
 from torch import nn
+from torch.nn.parameter import UninitializedParameter
 from transformers.activations import ACT2FN
 
 from vllm.compilation.decorators import support_torch_compile
@@ -488,9 +489,11 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         quant_config: QuantizationConfig | None,
         prefix: str,
     ) -> MergedColumnParallelLinear:
+        # Keep qkv and z as separate packed shards so GGUF checkpoints that
+        # store `attn_qkv` and `attn_gate` tensors can load both into one module.
         return MergedColumnParallelLinear(
             input_size=hidden_size,
-            output_sizes=[sum((key_dim, key_dim, value_dim, value_dim))],
+            output_sizes=[sum((key_dim, key_dim, value_dim)), value_dim],
             bias=False,
             quant_config=quant_config,
             prefix=prefix,
@@ -1106,6 +1109,7 @@ class Qwen3NextModel(nn.Module):
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=vllm_config.quant_config,
         )
 
         def get_layer(prefix: str):
@@ -1177,6 +1181,8 @@ class Qwen3NextModel(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
+            ("linear_attn.in_proj_qkvz", "linear_attn.attn_qkv", 0),
+            ("linear_attn.in_proj_qkvz", "linear_attn.attn_gate", 1),
             ("qkv_proj", "q_proj", "q"),
             ("qkv_proj", "k_proj", "k"),
             ("qkv_proj", "v_proj", "v"),
@@ -1262,6 +1268,20 @@ class Qwen3NextModel(nn.Module):
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
+                    # GGUF drops size-1 dims: [1, N] -> [N], [N, 1, K] -> [N, K].
+                    # Restore the singleton axis only when it exactly matches
+                    # the target parameter shape.
+                    if (
+                        not isinstance(param, UninitializedParameter)
+                        and loaded_weight.dim() + 1 == param.dim()
+                    ):
+                        for axis, dim_size in enumerate(param.shape):
+                            if dim_size != 1:
+                                continue
+                            candidate = loaded_weight.unsqueeze(axis)
+                            if candidate.shape == param.shape:
+                                loaded_weight = candidate
+                                break
                     weight_loader(param, loaded_weight)
             loaded_params.add(name)
         return loaded_params
@@ -1352,6 +1372,7 @@ class Qwen3NextForCausalLM(
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
