@@ -18,6 +18,7 @@ from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor,
     process_dict_updates,
 )
 from vllm.v1.sample.logits_processor.interface import (
@@ -50,6 +51,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor,
 ]
 
 
@@ -198,14 +200,14 @@ def build_logitsprocs(
         return LogitsProcessors()
 
     # Check if speculative decoding is enabled.
-    if vllm_config.speculative_config:
-        if custom_logitsprocs:
-            raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
-        logger.warning(
-            "min_p, logit_bias, and min_tokens parameters won't currently work "
-            "with speculative decoding enabled."
-        )
-        return LogitsProcessors()
+    # if vllm_config.speculative_config:
+    #     if custom_logitsprocs:
+    #         raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
+    #     logger.warning(
+    #         "min_p, logit_bias, and min_tokens parameters won't currently work "
+    #         "with speculative decoding enabled."
+    #     )
+    #     return LogitsProcessors()
 
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
@@ -349,4 +351,5 @@ __all__ = [
     "STR_POOLING_REJECTS_LOGITSPROCS",
     "LOGITSPROCS_GROUP",
     "AdapterLogitsProcessor",
+    "ThinkingTokenBudgetLogitsProcessor",
 ]

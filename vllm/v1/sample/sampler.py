@@ -181,7 +181,7 @@ class Sampler(nn.Module):
         # Apply logits processors that only apply to random sampling
         # (argmax invariant)
         for processor in sampling_metadata.logitsprocs.argmax_invariant:
-            logits = processor.apply(logits)
+            logits = processor.apply(logits,predict_bonus_token=False)
 
         # Apply top_k and/or top_p.
         random_sampled, processed_logprobs = self.topk_topp_sampler(
@@ -293,7 +293,7 @@ class Sampler(nn.Module):
 
         # Apply logits processors which can impact greedy sampling.
         for processor in sampling_metadata.logitsprocs.non_argmax_invariant:
-            logits = processor.apply(logits)
+            logits = processor.apply(logits,predict_bonus_token=predict_bonus_token)
 
         # Apply penalties (e.g., freq_penalties).
         logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
