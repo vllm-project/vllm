@@ -538,6 +538,10 @@ class CudaPlatformBase(Platform):
     def support_static_graph_mode(cls) -> bool:
         return True
 
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,

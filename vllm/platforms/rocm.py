@@ -674,3 +674,7 @@ class RocmPlatform(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def use_custom_op_collectives(cls) -> bool:
+        return True
