@@ -136,22 +136,34 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
     if log_config is not None:
         return log_config
 
-    # If endpoints to filter are specified, create a config with the filter
-    if args.disable_access_log_for_endpoints:
+    # Collect excluded paths from both flags
+    excluded_paths = _get_excluded_paths(args)
+    if excluded_paths:
         from vllm.logging_utils import create_uvicorn_log_config
 
-        # Parse comma-separated string into list
-        excluded_paths = [
-            p.strip()
-            for p in args.disable_access_log_for_endpoints.split(",")
-            if p.strip()
-        ]
         return create_uvicorn_log_config(
             excluded_paths=excluded_paths,
             log_level=args.uvicorn_log_level,
         )
 
     return None
+
+
+def _get_excluded_paths(args: Namespace) -> list[str]:
+    """Merge excluded paths from both CLI flags, deduplicating."""
+    paths: list[str] = []
+    if getattr(args, "disable_uvicorn_metrics_access_log", False):
+        paths.extend(["/health", "/metrics"])
+    if getattr(args, "disable_access_log_for_endpoints", None):
+        paths.extend(
+            [
+                p.strip()
+                for p in args.disable_access_log_for_endpoints.split(",")
+                if p.strip()
+            ]
+        )
+    # Deduplicate while preserving order
+    return list(dict.fromkeys(paths))
 
 
 def _extract_content_from_chunk(chunk_data: dict) -> str:
