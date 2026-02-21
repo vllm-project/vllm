@@ -533,14 +533,16 @@ __device__ inline void dequant_fp8_scales<half2, vllm::kFE4M3fn.id()>(
 template <>
 __device__ inline void dequant_fp8_scales<nv_bfloat162, vllm::kFE4M3fn.id()>(
     int q, nv_bfloat162* frag_b) {
-  constexpr int FP8_EXPONENT = 4, BF16_EXPONENT = 8;
-  constexpr int RIGHT_SHIFT = BF16_EXPONENT - FP8_EXPONENT;
-  constexpr int MASK = 0x7F007F00;
+  // S0E5M3 (bias 15) -> BF16 (bias 127): exponent widening 5->8 bit
+  // BF16 exp = E4 !E4 !E4 !E4 E3 E2 E1 E0
+  int Out1 = ((q & 0x80008000) >> 1) | ((q & 0x7F007F00) >> 4);
+  int msb1 = (Out1 ^ 0x40004000) & 0x40004000;
+  Out1 |= (msb1 >> 1) | (msb1 >> 2) | (msb1 >> 3);
 
-  // Extract and shift FP8 values to BF16 format
-  int Out1 = ((q & 0x80008000) >> 1) | ((q & MASK) >> RIGHT_SHIFT);
   q <<= 8;
-  int Out2 = ((q & 0x80008000) >> 1) | ((q & MASK) >> RIGHT_SHIFT);
+  int Out2 = ((q & 0x80008000) >> 1) | ((q & 0x7F007F00) >> 4);
+  int msb2 = (Out2 ^ 0x40004000) & 0x40004000;
+  Out2 |= (msb2 >> 1) | (msb2 >> 2) | (msb2 >> 3);
 
   // Note: reverse indexing is intentional because weights are permuted
   frag_b[1] = *reinterpret_cast<const nv_bfloat162*>(&Out1);

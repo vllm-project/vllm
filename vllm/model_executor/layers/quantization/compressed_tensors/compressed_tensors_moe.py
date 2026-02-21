@@ -539,6 +539,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             w2_scale,
             w2_scale_2,
             a2_scale,
+            w13_stability_scale_factor,
+            w2_stability_scale_factor,
         ) = convert_to_nvfp4_moe_kernel_format(
             nvfp4_backend=self.nvfp4_backend,
             layer=layer,
@@ -561,6 +563,8 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_weight_scale_2 = w2_scale_2
         layer.w13_input_scale = a13_scale
         layer.w2_input_scale = a2_scale
+        layer.w13_stability_scale_factor = w13_stability_scale_factor
+        layer.w2_stability_scale_factor = w2_stability_scale_factor
 
         # Setup modular kernel for TP case and naive DP/EP case.
         # In non-naive DP/EP case, we will create a ModularKernelMethod.
@@ -607,6 +611,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            w13_stability_scale_factor=getattr(
+                layer, "w13_stability_scale_factor", None
+            ),
+            w2_stability_scale_factor=getattr(layer, "w2_stability_scale_factor", None),
         )
 
     @property

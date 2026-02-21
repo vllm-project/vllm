@@ -627,6 +627,14 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     def g2_alphas(self) -> torch.Tensor | None:
         return self.quant_config.g2_alphas
 
+    @property
+    def w1_stability_scale_factor(self) -> torch.Tensor | None:
+        return self.quant_config.w1_stability_scale_factor
+
+    @property
+    def w2_stability_scale_factor(self) -> torch.Tensor | None:
+        return self.quant_config.w2_stability_scale_factor
+
     # TODO (bnell): make this return a CHUNK_SIZE or None instead?
     @abstractmethod
     def supports_chunking(self) -> bool:

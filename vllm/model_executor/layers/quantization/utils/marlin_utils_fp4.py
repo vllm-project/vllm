@@ -88,8 +88,108 @@ def nvfp4_marlin_process_global_scale(global_scale):
     return global_scale * (2.0 ** (exponent_bias - 7))
 
 
+def marlin_process_stability_scale_factor(
+    weight_scale: torch.Tensor,
+    weight_global_scale: torch.Tensor,
+) -> torch.Tensor:
+    """
+    FP4 cannot represent NaN and Inf, therefore no exceptional numbers (NaN and Inf)
+    will be generated in FP4 GEMM operations. However, the Marlin operator first
+    converts to FP16 or BF16 before performing GEMM, which may produce Inf, and
+    subsequently generate NaN during propagation.
+
+    Due to the larger dynamic range of BF16, it is less likely to produce Inf, while
+    FP16 is more prone to producing Inf due to its smaller dynamic range.
+
+    Therefore, we need to calculate a scaling value (K) to scale down the input and
+    then restore it after the GEMM operation. Based on the principle of matrix
+    multiplication, for MMA, it can be simply expressed as
+    `O = A x B + C` -> `O' = (A/K x B) + (C/K); O = O' * K`.
+
+    The calculation of K requires evaluating the possible maximum value of
+    `input x weight` and dividing it by the maximum representable value of float16.
+    Since the weight is of type FP4, we directly select the maximum representable
+    value of FP4, which is 6.0.
+
+    Because the weight remains constant during inference, a portion of K is
+    pre-calculated to reduce performance overhead.
+    """
+
+    weight_max = 6.0
+    weight_scale_float = weight_scale.to(torch.float)
+    weight_scale_max = weight_scale_float.abs().nan_to_num(nan=0.0).max()
+
+    return weight_max * weight_scale_max * weight_global_scale.abs()
+
+
+def marlin_stability_scale(
+    x: torch.Tensor,
+    stability_scale_factor: torch.Tensor | None,
+    bias: torch.Tensor | None,
+) -> torch.Tensor | None:
+    """
+    Through practical testing, it was observed that `input` might contain NaN.
+    Therefore, all NaN are removed first to prevent scale value itself from
+    becoming NaN.
+
+    Since a portion of scale value (`stability_scale_factor`) has already been
+    calculated during the model loading, we only need to find the maximum of
+    the `input` and multiply it.
+
+    Because the calculation might result in Inf, a clamp operation is performed
+    to limit the value to an empirical value (`1024.0`).
+    """
+
+    supported_bias_dtypes = (x.dtype, torch.float)
+    if (
+        x.dtype not in (torch.float16, torch.bfloat16)
+        or stability_scale_factor is None
+        or (bias is not None and bias.dtype not in supported_bias_dtypes)
+    ):
+        return None
+
+    # bfloat16 has a much larger range (3.39e38) than float16 (65504),
+    # so overflow during dequantization is practically impossible.
+    # Skip stability scaling entirely for bfloat16 to avoid allocating
+    # temporary tensors during CUDA graph capture.
+    if x.dtype == torch.bfloat16:
+        return None
+
+    safe_limit = 1.0 / torch.finfo(x.dtype).max
+    acc_factor = x.shape[-1]
+    abs_x = x.abs()
+    abs_x.nan_to_num_(nan=0.0)
+    max_x = abs_x.max().float()
+    del abs_x
+    k = max_x * acc_factor * safe_limit * stability_scale_factor
+    if bias is not None:
+        abs_bias = bias.abs()
+        abs_bias.nan_to_num_(nan=0.0)
+        max_bias = abs_bias.max().float()
+        del abs_bias
+        k.add_(max_bias * safe_limit)
+    k.clamp_(min=1.0, max=1024.0).log2_().ceil_().exp2_()
+    return k.to(dtype=x.dtype)
+
+
+def marlin_process_moe_stability_scale_factor(
+    weight_scale: torch.Tensor,
+    weight_global_scale: torch.Tensor,
+) -> torch.Tensor:
+    """
+    Compute stability scale factor for MoE NVFP4 Marlin layers.
+    Takes MAX across all experts to get a single worst-case scalar.
+    """
+    weight_max = 6.0
+    weight_scale_float = weight_scale.to(torch.float)
+    weight_scale_max = weight_scale_float.abs().nan_to_num(nan=0.0).max()
+    global_scale_max = weight_global_scale.abs().max()
+    return weight_max * weight_scale_max * global_scale_max
+
+
 def apply_fp4_marlin_linear(
     input: torch.Tensor,
+    stability_scale_factor: torch.Tensor | None,
     weight: torch.Tensor,
     weight_scale: torch.Tensor,
     weight_global_scale: torch.Tensor | None,
@@ -102,6 +202,15 @@ def apply_fp4_marlin_linear(
 ) -> torch.Tensor:
     # For GPUs that lack FP4 hardware support, we can leverage the
     # Marlin kernel for fast weight-only FP4 quantization
+
+    stability_scale = marlin_stability_scale(input, stability_scale_factor, bias)
+
+    if stability_scale is not None:
+        stability_scale_inv = torch.reciprocal(stability_scale)
+        input.mul_(stability_scale_inv)
+        if bias is not None:
+            # Use non-in-place to avoid modifying the model parameter.
+            bias = bias * stability_scale_inv
 
     reshaped_x = input.reshape(-1, input.shape[-1])
     out_shape = input.shape[:-1] + (size_n,)
@@ -141,7 +250,10 @@ def apply_fp4_marlin_linear(
         use_fp32_reduce=use_fp32_reduce,
     )
 
-    return output.reshape(out_shape)
+    out = output.reshape(out_shape)
+    if stability_scale is not None:
+        out.mul_(stability_scale)
+    return out
 
 
 def prepare_fp4_layer_for_marlin(
@@ -207,19 +319,29 @@ def prepare_fp4_layer_for_marlin(
     )
 
     if is_nvfp4:
-        weight_scale = nvfp4_marlin_process_scales(weight_scale)
-        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
-
+        # Compute stability scale factor BEFORE processing scales to S0E5M3,
+        # since the processed FP8 bytes have different numerical values.
         weight_global_scale = layer.weight_global_scale.to(param_dtype)
         weight_global_scale = nvfp4_marlin_process_global_scale(weight_global_scale)
+        stability_scale_factor = marlin_process_stability_scale_factor(
+            weight_scale, weight_global_scale
+        )
+
+        weight_scale = nvfp4_marlin_process_scales(weight_scale)
+        layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
         layer.weight_global_scale = torch.nn.Parameter(
             weight_global_scale, requires_grad=False
+        )
+        layer.stability_scale_factor = torch.nn.Parameter(
+            stability_scale_factor, requires_grad=False
         )
     else:
         weight_scale = mxfp4_marlin_process_scales(
             weight_scale, input_dtype=input_dtype
         )
         layer.weight_scale = torch.nn.Parameter(weight_scale, requires_grad=False)
+
+        layer.stability_scale_factor = None
 
     if hasattr(layer, "bias") and layer.bias is not None:
         assert layer.bias.shape == (part_size_n,)
@@ -239,7 +361,14 @@ def prepare_nvfp4_moe_layer_for_marlin(
     w2_scale_2: torch.Tensor,
     is_act_and_mul: bool,
 ) -> tuple[
-    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
 ]:
     logger.warning_once(
         "Your GPU does not have native support for FP4 computation but "
@@ -326,10 +455,30 @@ def prepare_nvfp4_moe_layer_for_marlin(
         g_scales = nvfp4_marlin_process_global_scale(g_scales)
         return scales, g_scales
 
+    # Compute stability scale factors BEFORE processing scales to S0E5M3,
+    # since the processed FP8 bytes have different numerical values.
+    w13_g_processed = nvfp4_marlin_process_global_scale(w13_scale_2.to(param_dtype))
+    w2_g_processed = nvfp4_marlin_process_global_scale(w2_scale_2.to(param_dtype))
+    w13_stability_scale_factor = marlin_process_moe_stability_scale_factor(
+        w13_scale.to(param_dtype), w13_g_processed
+    )
+    w2_stability_scale_factor = marlin_process_moe_stability_scale_factor(
+        w2_scale.to(param_dtype), w2_g_processed
+    )
+
     w13_scale, w13_scale_2 = premute_scales(w13_scale, w13_scale_2, "w13")
     w2_scale, w2_scale_2 = premute_scales(w2_scale, w2_scale_2, "w2")
 
-    return w13, w13_scale, w13_scale_2, w2, w2_scale, w2_scale_2
+    return (
+        w13,
+        w13_scale,
+        w13_scale_2,
+        w2,
+        w2_scale,
+        w2_scale_2,
+        w13_stability_scale_factor,
+        w2_stability_scale_factor,
+    )
 
 
 def prepare_moe_fp4_layer_for_marlin(
@@ -391,6 +540,17 @@ def prepare_moe_fp4_layer_for_marlin(
         weight = torch.nn.Parameter(weight, requires_grad=False)
 
         setattr(layer, name, weight)
+
+    # STABILITY SCALE FACTORS
+    # Compute BEFORE processing scales to S0E5M3, since the processed
+    # FP8 bytes have different numerical values.
+    if is_nvfp4:
+        for name in ["w13", "w2"]:
+            raw_scales = getattr(layer, name + "_weight_scale").to(param_dtype)
+            raw_gs = getattr(layer, name + "_weight_scale_2").to(param_dtype)
+            processed_gs = nvfp4_marlin_process_global_scale(raw_gs)
+            ssf = marlin_process_moe_stability_scale_factor(raw_scales, processed_gs)
+            setattr(layer, name + "_stability_scale_factor", ssf)
 
     # WEIGHT SCALES
     # Permute scales
