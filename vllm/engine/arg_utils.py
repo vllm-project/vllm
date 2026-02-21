@@ -2017,21 +2017,20 @@ class EngineArgs:
             )
 
         # Disable chunked prefill and prefix caching for:
-        # POWER (ppc64le)/s390x/RISCV CPUs in V1
+        # POWER (ppc64le)/RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
             CpuArchEnum.POWERPC,
-            CpuArchEnum.S390X,
             CpuArchEnum.RISCV,
         ):
             logger.info(
                 "Chunked prefill is not supported for POWER, "
-                "S390X and RISC-V CPUs; "
+                "and RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
             logger.info(
                 "Prefix caching is not supported for POWER, "
-                "S390X and RISC-V CPUs; "
+                "and RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
