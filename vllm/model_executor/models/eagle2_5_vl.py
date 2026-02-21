@@ -149,7 +149,7 @@ class Eagle2_5_VLProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for Eagle2.5-VL model."""
 
     def get_hf_processor(self, **kwargs) -> Eagle2_5_VLProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             Eagle2_5_VLProcessor,
             config=self.ctx.get_hf_config(),
             tokenizer=self.get_tokenizer(),

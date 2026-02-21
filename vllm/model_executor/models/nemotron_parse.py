@@ -602,7 +602,7 @@ class NemotronParseProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs) -> NemotronParseProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             NemotronParseProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),

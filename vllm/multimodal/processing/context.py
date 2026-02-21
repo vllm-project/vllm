@@ -276,6 +276,20 @@ class InputProcessingContext:
             **merged_kwargs,
         )
 
+    def init_processor(
+        self,
+        typ: type[_T],
+        /,
+        **kwargs: object,
+    ) -> _T:
+        """
+        Initialize a HuggingFace-like processor class, merging the
+        keyword arguments with those in the model's configuration.
+        """
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+
+        return typ(**merged_kwargs)
+
     def _postprocess_output(
         self,
         output: JSONTree,

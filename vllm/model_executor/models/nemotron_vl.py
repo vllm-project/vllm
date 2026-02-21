@@ -337,7 +337,7 @@ class NemotronVLProcessingInfo(BaseInternVLProcessingInfo):
     """Processing info for Nemotron VL models."""
 
     def get_hf_processor(self, **kwargs: object) -> NemotronVLProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             NemotronVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),

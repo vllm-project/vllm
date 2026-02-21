@@ -1179,7 +1179,7 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
         return max(max_frames_per_video, 1)
 
     def get_hf_processor(self, **kwargs: object) -> NanoNemotronVLProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             NanoNemotronVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),

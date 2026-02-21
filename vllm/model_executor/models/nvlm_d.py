@@ -72,7 +72,7 @@ class NVLMProcessor(BaseInternVLProcessor):
 
 class NVLMProcessingInfo(BaseInternVLProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> NVLMProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             NVLMProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),

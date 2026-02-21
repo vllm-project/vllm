@@ -911,7 +911,7 @@ class InternVLProcessingInfo(BaseInternVLProcessingInfo):
         return max(max_frames_per_video, 1)
 
     def get_hf_processor(self, **kwargs: object) -> InternVLProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             InternVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),

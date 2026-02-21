@@ -456,7 +456,7 @@ class GLM4VProcessingInfo(BaseProcessingInfo):
         return self.ctx.get_hf_config(ChatGLMConfig)
 
     def get_hf_processor(self, **kwargs: object) -> GLM4VProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             GLM4VProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),

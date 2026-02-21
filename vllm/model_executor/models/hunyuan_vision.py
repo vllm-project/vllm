@@ -590,7 +590,7 @@ class HunYuanVLProcessingInfo(BaseProcessingInfo):
         self,
         **kwargs: object,
     ) -> HunYuanVLProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             HunYuanVLProcessor,
             use_fast=kwargs.pop("use_fast", True),
             **kwargs,
