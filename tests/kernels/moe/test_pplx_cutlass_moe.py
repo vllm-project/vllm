@@ -45,7 +45,7 @@ requires_pplx = pytest.mark.skipif(
 )
 
 NUM_EXPERTS = [40, 64]
-TOP_KS = [6, 8]
+TOP_KS = [1, 6, 8]
 
 
 def rank_chunk(num, r, w):
@@ -81,6 +81,7 @@ def pplx_cutlass_moe(
     per_act_token: bool,
     per_out_ch: bool,
     group_name: str | None,
+    apply_router_weight_on_input: bool = False,
 ):
     from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
         PplxPrepareAndFinalize,
@@ -191,6 +192,7 @@ def pplx_cutlass_moe(
         chunk_topk_ids,
         global_num_experts=num_experts,
         expert_map=None,  # TODO
+        apply_router_weight_on_input=apply_router_weight_on_input,
     )
 
     torch.cuda.synchronize()
@@ -221,6 +223,7 @@ def _pplx_moe(
     per_act_token: bool,
     per_out_ch: bool,
     use_internode: bool,
+    apply_router_weight_on_input: bool = False,
 ):
     try:
         if use_internode:
@@ -237,8 +240,14 @@ def _pplx_moe(
             group_name = cpu_group.group_name
 
         with set_current_vllm_config(vllm_config):
+            # Compute expected result using torch reference implementation
             torch_output = torch_experts(
-                a_full, w1_full, w2_full, topk_weights, topk_ids
+                a_full,
+                w1_full,
+                w2_full,
+                topk_weights,
+                topk_ids,
+                apply_router_weights_on_input=apply_router_weight_on_input,
             )
             pplx_output = pplx_cutlass_moe(
                 pgi,
@@ -255,6 +264,7 @@ def _pplx_moe(
                 per_act_token,
                 per_out_ch,
                 group_name,
+                apply_router_weight_on_input,
             )
 
             torch_output = chunk_by_rank(torch_output, pgi.rank, pgi.world_size).to(
@@ -280,6 +290,7 @@ def _pplx_moe(
 @pytest.mark.parametrize("per_out_ch", [True, False])
 @pytest.mark.parametrize("world_dp_size", [[2, 1]])  # , [4, 2]])
 @pytest.mark.parametrize("use_internode", [False])
+@pytest.mark.parametrize("apply_router_weight_on_input", [True, False])
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.skipif(
     (lambda x: x is None or not ops.cutlass_group_gemm_supported(x.to_int()))(
@@ -298,7 +309,12 @@ def test_cutlass_moe_pplx(
     per_out_ch: bool,
     world_dp_size: tuple[int, int],
     use_internode: bool,
+    apply_router_weight_on_input: bool,
 ):
+    # apply_router_weight_on_input=True only supports topk=1 (Llama4 config)
+    if apply_router_weight_on_input and topk != 1:
+        pytest.skip("apply_router_weight_on_input=True only supports topk=1")
+
     set_random_seed(7)
 
     with set_current_vllm_config(vllm_config):
@@ -362,4 +378,5 @@ def test_cutlass_moe_pplx(
             per_act_token,
             per_out_ch,
             use_internode,
+            apply_router_weight_on_input,
         )
