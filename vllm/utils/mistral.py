@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Provides lazy import of the vllm.tokenizers.mistral module."""
 
+from __future__ import annotations
+
 from typing import TYPE_CHECKING, TypeGuard
 
 from vllm.tokenizers import TokenizerLike
