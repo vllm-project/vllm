@@ -279,10 +279,11 @@ class MultiConnector(KVConnectorBase_V1):
         for c in self._connectors:
             c.set_host_xfer_buffer_ops(copy_operation)
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         """Handle preempted requests for all sub-connectors."""
-        for c in self._connectors:
-            c.handle_preemptions(preempted_req_ids)
+        assert isinstance(kv_connector_metadata, MultiKVConnectorMetadata)
+        for c, cm in zip(self._connectors, kv_connector_metadata.metadata):
+            c.handle_preemptions(cm)
 
     def get_finished_count(self) -> int | None:
         # TODO(https://github.com/vllm-project/vllm/issues/33400)
