@@ -655,10 +655,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
 
         # EPLB path
         if self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
-            assert layer.activation == MoEActivation.SILU, (
-                "Only SiLU activation is supported for FlashInfer TRTLLM,"
-                f" not {layer.activation}."
-            )
             assert layer.enable_eplb
             return flashinfer_trtllm_fp4_routed_moe(
                 layer=layer,
