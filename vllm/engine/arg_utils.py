@@ -436,6 +436,7 @@ class EngineArgs:
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
+    deterministic_prefix_caching: bool = CacheConfig.deterministic_prefix_caching
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     swap_space: float = CacheConfig.swap_space
@@ -947,6 +948,10 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
+        )
+        cache_group.add_argument(
+            "--deterministic-prefix-caching",
+            **cache_kwargs["deterministic_prefix_caching"],
         )
         cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
         cache_group.add_argument(
@@ -1466,6 +1471,7 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
+            deterministic_prefix_caching=self.deterministic_prefix_caching,
             cpu_offload_gb=self.cpu_offload_gb,
             cpu_offload_params=self.cpu_offload_params,
             calculate_kv_scales=self.calculate_kv_scales,
