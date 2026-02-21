@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
+
 import numpy as np
 
 from vllm import envs
@@ -766,24 +767,19 @@ class Scheduler(SchedulerInterface):
                     nrd_copy = replace(nrd)
                     parent_req_id = nrd_copy.req_id  # Save parent before modification
                     nrd_copy.req_id = nrd_copy.req_id + "." + str(start)
-                    # For virtual gap requests, num_computed_tokens should be 0
-                    # relative to the virtual request's blocks. The positions will be
-                    # [0, 1, ..., gap_len-1] which map to the gap block slots.
-                    nrd_copy.num_computed_tokens = 0
+                    # Virtual gap requests share parent's blocks and write directly
+                    # to gap positions in parent's KV cache. num_computed_tokens=start
+                    # makes positions [start, start+1, ...] which map to gap slots.
+                    nrd_copy.num_computed_tokens = start
                     nrd_copy.is_gap_recompute = True
                     nrd_copy.parent_req_id = parent_req_id
-                    nrd_copy.gap_start = start  # Store gap position for KV copy
+                    nrd_copy.gap_start = start  # For cleanup tracking
                     req_copy_num_sched_tokens = end - start
                     num_scheduled_tokens[nrd_copy.req_id] = req_copy_num_sched_tokens
                     total_num_scheduled_tokens += req_copy_num_sched_tokens
-                    block_size = self.block_size
-                    start_block_idx = start // block_size
-                    print(f"Start block idx: {start_block_idx}")
-                    end_block_idx = (end - 1) // block_size + 1
-                    print(f"End block idx: {end_block_idx}")
-                    # end_block_idx is already the exclusive end index (like Python range)
-                    # Don't add +1 here
-                    gap_block_ids = tuple(block_group[start_block_idx:end_block_idx] for block_group in nrd.block_ids)
+                    # Virtual request shares ALL parent's blocks so slot mappings
+                    # point to correct positions in parent's KV cache
+                    nrd_copy.block_ids = nrd.block_ids
                     # For virtual gap request, only include the gap tokens
                     # (tokens from start to end, not all tokens up to end)
                     nrd_copy.prompt_token_ids = (
@@ -794,11 +790,14 @@ class Scheduler(SchedulerInterface):
                     # For v2 model runner, prefill_token_ids also needs to be set
                     if self.use_v2_model_runner and nrd.prefill_token_ids is not None:
                         nrd_copy.prefill_token_ids = nrd.prefill_token_ids[start:end]
-                    nrd_copy.block_ids = gap_block_ids
-                    print(f" === AFTER, nrd_copy.block_ids = {nrd_copy.block_ids} ===")
-                    print(f" Virtual request: {nrd_copy.req_id}, parent: {nrd_copy.parent_req_id}")
+                    print(f" === Virtual request: {nrd_copy.req_id} ===")
+                    print(f"   parent: {nrd_copy.parent_req_id}")
                     print(f"   num_computed_tokens: {nrd_copy.num_computed_tokens}")
-                    print(f"   prompt_len: {len(nrd_copy.prompt_token_ids) if nrd_copy.prompt_token_ids else 0}")
+                    print(
+                        f"   prompt_len: {len(nrd_copy.prompt_token_ids) if nrd_copy.prompt_token_ids else 0}"
+                    )
+                    block_count = len(nrd_copy.block_ids[0]) if nrd_copy.block_ids else 0
+                    print(f"   shares parent's blocks: {block_count} blocks")
                     new_reqs_data.append(nrd_copy)
                     # Track this virtual request ID for cleanup
                     if self.use_v2_model_runner:
@@ -1507,7 +1506,9 @@ class Scheduler(SchedulerInterface):
 
     def add_request(self, request: Request) -> None:
         self.waiting.add_request(request)
-        print(f"Added request {request.request_id}. BEFORE, self.requests is: {self.requests}")
+        print(
+            f"Added request {request.request_id}. BEFORE, self.requests is: {self.requests}"
+        )
         self.requests[request.request_id] = request
         print(f"AFTER, self.requests is: {self.requests}")
         if self.log_stats:
