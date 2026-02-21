@@ -98,8 +98,10 @@ class AttentionBackend(ABC):
         ordering of dimensions is
         [num_blocks, num_heads, 2, block_size, head_size].
 
-        If this function is unimplemented / raises NotImplementedError,
-        the physical layout of the KV cache will match the logical shape.
+        The default implementation returns the identity permutation (physical
+        layout matches the logical shape) for the standard 5-dimensional
+        KV cache shape. Backends that need a custom memory layout should
+        override this method.
 
         Args:
             include_num_layers_dimension: if True, includes an additional
@@ -115,7 +117,11 @@ class AttentionBackend(ABC):
         Returns:
             A tuple of ints which is a permutation of range(len(shape)).
         """
-        raise NotImplementedError
+        # Standard KV cache has 5 dimensions.
+        num_dims = 5
+        if include_num_layers_dimension:
+            num_dims += 1
+        return tuple(range(num_dims))
 
     @classmethod
     def full_cls_name(cls) -> tuple[str, str]:

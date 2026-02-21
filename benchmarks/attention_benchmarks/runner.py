@@ -333,11 +333,8 @@ def _create_kv_cache(
     )
 
     # Get the stride order for custom memory layout
-    try:
-        stride_order = backend_class.get_kv_cache_stride_order()
-        assert len(stride_order) == len(cache_shape)
-    except (AttributeError, NotImplementedError):
-        stride_order = tuple(range(len(cache_shape)))
+    stride_order = backend_class.get_kv_cache_stride_order()
+    assert len(stride_order) == len(cache_shape)
 
     # Permute shape to physical layout order
     physical_shape = tuple(cache_shape[i] for i in stride_order)

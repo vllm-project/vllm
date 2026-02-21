@@ -259,13 +259,10 @@ class CpuGpuOffloadingHandlers:
                 assert gpu_shape[0] == 2
                 split_k_and_v = True
 
-            try:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=has_layers_dim
-                )
-                assert len(kv_cache_stride_order) == len(gpu_shape)
-            except (AttributeError, NotImplementedError):
-                kv_cache_stride_order = tuple(range(len(gpu_shape)))
+            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+                include_num_layers_dimension=has_layers_dim
+            )
+            assert len(kv_cache_stride_order) == len(gpu_shape)
 
             # permute test_shape according to stride_order
             test_shape = tuple(test_shape[i] for i in kv_cache_stride_order)
