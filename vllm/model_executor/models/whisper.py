@@ -692,11 +692,8 @@ class WhisperDummyInputsBuilder(BaseDummyInputsBuilder[WhisperProcessingInfo]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
-        feature_extractor = self.info.get_feature_extractor(
-            **(mm_processor_kwargs or {})
-        )
+        feature_extractor = self.info.get_feature_extractor()
 
         sampling_rate = feature_extractor.sampling_rate
         audio_len = feature_extractor.chunk_length * sampling_rate
@@ -778,6 +775,14 @@ class WhisperMultiModalProcessor(EncDecMultiModalProcessor[WhisperProcessingInfo
         ]
 
 
+# Whisper token IDs (these are the ones you already use)
+SOT_TOKEN_ID = 50258  # <|startoftranscript|>
+STARTOFLM_TOKEN_ID = 50360  # <|startoflm|> (pathological case)
+DETECT_LANG_TOKEN_ID = 50294  # <|la|> fallback
+FALLBACK_LANG_TOKEN_ID = 50259  # <|en|> fallback
+TRANSCRIBE_TOKEN_ID = 50359  # <|transcribe|>
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     WhisperMultiModalProcessor,
     info=WhisperProcessingInfo,
@@ -807,15 +812,10 @@ class WhisperForConditionalGeneration(
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
         if language is None:
-            # TODO language should be optional and can be guessed.
-            # For now we default to en. See
-            # https://github.com/huggingface/transformers/blob/main/src/transformers/models/whisper/generation_whisper.py#L1520
             logger.warning(
-                "Defaulting to language='en'. If you wish to transcribe "
-                "audio in a different language, pass the `language` field "
-                "in the TranscriptionRequest."
+                "No default language. Language will be detected during processing."
             )
-            language = "en"
+            return None
         return super().validate_language(language)
 
     @classmethod
@@ -830,13 +830,13 @@ class WhisperForConditionalGeneration(
         to_language: str | None,
     ) -> PromptType:
         if language is None:
-            raise ValueError(
-                "Language must be specified when creating the Whisper prompt"
-            )
-
-        decoder_text = (
-            f"<|prev|>{request_prompt}" if request_prompt else ""
-        ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
+            decoder_text = (
+                f"<|prev|>{request_prompt}" if request_prompt else ""
+            ) + f"<|startoftranscript|><|la|><|{task_type}|><|notimestamps|>"
+        else:
+            decoder_text = (
+                f"<|prev|>{request_prompt}" if request_prompt else ""
+            ) + f"<|startoftranscript|><|{language}|><|{task_type}|><|notimestamps|>"
 
         return ExplicitEncoderDecoderPrompt(
             encoder_prompt=TextPrompt(
@@ -904,6 +904,83 @@ class WhisperForConditionalGeneration(
         logit_scale = getattr(config, "logit_scale", 1.0)
         self.logits_processor = LogitsProcessor(config.vocab_size, scale=logit_scale)
 
+    @torch.inference_mode()
+    def detect_language(
+        self,
+        encoder_outputs: list[torch.Tensor] | None,
+        device: torch.device,
+        return_score: bool = False,
+    ) -> int | tuple[int, float]:
+        """
+        Detects the language token using Whisper's standard trick:
+        - Run the decoder with a single token: [SOT]
+        - Compute logits for the next token
+        - Take argmax => predicted language token
+
+        Returns:
+        - token_id (int)
+        - or (token_id, max_logit) if return_score=True
+
+        Notes:
+        - Must be called outside CUDA graph capture.
+        - This function does NOT modify any prompt/input_ids;
+          it only returns a language token.
+        """
+
+        # Safety: CUDA graph capture forbids CPU-GPU sync patterns and Python branching
+        if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "detect_language() must not be called during CUDA graph capture."
+            )
+
+        if encoder_outputs is None or len(encoder_outputs) == 0:
+            return (
+                (FALLBACK_LANG_TOKEN_ID, 1.0)
+                if return_score
+                else FALLBACK_LANG_TOKEN_ID
+            )
+
+        detect_ids = torch.tensor([SOT_TOKEN_ID], dtype=torch.long, device=device)
+        detect_pos = torch.tensor([0], dtype=torch.long, device=device)
+
+        # Forward through the decoder (same call style as in your forward)
+        hs = self.model(
+            input_ids=detect_ids,  # [SOT]
+            positions=detect_pos,
+            encoder_outputs=encoder_outputs,
+        )
+
+        # Project to vocabulary logits
+        logits = self.compute_logits(hs)
+
+        # Get last-step logits robustly across common shapes
+        if logits.dim() == 3:
+            # [B, T, V] (often B=1)
+            last = logits[0, -1, :]
+        elif logits.dim() == 2:
+            # [T, V] or [1, V]
+            last = logits[-1, :]
+        else:
+            raise RuntimeError(f"Unexpected logits shape: {tuple(logits.shape)}")
+
+        token_id = torch.argmax(last, dim=-1)  # 0-d tensor sur GPU
+        token_id = int(token_id.item())
+        prob = float('nan')
+        # Safety: sometimes <|startoflm|> is predicted; fallback to English
+        if token_id == STARTOFLM_TOKEN_ID:
+            token_id = FALLBACK_LANG_TOKEN_ID
+            prob = 1.0
+        elif return_score:
+            # Compute softmax probabilities for the next token
+            probs = nn.functional.softmax(last, dim=-1)
+            # Argmax token id + probability for that token
+            prob = float(probs[token_id].item())
+
+        logger.info(
+            "Detected language token ID: %d with probability %f", token_id, prob
+        )
+        return (token_id, prob) if return_score else token_id
+
     def forward(
         self,
         input_ids: torch.Tensor,
@@ -913,12 +990,40 @@ class WhisperForConditionalGeneration(
     ) -> torch.Tensor:
         if encoder_outputs is None:
             encoder_outputs = []
-        decoder_outputs = self.model(
+
+        # 1) During CUDA graph capture: avoid branching / .item() / logging
+        # 2) Safety for very short sequences
+        if (torch.cuda.is_available() and torch.cuda.is_current_stream_capturing()) or (
+            input_ids is not None and input_ids.numel() < 2
+        ):
+            logger.info("Decoder in CUDA graph capture")
+            return self.model(
+                input_ids=input_ids,
+                positions=positions,
+                encoder_outputs=encoder_outputs,
+            )
+
+        # 3) If prompt starts with [SOT, language-placeholder],
+        #    run language detection once
+        if (
+            input_ids[0].item() == SOT_TOKEN_ID
+            and input_ids[1].item() == DETECT_LANG_TOKEN_ID
+        ):
+            # Detect language token using encoder outputs
+            lang_token, _ = self.detect_language(
+                encoder_outputs=encoder_outputs,
+                device=input_ids.device,
+                return_score=True,
+            )
+            input_ids[1] = lang_token
+
+        # 4) Normal decoding
+        logger.info("Decoder not in CUDA graph capture. Eager running for decoding")
+        return self.model(
             input_ids=input_ids,
             positions=positions,
             encoder_outputs=encoder_outputs,
         )
-        return decoder_outputs
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
