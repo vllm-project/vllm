@@ -23,6 +23,9 @@ if current_platform.is_cuda_alike():
 elif current_platform.is_xpu():
     from vllm._xpu_ops import xpu_ops as ops
 
+    fp8_mqa_logits = ops.fp8_mqa_logits
+    fp8_paged_mqa_logits = ops.fp8_paged_mqa_logits
+
 logger = init_logger(__name__)
 
 
@@ -111,21 +114,29 @@ def sparse_attn_indexer(
                 chunk.cu_seqlen_ke,
                 clean_logits=False,
             )
-            num_rows = logits.shape[0]
 
-            topk_indices = topk_indices_buffer[
-                chunk.token_start : chunk.token_end, :topk_tokens
-            ]
-            torch.ops._C.top_k_per_row_prefill(
-                logits,
-                chunk.cu_seqlen_ks,
-                chunk.cu_seqlen_ke,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
-                topk_tokens,
-            )
+            if current_platform.is_xpu():
+                topk_indices = ops.topk_with_bounds_torch(
+                    logits, chunk.cu_seqlen_ks, chunk.cu_seqlen_ke, topk_tokens
+                )
+                topk_indices_buffer[
+                    chunk.token_start : chunk.token_end, : topk_indices.shape[-1]
+                ] = topk_indices
+            else:
+                num_rows = logits.shape[0]
+                topk_indices = topk_indices_buffer[
+                    chunk.token_start : chunk.token_end, :topk_tokens
+                ]
+                torch.ops._C.top_k_per_row_prefill(
+                    logits,
+                    chunk.cu_seqlen_ks,
+                    chunk.cu_seqlen_ke,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
             # Compute lengths from row spans
             # lengths = (chunk.cu_seqlen_ke - chunk.cu_seqlen_ks).to(torch.int32)
@@ -172,37 +183,48 @@ def sparse_attn_indexer(
         )
 
         num_rows = logits.shape[0]
-        topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
 
-        if decode_metadata.use_large_context_topk:
-            if next_n == 1:
-                lengths = decode_metadata.seq_lens
-            else:
-                # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
-                lengths = (
-                    decode_metadata.seq_lens.unsqueeze(1)
-                    - next_n
-                    + 1
-                    + decode_metadata.offsets
-                ).flatten()
-
-            torch.ops._C.large_context_topk(
+        if current_platform.is_xpu():
+            topk_indices = ops.decode_topk_with_masking_torch(
                 logits,
-                topk_indices,
-                lengths,
-                None,
-            )
-        else:
-            torch.ops._C.top_k_per_row_decode(
-                logits,
+                batch_size,
                 next_n,
-                decode_metadata.seq_lens,
-                topk_indices,
-                num_rows,
-                logits.stride(0),
-                logits.stride(1),
                 topk_tokens,
+                max_model_len,
+                decode_metadata.seq_lens,
             )
+            topk_indices_buffer[:num_decode_tokens, :topk_tokens] = topk_indices
+        else:
+            topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
+            if decode_metadata.use_large_context_topk:
+                if next_n == 1:
+                    lengths = decode_metadata.seq_lens
+                else:
+                    # (bs,) -> (bs, 1) + (next_n,) -> (bs, next_n) -> (bs * next_n,)
+                    lengths = (
+                        decode_metadata.seq_lens.unsqueeze(1)
+                        - next_n
+                        + 1
+                        + decode_metadata.offsets
+                    ).flatten()
+
+                torch.ops._C.large_context_topk(
+                    logits,
+                    topk_indices,
+                    lengths,
+                    None,
+                )
+            else:
+                torch.ops._C.top_k_per_row_decode(
+                    logits,
+                    next_n,
+                    decode_metadata.seq_lens,
+                    topk_indices,
+                    num_rows,
+                    logits.stride(0),
+                    logits.stride(1),
+                    topk_tokens,
+                )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
@@ -290,14 +312,14 @@ class SparseAttnIndexer(CustomOp):
         k: torch.Tensor,
         weights: torch.Tensor,
     ):
-        if current_platform.is_cuda():
+        if current_platform.is_cuda() or current_platform.is_xpu():
             return self.forward_cuda(hidden_states, q_fp8, k, weights)
         elif current_platform.is_rocm():
             return self.forward_hip(hidden_states, q_fp8, k, weights)
         else:
             raise NotImplementedError(
                 "SparseAttnIndexer native forward is only implemented for "
-                "CUDA and ROCm platform."
+                "CUDA, ROCm and XPU platforms."
             )
 
     def forward_cuda(
