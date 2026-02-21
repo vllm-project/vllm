@@ -9,6 +9,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm
     triton_scaled_mm,
 )
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
@@ -31,7 +32,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if not c.input_symmetric:
+        if not c.activation_quant_key.symmetric:
             return False, "supports symmetric input only."
         return True, None
 
@@ -51,7 +52,10 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, w_s_name)
-        if is_fused_module and not self.config.is_channelwise:
+        is_per_tensor = (
+            self.config.weight_quant_key.scale.group_shape == GroupShape.PER_TENSOR
+        )
+        if is_fused_module and is_per_tensor:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
@@ -60,7 +64,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         )
 
         # INPUT SCALE
-        if self.config.is_static_input_scheme:
+        if self.config.activation_quant_key.scale.static:
             assert i_s is not None
             replace_parameter(
                 layer,

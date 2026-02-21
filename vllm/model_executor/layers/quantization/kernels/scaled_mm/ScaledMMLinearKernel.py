@@ -9,9 +9,7 @@ from typing import Generic, TypeVar
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
-    QuantKey,
-)
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import current_platform
 
 
@@ -22,10 +20,9 @@ class ScaledMMLinearLayerConfig:
 
 @dataclass
 class Int8ScaledMMLinearLayerConfig(ScaledMMLinearLayerConfig):
-    # TODO: Change to QuantKey like FP8ScaledMMLinearLayerConfig
-    is_static_input_scheme: bool
-    is_channelwise: bool
-    input_symmetric: bool
+    weight_quant_key: QuantKey
+    activation_quant_key: QuantKey
+    out_dtype: torch.dtype | None = None
 
 
 @dataclass
@@ -176,6 +173,9 @@ class FP8ScaledMMLinearKernel(
 class Int8ScaledMMLinearKernel(
     ScaledMMLinearKernel[Int8ScaledMMLinearLayerConfig, _Int8ParamsT], ABC
 ):
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        pass
+
     def _get_layer_params(self, layer) -> _Int8ParamsT:
         w_q, w_s, i_s, i_zp, azp_adj = self.layer_param_names
         return (

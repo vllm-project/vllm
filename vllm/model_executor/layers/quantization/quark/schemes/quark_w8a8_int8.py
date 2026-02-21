@@ -10,6 +10,11 @@ from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
     init_int8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+    ScaleDesc,
+)
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
     ChannelQuantScaleParameter,
@@ -47,10 +52,30 @@ class QuarkW8A8Int8(QuarkScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
+        is_static = self.is_static_input_scheme is True  # None -> False
+        is_symmetric = self.input_symmetric is True  # None -> False
+
+        weight_group_shape = (
+            GroupShape.PER_TOKEN
+            if self.qscheme == "per_channel"
+            else GroupShape.PER_TENSOR
+        )
+        weight_quant_key = QuantKey(
+            dtype=torch.int8,
+            scale=ScaleDesc(torch.float32, True, weight_group_shape),
+            symmetric=True,
+        )
+
+        act_group_shape = GroupShape.PER_TENSOR if is_static else GroupShape.PER_TOKEN
+        activation_quant_key = QuantKey(
+            dtype=torch.int8,
+            scale=ScaleDesc(torch.float32, is_static, act_group_shape),
+            symmetric=is_symmetric,
+        )
+
         self.kernel = init_int8_linear_kernel(
-            is_channelwise=(self.qscheme == "per_channel"),
-            is_static_input_scheme=(self.is_static_input_scheme is True),
-            input_symmetric=(self.input_symmetric is True),
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
             module_name=self.__class__.__name__,
         )
 

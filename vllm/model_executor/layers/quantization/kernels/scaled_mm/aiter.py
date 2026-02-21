@@ -39,7 +39,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
 
     @classmethod
     def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
-        if not c.input_symmetric:
+        if not c.activation_quant_key.symmetric:
             return False, "supports symmetric quantization only."
         return True, None
 

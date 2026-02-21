@@ -7,6 +7,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.model_executor.layers.quantization.utils import replace_parameter
+from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,
 )
@@ -41,7 +42,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         if (
             current_platform.get_cpu_architecture() == CpuArchEnum.X86
             and envs.VLLM_CPU_SGL_KERNEL
-            and self.config.input_symmetric
+            and self.config.activation_quant_key.symmetric
             and check_cpu_sgl_kernel(N, K, dtype)
         ):
             self.linear_method = self._apply_weights_sgl
@@ -67,7 +68,10 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # scales being passed to the kernel), convert to the per-channel case.
         is_fused_module = len(layer.logical_widths) > 1
         weight_scale = getattr(layer, w_s_name)
-        if is_fused_module and not self.config.is_channelwise:
+        is_per_tensor = (
+            self.config.weight_quant_key.scale.group_shape == GroupShape.PER_TENSOR
+        )
+        if is_fused_module and is_per_tensor:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
@@ -76,10 +80,10 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         )
 
         # INPUT SCALE
-        if self.config.is_static_input_scheme:
+        if self.config.activation_quant_key.scale.static:
             input_scale = getattr(layer, i_s_name)
 
-            if self.config.input_symmetric:
+            if self.config.activation_quant_key.symmetric:
                 replace_parameter(
                     layer,
                     i_s_name,
@@ -112,7 +116,8 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # s_a * s_b * [(A - zp_a)B] + bias =
         # s_a * (s_b * AB) - s_a * s_b * zp_a * B + bias =
         # s_a * GEMM_output - s_a * zp_a * adj + bias
-        if not (self.config.input_symmetric and self.config.is_static_input_scheme):
+        act_key = self.config.activation_quant_key
+        if not (act_key.symmetric and act_key.scale.static):
             weight = getattr(layer, w_q_name)
             weight_scale = getattr(layer, w_s_name)
             azp_adj = weight.sum(dim=0, keepdim=True, dtype=torch.float32)
@@ -129,7 +134,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
             getattr(layer, w_s_name),
             torch.get_default_dtype(),
             getattr(layer, i_s_name) is None,
-            not self.config.input_symmetric,
+            not self.config.activation_quant_key.symmetric,
             32,
         )
         # weight is prepacked and maintained by the dnnl_handler,
@@ -156,7 +161,10 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # CPU SGL kernels only support per-channel.
         # For per-tensor quant, convert to the per-channel case.
         weight_scale = getattr(layer, w_s_name)
-        if not self.config.is_channelwise:
+        is_per_tensor = (
+            self.config.weight_quant_key.scale.group_shape == GroupShape.PER_TENSOR
+        )
+        if is_per_tensor:
             weight_scale = convert_to_channelwise(weight_scale, layer.logical_widths)
         replace_parameter(
             layer,
@@ -190,7 +198,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         # * dynamic, i_s is None and x_s computed from x.
         # * static, i_s is scalar and x_s is i_s.
         x_q, x_s, x_zp = ops.onednn_scaled_int8_quant(
-            x, i_s, i_zp, self.config.input_symmetric
+            x, i_s, i_zp, self.config.activation_quant_key.symmetric
         )
 
         m = x.size(0)
