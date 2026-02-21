@@ -550,16 +550,23 @@ class InputBatch:
             self.num_computed_tokens_cpu[i1],
         )
 
-        # NOTE: the following is unsafe
-        # self.token_ids_cpu[i1, ...], self.token_ids_cpu[i2, ...], =\
-        #     self.token_ids_cpu[i2, ...], self.token_ids_cpu[i1, ...]
         # instead, we need to temporarily copy the data for one of the indices
-        # TODO(lucas): optimize this by only copying valid indices
-        tmp = self.token_ids_cpu[i1, ...].copy()
-        self.token_ids_cpu[i1, ...] = self.token_ids_cpu[i2, ...]
-        self.token_ids_cpu[i2, ...] = tmp
+        # optimize this by only copying valid indices (active token prefix)
+        num_tokens1 = self.num_tokens_no_spec[i1] + len(self.spec_token_ids[i1])
+        num_tokens2 = self.num_tokens_no_spec[i2] + len(self.spec_token_ids[i2])
 
-        self.is_token_ids[[i1, i2], ...] = self.is_token_ids[[i2, i1], ...]
+        tmp_tokens = self.token_ids_cpu[i1, :num_tokens1].copy()
+        tmp_is_token_ids = self.is_token_ids[i1, :num_tokens1].copy()
+
+        self.token_ids_cpu[i1, :num_tokens2] = self.token_ids_cpu[i2, :num_tokens2]
+        self.is_token_ids[i1, :num_tokens2] = self.is_token_ids[i2, :num_tokens2]
+        if num_tokens1 > num_tokens2:
+            self.is_token_ids[i1, num_tokens2:num_tokens1] = False
+
+        self.token_ids_cpu[i2, :num_tokens1] = tmp_tokens
+        self.is_token_ids[i2, :num_tokens1] = tmp_is_token_ids
+        if num_tokens2 > num_tokens1:
+            self.is_token_ids[i2, num_tokens1:num_tokens2] = False
 
         # Swap prompt embeddings if they exist
         embeds_i1 = self.req_prompt_embeds.get(i1)
