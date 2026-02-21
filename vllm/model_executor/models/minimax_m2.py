@@ -148,7 +148,6 @@ class MiniMaxM2Attention(nn.Module):
         num_kv_heads: int,
         rotary_dim: int,
         rope_parameters: dict[str, Any] | None = None,
-        attn_window_size: int | None = None,
         max_position_embeddings: int = 8192,
         head_dim: int | None = None,
         rms_norm_eps: float = 1e-06,
@@ -212,7 +211,6 @@ class MiniMaxM2Attention(nn.Module):
             self.head_dim,
             self.scaling,
             num_kv_heads=self.num_kv_heads,
-            per_layer_sliding_window=attn_window_size,
             cache_config=cache_config,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
@@ -292,7 +290,7 @@ class MiniMaxM2DecoderLayer(nn.Module):
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         residual: torch.Tensor | None,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Self Attention
         if residual is None:
             residual = hidden_states
@@ -331,7 +329,7 @@ class MiniMaxM2Model(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
-                quant_config=None,
+                quant_config=quant_config,
                 prefix=f"{prefix}.embed_tokens",
             )
         else:
@@ -438,16 +436,24 @@ class MiniMaxM2Model(nn.Module):
 
                 if is_pp_missing_parameter(name, self):
                     continue
+                if name not in params_dict:
+                    continue
 
                 param = params_dict[name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
+                is_expert_weight = False
                 for mapping in expert_params_mapping:
                     param_name, weight_name, expert_id, shard_id = mapping
                     if weight_name not in name:
                         continue
+
+                    # Anyway, this is an expert weight and should not be
+                    # attempted to load as other weights later
+                    is_expert_weight = True
+
                     name = name.replace(weight_name, param_name)
 
                     if is_pp_missing_parameter(name, self):
@@ -464,6 +470,12 @@ class MiniMaxM2Model(nn.Module):
                     )
                     break
                 else:
+                    if is_expert_weight:
+                        # We've checked that this is an expert weight
+                        # However it's not mapped locally to this rank
+                        # So we simply skip it
+                        continue
+
                     # Skip loading extra bias for GPTQ models.
                     if name.endswith(".bias") and name not in params_dict:
                         continue
@@ -507,11 +519,14 @@ class MiniMaxM2ForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
         )
         if get_pp_group().is_last_rank:
             self.lm_head = ParallelLMHead(
-                config.vocab_size, config.hidden_size, quant_config=None
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
+            self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
             self.lm_head = PPMissingLayer()
-        self.logits_processor = LogitsProcessor(config.vocab_size)
         self.make_empty_intermediate_tensors = (
             self.model.make_empty_intermediate_tensors
         )
