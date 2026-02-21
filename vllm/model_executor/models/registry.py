@@ -256,6 +256,7 @@ _EMBEDDING_MODELS = {
     "Qwen2VLForConditionalGeneration": ("qwen2_vl", "Qwen2VLForConditionalGeneration"),  # noqa: E501
     "ColQwen3": ("colqwen3", "ColQwen3Model"),
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
+    "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
