@@ -267,6 +267,7 @@ class InputProcessingContext:
             tokenizer = tokenizer.transformers_tokenizer
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+        merged_kwargs.pop("tokenizer", None)
 
         return cached_processor_from_config(
             self.model_config,
