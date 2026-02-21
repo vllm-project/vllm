@@ -877,6 +877,8 @@ class GPUModelRunner(
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
 
+        # Handle virtual gap requests: remove their state but do NOT free KV cache
+        # since they share blocks with their parent requests.
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
             self.encoder_cache.pop(mm_hash, None)
@@ -3070,7 +3072,7 @@ class GPUModelRunner(
             logger.info("  Total blocks: %d", len(block_hashes))
             
             # Log first few blocks to console
-            max_console_blocks = 5
+            max_console_blocks = 15
             for block_idx, (k_hash, v_hash) in list(block_hashes.items())[:max_console_blocks]:
                 logger.info("    Block %d: K=%s, V=%s", block_idx, k_hash, v_hash)
             
@@ -3448,7 +3450,7 @@ class GPUModelRunner(
 
             use_spec_decode = len(scheduler_output.scheduled_spec_decode_tokens) > 0
             ubatch_slices_attn = ubatch_slices_padded if pad_attn else ubatch_slices
-
+            logger.info("Building attention metadata for %d requests...", num_reqs)
             attn_metadata, spec_decode_common_attn_metadata = (
                 self._build_attention_metadata(
                     num_tokens=num_tokens_unpadded,
@@ -3483,8 +3485,17 @@ class GPUModelRunner(
             # Mark KV scales as calculated after the first forward pass
             self.calculate_kv_scales = False
 
+        # Encoder-decoder models can only compile the pure decode steps where no
+        # encoder inputs are present. Use eager for the first pass.
+        num_encoder_reqs = len(scheduler_output.scheduled_encoder_inputs)
+        logger.info("Num_encoder_reqs: %d.", num_encoder_reqs)
+        has_encoder_input = (
+            self.model_config.is_encoder_decoder and num_encoder_reqs > 0
+        )
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+        print(f"Putting positions: {positions}.")
         with (
             set_forward_context(
                 attn_metadata,
@@ -3569,6 +3580,9 @@ class GPUModelRunner(
                 )
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
+
+        # NOTE: Virtual gap request cleanup is done in sample_tokens AFTER
+        # bookkeeping, because _bookkeeping_sync needs access to self.requests
 
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
@@ -3733,6 +3747,34 @@ class GPUModelRunner(
                 cudagraph_stats=cudagraph_stats,
             )
 
+        # Handle virtual gap requests: copy KV to parent and cleanup
+        # This must happen AFTER _bookkeeping_sync because it accesses self.requests
+        if scheduler_output.virtual_gap_req_ids is not None:
+            # Build lookup for virtual request data
+            virtual_req_data = {
+                nrd.req_id: nrd for nrd in scheduler_output.scheduled_new_reqs
+                if nrd.req_id in scheduler_output.virtual_gap_req_ids
+            }
+            for req_id in scheduler_output.virtual_gap_req_ids:
+                req_data = virtual_req_data.get(req_id)
+                if req_data and req_data.parent_req_id and req_data.gap_start is not None:
+                    # CRITICAL: Virtual requests are new requests with num_computed_tokens=0.
+                    # We need to update num_computed_tokens to the actual number of tokens
+                    # computed so the KV copy knows how many tokens to copy.
+                    virtual_idx = self.input_batch.req_id_to_index.get(req_id)
+                    if virtual_idx is not None:
+                        num_scheduled = scheduler_output.num_scheduled_tokens.get(req_id, 0)
+                        if num_scheduled > 0:
+                            self.input_batch.num_computed_tokens_cpu[virtual_idx] = num_scheduled
+
+                    self._copy_virtual_request_kv_to_parent_v2(
+                        req_id, req_data.parent_req_id, req_data.gap_start
+                    )
+                # Remove virtual request state
+                self.requests.pop(req_id, None)
+                self.num_prompt_logprobs.pop(req_id, None)
+                self.input_batch.remove_request(req_id)
+
         if not self.use_async_scheduling:
             return output
 
@@ -3764,6 +3806,149 @@ class GPUModelRunner(
             return None
         draft_token_ids, req_ids = self._get_draft_token_ids_cpu()
         return DraftTokenIds(req_ids, draft_token_ids)
+
+    def _copy_virtual_request_kv_to_parent_v2(
+        self,
+        virtual_req_id: str,
+        parent_req_id: str,
+        gap_start: int,
+    ) -> None:
+        """Copy KV cache from virtual gap request to parent's gap blocks.
+
+        Virtual requests write to their own allocated slots, but we need the
+        recomputed KV values to be in the parent's gap blocks for correct
+        attention computation.
+        """
+        logger.info(
+            "[V2 KV Copy] Starting copy from %s to %s at position %d",
+            virtual_req_id, parent_req_id, gap_start
+        )
+        try:
+            # Get request indices from input_batch
+            virtual_idx = self.input_batch.req_id_to_index.get(virtual_req_id)
+            parent_idx = self.input_batch.req_id_to_index.get(parent_req_id)
+
+            if virtual_idx is None or parent_idx is None:
+                logger.warning(
+                    "[V2 KV Copy] Could not find request indices for %s -> %s "
+                    "(virtual_idx=%s, parent_idx=%s)",
+                    virtual_req_id, parent_req_id, virtual_idx, parent_idx
+                )
+                return
+
+            # Get number of tokens computed by virtual request
+            num_tokens = int(self.input_batch.num_computed_tokens_cpu[virtual_idx])
+            if num_tokens == 0:
+                logger.info("[V2 KV Copy] No tokens to copy for %s", virtual_req_id)
+                return
+
+            logger.info(
+                "[V2 KV Copy] virtual_idx=%d, parent_idx=%d, num_tokens=%d",
+                virtual_idx, parent_idx, num_tokens
+            )
+
+            # For each KV cache group, copy slot mappings
+            # The slot mapping is computed per-group and per-request
+            for group_idx in range(len(self.input_batch.block_table.block_tables)):
+                block_table = self.input_batch.block_table[group_idx]
+
+                # Get virtual request's slot mapping
+                # slot_mapping.np shape: [max_num_batched_tokens]
+                # We need to find the range of slots for this virtual request
+                # The slots are stored contiguously for each request
+                # But we need to know where in the batch this request's tokens start
+
+                # Actually, in v2 the slot mapping is per-batch-position, not per-request
+                # We need to reconstruct by looking at the request's position in the batch
+                # This is tricky because the batch may be reordered
+
+                # Instead, let's use a different approach:
+                # The virtual request's KV was written to blocks allocated specifically for it
+                # We can find those block IDs directly from block_table.block_table.np
+
+                virtual_num_blocks = block_table.num_blocks_per_row[virtual_idx]
+                parent_num_blocks = block_table.num_blocks_per_row[parent_idx]
+
+                logger.info(
+                    "[V2 KV Copy] Group %d: virtual has %d blocks, parent has %d blocks",
+                    group_idx, virtual_num_blocks, parent_num_blocks
+                )
+
+                kv_cache = self.kv_caches[group_idx]
+
+                # Get the block IDs for both requests
+                virtual_blocks = block_table.block_table.np[virtual_idx, :virtual_num_blocks]
+                # CRITICAL: gap_start is in tokens. We need to convert to kernel block index.
+                # The KV cache shape is [num_blocks, 2, num_heads, block_size, head_dim]
+                # where shape[3] is the kernel block size (may differ from allocation block size).
+                # If hybrid blocks are used, kernel block size (e.g., 8) differs from
+                # allocation block size (e.g., 16), and kernel block index = position // kernel_block_size.
+                kernel_block_size = kv_cache.shape[3]
+                parent_gap_block_idx = gap_start // kernel_block_size
+                parent_blocks_needed = (gap_start + num_tokens + kernel_block_size - 1) // kernel_block_size - parent_gap_block_idx
+                parent_blocks = block_table.block_table.np[parent_idx, parent_gap_block_idx:parent_gap_block_idx + parent_blocks_needed]
+
+                logger.info(
+                    "[V2 KV Copy] DEBUG gap_start=%d, kernel_block_size=%d, "
+                    "parent_gap_block_idx=%d, parent_blocks_needed=%d",
+                    gap_start, kernel_block_size,
+                    parent_gap_block_idx, parent_blocks_needed
+                )
+                logger.info(
+                    "[V2 KV Copy] Group %d: virtual_blocks=%s, parent_blocks=%s",
+                    group_idx, virtual_blocks[:10], parent_blocks[:10]
+                )
+
+                # kernel_block_size extracted from kv_cache.shape[3] above
+                # Use it consistently for all position calculations
+
+                # Copy token by token or block by block
+                tokens_copied = 0
+                for i in range(num_tokens):
+                    # Virtual position in virtual request's blocks
+                    virtual_token_idx = i
+                    virtual_block_idx = virtual_token_idx // kernel_block_size
+                    virtual_offset = virtual_token_idx % kernel_block_size
+
+                    # Parent position (gap_start + i)
+                    parent_token_idx = gap_start + i
+                    parent_block_idx_abs = parent_token_idx // kernel_block_size
+                    parent_block_idx_in_gap = parent_block_idx_abs - parent_gap_block_idx
+                    parent_offset = parent_token_idx % kernel_block_size
+
+                    if i < 5:
+                        logger.info("[V2 KV Copy] Token %d: parent_token_idx=%d, kernel_block_size=%d, parent_block_idx_abs=%d, parent_gap_block_idx=%d, parent_block_idx_in_gap=%d",
+                                   i, parent_token_idx, kernel_block_size, parent_block_idx_abs, parent_gap_block_idx, parent_block_idx_in_gap)
+
+                    if virtual_block_idx < len(virtual_blocks) and parent_block_idx_in_gap < len(parent_blocks):
+                        v_block_id = int(virtual_blocks[virtual_block_idx])
+                        p_block_id = int(parent_blocks[parent_block_idx_in_gap])
+
+                        if v_block_id >= 0 and p_block_id >= 0:
+                            # Copy K and V
+                            kv_cache[p_block_id, 0, :, parent_offset, :] = kv_cache[v_block_id, 0, :, virtual_offset, :]
+                            kv_cache[p_block_id, 1, :, parent_offset, :] = kv_cache[v_block_id, 1, :, virtual_offset, :]
+                            tokens_copied += 1
+                        else:
+                            logger.info("[V2 KV Copy] Oi there's a bug :( v_block_id = %d, p_block_id = %d", v_block_id, p_block_id)
+                    else:
+                            logger.info("[V2 KV Copy] Oi there's a bug :( virtual_block_idx = %d, len(virtual_blocks) = %d, parent_block_idx_in_gap = %d, len(parent_blocks) = %d", virtual_block_idx, len(virtual_blocks), parent_block_idx_in_gap, len(parent_blocks))
+                        
+
+                logger.info(
+                    "[V2 KV Copy] Group %d: Copied %d/%d tokens",
+                    group_idx, tokens_copied, num_tokens
+                )
+
+            logger.info(
+                "[V2 KV Copy] Successfully copied %d tokens from %s to %s at position %d",
+                num_tokens, virtual_req_id, parent_req_id, gap_start
+            )
+
+        except Exception as e:
+            logger.error("[V2 KV Copy] Error copying KV for %s: %s", virtual_req_id, e)
+            import traceback
+            traceback.print_exc()
 
     def _copy_draft_token_ids_to_cpu(
         self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
