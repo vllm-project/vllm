@@ -346,17 +346,17 @@ class ParsableContext(ConversationContext):
         self.parser.response_messages.extend(output)
 
     def need_builtin_tool_call(self) -> bool:
-        """Return true if the last message is a MCP tool call"""
+        """Return true if the last message is a builtin tool call
+        that the request has enabled."""
         last_message = self.parser.response_messages[-1]
-        # TODO(qandrew): figure out which tools are MCP tools
-        if last_message.type == "function_call":  # noqa: SIM102
-            if last_message.name in (
-                "code_interpreter",
-                "python",
-                "web_search_preview",
-            ) or last_message.name.startswith("container"):
-                return True
-
+        if last_message.type != "function_call":
+            return False
+        if last_message.name in ("code_interpreter", "python"):
+            return "python" in self.available_tools
+        if last_message.name == "web_search_preview":
+            return "browser" in self.available_tools
+        if last_message.name.startswith("container"):
+            return "container" in self.available_tools
         return False
 
     async def call_python_tool(
@@ -665,11 +665,15 @@ class HarmonyContext(ConversationContext):
     def need_builtin_tool_call(self) -> bool:
         last_msg = self.messages[-1]
         recipient = last_msg.recipient
-        return recipient is not None and (
-            recipient.startswith("browser.")
-            or recipient.startswith("python")
-            or recipient.startswith("container.")
-        )
+        if recipient is None:
+            return False
+        if recipient.startswith("browser."):
+            return "browser" in self.available_tools
+        if recipient.startswith("python"):
+            return "python" in self.available_tools
+        if recipient.startswith("container."):
+            return "container" in self.available_tools
+        return False
 
     async def call_tool(self) -> list[Message]:
         if not self.messages:
