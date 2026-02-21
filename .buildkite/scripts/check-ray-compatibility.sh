@@ -112,6 +112,8 @@ fi
 
 # Notify Slack if webhook is configured.
 if [ -n "$RAY_COMPAT_SLACK_WEBHOOK_URL" ]; then
+    # Single quotes are intentional: the f-string expressions are Python, not shell.
+    # shellcheck disable=SC2016
     PAYLOAD=$(python3 -c '
 import json, os, sys
 failed = sys.argv[1]
