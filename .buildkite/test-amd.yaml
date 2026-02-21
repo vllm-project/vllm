@@ -147,7 +147,6 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   no_gpu: true
-  optional: true
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -1617,6 +1616,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   no_gpu: true
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
