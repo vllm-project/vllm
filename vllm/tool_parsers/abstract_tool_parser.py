@@ -3,6 +3,7 @@
 
 import importlib
 import os
+import threading
 from collections.abc import Callable, Sequence
 from functools import cached_property
 
@@ -38,6 +39,15 @@ class ToolParser:
     derived classes.
     """
 
+    # Class-level cache for tokenizer encode/decode results.
+    # Keyed by (tokenizer_id, token_string) to avoid calling
+    # tokenizer.encode()/decode() on every parser instantiation.
+    # This prevents RuntimeError("Already borrowed") when concurrent
+    # requests share the same HuggingFace tokenizer (PyO3 RefCell).
+    _token_id_cache: dict[tuple[int, str], list[int]] = {}
+    _token_str_cache: dict[tuple[int, int], str] = {}
+    _token_cache_lock = threading.Lock()
+
     def __init__(self, tokenizer: TokenizerLike):
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
@@ -52,6 +62,43 @@ class ToolParser:
         # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
+
+    def _cached_encode(self, text: str) -> list[int]:
+        """Encode text to token IDs with class-level caching.
+
+        Avoids calling tokenizer.encode() on every parser instantiation,
+        preventing concurrent-access panics in the tokenizer's Rust backend.
+        """
+        key = (id(self.model_tokenizer), text)
+        result = self._token_id_cache.get(key)
+        if result is not None:
+            return result
+        with self._token_cache_lock:
+            # Double-check after acquiring lock
+            result = self._token_id_cache.get(key)
+            if result is not None:
+                return result
+            result = self.model_tokenizer.encode(text, add_special_tokens=False)
+            self._token_id_cache[key] = result
+            return result
+
+    def _cached_decode(self, token_id: int) -> str:
+        """Decode a single token ID to string with class-level caching.
+
+        Avoids calling tokenizer.decode() on every parser instantiation,
+        preventing concurrent-access panics in the tokenizer's Rust backend.
+        """
+        key = (id(self.model_tokenizer), token_id)
+        result = self._token_str_cache.get(key)
+        if result is not None:
+            return result
+        with self._token_cache_lock:
+            result = self._token_str_cache.get(key)
+            if result is not None:
+                return result
+            result = self.model_tokenizer.decode([token_id])
+            self._token_str_cache[key] = result
+            return result
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """
