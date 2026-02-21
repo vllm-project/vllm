@@ -223,9 +223,15 @@ def parse_response_input(
             response_msg["output"],
         )
     elif response_msg["type"] == "reasoning":
-        content = response_msg["content"]
-        assert len(content) == 1
-        msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        content = response_msg.get("content")
+        if content and len(content) >= 1:
+            msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        elif response_msg.get("summary") and len(response_msg["summary"]) >= 1:
+            msg = Message.from_role_and_content(
+                Role.ASSISTANT, response_msg["summary"][0]["text"]
+            )
+        else:
+            msg = Message.from_role_and_content(Role.ASSISTANT, "")
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")

@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_chat_output,
     parse_input_to_harmony_message,
     parse_output_message,
+    parse_response_input,
 )
 
 
@@ -1199,3 +1200,66 @@ def test_parse_remaining_state_analysis_channel() -> None:
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+
+class TestParseResponseInputReasoningItem:
+    """Tests for parse_response_input handling of reasoning input items.
+
+    Per the OpenAI spec, ResponseReasoningItem.content is
+    Optional[List[Content]] = None. Clients like langchain-openai may omit
+    this field when constructing multi-turn input from previous responses.
+    """
+
+    def test_reasoning_with_content(self):
+        """Test reasoning item with content field present."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": [{"type": "reasoning_text", "text": "Thinking step by step"}],
+            "summary": [{"type": "summary_text", "text": "Summary"}],
+        }
+
+        msg = parse_response_input(item, prev_responses=[])
+
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.content[0].text == "Thinking step by step"
+
+    def test_reasoning_without_content_uses_summary(self):
+        """Test reasoning item without content field falls back to summary."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": [{"type": "summary_text", "text": "Thinking about math"}],
+        }
+
+        msg = parse_response_input(item, prev_responses=[])
+
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.content[0].text == "Thinking about math"
+
+    def test_reasoning_with_none_content_uses_summary(self):
+        """Test reasoning item with content=None falls back to summary."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": None,
+            "summary": [{"type": "summary_text", "text": "Thinking about math"}],
+        }
+
+        msg = parse_response_input(item, prev_responses=[])
+
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.content[0].text == "Thinking about math"
+
+    def test_reasoning_without_content_or_summary(self):
+        """Test reasoning item with neither content nor summary."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": [],
+        }
+
+        msg = parse_response_input(item, prev_responses=[])
+
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.content[0].text == ""
