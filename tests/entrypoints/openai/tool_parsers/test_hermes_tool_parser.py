@@ -458,3 +458,38 @@ def test_hermes_parser_non_streaming_tool_call_invalid_json(
 
     assert tool_call is not None
     assert not tool_call.tools_called
+
+
+def test_hermes_structural_tag_support(
+    hermes_parser: Hermes2ProToolParser,
+) -> None:
+    assert hermes_parser.supports_structural_tag()
+
+    info = hermes_parser.get_structure_info("get_weather")
+    assert info is not None
+    assert info.trigger == "<tool_call>"
+    assert info.begin == '<tool_call>{"name": "get_weather", "arguments": '
+    assert info.end == "}</tool_call>"
+
+
+def test_hermes_adjust_request_uses_structural_tag(
+    hermes_parser: Hermes2ProToolParser,
+) -> None:
+    """Test that adjust_request sets up structural tags for tool calling."""
+    request = ChatCompletionRequest(
+        model="test",
+        messages=[{"role": "user", "content": "test"}],
+        tools=TOOLS,
+        tool_choice="required",
+    )
+
+    adjusted = hermes_parser.adjust_request(request)
+
+    assert adjusted.structured_outputs is not None
+    assert adjusted.structured_outputs.structural_tag is not None
+    # Verify it's valid JSON with expected structure
+    config = json.loads(adjusted.structured_outputs.structural_tag)
+    assert config["type"] == "structural_tag"
+    assert len(config["structures"]) == 1
+    assert config["triggers"] == ["<tool_call>"]
+    assert "get_current_weather" in config["structures"][0]["begin"]
