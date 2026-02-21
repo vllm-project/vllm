@@ -23,6 +23,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import is_quantized_kv_cache
 
 logger = init_logger(__name__)
 
@@ -378,12 +379,12 @@ def use_trtllm_attention(
         # CLI argument not set - use auto-detection
         if is_prefill:
             # Prefill auto-detection
-            use_trtllm = kv_cache_dtype == "auto"
+            use_trtllm = not is_quantized_kv_cache(kv_cache_dtype)
             if use_trtllm:
                 logger.warning_once("Using TRTLLM prefill attention (auto-detected).")
         else:
             # Decode auto-detection
-            use_trtllm = num_tokens <= 256 and kv_cache_dtype == "auto"
+            use_trtllm = num_tokens <= 256 and not is_quantized_kv_cache(kv_cache_dtype)
             if use_trtllm:
                 logger.warning_once("Using TRTLLM decode attention (auto-detected).")
         return use_trtllm

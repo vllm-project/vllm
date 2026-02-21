@@ -796,7 +796,8 @@ void convert_fp8(torch::Tensor& dst_cache, torch::Tensor& src_cache,
   dim3 block(std::min(block_stride, int64_t(512)));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  if (kv_cache_dtype == "auto") {
+  if (kv_cache_dtype == "auto" || kv_cache_dtype == "bfloat16" ||
+      kv_cache_dtype == "float16") {
     if (src_cache.dtype() == at::ScalarType::Float) {
       CALL_CONVERT_FP8(uint8_t, float, vllm::Fp8KVCacheDataType::kAuto);
     } else if (src_cache.dtype() == at::ScalarType::Half) {
