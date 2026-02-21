@@ -1053,6 +1053,11 @@ def override_envs_for_invariance(
     # torch.compile settings
     os.environ["VLLM_USE_AOT_COMPILE"] = "0"
 
+    # Disable Triton autotuning for deterministic kernel config selection.
+    # This ensures the same Triton config is used across runs, preventing
+    # non-determinism from timing-dependent config selection.
+    os.environ["VLLM_TRITON_AUTOTUNE"] = "0"
+
 
 def init_batch_invariance(
     attention_backend: AttentionBackendEnum | None,
@@ -1061,6 +1066,11 @@ def init_batch_invariance(
     if vllm_is_batch_invariant():
         override_envs_for_invariance(attention_backend)
         enable_batch_invariant_mode()
+
+        # Disable Triton autotuning globally (including third-party code)
+        from vllm.triton_utils.autotune import disable_autotune_globally
+
+        disable_autotune_globally()
 
         # Disable TF32 for batch invariance - it causes non-deterministic rounding
         torch.backends.cuda.matmul.fp32_precision = "ieee"
