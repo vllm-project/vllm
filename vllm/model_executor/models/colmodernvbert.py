@@ -36,7 +36,6 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.colmodernvbert import ColModernVBertConfig
-from vllm.transformers_utils.processor import cached_get_processor
 
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import default_pooling_type
@@ -169,15 +168,11 @@ class ColModernVBertMultiModalProcessor(
 
         images = mm_data.get("images")
         if images:
-            # ColModernVBERT has no registered HF processor class, so we
-            # load the image processor directly (cached by lru_cache).
             from transformers import Idefics3ImageProcessor
 
-            image_processor = cached_get_processor(
+            image_processor = Idefics3ImageProcessor.from_pretrained(
                 self.info.ctx.model_config.model,
-                processor_cls=Idefics3ImageProcessor,
                 revision=self.info.ctx.model_config.revision,
-                trust_remote_code=(self.info.ctx.model_config.trust_remote_code),
             )
             image_outputs = image_processor(
                 images=images,
