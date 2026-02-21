@@ -189,7 +189,7 @@ if [[ -z "$render_gid" ]]; then
   exit 1
 fi
 
-if [[ $commands == *"VLLM_TEST_GROUP_NAME=_4-2-node-tests-4-gpus-in-total"* ]]; then
+if [[ $commands == *"VLLM_TEST_GROUP_NAME=mi3.5_4-2-node-tests-4-gpus-in-total"* ]]; then
 
   export DCKR_VER=$(docker --version | sed 's/Docker version \(.*\), build .*/\1/')
 
