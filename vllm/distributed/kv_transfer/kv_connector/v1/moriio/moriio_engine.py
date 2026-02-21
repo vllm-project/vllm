@@ -29,6 +29,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOError,
     RemoteAllocInfo,
     TransferError,
+    TransferId,
     WriteTask,
     get_port_offset,
     get_role,
@@ -162,10 +163,10 @@ class MoRIIOWriter:
             True if remote blocks are ready
         """
         return (
-            task.request_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
+            task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
         )
 
-    def _get_remote_alloc_info(self, request_id: str) -> RemoteAllocInfo:
+    def _get_remote_alloc_info(self, transfer_id: str) -> RemoteAllocInfo:
         """Get remote allocation info for a request.
 
         Args:
@@ -178,10 +179,10 @@ class MoRIIOWriter:
             KeyError: If allocation info is missing
         """
         try:
-            return self.worker.moriio_wrapper.done_remote_allocate_req_dict[request_id]
+            return self.worker.moriio_wrapper.done_remote_allocate_req_dict[transfer_id]
         except KeyError as e:
             raise KeyError(
-                f"Remote allocation info missing for request {request_id}"
+                f"Remote allocation info missing for transfer {transfer_id}"
             ) from e
 
     def _execute_write_task(self, task: WriteTask) -> None:
@@ -192,10 +193,14 @@ class MoRIIOWriter:
 
         """
         # Get remote allocation info
-        request_info = self._get_remote_alloc_info(task.request_id)
+        request_info = self._get_remote_alloc_info(task.transfer_id)
 
         if request_info.block_ids is None:
-            logger.debug("Request %s remote block IDs not ready", task.request_id)
+            logger.debug(
+                "Request remote block IDs not ready:request_id = %s, transfer_id = %s",
+                task.request_id,
+                task.transfer_id,
+            )
             return
 
         # Wait for CUDA event
@@ -257,6 +262,7 @@ class MoRIIOWriter:
 
         return LayerTransferPlan(
             request_id=task.request_id,
+            transfer_id=task.transfer_id,
             layer_name=task.layer_name,
             sess_idx=sess_idx,
             transfer_local_offsets=local_off,
@@ -312,17 +318,18 @@ class MoRIIOWriter:
 
             # Send completion notification
             self.worker.moriio_wrapper.send_notify(
-                task.request_id, task.remote_ip, remote_port
+                task.transfer_id, task.remote_ip, remote_port
             )
             # mark request as done, then we can free the blocks
             with self.worker.moriio_wrapper.lock:
                 self.worker.moriio_wrapper.done_req_ids.append(task.request_id)
             del self.worker.moriio_wrapper.done_remote_allocate_req_dict[
-                task.request_id
+                task.transfer_id
             ]
             logger.debug(
-                "Completed transfer for request %s, notified port %d",
+                "Completed transfer for (request, transfer) %s, %s, notified port %d",
                 task.request_id,
+                task.transfer_id,
                 remote_port,
             )
 
@@ -355,7 +362,7 @@ class MoRIIOWrapper:
         self.notify_port: int | None = None
         self.lock = threading.Lock()
         self.done_req_ids: list[str] = []
-        self.done_remote_allocate_req_dict: dict[str, RemoteAllocInfo] = {}
+        self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
         self.notify_thread: threading.Thread | None = None
         self.sessions: list[IOEngine.Session] = []
@@ -525,7 +532,7 @@ class MoRIIOWrapper:
 
         try:
             msg_str = msg.decode("UTF-8")
-            if msg_str.startswith(MoRIIOConstants.COMPLETION_PREFIX):
+            if msg_str.startswith(MoRIIOConstants.TRANSFER_PREFIX):
                 self._handle_completion_message(msg_str)
                 handled = True
         except UnicodeDecodeError:
@@ -535,7 +542,7 @@ class MoRIIOWrapper:
 
     def _handle_structured_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
-        req_id = data["req_id"]
+        transfer_id = data["transfer_id"]
         block_notify_list = data.get("block_notify_list", [])
         decode_dp_rank = data.get("decode_rank", 0)
         assert len(block_notify_list) > 0, (
@@ -543,7 +550,7 @@ class MoRIIOWrapper:
         )
 
         with self.lock:
-            self.done_remote_allocate_req_dict[req_id] = RemoteAllocInfo(
+            self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
                 block_ids=block_notify_list, decode_dp_rank=decode_dp_rank
             )
 
