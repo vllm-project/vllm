@@ -153,6 +153,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
         self.speculator = None
+        self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
             self.do_spec_decode = True
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
@@ -167,7 +168,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             self.do_spec_decode = False
             self.num_speculative_steps = 0
-            self.use_aux_hidden_state_outputs = False
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
