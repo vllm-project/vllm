@@ -448,23 +448,22 @@ class EngineCore:
             if not self.is_ec_producer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-            if self.is_pooling_model or not model_executed:
-                # No sampling required (no requests scheduled).
+            has_struct_outputs = scheduler_output.has_structured_output_requests
+            if self.is_pooling_model or not model_executed or not has_struct_outputs:
+                # No sampling required, or sampling will be done by the
+                # execute_model call.
                 future = cast(Future[ModelRunnerOutput], exec_future)
+            elif not scheduler_output.pending_structured_output_tokens:
+                # We aren't waiting for any tokens, get any grammar output
+                # and sample immediately.
+                grammar_output = self.scheduler.get_grammar_bitmask(scheduler_output)
+                future = self.model_executor.sample_tokens(
+                    grammar_output, non_block=True
+                )
             else:
-                if not scheduler_output.pending_structured_output_tokens:
-                    # We aren't waiting for any tokens, get any grammar output
-                    # and sample immediately.
-                    grammar_output = self.scheduler.get_grammar_bitmask(
-                        scheduler_output
-                    )
-                    future = self.model_executor.sample_tokens(
-                        grammar_output, non_block=True
-                    )
-                else:
-                    # We need to defer sampling until we have processed the model output
-                    # from the prior step.
-                    deferred_scheduler_output = scheduler_output
+                # We need to defer sampling until we have processed the model output
+                # from the prior step.
+                deferred_scheduler_output = scheduler_output
 
             if not deferred_scheduler_output:
                 # Add this step's future to the queue.
