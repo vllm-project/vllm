@@ -27,7 +27,6 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
-from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
     dbo_maybe_run_recv_hook,
