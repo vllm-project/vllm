@@ -59,7 +59,7 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
-MMDummyOptions: TypeAlias = Mapping[str, BaseDummyOptions]
+MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
 """
 A dictionary containing an entry for each modality type of dummy data.
 
