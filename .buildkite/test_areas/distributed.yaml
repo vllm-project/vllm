@@ -209,7 +209,7 @@ steps:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: Pipeline + Context Parallelism (4 GPUs))
+- label: Pipeline + Context Parallelism (4 GPUs)
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   num_devices: 4

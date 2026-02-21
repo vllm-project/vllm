@@ -285,12 +285,12 @@ graphql-core==3.2.6
     # via hypothesis-graphql
 greenlet==3.2.3
     # via sqlalchemy
-grpcio==1.78.0
+grpcio==1.78.1
     # via
     #   grpcio-tools
     #   ray
     #   tensorboard
-grpcio-tools==1.78.0
+grpcio-tools==1.78.1
     # via -r requirements/test.in
 h11==0.14.0
     # via
