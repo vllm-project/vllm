@@ -26,6 +26,9 @@ class LayerReloadingInfo:
     # stores arguments and tensors ready for loading
     loaded_weights: list[tuple[str, BoundArguments]] = field(default_factory=list)
 
+    # device to materialize meta tensors to for initial loading
+    initial_load_target_device: torch.device | None = None
+
     def reset(self):
         self.__init__(restore_metadata=self.restore_metadata)  # type: ignore[misc]
 
