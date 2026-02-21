@@ -481,9 +481,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Enable batch-invariant mode: deterministic results regardless of
     # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
-    "VLLM_BATCH_INVARIANT": lambda: bool(
-        int(os.getenv("VLLM_BATCH_INVARIANT", "0"))
-    ),
+    "VLLM_BATCH_INVARIANT": lambda: bool(int(os.getenv("VLLM_BATCH_INVARIANT", "0"))),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
