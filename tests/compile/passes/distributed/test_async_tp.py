@@ -142,6 +142,30 @@ class TestScaledMMRSModel(_BaseScaledMMModel):
         return [torch.ops.vllm.patched_fused_scaled_matmul_reduce_scatter.default]
 
 
+class TestHelionAGScaledMMModel(_BaseScaledMMModel):
+    def forward(self, input: torch.Tensor):
+        fp8_input = input.to(FP8_DTYPE)
+
+        all_gather = tensor_model_parallel_all_gather(fp8_input, dim=0)
+
+        scale_a = torch.ones(all_gather.shape[0], 1, dtype=torch.float32)
+
+        scaled_mm = torch._scaled_mm(
+            all_gather,
+            self.weight,
+            scale_a=scale_a,
+            scale_b=self.scale_b,
+            out_dtype=self.dtype,
+        )
+
+        return scaled_mm
+
+    def ops_in_model_before(self):
+        return [torch.ops.vllm.all_gather.default]
+
+    def ops_in_model_after(self):
+        return [torch.ops.vllm.helion_all_gather_fp8_gemm.default]
+
 class TestAGScaledMMModel(_BaseScaledMMModel):
     def forward(self, input: torch.Tensor):
         """
@@ -223,6 +247,7 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
     def ops_in_model_after(self):
         return [torch.ops.symm_mem.fused_all_gather_scaled_matmul.default]
 
+helion_enabled = envs.VLLM_USE_HELION_BACKEND
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize(
@@ -231,7 +256,7 @@ class TestAGCutlassScaledMMModel(_BaseScaledMMModel):
         TestMMRSModel,
         TestAGMMModel,
         TestScaledMMRSModel,
-        TestAGScaledMMModel,
+        TestHelionAGScaledMMModel if helion_enabled else TestAGScaledMMModel,
         TestCutlassScaledMMRSModel,
         TestAGCutlassScaledMMModel,
     ],
@@ -254,7 +279,7 @@ def test_async_tp_pass_replace(
         test_model
         in (
             TestScaledMMRSModel,
-            TestAGScaledMMModel,
+            TestHelionAGScaledMMModel if helion_enabled else TestAGScaledMMModel,
             TestCutlassScaledMMRSModel,
             TestAGCutlassScaledMMModel,
         )
