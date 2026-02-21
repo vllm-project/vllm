@@ -3,7 +3,7 @@
 """
 KV cache helper for store.
 """
-
+from vllm.v1.kv_cache_interface import MambaSpec
 from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -20,10 +20,15 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.kv_cache_interface import KVCacheSpec
 
 logger = init_logger(__name__)
 
 EngineId = str
+# block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
+# mutability and are for connector internal use only.
+BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
@@ -301,6 +306,37 @@ def yield_req_data(
     )
 
 
+def get_full_attention_group_idx(
+    kv_cache_config: "KVCacheConfig",
+) -> int:
+    """
+    Get the index of the full attention KV cache group from KVCacheConfig.
+
+    Args:
+        kv_cache_config: The KV cache configuration
+
+    Returns:
+        The index of the full attention group
+
+    Raises:
+        AssertionError: If no full attention group is found
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    fa_group_idx = next(
+        (
+            i
+            for i, group in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(group.kv_cache_spec, FullAttentionSpec)
+        ),
+        None,
+    )
+    assert fa_group_idx is not None, (
+        "No full attention KV cache group found in kv_cache_config"
+    )
+    return fa_group_idx
+
+
 @dataclass
 class TpKVTopology:
     """
@@ -321,17 +357,22 @@ class TpKVTopology:
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
         _MOCK_BLOCK_SIZE = 16
-        kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
-        )
-        logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
+        # FIXME Wont work with as kv cache shape is not implemented for mamba
+        print(f"{self.attn_backend=}")
+        # kv_cache_shape = self.attn_backend.get_kv_cache_shape(
+        #     num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
+        # )
+        # logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
-        self._is_kv_layout_blocks_first = (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-        )
+        # self._is_kv_layout_blocks_first = (
+        #     len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
+        # )
+        # FIXME to patch only once when mamba is detected. Basically we treat all backends as nb, 2, ...
+        self._is_kv_layout_blocks_first = True
 
         self._cross_layers_blocks = False
+        # self._physical_block_size_position = 0
         if self.tensor_shape is not None:
             self._cross_layers_blocks = (
                 len(self.tensor_shape) == len(kv_cache_shape) + 1
@@ -357,10 +398,11 @@ class TpKVTopology:
         # is logical while in the cross layers case it is the physical
         # position. This matches the shape of the actual kv cache tensors
         # passed at register_kv_caches()/register_cross_layers_kv_cache()
-        block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
+        # FIXME likely interesented in FA layers
+        # block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
 
-        assert block_size_position is not None
-        self._block_size_position = -(len(kv_cache_shape) - block_size_position)
+        # assert block_size_position is not None
+        # self._block_size_position = -(len(kv_cache_shape) - block_size_position)
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
@@ -387,7 +429,8 @@ class TpKVTopology:
 
     @property
     def block_size_position(self) -> int:
-        return self._block_size_position
+        # return self._block_size_position
+        return -2 if self.is_mla else -3
 
     def tp_ratio(
         self,
@@ -477,6 +520,26 @@ class TpKVTopology:
     ) -> list[int]:
         remote_tp_size = self.remote_tp_size[remote_engine_id]
         return self.get_target_remote_ranks(remote_tp_size)
+
+    def get_transfer_cache_regions(self, cache: torch.Tensor, layer_spec: "KVCacheSpec") -> list[torch.Tensor] | torch.Tensor:
+        # TODO docs
+        if isinstance(layer_spec, MambaSpec):
+            # Register the whole kv cache shared tensor, including SSM/Conv. This is 
+            # similar to FI with the difference that SSM/Conv have different sizes
+            ssm, conv = cache
+            return [ssm]
+
+        # FIXME check if *any* of the backends are mamba
+        _is_mamba = True
+        # if _is_mamba and backends[layer] == AttentionBackendEnum.FLASH_ATTN:
+        if True:
+            # assuming FA for now in this branch, we want to treat it like FI and register the whole tensor.
+            #  Stride is already adjusted by manager. Shape's not.
+            # swap [2<>num_blocks, block_size, num_kv_heads, head_size] to match FI
+            cache = cache.transpose(0, 1)
+            
+        # Regular case: backends like FA register K/V in separate regions
+        return cache if self.split_k_and_v else [cache]
 
 
 def get_current_attn_backend(vllm_config: VllmConfig):
