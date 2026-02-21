@@ -288,7 +288,7 @@ async def async_request_openai_chat_completions(
     request_func_input: RequestFuncInput,
     session: aiohttp.ClientSession,
     pbar: tqdm | None = None,
-    mm_position: Literal["first", "last"] = "last",
+    mm_position: Literal["first", "last"] = "first",
 ) -> RequestFuncOutput:
     api_url = request_func_input.api_url
     _validate_api_url(api_url, "OpenAI Chat Completions API", "chat/completions")

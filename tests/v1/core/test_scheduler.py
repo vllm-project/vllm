@@ -105,7 +105,7 @@ def test_schedule(enable_prefix_caching: bool, prompt_logprobs: int | None):
         assert scheduler.running[i] == request
 
 
-def test_schedule_multimodal_requests():
+def test_schedule_multimodal_requests_one_batch():
     scheduler = create_scheduler(model="llava-hf/llava-1.5-7b-hf")
     mm_positions = [[PlaceholderRange(offset=i, length=100)] for i in range(10)]
     requests = create_requests(
@@ -125,6 +125,128 @@ def test_schedule_multimodal_requests():
     assert len(output.scheduled_encoder_inputs) == 10
     for req_id, encoder_input in output.scheduled_encoder_inputs.items():
         assert len(encoder_input) == 1
+
+
+@pytest.mark.parametrize(
+    ("encoder_budget_mult", "encoder_cache_mult"),
+    [(0.5, 0.5), (0.5, 1.0), (1.0, 1.0), (1.5, 2.0), (2.0, 2.0)],
+)
+@pytest.mark.parametrize(
+    ("chunk_mult", "disable_chunked_mm_input"),
+    [(0.5, False), (1.0, True), (1.0, False), (2.0, True), (2.0, False)],
+)
+def test_schedule_multimodal_requests_multi_batch(
+    encoder_budget_mult, encoder_cache_mult, chunk_mult, disable_chunked_mm_input
+):
+    MM_TOK_MULT = 4
+    MAX_MM_ITEM_TOKS = 576
+    NUM_TEXT_TOKS = 100
+    NUM_TOTAL_TOKS = NUM_TEXT_TOKS + MM_TOK_MULT * MAX_MM_ITEM_TOKS
+
+    def build_req_mm_positions(n_mm_items: int):
+        req_mm_positions = []
+        start_idx = NUM_TEXT_TOKS
+
+        for _ in range(n_mm_items):
+            mm_position = PlaceholderRange(
+                offset=start_idx,
+                length=MM_TOK_MULT * MAX_MM_ITEM_TOKS // n_mm_items,
+            )
+
+            req_mm_positions.append(mm_position)
+            start_idx += mm_position.length
+
+        assert start_idx == NUM_TOTAL_TOKS
+        return req_mm_positions
+
+    mm_positions = [
+        build_req_mm_positions(1 * MM_TOK_MULT),
+        build_req_mm_positions(2 * MM_TOK_MULT),
+        build_req_mm_positions(4 * MM_TOK_MULT),
+        build_req_mm_positions(8 * MM_TOK_MULT),
+    ]
+
+    max_num_batched_tokens = int(chunk_mult * MAX_MM_ITEM_TOKS)
+
+    # mult < 1 should be automatically overridden by MAX_MM_ITEM_TOKS
+    max_num_batched_encoder_embeds = int(encoder_budget_mult * MAX_MM_ITEM_TOKS)
+    encoder_cache_size = int(encoder_cache_mult * MAX_MM_ITEM_TOKS)
+
+    print(
+        f"{max_num_batched_tokens=}, {disable_chunked_mm_input=}, "
+        f"{max_num_batched_encoder_embeds=}, {encoder_cache_size=}"
+    )
+
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_model_len=NUM_TOTAL_TOKS,
+        max_num_batched_tokens=max_num_batched_tokens,
+        max_num_batched_encoder_embeds=max_num_batched_encoder_embeds,
+        encoder_cache_size=encoder_cache_size,
+        disable_chunked_mm_input=disable_chunked_mm_input,
+    )
+    assert max(scheduler.mm_budget.mm_max_toks_per_item.values()) == MAX_MM_ITEM_TOKS
+
+    requests = create_requests(
+        num_requests=len(mm_positions),
+        num_tokens=NUM_TOTAL_TOKS,
+        mm_positions=mm_positions,
+    )
+
+    mm_positions_by_req_id = {
+        request.request_id: [f.mm_position for f in request.mm_features]
+        for request in requests
+    }
+    for req_id, mm_positions in mm_positions_by_req_id.items():
+        print(f"{req_id=}: {mm_positions=}, {NUM_TOTAL_TOKS=}")
+
+    for request in requests:
+        scheduler.add_request(request)
+
+    total_scheduled_tokens = {request.request_id: 0 for request in requests}
+    total_scheduled_encoder_inputs = {
+        request.request_id: list[int]() for request in requests
+    }
+    while any(
+        num_tokens < NUM_TOTAL_TOKS for num_tokens in total_scheduled_tokens.values()
+    ):
+        output = scheduler.schedule()
+
+        req_to_index = {request.request_id: i for i, request in enumerate(requests)}
+        model_runner_output = ModelRunnerOutput(
+            req_ids=[request.request_id for request in requests],
+            req_id_to_index=req_to_index,
+            sampled_token_ids=[[] for _ in range(len(requests))],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        )
+        scheduler.update_from_output(output, model_runner_output)
+
+        new_scheduled_tokens = output.num_scheduled_tokens
+        new_scheduled_encoder_inputs = output.scheduled_encoder_inputs
+        print(
+            f"{total_scheduled_tokens=}, {new_scheduled_tokens=}, "
+            f"{new_scheduled_encoder_inputs=}"
+        )
+
+        assert any(num_tokens > 0 for num_tokens in new_scheduled_tokens.values()), (
+            "Detected hanging condition"
+        )
+
+        for req_id, num_tokens in new_scheduled_tokens.items():
+            total_scheduled_tokens[req_id] += num_tokens
+        for req_id, enc_inputs in new_scheduled_encoder_inputs.items():
+            total_scheduled_encoder_inputs[req_id].extend(enc_inputs)
+
+    assert all(
+        num_tokens == NUM_TOTAL_TOKS for num_tokens in total_scheduled_tokens.values()
+    )
+
+    assert all(
+        len(enc_inputs) == len(mm_positions_by_req_id[req_id])
+        for req_id, enc_inputs in total_scheduled_encoder_inputs.items()
+    )
 
 
 def test_async_scheduling_pp_allows_rescheduling_with_output_placeholders():
@@ -169,7 +291,7 @@ def test_schedule_partial_requests():
     assert output.scheduled_cached_reqs.num_reqs == 0
     assert len(output.finished_req_ids) == 0
 
-    assert scheduler.max_num_encoder_input_tokens == 1024
+    assert scheduler.encoder_compute_budget == 1024
     # The first request is scheduled fully.
     assert output.num_scheduled_tokens[requests[0].request_id] == 800
     # The second request is scheduled partially.
@@ -1746,7 +1868,7 @@ def create_scheduler_with_priority(
     Args:
       model: model under test
       max_num_seqs: max sequences to schedule
-      max_num_batch_tokens: max num tokens to batch
+      max_num_batched_tokens: max num tokens to batch
       enable_prefix_caching: optionally force APC config
                              (True/False) or use default
                              (False)
