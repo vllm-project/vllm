@@ -1067,7 +1067,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                     inputs_embeds=input_batch.inputs_embeds,
                 )
 
-        self.execute_model_state = hidden_states, input_batch, scheduler_output.virtual_gap_req_ids
+        self.execute_model_state = (
+            hidden_states,
+            input_batch,
+            scheduler_output.virtual_gap_req_ids,
+        )
         return None
 
     @torch.inference_mode()
