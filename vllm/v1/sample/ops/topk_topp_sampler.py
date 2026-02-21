@@ -248,7 +248,7 @@ def apply_top_k_top_p(
     if p is None and k is None:
         return logits
 
-    if HAS_TRITON and logits.shape[0] >= 8:
+    if HAS_TRITON and logits.shape[0] >= 8 and current_platform.is_cuda_alike():
         return apply_top_k_top_p_triton(logits, k, p)
 
     # Use pytorch sort implementation for small batch sizes.
