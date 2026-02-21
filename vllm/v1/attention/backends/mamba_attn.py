@@ -8,7 +8,7 @@ from typing import ClassVar, TypeVar
 
 import torch
 
-from vllm.config import VllmConfig
+from vllm.config import CompilationConfig, VllmConfig
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -64,6 +64,12 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
     )
     supports_update_block_table: bool = True
+
+    compilation_config: CompilationConfig
+    decode_cudagraph_max_bs: int
+    state_indices_tensor: torch.Tensor
+    block_idx_last_scheduled_token: torch.Tensor
+    block_idx_last_computed_token: torch.Tensor
 
     def __init__(
         self,
