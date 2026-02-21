@@ -15,7 +15,6 @@
 # command(str): the single command to run for tests. incompatible with commands.
 # commands(list): the list of commands to run for the test. incompatible with command.
 # mirror_hardwares(list): the list of hardware to run the test on as well. currently only supports [amdexperimental]
-# gpu(str): override the GPU selection for the test. default is L4 GPUs. supports a100, b200, h200
 # num_gpus(int): override the number of GPUs for the test. defaults to 1 GPU. currently supports 2,4.
 # num_nodes(int): whether to simulate multi-node setup by launching multiple containers on one host,
 #     in this case, commands must be specified. the first command runs on the first host, the second
@@ -95,11 +94,11 @@
 #     - There is some Tensor Parallelism related processing logic in LoRA that requires multi-GPU testing for validation.           #
 #     - {`pytest -v -s -x lora/test_gptoss_tp.py`}: Disabled for now because MXFP4 backend on non-cuda platform doesn't support     #
 #                                                   LoRA yet.                                                                       #
-#   * [Distributed Tests (A100,MI300)]: Don't test llama model here, it seems hf implementation is buggy. See:                      #
-#                                       https://github.com/vllm-project/vllm/pull/5689                                              #
-#   * [Distributed Tests (H100,MI325)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293 in       #
-#                                       favor of new tests in fusions_e2e. We avoid replicating the new jobs in                     #
-#                                       this file as it's deprecated.                                                               #
+#   * [Distributed Tests (GPU_TAG)]: Don't test llama model here, it seems hf implementation is buggy. See:                         #
+#                                    https://github.com/vllm-project/vllm/pull/5689                                                 #
+#   * [Distributed Tests (GPU_TAG)]: Some old E2E tests were removed in https://github.com/vllm-project/vllm/pull/33293 in          #
+#                                    favor of new tests in fusions_e2e. We avoid replicating the new jobs in                        #
+#                                    this file as it's deprecated.                                                                  #
 #                                                                                                                                   #
 #####################################################################################################################################
 
@@ -329,7 +328,7 @@ steps:
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 
-- label: Sequence Parallel Correctness Tests (2xH100) # TBD
+- label: Sequence Parallel Correctness Tests (2xMI325) # TBD
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
@@ -342,7 +341,7 @@ steps:
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 
-- label: AsyncTP Correctness Tests (2xH100) # TBD
+- label: AsyncTP Correctness Tests (2xMI325) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
@@ -405,7 +404,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
 
 
-- label: Distributed Tests (8 GPUs)(H100) # 6.4m
+- label: Distributed Tests (8 GPUs)(MI325) # 6.4m
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_8
@@ -552,7 +551,7 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 attention (H100) # 14.5m
+- label: V1 attention (MI325) # 14.5m
   timeout_in_minutes: 40
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
@@ -566,7 +565,7 @@ steps:
   - pytest -v -s v1/attention
 
 
-- label: Batch Invariance (H100) # 5.2m
+- label: Batch Invariance (MI325) # 5.2m
   timeout_in_minutes: 12
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
@@ -1429,7 +1428,7 @@ steps:
   - CROSS_LAYERS_BLOCKS=True ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
-- label: Distributed Tests (4 GPUs)(A100) # 20.9m
+- label: Distributed Tests (4 GPUs)(MI325) # 20.9m
   timeout_in_minutes: 37
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi325_4
@@ -1444,7 +1443,7 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 
-- label: Distributed Tests (2 GPUs)(H100) # TBD
+- label: Distributed Tests (2 GPUs)(MI325) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
@@ -1458,7 +1457,7 @@ steps:
   - pytest -v -s tests/v1/distributed/test_dbo.py
 
 
-- label: Distributed Compile Unit Tests (2xH100) # TBD
+- label: Distributed Compile Unit Tests (2xMI325) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
@@ -1485,7 +1484,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 
-- label: LM Eval Large Models (4 GPUs)(H100) # 24.8m
+- label: LM Eval Large Models (4 GPUs)(MI325) # 24.8m
   timeout_in_minutes: 42
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
@@ -1500,7 +1499,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
 
 
-- label: LM Eval Large Models (4 GPUs)(A100) # 17.3m
+- label: LM Eval Large Models (4 GPUs)(MI325) # 17.3m
   timeout_in_minutes: 27
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
@@ -1793,7 +1792,7 @@ steps:
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 
-- label: Sequence Parallel Correctness Tests (2xH100) # TBD
+- label: Sequence Parallel Correctness Tests (2xMI355) # TBD
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
@@ -1805,7 +1804,7 @@ steps:
   - pytest -v -s tests/compile/correctness_e2e/test_sequence_parallel.py
 
 
-- label: AsyncTP Correctness Tests (2xH100) # TBD
+- label: AsyncTP Correctness Tests (2xMI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi325_2
@@ -1867,7 +1866,7 @@ steps:
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
 
 
-- label: Distributed Tests (8 GPUs)(H100) # TBD
+- label: Distributed Tests (8 GPUs)(MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_8
@@ -2008,7 +2007,7 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 attention (B200) # TBD
+- label: V1 attention (MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
@@ -2021,7 +2020,7 @@ steps:
   - pytest -v -s v1/attention
 
 
-- label: Batch Invariance (H100) # TBD
+- label: Batch Invariance (MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
@@ -2847,7 +2846,7 @@ steps:
   - CROSS_LAYERS_BLOCKS=True ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
-- label: Distributed Tests (4 GPUs)(A100) # TBD
+- label: Distributed Tests (4 GPUs)(MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
@@ -2863,7 +2862,7 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 
-- label: Distributed Tests (2 GPUs)(H100) # TBD
+- label: Distributed Tests (2 GPUs)(MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
@@ -2888,7 +2887,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 
-- label: LM Eval Large Models (4 GPUs)(H100) # TBD
+- label: LM Eval Large Models (4 GPUs)(MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
@@ -2903,7 +2902,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
 
 
-- label: LM Eval Large Models (4 GPUs)(A100) # TBD
+- label: LM Eval Large Models (4 GPUs)(MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
@@ -2957,7 +2956,7 @@ steps:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy (B200) # TBD
+- label: Qwen3-30B-A3B-FP8-block Accuracy (MI355) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightlynightly, amdmi355]
   agent_pool: mi355_2
