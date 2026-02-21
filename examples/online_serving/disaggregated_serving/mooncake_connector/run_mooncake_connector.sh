@@ -143,7 +143,7 @@ main() {
     IFS=',' read -ra BOOTSTRAP_PORT_ARRAY <<< "$BOOTSTRAP_PORTS"
     IFS=',' read -ra DECODE_PORT_ARRAY <<< "$DECODE_PORTS"
 
-    proxy_param=""
+    proxy_args=()
 
     # =============================================================================
     # Launch Prefill Servers (X Producers)
@@ -156,12 +156,12 @@ main() {
         local bootstrap_port=${BOOTSTRAP_PORT_ARRAY[$i]}
 
         echo "  Prefill server $((i+1)): GPU $gpu_id, Port $port, Bootstrap Port $bootstrap_port"
-        VLLM_MOONCAKE_BOOTSTRAP_PORT=$bootstrap_port CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
-        --port $port \
+        VLLM_MOONCAKE_BOOTSTRAP_PORT=$bootstrap_port CUDA_VISIBLE_DEVICES=$gpu_id vllm serve "$MODEL" \
+        --port "$port" \
         --kv-transfer-config \
         "{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_producer\"}" > prefill$((i+1)).log 2>&1 &
         PIDS+=($!)
-        proxy_param="${proxy_param} --prefill http://0.0.0.0:${port} $bootstrap_port"
+        proxy_args+=(--prefill "http://0.0.0.0:${port}" "$bootstrap_port")
     done
 
     # =============================================================================
@@ -174,12 +174,12 @@ main() {
         local port=${DECODE_PORT_ARRAY[$i]}
 
         echo "  Decode server $((i+1)): GPU $gpu_id, Port $port"
-        CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
-        --port $port \
+        CUDA_VISIBLE_DEVICES=$gpu_id vllm serve "$MODEL" \
+        --port "$port" \
         --kv-transfer-config \
         "{\"kv_connector\":\"MooncakeConnector\",\"kv_role\":\"kv_consumer\"}" > decode$((i+1)).log 2>&1 &
         PIDS+=($!)
-        proxy_param="${proxy_param} --decode http://0.0.0.0:${port}"
+        proxy_args+=(--decode "http://0.0.0.0:${port}")
     done
 
     # =============================================================================
@@ -187,7 +187,7 @@ main() {
     # =============================================================================
     echo ""
     echo "Starting proxy server on port $PROXY_PORT..."
-    python3 mooncake_connector_proxy.py $proxy_param --port $PROXY_PORT > proxy.log 2>&1 &
+    python3 mooncake_connector_proxy.py "${proxy_args[@]}" --port "$PROXY_PORT" > proxy.log 2>&1 &
     PIDS+=($!)
 
     # =============================================================================
@@ -196,9 +196,10 @@ main() {
     echo ""
     echo "Waiting for all servers to start..."
     for port in "${PREFILL_PORT_ARRAY[@]}" "${DECODE_PORT_ARRAY[@]}"; do
-        if ! wait_for_server $port; then
+        if ! wait_for_server "$port"; then
             echo "Failed to start server on port $port"
             cleanup
+            # shellcheck disable=SC2317
             exit 1
         fi
     done
@@ -209,8 +210,8 @@ main() {
     # =============================================================================
     # Run Benchmark
     # =============================================================================
-    vllm bench serve --port $PROXY_PORT --seed $(date +%s) \
-        --backend vllm --model $MODEL \
+    vllm bench serve --port "$PROXY_PORT" --seed "$(date +%s)" \
+        --backend vllm --model "$MODEL" \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
         --num-prompts 200 --burstiness 100 --request-rate 2 | tee benchmark.log
 
