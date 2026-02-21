@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1248,8 +1249,8 @@ class EngineCoreProc(EngineCore):
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
                         try:
                             request = self.preprocess_add_request(req)
-                        except Exception:
-                            self._handle_request_preproc_error(req)
+                        except Exception as exc:
+                            self._handle_request_preproc_error(req, exc)
                             continue
                     else:
                         request = generic_decoder.decode(data_frames)
@@ -1334,13 +1335,32 @@ class EngineCoreProc(EngineCore):
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
 
-    def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
+    def _handle_request_preproc_error(
+        self,
+        request: EngineCoreRequest,
+        exc: BaseException | None = None,
+    ) -> None:
         """Log and return a request-scoped error response for exceptions raised
         from the add request preprocessing in the input socket processing thread.
         """
-        logger.exception(
-            "Unexpected error pre-processing request %s", request.request_id
-        )
+        if isinstance(exc, MultiModalCacheMissError):
+            # Cache desync between P0 sender and P1 receiver caches.
+            # This is a known race under high concurrency with multimodal
+            # inputs.  Log at warning level (not exception) since it is
+            # not a programming error; the client can simply retry.
+            logger.warning(
+                "Multimodal cache miss for request %s (hash=%s). "
+                "The request will be aborted; the client may retry. "
+                "If this happens frequently, consider increasing "
+                "--mm-processor-cache-gb.",
+                request.request_id,
+                exc.mm_hash,
+            )
+        else:
+            logger.exception(
+                "Unexpected error pre-processing request %s",
+                request.request_id,
+            )
         self.output_queue.put_nowait(
             (
                 request.client_index,
