@@ -1,0 +1,636 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import dataclasses
+from typing import Any
+
+import regex as re
+import torch
+from humming import dtypes
+from humming.layer import HummingLayerMeta, HummingMethod
+
+from vllm import envs
+from vllm.model_executor.layers.batch_invariant import (
+    vllm_is_batch_invariant,
+)
+from vllm.model_executor.layers.fused_moe.layer import (
+    FusedMoE,
+    FusedMoEConfig,
+    FusedMoEMethodBase,
+)
+from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
+    UnquantizedFusedMoEMethod,
+)
+from vllm.model_executor.layers.linear import (
+    LinearBase,
+    LinearMethodBase,
+    UnquantizedLinearMethod,
+)
+from vllm.model_executor.layers.quantization import QuantizationMethods
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizationConfig,
+    QuantizeMethodBase,
+)
+from vllm.model_executor.layers.quantization.utils.humming_moe_utils import (
+    humming_moe_align,
+)
+from vllm.model_executor.layers.quantization.utils.humming_utils import (
+    WEIGHT_CONVERTER_MAP,
+)
+from vllm.model_executor.utils import set_weight_attrs
+
+
+def get_ignored_layers(config):
+    if "ignored_layers" in config:
+        return config["ignored_layers"]
+    if "modules_to_not_convert" in config:
+        return config["modules_to_not_convert"]
+    return []
+
+
+def is_layer_skipped(prefix: str, ignore_layers: list[str]):
+    return any(module_name in prefix for module_name in ignore_layers)
+
+
+def parse_single_config(config):
+    if "quant_method" not in config:
+        return
+
+    quant_method = config["quant_method"]
+
+    if quant_method == "gptq":
+        desc_act = config.get("desc_act", False)
+        assert not desc_act, "desc_act is not supported by humming"
+        result_dict = {
+            "has_dynamic_zp": not config.get("sym", True),
+            "block_shape": (1, config["group_size"]),
+            "b_dtype": dtypes.DataType.from_str("uint" + str(config["bits"])),
+        }
+    elif quant_method == "awq":
+        result_dict = {
+            "has_dynamic_zp": config.get("zero_point", False),
+            "block_shape": (1, config["group_size"]),
+            "b_dtype": dtypes.DataType.from_str("uint" + str(config["bits"])),
+        }
+    elif quant_method == "fp8":
+        b_dtype = dtypes.DataType.from_str("float8" + config.get("fmt", "e4m3"))
+        result_dict = {
+            "block_shape": config.get("weight_block_size", (0, 0)),
+            "b_dtype": b_dtype,
+        }
+    elif quant_method == "modelopt":
+        result_dict = {
+            "block_shape": (1, 16),
+            "has_global_scale": True,
+            "b_dtype": dtypes.float4e2m1,
+            "bs_dtype": dtypes.float8e4m3,
+        }
+    elif quant_method == "mxfp4":
+        result_dict = {
+            "block_shape": (1, 32),
+            "b_dtype": dtypes.float4e2m1,
+            "bs_dtype": dtypes.float8e8m0,
+        }
+    else:
+        raise AssertionError(f"Invalid quant_method: {quant_method}")
+
+    result_dict["weight_scale_group_size_n"] = result_dict["block_shape"][0]
+    result_dict["weight_scale_group_size_k"] = result_dict["block_shape"][1]
+    result_dict["ckpt_quant_method"] = quant_method
+
+    return result_dict
+
+
+class HummingLayerQuantizationConfig(QuantizationConfig):
+    def __init__(
+        self,
+        a_dtype: str | None,
+        b_dtype: str,
+        c_dtype: str | None,
+        bs_dtype: str | None,
+        ckpt_quant_method: str | None,
+        input_scale_group_size_n: int,
+        input_scale_group_size_k: int,
+        weight_scale_group_size_n: int,
+        weight_scale_group_size_k: int,
+        has_dynamic_zp: bool,
+        has_global_scale: bool,
+    ) -> None:
+        self.a_dtype = a_dtype
+        self.b_dtype = b_dtype
+        self.c_dtype = c_dtype
+        self.bs_dtype = bs_dtype
+        self.ckpt_quant_method = ckpt_quant_method
+        self.input_scale_group_size_n = input_scale_group_size_n
+        self.input_scale_group_size_k = input_scale_group_size_k
+        self.weight_scale_group_size_n = weight_scale_group_size_n
+        self.weight_scale_group_size_k = weight_scale_group_size_k
+        self.has_dynamic_zp = has_dynamic_zp
+        self.has_global_scale = has_global_scale
+
+    @classmethod
+    def from_config(cls, config):
+        return cls(
+            a_dtype=config.get("a_dtype", None),
+            b_dtype=config["b_dtype"],
+            c_dtype=config.get("c_dtype", None),
+            bs_dtype=config.get("bs_dtype", None),
+            ckpt_quant_method=config.get("ckpt_quant_method", None),
+            input_scale_group_size_n=config.get("input_scale_group_size_n", 0),
+            input_scale_group_size_k=config.get("input_scale_group_size_k", 0),
+            weight_scale_group_size_n=config.get("weight_scale_group_size_n", 0),
+            weight_scale_group_size_k=config.get("weight_scale_group_size_k", 0),
+            has_dynamic_zp=config.get("has_dynamic_zp", False),
+            has_global_scale=config.get("has_global_scale", False),
+        )
+
+    @classmethod
+    def get_config_filenames(cls):
+        return []
+
+    @classmethod
+    def get_min_capability(cls):
+        return 75
+
+    @classmethod
+    def get_name(cls):
+        return "humming"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        raise NotImplementedError
+
+
+class HummingConfig(QuantizationConfig):
+    def __init__(self, full_config: dict[str, Any] | None = None) -> None:
+        self.full_config: dict[str, Any] = full_config or {}
+
+    @classmethod
+    def get_name(cls) -> QuantizationMethods:
+        return "humming"
+
+    @classmethod
+    def get_supported_act_dtypes(cls) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 75
+
+    @classmethod
+    def get_config_filenames(cls) -> list[str]:
+        return []
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "HummingConfig":
+        return cls(full_config=config)
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant
+    ) -> QuantizationMethods | None:
+        if user_quant == "humming":
+            return cls.get_name()
+        return None
+
+    @classmethod
+    def is_layer_skipped(cls, config: dict[str, Any], prefix: str):
+        keys = ["ignored_layers", "ignore", "modules_to_not_convert"]
+        ignored_layers = cls.get_from_keys_or(config, keys, [])
+        if any(module_name in prefix for module_name in ignored_layers):
+            return True
+        if "lm_head" in prefix:
+            return True
+
+        for regex in config.get("dynamic", {}):
+            if regex[:1] != "-":
+                continue
+            regex = regex[2:]
+            if re.match(regex[2:], prefix):
+                return True
+
+        return False
+
+    @classmethod
+    def get_layer_weight_quant_config(
+        cls, config: dict[str, Any], prefix: str
+    ) -> dict[str, Any] | None:
+        if cls.is_layer_skipped(config, prefix):
+            return None
+
+        layer_config = parse_single_config(config)
+        for regex, override_config in config.get("dynamic", {}).items():
+            if regex[:1] != "+":
+                continue
+            regex = regex[2:]
+            if re.match(regex[2:], prefix):
+                layer_config = config.copy()
+                layer_config.update(override_config)
+                layer_config = parse_single_config(layer_config)
+                break
+
+        return layer_config
+
+    def get_quant_config_for_layer(
+        self, prefix: str
+    ) -> HummingLayerQuantizationConfig | None:
+        weight_config = self.get_layer_weight_quant_config(self.full_config, prefix)
+
+        if weight_config is None:
+            weight_config = envs.VLLM_HUMMING_ONLINE_QUANT_CONFIG or {}
+            weight_config = self.get_layer_weight_quant_config(weight_config, prefix)
+            if weight_config is not None:
+                weight_config["ckpt_quant_method"] = None
+
+        if weight_config is not None:
+            return HummingLayerQuantizationConfig.from_config(weight_config)
+        return None
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        quant_config = self.get_quant_config_for_layer(prefix)
+        if quant_config is None:
+            if isinstance(layer, FusedMoE):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+            elif isinstance(layer, LinearBase):
+                return UnquantizedLinearMethod()
+        elif isinstance(layer, LinearBase):
+            return HummingLinearMethod(quant_config)
+        elif isinstance(layer, FusedMoE):
+            return HummingMoEMethod(quant_config, layer.moe_config)
+        return None
+
+
+class HummingLinearMethod(LinearMethodBase):
+    def __init__(self, quant_config: HummingLayerQuantizationConfig):
+        self.quant_config = quant_config
+        ckpt_quant_method = self.quant_config.ckpt_quant_method
+        weight_converter_cls = WEIGHT_CONVERTER_MAP[ckpt_quant_method]
+        self.weight_converter = weight_converter_cls(quant_config)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        f16_dtype = dtypes.DataType.from_torch_dtype(params_dtype)
+        output_size_per_partition = sum(output_partition_sizes)
+        layer.logical_widths = output_partition_sizes
+        layer.output_size = output_size
+        layer.input_size_per_partition = input_size_per_partition
+        layer.output_size_per_partition = output_size_per_partition
+        layer.orig_dtype = params_dtype
+        layer.weight_block_size = None
+
+        self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
+        self.quant_config.c_dtype = self.quant_config.c_dtype or f16_dtype
+        self.quant_config.bs_dtype = self.quant_config.bs_dtype or f16_dtype
+
+        meta = HummingLayerMeta(
+            a_dtype=self.quant_config.a_dtype,
+            b_dtype=self.quant_config.b_dtype,
+            c_dtype=self.quant_config.c_dtype,
+            bs_dtype=self.quant_config.bs_dtype,
+            shape_n=output_size,
+            shape_k=input_size,
+            has_bias=layer.has_bias,
+            weight_scale_group_size=self.quant_config.weight_scale_group_size_k,
+            has_dynamic_zp=self.quant_config.has_dynamic_zp,
+            has_global_scale=self.quant_config.has_global_scale,
+        )
+        self.meta = meta
+        HummingMethod.create_weights(layer, meta)
+        self.process_params(layer)
+
+    def process_params(self, layer: torch.nn.Module):
+        weight_loader = self.get_weight_loader(layer)
+        # bias is inited and loaded outside HummingLinearMethod
+        names = ["weight", "weight_scale", "zero_point", "global_scale"]
+        unused_names = list(self.weight_converter.unused_names)
+
+        for name in names:
+            param = getattr(layer, name, None)
+            if param is None:
+                continue
+
+            set_weight_attrs(param, {"weight_loader": weight_loader})
+            param.param_name = name
+            param.ckpt_name = self.weight_converter.get_ckpt_name(name)
+            if name == param.ckpt_name:
+                continue
+
+            buffer = torch.nn.Buffer(param.data)
+
+            # rename param name (layer_name -> ckpt_name) for weight loading
+            setattr(layer, param.ckpt_name, param)
+            # convert from a Parameter to a Buffer to avoid conflicts with ckpt_name
+            delattr(layer, param.param_name)
+            setattr(layer, param.param_name, buffer)
+
+        # set unused names to empty tensors and empty weight_loaders
+        # to avoid loading errors
+        for name in names + unused_names:
+            ckpt_name = name
+            if name not in unused_names:
+                ckpt_name = self.weight_converter.get_ckpt_name(name)
+            if hasattr(layer, ckpt_name):
+                continue
+
+            tensor = torch.tensor([])
+            param = torch.nn.Parameter(tensor, requires_grad=False)
+
+            def empty_weight_loader(*args, **kwargs):
+                return
+
+            set_weight_attrs(param, {"weight_loader": empty_weight_loader})
+            setattr(layer, ckpt_name, param)
+
+    def get_weight_loader(self, layer: torch.nn.Module):
+        shard_id_map = {"q": 0, "k": 1, "v": 2}
+
+        def weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            shard_id: str | int | None = None,
+        ):
+            param_name = param.param_name
+            data = self.weight_converter.convert(loaded_weight, param_name)
+            if isinstance(shard_id, str):
+                shard_id = shard_id_map[shard_id]
+            offset_n = sum(layer.logical_widths[: (shard_id or 0)])
+            packed = self.quant_config.ckpt_quant_method is not None
+            HummingMethod.load_weight(
+                layer=layer,
+                offset_n=offset_n,
+                packed=packed,
+                **data,
+            )
+
+        return weight_loader
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        HummingMethod.finish_load(layer)
+        use_stream_k = not vllm_is_batch_invariant()
+        HummingMethod.prepare_default_kernel_configs(layer, use_stream_k=use_stream_k)
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return HummingMethod.forward_layer(layer, x)
+
+
+class HummingMoEMethod(FusedMoEMethodBase):
+    def __init__(
+        self, quant_config: HummingLayerQuantizationConfig, moe: "FusedMoEConfig"
+    ) -> None:
+        super().__init__(moe)
+        self.quant_config = quant_config
+        self.moe = moe
+        ckpt_quant_method = self.quant_config.ckpt_quant_method
+        weight_converter_cls = WEIGHT_CONVERTER_MAP[ckpt_quant_method]
+        self.weight_converter = weight_converter_cls(quant_config)
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        layer.num_experts = num_experts
+        layer.top_k = self.moe.experts_per_token
+
+        f16_dtype = dtypes.DataType.from_torch_dtype(params_dtype)
+        self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
+        self.quant_config.c_dtype = self.quant_config.c_dtype or f16_dtype
+        self.quant_config.bs_dtype = self.quant_config.bs_dtype or f16_dtype
+
+        base_meta = HummingLayerMeta(
+            a_dtype=self.quant_config.a_dtype,
+            b_dtype=self.quant_config.b_dtype,
+            c_dtype=self.quant_config.c_dtype,
+            bs_dtype=self.quant_config.bs_dtype,
+            shape_n=0,
+            shape_k=0,
+            has_bias=self.moe.has_bias,
+            weight_scale_group_size=self.quant_config.weight_scale_group_size_k,
+            has_dynamic_zp=self.quant_config.has_dynamic_zp,
+            has_global_scale=self.quant_config.has_global_scale,
+        )
+
+        meta1 = dataclasses.replace(
+            base_meta,
+            shape_n=intermediate_size_per_partition * 2,
+            shape_k=hidden_size,
+            num_experts=num_experts,
+            sublayer_name="w13",
+        )
+        self.meta1 = meta1
+
+        meta2 = dataclasses.replace(
+            base_meta,
+            shape_n=hidden_size,
+            shape_k=intermediate_size_per_partition,
+            num_experts=num_experts,
+            sublayer_name="w2",
+        )
+        self.meta2 = meta2
+
+        HummingMethod.create_weights(layer, meta1)
+        HummingMethod.create_weights(layer, meta2)
+        self.process_params(layer)
+
+    def process_params(self, layer: torch.nn.Module):
+        weight_loader = self.get_weight_loader(layer)
+        # unlink HummingLinearMethod,
+        # the bias os FusedMoE is manager by HummingMoEMethod
+        names = ["weight", "weight_scale", "zero_point", "global_scale", "bias"]
+        unused_names = list(self.weight_converter.unused_names)
+
+        for name in names:
+            for sublayer in ["w13", "w2"]:
+                param = getattr(layer, sublayer + "_" + name, None)
+                if param is None:
+                    continue
+
+                set_weight_attrs(param, {"weight_loader": weight_loader})
+                ckpt_name = self.weight_converter.get_ckpt_name(name)
+                param.ckpt_name = ckpt_name
+                param.param_name = name
+                param.sublayer = sublayer
+                if name == ckpt_name:
+                    continue
+                buffer = torch.nn.Buffer(param.data)
+
+                setattr(layer, sublayer + "_" + ckpt_name, param)
+                delattr(layer, sublayer + "_" + name)
+                setattr(layer, sublayer + "_" + name, buffer)
+
+        for name in names + unused_names:
+            ckpt_name = name
+            if name not in unused_names:
+                ckpt_name = self.weight_converter.get_ckpt_name(name)
+
+            for sublayer in ["w13", "w2"]:
+                if hasattr(layer, sublayer + "_" + name):
+                    continue
+
+                tensor = torch.tensor([])
+                param = torch.nn.Parameter(tensor, requires_grad=False)
+
+                def empty_weight_loader(*args, **kwargs):
+                    return
+
+                set_weight_attrs(param, {"weight_loader": empty_weight_loader})
+                setattr(layer, sublayer + "_" + ckpt_name, param)
+
+    def get_weight_loader(self, layer: torch.nn.Module):
+        shard_id_map = {"w1": 0, "w3": 1}
+
+        def weight_loader(
+            param: torch.nn.Parameter,
+            loaded_weight: torch.Tensor,
+            weight_name: str,
+            shard_id: int | None = None,
+            expert_id: int | None = None,
+        ):
+            param_name = param.param_name
+            data = self.weight_converter.convert(loaded_weight, param_name)
+
+            offset_n = None
+            if param.sublayer == "w13":
+                if isinstance(shard_id, str):
+                    shard_id = shard_id_map[shard_id]
+                offset_n = self.meta1.shape_n // 2 * (shard_id or 0)
+
+            packed = self.quant_config.ckpt_quant_method is not None
+            HummingMethod.load_weight(
+                layer=layer,
+                offset_n=offset_n,
+                expert_id=expert_id,
+                packed=packed,
+                sublayer_name=param.sublayer,
+                **data,
+            )
+
+        return weight_loader
+
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module):
+        return
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        HummingMethod.finish_load(layer, "w13")
+        HummingMethod.finish_load(layer, "w2")
+
+        use_stream_k = not vllm_is_batch_invariant()
+        HummingMethod.prepare_default_kernel_configs(
+            layer,
+            sublayer_name="w13",
+            use_stream_k=use_stream_k,
+            is_moe=True,
+            top_k=layer.top_k,
+            is_moe_down=False,
+        )
+        HummingMethod.prepare_default_kernel_configs(
+            layer,
+            sublayer_name="w2",
+            use_stream_k=use_stream_k,
+            is_moe=True,
+            top_k=layer.top_k,
+            is_moe_down=True,
+        )
+
+    def prepare_buffer(
+        self,
+        layer: FusedMoE,
+        shape_m: int,
+        top_k: int,
+        dtype: torch.dtype,
+        device: torch.device,
+    ):
+        output_shape1 = (shape_m, top_k, layer.humming_metas["w13"].shape_n)
+        output_shape2 = (shape_m, top_k, layer.humming_metas["w2"].shape_n)
+        input_shape2 = (shape_m, top_k, layer.humming_metas["w13"].shape_n // 2)
+        buffer_size1 = output_shape1[0] * output_shape1[1] * output_shape1[2]
+        buffer_size2 = output_shape2[0] * output_shape2[1] * output_shape2[2]
+
+        buffer_size = max(buffer_size1, buffer_size2) + buffer_size1 // 2
+        buffer = torch.empty(buffer_size, dtype=dtype, device=device)
+        output1 = buffer[buffer_size1 // 2 :][:buffer_size1].view(*output_shape1)
+        input2 = buffer[: buffer_size1 // 2].view(*input_shape2)
+        output2 = buffer[buffer_size1 // 2 :][:buffer_size2].view(*output_shape2)
+
+        return output1, input2, output2
+
+    def apply(
+        self,
+        layer: FusedMoE,
+        x: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        # TODO: config tunning
+        sorted_token_ids, expert_ids, num_tokens_post_padded = humming_moe_align(
+            layer.humming_block_size_configs["w13"],
+            topk_ids=topk_ids,
+            num_experts=layer.num_experts,
+            expert_map=layer.expert_map,
+        )
+
+        output1, input2, output2 = self.prepare_buffer(
+            layer,
+            shape_m=x.size(0),
+            top_k=topk_ids.size(-1),
+            dtype=x.dtype,
+            device=x.device,
+        )
+
+        output1 = HummingMethod.forward_layer(
+            layer=layer,
+            inputs=x,
+            outputs=output1,
+            topk_weights=topk_weights,
+            sorted_token_ids=sorted_token_ids,
+            expert_ids=expert_ids,
+            num_tokens_post_padded=num_tokens_post_padded,
+            sublayer_name="w13",
+        )
+
+        # TODO: fused activation
+        from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
+
+        apply_moe_activation(
+            layer.activation,
+            input2.view(-1, input2.size(-1)),
+            output1.view(-1, output1.size(-1)),
+        )
+
+        output2 = HummingMethod.forward_layer(
+            layer=layer,
+            inputs=input2,
+            outputs=None,
+            topk_weights=topk_weights,
+            sorted_token_ids=sorted_token_ids,
+            expert_ids=expert_ids,
+            num_tokens_post_padded=num_tokens_post_padded,
+            sublayer_name="w2",
+        )
+
+        return output2.sum(1)
