@@ -183,6 +183,24 @@ class Base(
                 trust_remote_code=self.model_config.trust_remote_code,
             )
 
+        # Some models (e.g. GLM-OCR) are released with num_nextn_predict_layers=0
+        # in their config but still include MTP (multi-token prediction) weights in
+        # the checkpoint for optional speculative decoding via
+        # --speculative-config.method mtp. When loaded through the Transformers
+        # backend the MTP layer weights are "unexpected" (the architecture built
+        # from num_nextn_predict_layers=0 has no MTP layers), causing a crash.
+        # Detect this pattern and add the MTP layer prefix to
+        # ignore_unexpected_prefixes so the weights are silently skipped.
+        num_nextn = getattr(self.text_config, "num_nextn_predict_layers", None)
+        num_hidden = getattr(self.text_config, "num_hidden_layers", None)
+        if num_nextn == 0 and num_hidden is not None:
+            for mod_name, mod in self.model.named_modules():
+                if (isinstance(mod, nn.ModuleList)
+                        and len(mod) == num_hidden):
+                    self.ignore_unexpected_prefixes.append(
+                        f"{mod_name}.{num_hidden}.")
+                    break
+
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
         # Substitute remaining layers with vLLM's layers as needed
