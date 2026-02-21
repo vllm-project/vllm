@@ -550,3 +550,17 @@ class H2OVLChatModel(InternVLChatModel):
         else:
             msg = "Monolith mode is not applicable to H2OVL"
             raise NotImplementedError(msg)
+
+    def get_num_mm_encoder_tokens(
+        self,
+        num_image_tokens: int,
+    ) -> int:
+        # H2OVL encoder preserves token count
+        return num_image_tokens
+
+    def get_num_mm_connector_tokens(
+        self,
+        num_vision_tokens: int,
+    ) -> int:
+        # 1:1 mapping between encoder and connector
+        return num_vision_tokens
