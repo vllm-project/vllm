@@ -1484,7 +1484,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 
-- label: LM Eval Large Models (4 GPUs)(MI325) # 24.8m
+- label: LM Eval Large Models (4 GPUs)(FP8) # 24.8m
   timeout_in_minutes: 42
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
@@ -2887,7 +2887,7 @@ steps:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
 
-- label: LM Eval Large Models (4 GPUs)(MI355) # TBD
+- label: LM Eval Large Models (4 GPUs)(FP8) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
