@@ -330,6 +330,11 @@ RUN bash /tmp/install_torchcodec.sh \
 # Copy in the v1 package (for python-only install test group)
 COPY --from=export_vllm /vllm_v1 /usr/local/lib/python${PYTHON_VERSION}/dist-packages/vllm/v1
 
+# Set MIOPEN ENVS to resolve performance regressions in MIOpen 3D convolution kernel
+# See: https://github.com/pytorch/pytorch/issues/169857
+ENV MIOPEN_DEBUG_CONV_DIRECT=0
+ENV MIOPEN_DEBUG_CONV_GEMM=0
+
 # Source code is used in the `python_only_compile.sh` test
 # We hide it inside `src/` so that this source code
 # will not be imported by other tests
