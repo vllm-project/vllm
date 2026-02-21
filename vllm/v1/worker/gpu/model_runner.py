@@ -66,6 +66,9 @@ from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.spec_decode import init_speculator
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    set_eagle3_aux_hidden_state_layers,
+)
 from vllm.v1.worker.gpu.spec_decode.rejection_sample import rejection_sample
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
@@ -133,14 +136,40 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.output_copy_stream = torch.cuda.Stream(self.device)
         self.output_copy_event = torch.cuda.Event()
 
+        # Pipeline parallelism.
+        self.use_pp = self.parallel_config.pipeline_parallel_size > 1
+        if self.use_pp:
+            self.is_first_pp_rank = get_pp_group().is_first_rank
+            self.is_last_pp_rank = get_pp_group().is_last_rank
+        else:
+            self.is_first_pp_rank = True
+            self.is_last_pp_rank = True
+
+        # Decode context parallelism.
+        self.dcp_size = self.parallel_config.decode_context_parallel_size
+        self.use_dcp = self.dcp_size > 1
+        self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
+        self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
+
+        self.speculator = None
         if self.speculative_config is not None:
             self.do_spec_decode = True
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
-            self.speculator = init_speculator(self.vllm_config, self.device)
+            if self.is_last_pp_rank:
+                self.speculator = init_speculator(self.vllm_config, self.device)
+
+            # EAGLE3 may require auxiliary hidden states from target model outputs.
+            self.use_aux_hidden_state_outputs = (
+                self.speculative_config.method == "eagle3"
+            )
         else:
             self.do_spec_decode = False
             self.num_speculative_steps = 0
-            self.speculator = None
+            self.use_aux_hidden_state_outputs = False
+
+        # Draft tokens propagation - for spec-dec + struct outputs.
+        self.draft_tokens_handler = DraftTokensHandler(self.device)
+
         self.req_states = RequestState(
             max_num_reqs=self.max_num_reqs,
             max_model_len=self.max_model_len,
@@ -176,27 +205,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
-
-        # Draft tokens propagation - for spec-dec + struct outputs.
-        self.draft_tokens_handler = DraftTokensHandler(self.device)
-
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
-
-        # Pipeline parallelism.
-        self.use_pp = self.parallel_config.pipeline_parallel_size > 1
-        if self.use_pp:
-            self.is_first_pp_rank = get_pp_group().is_first_rank
-            self.is_last_pp_rank = get_pp_group().is_last_rank
-        else:
-            self.is_first_pp_rank = True
-            self.is_last_pp_rank = True
-
-        # Decode context parallelism.
-        self.dcp_size = self.parallel_config.decode_context_parallel_size
-        self.use_dcp = self.dcp_size > 1
-        self.dcp_rank = get_dcp_group().rank_in_group if self.use_dcp else 0
-        self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -220,7 +230,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.model = self.load_lora_model(
                     self.model, self.vllm_config, self.device
                 )
-            if self.do_spec_decode:
+
+            if self.use_aux_hidden_state_outputs:
+                set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
+            if self.speculator is not None:
                 self.speculator.load_model(self.model)
         time_after_load = time.perf_counter()
 
@@ -271,7 +284,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config, self.vllm_config, self.device
         )
         check_attention_cp_compatibility(self.vllm_config)
-        if self.do_spec_decode:
+        if self.speculator is not None:
             # HACK(woosuk)
             self.speculator.set_attn(
                 self.kv_cache_config,
@@ -359,7 +372,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None, None
 
         assert self.execute_model_state is not None
-        hidden_states, input_batch, _ = self.execute_model_state
+        hidden_states, _, input_batch, _ = self.execute_model_state
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -399,7 +412,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert sample_hidden_states is not None
             self._dummy_sampler_run(sample_hidden_states)
 
-            if self.do_spec_decode:
+            if self.speculator is not None:
                 num_tokens_across_dp = make_num_tokens_across_dp(
                     self.parallel_config.data_parallel_size, self.max_num_tokens
                 )
@@ -428,6 +441,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     @torch.inference_mode()
     def capture_model(self) -> int:
+        if (
+            self.use_aux_hidden_state_outputs
+            and self.cudagraph_manager.cudagraph_mode.has_full_cudagraphs()
+        ):
+            logger.warning_once(
+                "Skipping CUDA graph capture for Eagle3 aux hidden states "
+                "because FULL CUDA graph is not supported."
+            )
+            return 0
+
         if not self.cudagraph_manager.needs_capture():
             logger.warning(
                 "Skipping CUDA graph capture. To turn on CUDA graph capture, "
@@ -465,7 +488,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 kv_cache_config=self.kv_cache_config,
                 has_lora=self.lora_config is not None,
             )
-            if self.do_spec_decode:
+            if self.speculator is not None:
                 self.speculator.capture_model()
 
         end_time = time.perf_counter()
@@ -898,6 +921,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
             )
         )
+        if (
+            self.use_aux_hidden_state_outputs
+            and local_cudagraph_mode == CUDAGraphMode.FULL
+        ):
+            # FULL graph replay path only returns hidden_states tensor.
+            local_cudagraph_mode = CUDAGraphMode.NONE
+            local_cudagraph_size = None
 
         # DP sync: num_tokens + cudagraph_size + cudagraph_mode
         num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
@@ -959,6 +989,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # FIXME(woosuk): Fix warmup for LoRA.
 
         # Run model.
+        aux_hidden_states = None
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
             # NOTE(woosuk): Here, we don't need to pass the input tensors,
@@ -998,12 +1029,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=input_batch.slot_mappings,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
-                hidden_states = self.model(
+                model_output = self.model(
                     input_ids=input_ids,
                     positions=positions,
                     inputs_embeds=inputs_embeds,
                     intermediate_tensors=intermediate_tensors,
                 )
+                if self.use_aux_hidden_state_outputs and self.is_last_pp_rank:
+                    hidden_states, aux_hidden_states = model_output
+                else:
+                    hidden_states = model_output
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
 
@@ -1011,12 +1046,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Non-last PP rank: return IntermediateTensors for sending.
             assert isinstance(hidden_states, IntermediateTensors)
             hidden_states.kv_connector_output = kv_connector_output
-            self.execute_model_state = (None, input_batch, kv_connector_output)
+            self.execute_model_state = (None, None, input_batch, kv_connector_output)
             return hidden_states
 
-        assert isinstance(hidden_states, torch.Tensor)
         # Last rank (or no PP): hidden_states is a tensor for sampling.
-        self.execute_model_state = (hidden_states, input_batch, kv_connector_output)
+        assert isinstance(hidden_states, torch.Tensor)
+        self.execute_model_state = (
+            hidden_states,
+            aux_hidden_states,
+            input_batch,
+            kv_connector_output,
+        )
         return None
 
     @torch.inference_mode()
@@ -1024,7 +1064,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
         assert self.execute_model_state is not None
-        hidden_states, input_batch, kv_connector_output = self.execute_model_state
+        hidden_states, aux_hidden_states, input_batch, kv_connector_output = (
+            self.execute_model_state
+        )
         self.execute_model_state = None  # type: ignore
 
         if not self.is_last_pp_rank:
@@ -1084,11 +1126,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.postprocess(
             input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
         )
-        if self.do_spec_decode:
+        if self.speculator is not None:
             draft_tokens = self.propose_draft(
                 input_batch,
                 hidden_states,
-                None,  # aux_hidden_states
+                aux_hidden_states,
                 num_sampled,
                 num_rejected,
             )
