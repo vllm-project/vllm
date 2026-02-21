@@ -22,7 +22,12 @@
 #   docker buildx bake -f docker/docker-bake.hcl -f docker/versions.json
 # =============================================================================
 
-ARG CUDA_VERSION=12.9.1
+ARG CUDA_VERSION=12.8.1
+# BUILDER_CUDA_VERSION controls the CUDA toolkit used to compile csrc/ and
+# extensions (DeepGEMM, EP kernels).  It can differ from CUDA_VERSION, which
+# is the CUDA version shipped in the final runtime image and used to select
+# the matching PyTorch wheel.
+ARG BUILDER_CUDA_VERSION=12.9.1
 ARG PYTHON_VERSION=3.12
 
 # By parameterizing the base images, we allow third-party to use their own
@@ -36,7 +41,7 @@ ARG PYTHON_VERSION=3.12
 # compatibility with other Linux OSes. The main reason for this is that the
 # glibc version is baked into the distro, and binaries built with one glibc
 # version are not backwards compatible with OSes that use an earlier version.
-ARG BUILD_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-devel-ubuntu20.04
+ARG BUILD_BASE_IMAGE=nvidia/cuda:${BUILDER_CUDA_VERSION}-devel-ubuntu20.04
 # Using cuda base image with minimal dependencies necessary for JIT compilation (FlashInfer, DeepGEMM, EP kernels)
 ARG FINAL_BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-base-ubuntu22.04
 
@@ -92,8 +97,13 @@ ARG INSTALL_KV_CONNECTORS=false
 FROM ${BUILD_BASE_IMAGE} AS base
 
 ARG CUDA_VERSION
+ARG BUILDER_CUDA_VERSION
 ARG PYTHON_VERSION
 
+# Override the CUDA_VERSION env var inherited from the nvidia base image
+# (which equals BUILDER_CUDA_VERSION) so that $CUDA_VERSION in RUN commands
+# resolves to the runtime CUDA version used for PyTorch wheel selection.
+ENV CUDA_VERSION=${CUDA_VERSION}
 ENV DEBIAN_FRONTEND=noninteractive
 
 # Install system dependencies including build tools
@@ -133,7 +143,7 @@ ENV UV_LINK_MODE=copy
 RUN gcc --version
 
 # Ensure CUDA compatibility library is loaded
-RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+RUN echo "/usr/local/cuda-$(echo "$BUILDER_CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
@@ -309,7 +319,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 # Build DeepGEMM, pplx-kernels, DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
 FROM base AS extensions-build
-ARG CUDA_VERSION
+ARG BUILDER_CUDA_VERSION
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 ENV UV_HTTP_TIMEOUT=500
@@ -325,7 +335,7 @@ COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/deepgemm/dist && \
     VLLM_DOCKER_BUILD_CONTEXT=1 TORCH_CUDA_ARCH_LIST="9.0a 10.0a" /tmp/install_deepgemm.sh \
-        --cuda-version "${CUDA_VERSION}" \
+        --cuda-version "${BUILDER_CUDA_VERSION}" \
         ${DEEPGEMM_GIT_REF:+--ref "$DEEPGEMM_GIT_REF"} \
         --wheel-dir /tmp/deepgemm/dist || \
     echo "DeepGEMM build skipped (CUDA version requirement not met)"
