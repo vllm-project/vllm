@@ -331,5 +331,26 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             persistent_state_indices_t.copy_(state_indices_t, non_blocking=True)
             state_indices_t = persistent_state_indices_t
 
+            # For 'all' mode, also update prefix caching block indices
+            # to use this builder's persistent buffers (required for CUDA
+            # graph replay to read from the correct memory addresses).
+            if self.vllm_config.cache_config.mamba_cache_mode == "all":
+                assert metadata.block_idx_last_scheduled_token is not None
+                assert metadata.block_idx_last_computed_token is not None
+                self.block_idx_last_scheduled_token[:num_reqs].copy_(
+                    metadata.block_idx_last_scheduled_token[:num_reqs],
+                    non_blocking=True,
+                )
+                new_metadata.block_idx_last_scheduled_token = (
+                    self.block_idx_last_scheduled_token[: metadata.num_decode_tokens]
+                )
+                self.block_idx_last_computed_token[:num_reqs].copy_(
+                    metadata.block_idx_last_computed_token[:num_reqs],
+                    non_blocking=True,
+                )
+                new_metadata.block_idx_last_computed_token = (
+                    self.block_idx_last_computed_token[: metadata.num_decode_tokens]
+                )
+
         new_metadata.state_indices_tensor = state_indices_t
         return new_metadata
