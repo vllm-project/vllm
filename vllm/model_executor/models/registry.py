@@ -468,6 +468,10 @@ _MULTIMODAL_MODELS = {
         "qwen3_asr",
         "Qwen3ASRForConditionalGeneration",
     ),
+    "Qwen3ASRRealtimeGeneration": (
+        "qwen3_asr_realtime",
+        "Qwen3ASRRealtimeGeneration",
+    ),
     "Qwen3VLForConditionalGeneration": ("qwen3_vl", "Qwen3VLForConditionalGeneration"),  # noqa: E501
     "Qwen3VLMoeForConditionalGeneration": (
         "qwen3_vl_moe",
