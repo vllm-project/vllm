@@ -74,6 +74,7 @@ if TYPE_CHECKING:
     VLLM_TARGET_DEVICE: str = "cuda"
     VLLM_MAIN_CUDA_VERSION: str = "12.9"
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
+    VLLM_BATCH_INVARIANT: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -477,6 +478,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "highest",
         ["highest", "high", "medium"],
         case_sensitive=False,
+    ),
+    # Enable batch-invariant mode: deterministic results regardless of
+    # batch composition. Requires NVIDIA GPU with compute capability >= 9.0.
+    "VLLM_BATCH_INVARIANT": lambda: bool(
+        int(os.getenv("VLLM_BATCH_INVARIANT", "0"))
     ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
