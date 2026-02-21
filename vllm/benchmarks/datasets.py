@@ -10,6 +10,7 @@ generation. Supported dataset types include:
   - BurstGPT
   - HuggingFace
   - VisionArena
+  - TxtSlices
 """
 
 import argparse
@@ -20,11 +21,11 @@ import json
 import logging
 import math
 import random
+import urllib
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import suppress
-from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cache
 from io import BytesIO
 from tempfile import NamedTemporaryFile
@@ -60,20 +61,16 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# -----------------------------------------------------------------------------
-# Data Classes
-# -----------------------------------------------------------------------------
 
-
-@dataclass
+@dataclass(frozen=True)
 class SampleRequest:
     """
     Represents a single inference request for benchmarking.
     """
 
-    prompt: str | list[str]
+    prompt: str | list[str] | list[dict]
     prompt_len: int
-    expected_output_len: int
+    expected_output_len: int | None
     multi_modal_data: MultiModalDataDict | dict | list[dict] | None = None
     lora_request: LoRARequest | None = None
     request_id: str | None = None
@@ -110,7 +107,7 @@ class BenchmarkDataset(ABC):
         # default seed.
         self.random_seed = random_seed if random_seed is not None else self.DEFAULT_SEED
         self.disable_shuffle = disable_shuffle
-        self.data = None
+        self.data: Any
 
     def apply_multimodal_chat_transformation(
         self,
@@ -187,6 +184,7 @@ class BenchmarkDataset(ABC):
         num_requests: int,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        **kwargs,
     ) -> list[SampleRequest]:
         """
         Abstract method to generate sample requests from the dataset.
@@ -234,8 +232,10 @@ class BenchmarkDataset(ABC):
             needed = num_requests - len(requests)
             additional = []
             for i in range(needed):
-                req = deepcopy(random.choice(requests))
-                req.request_id = request_id_prefix + str(len(requests) + i)
+                req = replace(
+                    random.choice(requests),
+                    request_id=request_id_prefix + str(len(requests) + i),
+                )
                 additional.append(req)
             requests.extend(additional)
             logger.info("Oversampled requests to reach %d total samples.", num_requests)
@@ -702,8 +702,11 @@ class RandomDatasetForReranking(RandomDataset):
         tokenizer: TokenizerLike,
         num_requests: int,
         request_id_prefix: str = "",
+        no_oversample: bool = False,
+        prefix_len: int = RandomDataset.DEFAULT_PREFIX_LEN,
         range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
+        output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
         batchsize: int = 1,
         is_reranker: bool = True,
         **kwargs,
@@ -792,6 +795,95 @@ class RandomDatasetForReranking(RandomDataset):
             )
 
         return batch_requests
+
+
+# -----------------------------------------------------------------------------
+# TxtSlicesDataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class TxtSlicesDataset(BenchmarkDataset):
+    """
+    Implements the TxtSlices dataset. Takes a URL or file path to a text file,
+    tokenizes the entire content, and generates sample requests by randomly
+    slicing from the tokenized sequence with cycling support.
+    """
+
+    def __init__(
+        self,
+        **kwargs,
+    ) -> None:
+        super().__init__(**kwargs)
+        dataset_path = kwargs.get("dataset_path")
+        if dataset_path is None:
+            raise ValueError(
+                "dataset_path must be provided to create a TxtSlicesDataset."
+            )
+        self.text = self.load_data(dataset_path)
+        if len(self.text) == 0:
+            raise ValueError("The text file is empty and cannot be sampled from.")
+
+        self.rng = random.Random(self.random_seed)
+
+    @staticmethod
+    def load_data(dataset_path: str) -> str:
+        if dataset_path.startswith(("http://", "https://")):
+            with urllib.request.urlopen(dataset_path) as response:
+                return response.read().decode("utf-8")
+        else:
+            with open(dataset_path, encoding="utf-8") as f:
+                return f.read()
+
+    def get_token_ids(self, tokenizer: TokenizerLike) -> tuple[int, ...]:
+        tokenized = tokenizer(self.text, add_special_tokens=False)
+        token_ids = tokenized.input_ids
+        if len(token_ids) == 0:
+            raise ValueError("The text is empty and cannot be sampled from.")
+        return token_ids
+
+    def generate_prompt(
+        self,
+        tokenizer: TokenizerLike,
+        token_ids: tuple[int, ...],
+        input_len: int,
+    ) -> str:
+        num_available_tokens = len(token_ids)
+
+        # Randomly select a start position
+        start_pos = self.rng.randint(0, num_available_tokens - 1)
+
+        # Extract tokens with cycling if necessary
+        prompt_token_ids = tuple(
+            token_ids[(start_pos + j) % num_available_tokens] for j in range(input_len)
+        )
+
+        # Decode the tokens to get the prompt
+        return tokenizer.decode(prompt_token_ids, skip_special_tokens=False)
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        input_len: int = 1024,
+        output_len: int = 128,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        # Tokenize the entire text content
+        token_ids = self.get_token_ids(tokenizer)
+        num_special_tokens = int(tokenizer.num_special_tokens_to_add())
+        non_special_length = input_len - num_special_tokens
+
+        return [
+            SampleRequest(
+                prompt=self.generate_prompt(tokenizer, token_ids, non_special_length),
+                prompt_len=input_len,
+                expected_output_len=output_len,
+                request_id=request_id_prefix + str(i),
+            )
+            for i in range(num_requests)
+        ]
 
 
 # -----------------------------------------------------------------------------
@@ -1104,6 +1196,7 @@ class RandomMultiModalDataset(RandomDataset):
         range_ratio: float = RandomDataset.DEFAULT_RANGE_RATIO,
         input_len: int = RandomDataset.DEFAULT_INPUT_LEN,
         output_len: int = RandomDataset.DEFAULT_OUTPUT_LEN,
+        batchsize: int = 1,
         limit_mm_per_prompt: dict[str, int] = DEFAULT_LIMIT_MM_PER_PROMPT,
         base_items_per_request: int = DEFAULT_BASE_ITEMS_PER_REQUEST,
         num_mm_items_range_ratio: float = DEFAULT_NUM_MM_ITEMS_RANGE_RATIO,
@@ -1113,6 +1206,10 @@ class RandomMultiModalDataset(RandomDataset):
         enable_multimodal_chat: bool = DEFAULT_ENABLE_MULTIMODAL_CHAT,
         **kwargs,
     ) -> list[SampleRequest]:
+        if batchsize != 1:
+            raise NotImplementedError(
+                "batchsize > 1 is not supported for RandomMultiModalDataset."
+            )
         # Get the sampling parameters for the dataset
         input_lens, output_lens, offsets = self.get_sampling_params(
             num_requests, range_ratio, input_len, output_len, tokenizer
@@ -1252,15 +1349,15 @@ class ShareGPTDataset(BenchmarkDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
         lora_path: str | None = None,
         max_loras: int | None = None,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
         **kwargs,
-    ) -> list:
-        samples: list = []
+    ) -> list[SampleRequest]:
+        samples: list[SampleRequest] = []
         ind = 0
         for entry in self.data:
             if len(samples) >= num_requests:
@@ -1358,6 +1455,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "custom_mm",
             "prefix_repetition",
             "spec_bench",
+            "txt-slices",
         ],
         help="Name of the dataset to benchmark on.",
     )
@@ -1371,8 +1469,8 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
         type=str,
         default=None,
         action=_ValidateDatasetArgs,
-        help="Path to the sharegpt/sonnet dataset. "
-        "Or the huggingface dataset ID if using HF dataset.",
+        help="Path to the sharegpt/sonnet dataset, the HF dataset ID if using HF "
+        "dataset, or the path/URL to a txt file for the txt-slices dataset.",
     )
     parser.add_argument(
         "--no-oversample",
@@ -1552,6 +1650,7 @@ def add_random_dataset_base_args(
     - random (random dataset)
     - random-mm (random multimodal dataset)
     - random-rerank (random dataset for reranking)
+    - txt-slices (txt-slices dataset)
 
     Args:
         parser_or_group: Either a parser or an argument group to add arguments to.
@@ -1995,6 +2094,18 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 request_id_prefix=args.request_id_prefix,
                 no_oversample=args.no_oversample,
             ),
+            "txt-slices": lambda: TxtSlicesDataset(
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                input_len=args.random_input_len,
+                output_len=args.random_output_len,
+                request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
+            ),
         }
 
         try:
@@ -2042,7 +2153,7 @@ class CustomDataset(BenchmarkDataset):
         # This will be the standardized format which load_data()
         # has to convert into depending on the filetype of dataset_path.
         # sample() will assume this standardized format of self.data
-        self.data = []
+        self.data: list[dict] = []
 
         # Load the JSONL file
         if self.dataset_path.endswith(".jsonl"):
@@ -2071,15 +2182,15 @@ class CustomDataset(BenchmarkDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
         lora_path: str | None = None,
         max_loras: int | None = None,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         # load all data if needed
         self.num_available_samples = len(self.data)
         if num_requests <= 0:
@@ -2090,7 +2201,7 @@ class CustomDataset(BenchmarkDataset):
                 num_requests,
             )
 
-        sampled_requests = []
+        sampled_requests: list[SampleRequest] = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
@@ -2262,9 +2373,32 @@ class SpecBench(CustomDataset):
         if not getattr(self, "disable_shuffle", False):
             random.shuffle(self.data)
 
-    def sample(self, **kwargs) -> list:
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        lora_path: str | None = None,
+        max_loras: int | None = None,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
+        skip_chat_template: bool = False,
+        **kwargs,
+    ) -> list[SampleRequest]:
         # leverage CustomDataset sample
-        return super().sample(**kwargs)
+        return super().sample(
+            tokenizer,
+            num_requests,
+            request_id_prefix=request_id_prefix,
+            no_oversample=no_oversample,
+            lora_path=lora_path,
+            max_loras=max_loras,
+            output_len=output_len,
+            enable_multimodal_chat=enable_multimodal_chat,
+            skip_chat_template=skip_chat_template,
+            **kwargs,
+        )
 
 
 # -----------------------------------------------------------------------------
@@ -2303,14 +2437,14 @@ class SonnetDataset(BenchmarkDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
         prefix_len: int = DEFAULT_PREFIX_LEN,
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         return_prompt_formatted: bool = False,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         # Calculate average token length for a poem line.
         tokenized_lines = [tokenizer(line).input_ids for line in self.data]
         avg_len = sum(len(tokens) for tokens in tokenized_lines) / len(tokenized_lines)
@@ -2333,7 +2467,7 @@ class SonnetDataset(BenchmarkDataset):
         num_prefix_lines = max(round((prefix_len - base_offset) / avg_len), 0)
         prefix_lines = self.data[:num_prefix_lines]
 
-        samples = []
+        samples: list[SampleRequest] = []
         ind = 0
         while len(samples) < num_requests:
             extra_lines = random.choices(
@@ -2404,10 +2538,10 @@ class BurstGPTDataset(BenchmarkDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        max_loras: int | None = None,
-        lora_path: str | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        max_loras: int | None = None,
+        lora_path: str | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         samples = []
@@ -2492,15 +2626,15 @@ class ConversationDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
-        enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         # Filter examples with at least 2 conversations
         filtered_data = self.data.filter(lambda x: len(x["conversations"]) >= 2)
-        sampled_requests = []
+        sampled_requests: list[SampleRequest] = []
         ind = 0
         dynamic_output = output_len is None
 
@@ -2552,15 +2686,15 @@ class MultiModalConversationDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
-        enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         # Filter examples with at least 2 conversations
         filtered_data = self.data.filter(lambda x: len(x["conversations"]) >= 2)
-        sampled_requests = []
+        sampled_requests: list[SampleRequest] = []
         ind = 0
         dynamic_output = output_len is None
 
@@ -2621,14 +2755,14 @@ class VisionArenaDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
-        enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        sampled_requests = []
+        sampled_requests: list[SampleRequest] = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
@@ -2675,14 +2809,14 @@ class MMVUDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
-        enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        sampled_requests = []
+        sampled_requests: list[SampleRequest] = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
@@ -2736,15 +2870,15 @@ class InstructCoderDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        sampled_requests = []
+        sampled_requests: list[SampleRequest] = []
         for i, prompt in enumerate(self.sample_prompts(n=num_requests)):
             # apply template
             if not skip_chat_template:
@@ -2801,15 +2935,15 @@ class MTBenchDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
         output_len: int | None = None,
         enable_multimodal_chat: bool = False,
         skip_chat_template: bool = False,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
-        sampled_requests = []
+        sampled_requests: list[SampleRequest] = []
 
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
@@ -2948,12 +3082,12 @@ class AIMODataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        output_len: int | None = None,
         **kwargs,
-    ) -> list:
-        sampled_requests = []
+    ) -> list[SampleRequest]:
+        sampled_requests: list[SampleRequest] = []
         ind = 0
         dynamic_output = output_len is None
 
@@ -3126,18 +3260,18 @@ class ASRDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        output_len: int | None = None,
         **kwargs,
-    ) -> list:
+    ) -> list[SampleRequest]:
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
         if "openai" in tokenizer.name_or_path:
             prompt = "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>"
         else:
             prompt = ""
         prompt_len = len(tokenizer(prompt).input_ids)
-        sampled_requests = []
+        sampled_requests: list[SampleRequest] = []
         ind = 0
         skipped = 0
         asr_min_audio_len_sec = kwargs.get("asr_min_audio_len_sec")
@@ -3224,9 +3358,9 @@ class MLPerfDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        output_len: int | None = None,
         **kwargs,
     ) -> list[SampleRequest]:
         # Force dynamic output length based on reference completion.
@@ -3303,12 +3437,12 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
         prefix_len: int = DEFAULT_PREFIX_LEN,
         suffix_len: int = DEFAULT_SUFFIX_LEN,
         num_prefixes: int = DEFAULT_NUM_PREFIXES,
         output_len: int = DEFAULT_OUTPUT_LEN,
-        request_id_prefix: str = "",
-        no_oversample: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
         vocab_size = tokenizer.vocab_size
@@ -3319,7 +3453,7 @@ class PrefixRepetitionRandomDataset(BenchmarkDataset):
                 f"to num_prefixes ({num_prefixes})"
             )
 
-        def _generate_exact_length_tokens(target_length: int) -> list[int]:
+        def _generate_exact_length_tokens(target_length: int) -> tuple[list[int], int]:
             """Generate tokens that decode and re-encode to exactly
             target_length."""
             # Generate random tokens
@@ -3389,10 +3523,10 @@ class MMStarDataset(HuggingFaceDataset):
         self,
         tokenizer: TokenizerLike,
         num_requests: int,
-        output_len: int | None = None,
-        enable_multimodal_chat: bool = False,
         request_id_prefix: str = "",
         no_oversample: bool = False,
+        output_len: int | None = None,
+        enable_multimodal_chat: bool = False,
         **kwargs,
     ) -> list[SampleRequest]:
         # If --hf-output-len is not set, use the default output length.
@@ -3414,6 +3548,7 @@ class MMStarDataset(HuggingFaceDataset):
             # if enable_multimodal_chat is False).
             prompt_len = len(tokenizer(question_text).input_ids)
 
+            prompt: str | list[dict]
             if enable_multimodal_chat:
                 # If multimodal content should be embedded in the chat message,
                 # convert to [{"role":"user","content":[...]}]
