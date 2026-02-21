@@ -14,6 +14,14 @@ logger = init_logger(__name__)
 
 
 def main():
+    # Check if help is requested before doing any heavy initialization
+    # This allows --help to be fast without CUDA init
+    # Note: We call needs_help() at runtime (not at import time) so that
+    # tests that patch sys.argv get the correct behavior.
+    from vllm.engine.arg_utils import needs_help
+
+    showing_help = needs_help()
+
     import vllm.entrypoints.cli.benchmark.main
     import vllm.entrypoints.cli.collect_env
     import vllm.entrypoints.cli.openai
@@ -32,8 +40,10 @@ def main():
 
     cli_env_setup()
 
-    # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default
-    if len(sys.argv) > 1 and sys.argv[1] == "bench":
+    # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default.
+    # When showing help, skip this to avoid triggering CUDA/platform init
+    # (which can take ~10s or fail without a GPU).
+    if len(sys.argv) > 1 and sys.argv[1] == "bench" and not showing_help:
         logger.debug(
             "Bench command detected, must ensure current platform is not "
             "UnspecifiedPlatform to avoid device type inference error"
