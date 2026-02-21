@@ -93,7 +93,29 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
         audio = mm_data["audio"]
         if isinstance(audio, list) and len(audio) > 1:
             # Limit to single audio to match text requirement
-            mm_data["audio"] = [audio[0]]
+            audio = [audio[0]]
+
+        def _pad_audio_if_needed(audio_item):
+            if not (isinstance(audio_item, tuple) and len(audio_item) == 2):
+                return audio_item
+
+            waveform, sample_rate = audio_item
+            # GLM-ASR expects at least 1 second of audio features.
+            min_samples = int(sample_rate)
+            if len(waveform) >= min_samples:
+                return audio_item
+
+            padded = np.pad(
+                waveform,
+                (0, min_samples - len(waveform)),
+                mode="constant",
+            )
+            return (padded, sample_rate)
+
+        if isinstance(audio, list):
+            mm_data["audio"] = [_pad_audio_if_needed(item) for item in audio]
+        else:
+            mm_data["audio"] = _pad_audio_if_needed(audio)
     return mm_data
 
 

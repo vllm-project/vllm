@@ -3,9 +3,13 @@
 
 import importlib
 import inspect
+import threading
+from collections.abc import Callable
+from contextlib import contextmanager
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any, cast, get_args, get_type_hints
 
+import transformers.processing_utils as hf_processing_utils
 from transformers import (
     AutoFeatureExtractor,
     AutoImageProcessor,
@@ -27,6 +31,68 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+
+
+def _ensure_processing_utils_compat() -> None:
+    # Some remote processors still import this alias, which is missing in
+    # newer Transformers releases.
+    if not hasattr(hf_processing_utils, "ChatTemplateLoadKwargs"):
+        fallback = getattr(hf_processing_utils, "ProcessorChatTemplateKwargs", None)
+        if fallback is not None:
+            hf_processing_utils.ChatTemplateLoadKwargs = fallback
+
+
+_ensure_processing_utils_compat()
+
+_OPTIONAL_ATTRIBUTES_COMPAT_LOCK = threading.RLock()
+
+
+@contextmanager
+def _optional_attributes_init_compat():
+    if getattr(ProcessorMixin, "_vllm_optional_attributes_compat", False):
+        yield
+        return
+
+    original_init = ProcessorMixin.__init__
+
+    def _compat_init(self, *args, **kwargs):
+        optional_attributes = tuple(getattr(type(self), "optional_attributes", ()))
+        optional_values: dict[str, Any] = {}
+        if optional_attributes:
+            for key in optional_attributes:
+                if key in kwargs:
+                    optional_values[key] = kwargs.pop(key)
+
+        original_init(self, *args, **kwargs)
+
+        for key, value in optional_values.items():
+            setattr(self, key, value)
+
+    ProcessorMixin.__init__ = _compat_init
+    ProcessorMixin._vllm_optional_attributes_compat = True
+    try:
+        yield
+    finally:
+        ProcessorMixin.__init__ = original_init
+        ProcessorMixin._vllm_optional_attributes_compat = False
+
+
+def _load_processor_with_optional_attrs_compat(
+    loader: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    try:
+        return loader(*args, **kwargs)
+    except TypeError as e:
+        # Retry once for remote processor stacks that still pass
+        # `optional_attributes` through ProcessorMixin.__init__.
+        if "keyword argument" not in str(e):
+            raise
+        with _OPTIONAL_ATTRIBUTES_COMPAT_LOCK, _optional_attributes_init_compat():
+            return loader(*args, **kwargs)
+
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
@@ -126,7 +192,8 @@ def get_processor(
     try:
         processor_name = convert_model_repo_to_path(processor_name)
         if isinstance(processor_cls, tuple) or processor_cls == ProcessorMixin:
-            processor = AutoProcessor.from_pretrained(
+            processor = _load_processor_with_optional_attrs_compat(
+                AutoProcessor.from_pretrained,
                 processor_name,
                 *args,
                 revision=revision,
@@ -134,7 +201,8 @@ def get_processor(
                 **kwargs,
             )
         elif issubclass(processor_cls, ProcessorMixin):
-            processor = processor_cls.from_pretrained(
+            processor = _load_processor_with_optional_attrs_compat(
+                processor_cls.from_pretrained,
                 processor_name,
                 *args,
                 revision=revision,

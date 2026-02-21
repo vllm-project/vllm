@@ -11,11 +11,58 @@ from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, ProcessorMixin, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
 
-__all__ = ["Ovis2_5Processor"]
+__all__ = ["Ovis2_5Processor", "ensure_ovis2_5_special_tokens"]
 IMAGE_TOKEN = "<image>"
 VIDEO_TOKEN = "<video>"
 MIN_PIXELS = 448 * 448
 MAX_PIXELS = 1792 * 1792
+REQUIRED_SPECIAL_TOKENS = {
+    "image_token": "<image>",
+    "video_token": "<video>",
+    "visual_atom": "<ovis_visual_atom>",
+    "image_start": "<ovis_image_start>",
+    "image_end": "<ovis_image_end>",
+    "video_start": "<ovis_video_start>",
+    "video_end": "<ovis_video_end>",
+    "image_pad": "<|image_pad|>",
+}
+
+
+def _get_token_id(tokenizer, token_name: str) -> int | None:
+    token_id = tokenizer.convert_tokens_to_ids(token_name)
+    if isinstance(token_id, int) and token_id >= 0:
+        return token_id
+
+    vocab = tokenizer.get_vocab()
+    return vocab.get(token_name)
+
+
+def ensure_ovis2_5_special_tokens(tokenizer) -> set[str]:
+    """
+    Ensure visual special tokens exist in tokenizer vocabulary.
+
+    Some Transformers 5 tokenizers do not materialize these tokens from
+    tokenizer config by default.
+    """
+    missing = [
+        token_name
+        for token_name in REQUIRED_SPECIAL_TOKENS.values()
+        if _get_token_id(tokenizer, token_name) is None
+    ]
+    if not missing:
+        return set()
+
+    add_special_tokens = getattr(tokenizer, "add_special_tokens", None)
+    if callable(add_special_tokens):
+        # Keep order stable so token IDs remain deterministic across runs.
+        add_special_tokens({"additional_special_tokens": missing})
+        missing = [
+            token_name
+            for token_name in missing
+            if _get_token_id(tokenizer, token_name) is None
+        ]
+
+    return set(missing)
 
 
 class Ovis2_5ProcessorKwargs(ProcessingKwargs, total=False):  # type: ignore[call-arg]
@@ -78,17 +125,7 @@ class Ovis2_5Processor(ProcessorMixin):
 
     @cached_property
     def extra_special_tokens(self):
-        vocab = self.tokenizer.get_vocab()
-        required_tokens = {
-            "image_token": "<image>",
-            "video_token": "<video>",
-            "visual_atom": "<ovis_visual_atom>",
-            "image_start": "<ovis_image_start>",
-            "image_end": "<ovis_image_end>",
-            "video_start": "<ovis_video_start>",
-            "video_end": "<ovis_video_end>",
-            "image_pad": "<|image_pad|>",
-        }
+        missing = ensure_ovis2_5_special_tokens(self.tokenizer)
 
         extra_special_tokens = {}
         suggestion = (
@@ -99,10 +136,15 @@ class Ovis2_5Processor(ProcessorMixin):
             "https://huggingface.co/AIDC-AI/Ovis2.6-30B-A3B/blob/main/tokenizer_config.json"
         )
 
-        for key, token_name in required_tokens.items():
-            if token_name not in vocab:
+        if missing:
+            missing_str = ", ".join(sorted(missing))
+            raise ValueError(f"Can not find {missing_str}, {suggestion}")
+
+        for key, token_name in REQUIRED_SPECIAL_TOKENS.items():
+            token_id = _get_token_id(self.tokenizer, token_name)
+            if token_id is None:
                 raise ValueError(f"Can not find {token_name}, {suggestion}")
-            extra_special_tokens[key] = vocab[token_name]
+            extra_special_tokens[key] = token_id
 
         return extra_special_tokens
 

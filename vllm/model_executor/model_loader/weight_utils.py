@@ -69,10 +69,24 @@ temp_dir = tempfile.gettempdir()
 
 
 def enable_hf_transfer():
-    """automatically activates hf_transfer"""
-    if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
+    """Enable the best available Hugging Face Hub transfer backend.
+
+    huggingface-hub v1 removed ``HF_HUB_ENABLE_HF_TRANSFER`` in favor of
+    ``HF_XET_HIGH_PERFORMANCE``. Keep behavior compatible with both APIs.
+    """
+    # huggingface-hub >=1.x path (xet-based transfers).
+    if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
+        if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
+            huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+        return
+
+    # huggingface-hub <1.x path (hf_transfer optional acceleration).
+    if (
+        hasattr(huggingface_hub.constants, "HF_HUB_ENABLE_HF_TRANSFER")
+        and "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ
+    ):
         try:
-            # enable hf hub transfer if available
+            # Enable hf hub transfer if available.
             import hf_transfer  # type: ignore # noqa
 
             huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
