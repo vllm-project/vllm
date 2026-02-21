@@ -15,7 +15,7 @@ aiohttp >= 3.13.3
 openai >= 1.99.1  # For Responses API with reasoning content
 pydantic >= 2.12.0
 prometheus_client >= 0.18.0
-pillow  # Required for image processing
+pillow >= 12.1.1  # Required for image processing
 prometheus-fastapi-instrumentator >= 7.0.0
 tiktoken >= 0.6.0  # Required for DBRX tokenizer
 lm-format-enforcer == 0.11.3
