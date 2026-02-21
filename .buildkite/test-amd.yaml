@@ -147,6 +147,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   no_gpu: true
+  optional: true
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -188,7 +189,7 @@ steps:
 
 - label: Basic Correctness # 25.4m
   timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
   fast_check: true
@@ -222,7 +223,7 @@ steps:
 
 - label: Entrypoints Integration (LLM) # 13.1m
   timeout_in_minutes: 22
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
   fast_check: true
@@ -279,7 +280,7 @@ steps:
 
 - label: Entrypoints Integration (Pooling) # 22.8m
   timeout_in_minutes: 48
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   optional: true
   grade: Blocking
@@ -358,8 +359,8 @@ steps:
   timeout_in_minutes: 145
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
-  optional: true
   num_gpus: 4
+  optional: true
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/
@@ -408,9 +409,9 @@ steps:
   timeout_in_minutes: 10
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_8
+  num_gpus: 8
   optional: true
   grade: Blocking
-  num_gpus: 8
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - examples/offline_inference/torchrun_dp_example.py
@@ -441,8 +442,8 @@ steps:
   timeout_in_minutes: 12
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
-  grade: Blocking
   num_gpus: 4
+  grade: Blocking
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/distributed/eplb
@@ -456,8 +457,8 @@ steps:
   timeout_in_minutes: 9
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_2
-  grade: Blocking
   num_gpus: 2
+  grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/v1/tracing
@@ -502,7 +503,7 @@ steps:
 
 - label: V1 e2e + engine # 1h 33m
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_8
   grade: Blocking
   source_file_dependencies:
@@ -584,10 +585,10 @@ steps:
 
 - label: V1 others (CPU) # 10.4m
   timeout_in_minutes: 28
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
-  optional: true
   no_gpu: true
+  optional: true
   grade: Blocking
   source_file_dependencies:
   - vllm/
@@ -649,7 +650,7 @@ steps:
 
 - label: Samplers Test # 14.3m
   timeout_in_minutes: 23
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -910,7 +911,7 @@ steps:
 
 - label: Basic Models Tests (Extra Initialization) %N # 26.2m
   timeout_in_minutes: 46
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   grade: Blocking
   torch_nightly: true
@@ -1002,7 +1003,7 @@ steps:
 
 - label: Language Models Test (Extended Generation) # 32.2m
   timeout_in_minutes: 55
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   optional: true
   grade: Blocking
@@ -1029,7 +1030,7 @@ steps:
 
 - label: Language Models Test (Extended Pooling)  # 38.2m
   timeout_in_minutes: 68
-  mirror_hardwares: [amdexperimental, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
   source_file_dependencies:
   - vllm/
@@ -1645,7 +1646,7 @@ steps:
 
 - label: Python-only Installation # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -1708,7 +1709,7 @@ steps:
 
 - label: Entrypoints Integration (API Server 1) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   fast_check: true
   torch_nightly: true
@@ -1725,7 +1726,7 @@ steps:
 
 - label: Entrypoints Integration (API Server 2) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   fast_check: true
@@ -1745,7 +1746,7 @@ steps:
 
 - label: Entrypoints Integration (Pooling) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   fast_check: true
   torch_nightly: true
@@ -1760,7 +1761,7 @@ steps:
 
 - label: Entrypoints Integration (Responses API) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   fast_check: true
@@ -1776,7 +1777,7 @@ steps:
 
 - label: Sequence Parallel Correctness Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi325_2
   grade: Blocking
   num_gpus: 2
@@ -1794,7 +1795,7 @@ steps:
 
 - label: Sequence Parallel Correctness Tests (2xMI355) # TBD
   timeout_in_minutes: 50
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   optional: true
   num_gpus: 2
@@ -1819,7 +1820,7 @@ steps:
 
 - label: Distributed Tests (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
   num_gpus: 4
   working_dir: "/vllm-workspace/tests"
@@ -1868,7 +1869,7 @@ steps:
 
 - label: Distributed Tests (8 GPUs)(MI355) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_8
   num_gpus: 8
   working_dir: "/vllm-workspace/tests"
@@ -1960,7 +1961,7 @@ steps:
 
 - label: V1 e2e + engine # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_8
   source_file_dependencies:
   - vllm/
@@ -1984,7 +1985,7 @@ steps:
 
 - label: V1 others # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   source_file_dependencies:
   - vllm/
@@ -2009,7 +2010,7 @@ steps:
 
 - label: V1 attention (MI355) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   source_file_dependencies:
   - vllm/config/attention.py
@@ -2022,7 +2023,7 @@ steps:
 
 - label: Batch Invariance (MI355) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -2099,7 +2100,7 @@ steps:
 
 - label: Samplers Test # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   source_file_dependencies:
   - vllm/model_executor/layers
@@ -2112,7 +2113,7 @@ steps:
 
 - label: LoRA %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   parallelism: 4
   source_file_dependencies:
@@ -2212,7 +2213,7 @@ steps:
 
 - label: Kernels Quantization Test %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   parallelism: 2
   source_file_dependencies:
@@ -2360,7 +2361,7 @@ steps:
 
 - label: Basic Models Tests (Other) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   torch_nightly: true
@@ -2403,7 +2404,7 @@ steps:
 
 - label: Language Models Tests (Extra Standard) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   torch_nightly: true
   parallelism: 2
@@ -2420,7 +2421,7 @@ steps:
 
 - label: Language Models Tests (Hybrid) %N # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   torch_nightly: true
   parallelism: 2
@@ -2435,7 +2436,7 @@ steps:
 
 - label: Language Models Test (Extended Generation) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   source_file_dependencies:
   - vllm/
@@ -2448,7 +2449,7 @@ steps:
 
 - label: Language Models Test (PPL) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -2460,7 +2461,7 @@ steps:
 
 - label: Language Models Test (Extended Pooling) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   source_file_dependencies:
   - vllm/
@@ -2471,7 +2472,7 @@ steps:
 
 - label: Language Models Test (MTEB) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -2483,7 +2484,7 @@ steps:
 
 - label: Multi-Modal Processor Test (CPU) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -2497,7 +2498,7 @@ steps:
 
 - label: Multi-Modal Processor # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -2510,7 +2511,7 @@ steps:
 
 - label: Multi-Modal Models (Standard) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   torch_nightly: true
   source_file_dependencies:
@@ -2538,7 +2539,7 @@ steps:
 
 - label: Multi-Modal Models (Extended) 1 # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -2551,7 +2552,7 @@ steps:
 
 - label: Multi-Modal Models (Extended) 2 # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -2564,7 +2565,7 @@ steps:
 
 - label: Multi-Modal Models (Extended) 3 # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   source_file_dependencies:
@@ -2588,7 +2589,7 @@ steps:
 
 - label: Transformers Nightly Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
   working_dir: "/vllm-workspace/"
@@ -2622,7 +2623,7 @@ steps:
 
 - label: 2 Node Test (4 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdmultinode, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdmultinode, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
   num_gpus: 2
   num_nodes: 2
@@ -2649,7 +2650,7 @@ steps:
 
 - label: Distributed (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2687,7 +2688,7 @@ steps:
 
 - label: Distributed Model Tests (2 GPUs) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
@@ -2792,7 +2793,7 @@ steps:
 
 - label: Weight Loading Multiple GPU - Large Models # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_2
   working_dir: "/vllm-workspace/tests"
   num_gpus: 2
@@ -2848,7 +2849,7 @@ steps:
 
 - label: Distributed Tests (4 GPUs)(MI355) # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
   num_gpus: 4
   optional: true
@@ -2969,7 +2970,7 @@ steps:
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdgfx950nightly, amdmi355]
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_4
   num_gpus: 4
   optional: true
