@@ -251,6 +251,8 @@ class MMEncoderAttention(CustomOp):
     ) -> torch.Tensor:
         if self.attn_backend == AttentionBackendEnum.FLASH_ATTN:
             return self._forward_fa(query, key, value, cu_seqlens, max_seqlen)
+        elif self.attn_backend == AttentionBackendEnum.TRITON_ATTN:
+            return self._forward_triton(query, key, value, cu_seqlens, max_seqlen)
         elif self.attn_backend == AttentionBackendEnum.TORCH_SDPA:
             return self._forward_sdpa(query, key, value, cu_seqlens)
         else:
