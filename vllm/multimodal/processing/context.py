@@ -266,31 +266,14 @@ class InputProcessingContext:
         if isinstance(tokenizer, MistralTokenizer):
             tokenizer = tokenizer.transformers_tokenizer
 
+        merged_kwargs = self.get_merged_mm_kwargs(kwargs)
+
         return cached_processor_from_config(
             self.model_config,
             processor_cls=typ,
             tokenizer=tokenizer,
-            **kwargs,
+            **merged_kwargs,
         )
-
-    def init_processor(
-        self,
-        typ: type[_T],
-        /,
-        **kwargs: object,
-    ) -> _T:
-        """
-        Initialize a HuggingFace-like processor class, merging the
-        keyword arguments with those in the model's configuration.
-        """
-        mm_config = self.model_config.get_multimodal_config()
-        base_kwargs = mm_config.mm_processor_kwargs
-        if base_kwargs is None:
-            base_kwargs = {}
-
-        merged_kwargs = {**base_kwargs, **kwargs}
-
-        return typ(**merged_kwargs)
 
     def _postprocess_output(
         self,

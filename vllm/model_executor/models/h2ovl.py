@@ -413,7 +413,7 @@ class H2OVLProcessor(BaseInternVLProcessor):
 
 class H2OVLProcessingInfo(BaseInternVLProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> H2OVLProcessor:
-        return self.ctx.init_processor(
+        return self.ctx.get_hf_processor(
             H2OVLProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
