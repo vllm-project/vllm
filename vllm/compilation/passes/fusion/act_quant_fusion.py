@@ -16,6 +16,7 @@ from torch._ops import OpOverload
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     QuantKey,
     kFp8StaticTensorSym,
     kNvfp4Dynamic,
@@ -174,6 +175,129 @@ class SiluMulNvfp4QuantPattern(ActivationQuantPattern):
         register_replacement(pattern, replacement, self.get_inputs(), fwd_only, pm_pass)
 
 
+class SiluMulBlockQuantPattern:
+    """
+    Pattern for fusing SiLU+Mul with block quantization.
+    """
+
+    def __init__(
+        self,
+        group_shape: GroupShape,
+        has_col_major_scales: bool = False,
+        is_e8m0: bool = False,
+    ):
+        assert group_shape[0] == 1, (
+            f"SiluMulBlockQuantPattern only supports per-token quantization "
+            f"(group_m=1), got group_shape={group_shape}"
+        )
+
+        self.group_shape = group_shape
+        self.group_size = group_shape[1]
+        self.quant_dtype = FP8_DTYPE
+        self.has_col_major_scales = has_col_major_scales
+        self.is_e8m0 = is_e8m0
+
+    def register(self, pm_pass: PatternMatcherPass) -> None:
+        group_size = self.group_size
+        quant_dtype = self.quant_dtype
+
+        finfo = torch.finfo(quant_dtype)
+        fp8_min = finfo.min
+        fp8_max = finfo.max
+
+        def pattern(input_tensor: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            """Match the auto_functionalized_v2 pattern in the graph."""
+            d = input_tensor.shape[-1] // 2
+
+            silu_out_empty = torch.empty(
+                (input_tensor.shape[0], d),
+                dtype=input_tensor.dtype,
+                device=input_tensor.device,
+            )
+
+            silu_result = torch.ops.higher_order.auto_functionalized_v2(
+                torch.ops._C.silu_and_mul.default,
+                input=input_tensor,
+                _result_base_index=0,
+                _all_bases=[silu_out_empty],
+            )
+            silu_output = silu_result[1]
+
+            quant_out_empty = torch.empty(
+                (input_tensor.shape[0], d),
+                dtype=quant_dtype,
+                device=input_tensor.device,
+            )
+            scale_out_empty = torch.empty(
+                (input_tensor.shape[0], d // group_size),
+                dtype=torch.float32,
+                device=input_tensor.device,
+            )
+
+            quant_result = torch.ops.higher_order.auto_functionalized_v2(
+                torch.ops._C.per_token_group_fp8_quant.default,
+                input=silu_output,
+                group_size=group_size,
+                eps=1e-10,
+                fp8_min=fp8_min,
+                fp8_max=fp8_max,
+                scale_ue8m0=False,
+                _output_q_base_index=0,
+                _output_s_base_index=1,
+                _all_bases=[quant_out_empty, scale_out_empty],
+            )
+
+            output_q = quant_result[1]
+            output_s = quant_result[2]
+
+            return output_q, output_s
+
+        def replacement(
+            input_tensor: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            """Replace with fused kernel using explicit auto_functionalized."""
+            d = input_tensor.shape[-1] // 2
+
+            result = torch.empty(
+                (input_tensor.shape[0], d),
+                dtype=quant_dtype,
+                device=input_tensor.device,
+            )
+            scale = torch.empty(
+                (input_tensor.shape[0], d // group_size),
+                dtype=torch.float32,
+                device=input_tensor.device,
+            )
+
+            # Explicit auto_functionalized - matches vLLM style
+            at = auto_functionalized(
+                torch.ops._C.silu_and_mul_per_block_quant.default,
+                result=result,
+                input=input_tensor,
+                scale=scale,
+                group_size=group_size,
+                scale_ub=None,
+                is_scale_transposed=False,
+            )
+
+            return at[1], at[2]  # Extract result and scale
+
+        input_size = group_size * 2
+        inputs = [torch.empty(5, input_size, dtype=torch.bfloat16, device="cuda")]
+
+        try:
+            register_replacement(pattern, replacement, inputs, fwd_only, pm_pass)
+        except Exception as e:
+            logger.error(
+                "Failed to register SiluMulBlockQuant pattern for group_size=%s: %s",
+                group_size,
+                e,
+            )
+            import traceback
+
+            traceback.print_exc()
+
+
 class ActivationQuantFusionPass(VllmPatternMatcherPass):
     """
     This pass fuses a pre-defined set of custom ops into fused ops.
@@ -199,6 +323,26 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             pattern_silu_mul_nvfp4 = SiluMulNvfp4QuantPattern()
             pattern_silu_mul_nvfp4.register(self.patterns)
 
+        if current_platform.is_cuda():
+            count = 0
+            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                for has_col_major_scales in [True, False]:
+                    for is_e8m0 in [True, False]:
+                        pattern_silu_mul_block = SiluMulBlockQuantPattern(
+                            group_shape=group_shape,
+                            has_col_major_scales=has_col_major_scales,
+                            is_e8m0=is_e8m0,
+                        )
+                        pattern_silu_mul_block.register(self.patterns)
+                        count += 1
+                        msg = (
+                            f"  Registered pattern {count}: "
+                            f"group_size={group_shape[1]}, "
+                            f"col_major={has_col_major_scales}, "
+                            f"e8m0={is_e8m0}"
+                        )
+                        print(msg)
+
         self.dump_patterns(config, self.patterns)
 
     @VllmInductorPass.time_and_log
@@ -212,4 +356,5 @@ class ActivationQuantFusionPass(VllmPatternMatcherPass):
             ActivationQuantPattern,
             SiluMulFp8StaticQuantPattern,
             SiluMulNvfp4QuantPattern,
+            SiluMulBlockQuantPattern,
         )
