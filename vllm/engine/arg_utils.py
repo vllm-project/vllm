@@ -51,6 +51,7 @@ from vllm.config import (
     ParallelConfig,
     PoolerConfig,
     ProfilerConfig,
+    ReasoningConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
@@ -556,6 +557,7 @@ class EngineArgs:
     kv_events_config: KVEventsConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
+    reasoning_config: ReasoningConfig = get_field(VllmConfig, "reasoning_config")
 
     generation_config: str = ModelConfig.generation_config
     enable_sleep_mode: bool = ModelConfig.enable_sleep_mode
@@ -1218,6 +1220,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--attention-config", "-ac", **vllm_kwargs["attention_config"]
         )
+        vllm_group.add_argument("--reasoning-config", **vllm_kwargs["reasoning_config"])
         vllm_group.add_argument("--kernel-config", **vllm_kwargs["kernel_config"])
         vllm_group.add_argument(
             "--additional-config", **vllm_kwargs["additional_config"]
@@ -1842,6 +1845,7 @@ class EngineArgs:
             kv_transfer_config=self.kv_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
+            reasoning_config=self.reasoning_config,
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
