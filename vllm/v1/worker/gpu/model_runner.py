@@ -234,6 +234,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 )
 
             if self.use_aux_hidden_state_outputs:
+                assert self.speculative_config is not None
                 set_eagle3_aux_hidden_state_layers(self.model, self.speculative_config)
             if self.speculator is not None:
                 self.speculator.load_model(self.model)

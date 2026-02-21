@@ -10,6 +10,7 @@ def load_eagle_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mod
     from vllm.compilation.backends import set_model_tag
 
     speculative_config = vllm_config.speculative_config
+    assert speculative_config is not None
     draft_model_config = speculative_config.draft_model_config
     with set_model_tag("eagle_head"):
         eagle_model = get_model(
