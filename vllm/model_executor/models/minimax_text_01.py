@@ -813,7 +813,7 @@ class MiniMaxText01ForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 if is_pp_missing_parameter(name, self):
                     return
                 param = params_dict[name]
-                weight_loader = param.weight_loader
+                weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader = weight_loader_with_alias(name)(weight_loader)
                 weight_loader(
                     param,
