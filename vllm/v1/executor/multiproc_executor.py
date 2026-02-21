@@ -51,6 +51,7 @@ from vllm.utils.system_utils import (
     _maybe_force_spawn,
     decorate_logs,
     get_mp_context,
+    set_pdeathsig,
     set_process_title,
 )
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -697,6 +698,13 @@ class WorkerProc:
         """Worker initialization and execution loops.
         This runs a background process"""
 
+        # Belt-and-suspenders: ensure this worker dies when its parent
+        # (EngineCore) exits, even if the EngineCore is killed with SIGKILL.
+        # The death_pipe mechanism below handles clean shutdown; this provides
+        # an OS-level guarantee for cases where the pipe-based detection fails
+        # (e.g. worker blocked in a CUDA kernel when the parent dies).
+        set_pdeathsig(signal.SIGTERM)
+
         # Signal handler used for graceful termination.
         # SystemExit exception is only raised once to allow this and worker
         # processes to terminate without error
@@ -728,9 +736,13 @@ class WorkerProc:
                     # This will block until parent process exits (pipe closes)
                     death_pipe.recv()
                 except EOFError:
-                    # Parent process has exited, terminate this worker
+                    # Parent process has exited, terminate this worker.
                     logger.info_once("Parent process exited, terminating worker")
-                    # Send signal to self to trigger clean shutdown
+                    # Send SIGTERM to the main thread so the existing
+                    # signal_handler raises SystemExit.  shutdown_event alone
+                    # is not sufficient: the worker may be blocked inside a
+                    # CUDA kernel or waiting on the MQ and never polls it.
+                    os.kill(os.getpid(), signal.SIGTERM)
                     shutdown_event.set()
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
