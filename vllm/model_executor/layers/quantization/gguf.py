@@ -61,10 +61,12 @@ class GGUFConfig(QuantizationConfig):
 
     def get_supported_act_dtypes(self) -> list[torch.dtype]:
         # GGUF dequantization kernels use half precision (fp16) internally.
-        # bfloat16 has precision issues on Blackwell devices.
+        # bfloat16 has precision issues on Blackwell devices, but is required
+        # for DeltaNet/GatedDeltaNet recurrence numerical stability.
         if current_platform.has_device_capability(100):
-            logger.warning_once("GGUF has precision issues with bfloat16 on Blackwell.")
-            return [torch.half, torch.float32]
+            logger.warning_once(
+                "GGUF on Blackwell: bfloat16 enabled for DeltaNet compatibility."
+            )
         return [torch.half, torch.bfloat16, torch.float32]
 
     @classmethod
@@ -199,6 +201,13 @@ def _fused_mul_mat_gguf(
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
         return x @ qweight.T
+    # GGUF MMQ/MMVQ kernels only support float16 activations.
+    # When running in bfloat16 (e.g. for DeltaNet stability), convert
+    # activations to fp16 for the kernel call and convert back after.
+    orig_dtype = x.dtype
+    needs_cast = orig_dtype == torch.bfloat16
+    if needs_cast:
+        x = x.to(torch.float16)
     # enable MMVQ in contiguous batching with batch_size=1
     if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
         y = ops.ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
@@ -217,6 +226,8 @@ def _fused_mul_mat_gguf(
         # Wrap to GGMLQuantizationType IntEnum to make sure it's a valid type.
         qweight_type = WeightType(qweight_type)
         raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
+    if needs_cast:
+        y = y.to(orig_dtype)
     return y
 
 
@@ -262,12 +273,25 @@ def _fused_moe_gguf(
     # lazy import to avoid triggering triton import in CPU backend
     from vllm.model_executor.layers.fused_moe.fused_moe import moe_align_block_size
 
+    # GGUF MoE kernels only support float16 activations.
+    # When running in bfloat16, convert around the kernel calls.
+    orig_dtype = x.dtype
+    needs_cast = orig_dtype == torch.bfloat16
+    if needs_cast:
+        x = x.to(torch.float16)
+        topk_weights = topk_weights.to(torch.float16)
+
     out_hidden_states = torch.empty_like(x)
     # unless we decent expert reuse we are better off running moe_vec kernel
+    # When bf16->fp16 conversion is active:
+    # - ggml_moe_a8 (MMQ, >64 tokens) produces NaN with converted data
+    # - ggml_moe_a8_vec (MMVQ, <=64 tokens) works fine with conversion
+    # So skip MMQ when needs_cast and fall through to MMVQ or slow loop.
     if (
         qweight_type2 in MMQ_QUANT_TYPES
         and qweight_type in MMQ_QUANT_TYPES
         and x.shape[0] > 64
+        and not needs_cast
     ):
         num_tokens, _ = x.shape
         E, N, _ = w1.shape
@@ -309,16 +333,40 @@ def _fused_moe_gguf(
         E, N, _ = w1.shape
         top_k = topk_ids.shape[1]
 
-        out = ops.ggml_moe_a8_vec(x, w1, topk_ids, top_k, qweight_type, N, num_tokens)
-        out = act(out)
+        # MMVQ kernel has a 64-token launch config limit when running with
+        # bf16->fp16 converted data.  Process in chunks of 64 tokens.
+        CHUNK = 64 if needs_cast and num_tokens > 64 else num_tokens
+        if num_tokens == CHUNK:
+            out = ops.ggml_moe_a8_vec(
+                x, w1, topk_ids, top_k, qweight_type, N, num_tokens
+            )
+            out = act(out)
+            out = ops.ggml_moe_a8_vec(
+                out, w2, topk_ids, 1, qweight_type2, w2.shape[1], num_tokens * top_k
+            )
+            out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
+                topk_weights.view(num_tokens, top_k, 1)
+            )
+            ops.moe_sum(out, out_hidden_states)
+        else:
+            for start in range(0, num_tokens, CHUNK):
+                end = min(start + CHUNK, num_tokens)
+                chunk_len = end - start
+                x_chunk = x[start:end]
+                ids_chunk = topk_ids[start:end]
+                w_chunk = topk_weights[start:end]
 
-        out = ops.ggml_moe_a8_vec(
-            out, w2, topk_ids, 1, qweight_type2, w2.shape[1], num_tokens * top_k
-        )
-        out = out.reshape(num_tokens, top_k, w2.shape[1]).mul_(
-            topk_weights.view(num_tokens, top_k, 1)
-        )
-        ops.moe_sum(out, out_hidden_states)
+                out = ops.ggml_moe_a8_vec(
+                    x_chunk, w1, ids_chunk, top_k, qweight_type, N, chunk_len
+                )
+                out = act(out)
+                out = ops.ggml_moe_a8_vec(
+                    out, w2, ids_chunk, 1, qweight_type2, w2.shape[1], chunk_len * top_k
+                )
+                out = out.reshape(chunk_len, top_k, w2.shape[1]).mul_(
+                    w_chunk.view(chunk_len, top_k, 1)
+                )
+                ops.moe_sum(out, out_hidden_states[start:end])
     else:
         logger.warning_once(
             "There is no support for fast MoE kernel "
@@ -343,6 +391,8 @@ def _fused_moe_gguf(
                 else:
                     current_hidden_state.add_(current_state)
             out_hidden_states[tok] = current_hidden_state
+    if needs_cast:
+        out_hidden_states = out_hidden_states.to(orig_dtype)
     return out_hidden_states
 
 
