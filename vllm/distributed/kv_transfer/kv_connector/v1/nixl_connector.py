@@ -660,12 +660,32 @@ class NixlConnectorScheduler:
             params,
         )
 
+        if params is not None and params.get("do_remote_decode") and params.get("do_remote_prefill"):
+                # This is a special case where no decode or prefill is required.
+                # The request is mainly to query cached blocks. For such requests
+                # scheduler exits early, so, update the connector state here
+                # Only trigger 1 KV transfer per request.
+                params["do_remote_prefill"] = False
+                return None, False
+
         if params is not None and params.get("do_remote_prefill"):
             # Remote prefill: get all prompt blocks from remote.
             token_ids = request.prompt_token_ids or []
             count = len(token_ids) - num_computed_tokens
             if count > 0:
                 return count, True
+
+        elif params is not None and params.get("do_remote_decode"):
+            if params.get("remote_block_ids"):
+                # Decode worker sent remote block ids, so, provide them
+                # as an external token count to scheduler.
+                # The tokens will be loaded if not aleady present in the local cache.
+                if all(p in params for p in ("remote_engine_id", "remote_host",
+                                             "remote_port")):
+                    count = len(params.get("remote_block_ids")) * self.block_size - num_computed_tokens
+                    if count > 0:
+                        return count, True
+
 
         # No remote prefill for this request.
         return 0, False
@@ -686,6 +706,23 @@ class NixlConnectorScheduler:
 
         if params.get("do_remote_decode"):
             self._reqs_in_batch.add(request.request_id)
+
+            # Check if P worker got remote blocks from D worker and if they need to be loaded
+            if (num_external_tokens > 0) and params.get("remote_block_ids"):
+                if all(p in params for p in ("remote_engine_id", "remote_host",
+                                             "remote_port")):
+                    local_block_ids = blocks.get_unhashed_block_ids()
+
+                    assert len(local_block_ids) > 0
+                    # Get unhashed blocks to pull from remote.
+                    self._reqs_need_recv[request.request_id] = (
+                            request, local_block_ids)
+
+                else:
+                    logger.warning(
+                        "Got invalid KVTransferParams: %s. This "
+                        "request will not utilize KVTransfer", params)
+
         if self.use_host_buffer and params.get("do_remote_decode"):
             # NOTE: when accelerator is not directly supported by Nixl,
             # prefilled blocks need to be saved to host memory before transfer.
