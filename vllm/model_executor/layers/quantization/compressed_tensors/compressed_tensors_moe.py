@@ -34,10 +34,14 @@ from vllm.model_executor.layers.fused_moe.config import (
     int8_w8a16_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.cpu_fused_moe import select_experts
+from vllm.model_executor.layers.fused_moe.exllama_moe import ExllamaExperts
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
     BatchedMarlinExperts,
     MarlinExperts,
     fused_marlin_moe,
+)
+from vllm.model_executor.layers.fused_moe.modular_kernel import (
+    FusedMoEModularKernel,
 )
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
@@ -54,6 +58,9 @@ from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
     make_nvfp4_moe_kernel,
     make_nvfp4_moe_quant_config,
     select_nvfp4_moe_backend,
+)
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNoEP,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes.compressed_tensors_wNa16 import (  # noqa
     WNA16_SUPPORTED_BITS,
@@ -1910,21 +1917,82 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.a2_scale = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Reconfigure packed weights and scales to match moe_wna16 format
-        layer.w13_weight_packed = torch.nn.Parameter(
-            layer.w13_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
-            requires_grad=False,
-        )
-        layer.w2_weight_packed = torch.nn.Parameter(
-            layer.w2_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
-            requires_grad=False,
-        )
-        layer.w13_weight_scale = torch.nn.Parameter(
-            layer.w13_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
-        )
-        layer.w2_weight_scale = torch.nn.Parameter(
-            layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
-        )
+        import vllm.envs as envs
+
+        if envs.VLLM_MOE_EXLLAMA and self.num_bits == 4:
+            # Exllama MoE path: keep weights in [E, K/8, N] int32 format
+            # and apply gptq_shuffle for the exllama kernel's SIMD layout.
+            from vllm._custom_ops import gptq_shuffle
+
+            device = layer.w13_weight_packed.device
+            dummy_perm = torch.empty(0, dtype=torch.int32, device=device)
+            for e in range(layer.w13_weight_packed.size(0)):
+                gptq_shuffle(layer.w13_weight_packed.data[e], dummy_perm, self.num_bits)
+                gptq_shuffle(layer.w2_weight_packed.data[e], dummy_perm, self.num_bits)
+            # Scales are already [E, groups, N] — keep as-is for exllama.
+
+            # Create synthetic qzeros for the exllama kernel.
+            # Symmetric 4-bit: zero_point = 8 (midpoint of 0..15).
+            # GPTQv1 kernel adds +1, so store 7 per nibble.
+            # 8 nibbles of 7 packed into int32 = 0x77777777.
+            E = layer.w13_weight_packed.size(0)
+            groups_w13 = layer.w13_weight_scale.size(1)
+            N_w13 = layer.w13_weight_packed.size(2)
+            groups_w2 = layer.w2_weight_scale.size(1)
+            N_w2 = layer.w2_weight_packed.size(2)
+
+            w13_qzeros = torch.nn.Parameter(
+                torch.full(
+                    (E, groups_w13, N_w13 // 8),
+                    0x77777777,
+                    dtype=torch.int32,
+                    device=device,
+                ),
+                requires_grad=False,
+            )
+            w2_qzeros = torch.nn.Parameter(
+                torch.full(
+                    (E, groups_w2, N_w2 // 8),
+                    0x77777777,
+                    dtype=torch.int32,
+                    device=device,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_qzeros", w13_qzeros)
+            layer.register_parameter("w2_qzeros", w2_qzeros)
+            layer.use_exllama_moe = True
+
+            # Build modular kernel for exllama path
+            self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+            assert self.moe_quant_config is not None
+            layer.w13_weight = layer.w13_weight_packed
+            layer.w2_weight = layer.w2_weight_packed
+            self.moe_mk = FusedMoEModularKernel(
+                fused_experts=ExllamaExperts(
+                    moe_config=self.moe, quant_config=self.moe_quant_config
+                ),
+                prepare_finalize=MoEPrepareAndFinalizeNoEP(),
+            )
+        else:
+            # Triton path: transpose + reinterpret as uint8
+            layer.w13_weight_packed = torch.nn.Parameter(
+                layer.w13_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
+                requires_grad=False,
+            )
+            layer.w2_weight_packed = torch.nn.Parameter(
+                layer.w2_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
+                requires_grad=False,
+            )
+            layer.w13_weight_scale = torch.nn.Parameter(
+                layer.w13_weight_scale.transpose(1, 2).contiguous(),
+                requires_grad=False,
+            )
+            layer.w2_weight_scale = torch.nn.Parameter(
+                layer.w2_weight_scale.transpose(1, 2).contiguous(),
+                requires_grad=False,
+            )
+            layer.use_exllama_moe = False
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
@@ -1936,11 +2004,12 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             else int8_w8a16_moe_quant_config
         )
 
+        use_exllama = getattr(layer, "use_exllama_moe", False)
         return config_builder(
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            w1_zp=None,
-            w2_zp=None,
+            w1_zp=getattr(layer, "w13_qzeros", None) if use_exllama else None,
+            w2_zp=getattr(layer, "w2_qzeros", None) if use_exllama else None,
             block_shape=[0, self.group_size],
         )
 
@@ -1949,25 +2018,21 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         prepare_finalize: mk.FusedMoEPrepareAndFinalize,
         layer: torch.nn.Module,
     ) -> mk.FusedMoEPermuteExpertsUnpermute:
-        if self.moe.is_lora_enabled:
-            assert self.moe_quant_config is not None
-            from vllm.triton_utils import HAS_TRITON
+        assert self.moe_quant_config is not None
+        layer.w13_weight = layer.w13_weight_packed
+        layer.w2_weight = layer.w2_weight_packed
 
-            if HAS_TRITON:
-                from vllm.model_executor.layers.fused_moe import TritonWNA16Experts
+        use_exllama = getattr(layer, "use_exllama_moe", False)
+        if use_exllama:
+            return ExllamaExperts(
+                moe_config=self.moe, quant_config=self.moe_quant_config
+            )
 
-                layer.w13_weight = layer.w13_weight_packed
-                layer.w2_weight = layer.w2_weight_packed
-                return TritonWNA16Experts(
-                    moe_config=self.moe, quant_config=self.moe_quant_config
-                )
-            else:
-                raise NotImplementedError(
-                    "TritonExperts requires Triton. "
-                    "Install triton or disable LoRA for MoE."
-                )
+        from vllm.model_executor.layers.fused_moe import TritonWNA16Experts
 
-        raise NotImplementedError
+        return TritonWNA16Experts(
+            moe_config=self.moe, quant_config=self.moe_quant_config
+        )
 
     def apply(
         self,
@@ -1977,6 +2042,20 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.moe_mk is not None:
+            return self.moe_mk(
+                x,
+                layer.w13_weight,
+                layer.w2_weight,
+                topk_weights,
+                topk_ids,
+                activation=layer.activation,
+                global_num_experts=layer.global_num_experts,
+                apply_router_weight_on_input=layer.apply_router_weight_on_input,
+                expert_map=layer.expert_map,
+            )
+
+        # Triton WNA16 fallback (non-exllama, non-EP)
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         return fused_experts(

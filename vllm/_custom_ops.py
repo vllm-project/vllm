@@ -608,6 +608,39 @@ if hasattr(torch.ops._C, "gptq_gemm"):
         )
 
 
+def fused_moe_exllama_gemm(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_gptq_qzeros: torch.Tensor,
+    b_gptq_scales: torch.Tensor,
+    c: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    topk_weights: torch.Tensor,
+    top_k: int,
+    mul_routed_weight: bool,
+    block_size_m: int = 64,
+) -> None:
+    from vllm.v1.utils import record_function_or_nullcontext
+
+    M, K = a.shape
+    E, N = b_q_weight.size(0), c.size(-1)
+    with record_function_or_nullcontext(f"exllama_moe {M}x{N}x{K} E={E} top_k={top_k}"):
+        torch.ops._C.fused_moe_exllama_gemm(
+            a,
+            b_q_weight,
+            b_gptq_qzeros,
+            b_gptq_scales,
+            c,
+            sorted_token_ids,
+            expert_ids,
+            topk_weights,
+            top_k,
+            mul_routed_weight,
+            block_size_m,
+        )
+
+
 def gptq_shuffle(q_weight: torch.Tensor, q_perm: torch.Tensor, bit: int) -> None:
     torch.ops._C.gptq_shuffle(q_weight, q_perm, bit)
 
