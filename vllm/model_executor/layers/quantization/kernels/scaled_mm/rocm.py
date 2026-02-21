@@ -79,10 +79,8 @@ class ROCmFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if not current_platform.is_rocm():
             return False, "requires ROCm."
 
-        from vllm.platforms.rocm import on_mi3xx
-
-        if not on_mi3xx():
-            return False, "requires MI3xx."
+        if not current_platform.supports_fp8():
+            return False, "requires FP8-capable GPU."
 
         if not envs.VLLM_ROCM_USE_SKINNY_GEMM:
             return False, "requires VLLM_ROCM_USE_SKINNY_GEMM to be enabled."
