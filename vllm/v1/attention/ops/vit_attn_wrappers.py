@@ -268,3 +268,120 @@ def vit_torch_sdpa_wrapper(
     return torch.ops.vllm.torch_sdpa_wrapper(
         q, k, v, scale, cu_seqlens, enable_gqa=enable_gqa
     )
+
+
+def flashinfer_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float,
+    workspace_buffer: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
+) -> torch.Tensor:
+    from flashinfer.prefill import cudnn_batch_prefill_with_kv_cache
+
+    is_reshaped = q.dim() == 4
+
+    if is_reshaped:
+        reshape_batch_size = q.shape[0]
+        q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+
+    # cu_seqlens: token-level start offsets (batch_size elements)
+    # sequence_lengths: actual token counts per sequence (batch_size elements)
+    batch_size = len(cu_seqlens)
+    max_seq = max_seqlen.item()
+    total_tokens = q.shape[0]
+    num_heads = q.shape[1]
+    head_dim = q.shape[2]
+
+    # cuDNN SDPA expects dense (batch * max_seq, heads, head_dim) layout
+    # with actual_seq_lens indicating real lengths (no batch_offsets needed)
+    is_dense = total_tokens == batch_size * max_seq
+
+    if not is_dense:
+        # Pad ragged tensors to dense layout
+        q_dense = torch.zeros(
+            batch_size * max_seq, num_heads, head_dim, dtype=q.dtype, device=q.device
+        )
+        k_dense = torch.zeros_like(q_dense)
+        v_dense = torch.zeros_like(q_dense)
+        for i in range(batch_size):
+            src_start = cu_seqlens[i].item()
+            length = sequence_lengths[i].item()
+            dst_start = i * max_seq
+            q_dense[dst_start : dst_start + length] = q[src_start : src_start + length]
+            k_dense[dst_start : dst_start + length] = k[src_start : src_start + length]
+            v_dense[dst_start : dst_start + length] = v[src_start : src_start + length]
+        q, k, v = q_dense, k_dense, v_dense
+
+    actual_seq_lens = sequence_lengths.view(-1, 1, 1, 1)
+
+    output, _ = cudnn_batch_prefill_with_kv_cache(
+        q,
+        k,
+        v,
+        scale,
+        workspace_buffer,
+        max_token_per_sequence=max_seq,
+        max_sequence_kv=max_seq,
+        actual_seq_lens_q=actual_seq_lens,
+        actual_seq_lens_kv=actual_seq_lens,
+        causal=False,
+        return_lse=False,
+    )
+
+    if not is_dense:
+        # Extract back to ragged layout
+        output_ragged = torch.zeros(
+            total_tokens, num_heads, head_dim, dtype=output.dtype, device=output.device
+        )
+        for i in range(batch_size):
+            dst_start = cu_seqlens[i].item()
+            length = sequence_lengths[i].item()
+            src_start = i * max_seq
+            output_ragged[dst_start : dst_start + length] = output[
+                src_start : src_start + length
+            ]
+        output = output_ragged
+
+    if is_reshaped:
+        output = einops.rearrange(output, "(b s) h d -> b s h d", b=reshape_batch_size)
+
+    return output
+
+
+def vit_flashinfer_wrapper_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float,
+    workspace_buffer: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.empty_like(q)
+
+
+direct_register_custom_op(
+    op_name="flashinfer_wrapper",
+    op_func=flashinfer_wrapper,
+    fake_impl=vit_flashinfer_wrapper_fake,
+)
+
+
+def vit_flashinfer_wrapper(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    scale: float,
+    workspace_buffer: torch.Tensor,
+    cu_seqlens: torch.Tensor | None = None,
+    max_seqlen: torch.Tensor | None = None,
+    sequence_lengths: torch.Tensor | None = None,
+) -> torch.Tensor:
+    return torch.ops.vllm.flashinfer_wrapper(
+        q, k, v, scale, workspace_buffer, cu_seqlens, max_seqlen, sequence_lengths
+    )
