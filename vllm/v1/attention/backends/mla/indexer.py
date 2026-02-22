@@ -219,8 +219,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
         self.reorder_batch_threshold += self.num_speculative_tokens
 
-        props = torch.cuda.get_device_properties(self.device)
-        sm_count = props.multi_processor_count
+        sm_count = current_platform.get_num_sm()
         self.num_sms = sm_count
 
         self.decode_lens_buffer = torch.empty(

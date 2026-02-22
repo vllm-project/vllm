@@ -13,7 +13,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -38,7 +37,7 @@ if current_platform.is_rocm():
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
 
     def num_programs(total_tokens):
-        return min(total_tokens, get_cu_count())
+        return min(total_tokens, current_platform.get_num_sm())
 
     @triton.jit
     def cp_mha_gather_cache_kernel(

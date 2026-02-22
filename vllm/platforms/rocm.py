@@ -674,3 +674,7 @@ class RocmPlatform(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def get_num_sm(cls, device_id=0):
+        return torch.cuda.get_device_properties(device_id).multi_processor_count

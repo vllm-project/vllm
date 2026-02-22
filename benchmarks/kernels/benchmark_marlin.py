@@ -34,6 +34,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     quantize_weights,
     sort_weights,
 )
+from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -133,7 +134,7 @@ def bench_run(
         nonlocal allspark_supported
         if allspark_supported:
             properties = torch.cuda.get_device_properties(b.device.index)
-            sm_count = properties.multi_processor_count
+            sm_count = current_platform.get_num_sm(b.device.index)
             sm_version = properties.major * 10 + properties.minor
 
             supported_arch = sm_version >= 80 and sm_version < 90

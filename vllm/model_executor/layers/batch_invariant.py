@@ -147,7 +147,7 @@ def matmul_persistent(
     assert bias is None or bias.dim() == 1, (
         "Currently assuming bias is 1D, let Horace know if you run into this"
     )
-    NUM_SMS = torch.cuda.get_device_properties("cuda").multi_processor_count
+    NUM_SMS = current_platform.get_num_sm(a.device.index)
     M, K = a.shape
     K, N = b.shape
     dtype = a.dtype

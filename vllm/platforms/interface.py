@@ -692,6 +692,15 @@ class Platform:
         """
         return {}
 
+    @classmethod
+    def get_num_sm(cls, device_id: int = 0) -> int:
+        """
+        Get the number of SMs for the current platform.
+        """
+        raise NotImplementedError(
+            "get_num_sms is not implemented for the current platform."
+        )
+
 
 class UnspecifiedPlatform(Platform):
     _enum = PlatformEnum.UNSPECIFIED
