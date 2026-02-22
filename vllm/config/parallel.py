@@ -651,6 +651,11 @@ class ParallelConfig:
         if self.enable_elastic_ep:
             if not self.enable_eplb:
                 raise ValueError("Elastic EP is only supported with enable_eplb=True.")
+            if self.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "Elastic EP is not supported with pipeline parallelism "
+                    f"(pipeline_parallel_size={self.pipeline_parallel_size})."
+                )
             if self.data_parallel_external_lb or self.data_parallel_hybrid_lb:
                 raise NotImplementedError(
                     "Elastic EP is not compatible with data_parallel_external_lb "
