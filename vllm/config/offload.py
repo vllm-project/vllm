@@ -3,13 +3,11 @@
 """Configuration for model weight offloading."""
 
 from pydantic import Field, model_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 
 
 @config
-@dataclass
 class OffloadConfig:
     """Configuration for model weight offloading to CPU.
 
