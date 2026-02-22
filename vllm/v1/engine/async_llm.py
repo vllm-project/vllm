@@ -5,7 +5,7 @@ import os
 import socket
 import time
 import warnings
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from copy import copy
 from typing import Any
 
@@ -885,6 +885,9 @@ class AsyncLLM(EngineClient):
         return await self.engine_core.reset_prefix_cache_async(
             reset_running_requests, reset_connector
         )
+
+    async def drop_kv_checkpoints(self, checkpoint_ids: Sequence[str]) -> int:
+        return await self.engine_core.drop_kv_checkpoints_async(checkpoint_ids)
 
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()

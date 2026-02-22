@@ -3,7 +3,7 @@
 import itertools
 import time
 from collections import defaultdict, deque
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from typing import Any
 
@@ -1669,6 +1669,18 @@ class Scheduler(SchedulerInterface):
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
         else:
+            if request.kv_checkpoint_restore_id is not None:
+                try:
+                    self.kv_cache_manager.restore_request_from_checkpoint(
+                        request,
+                        request.kv_checkpoint_restore_id,
+                    )
+                except KeyError as e:
+                    raise ValueError(
+                        f"KV checkpoint '{request.kv_checkpoint_restore_id}' "
+                        "was not found."
+                    ) from e
+
             if request.resumable:
                 request.streaming_queue = deque()
             self.waiting.add_request(request)
@@ -1742,6 +1754,12 @@ class Scheduler(SchedulerInterface):
         self, request: Request, delay_free_blocks: bool = False
     ) -> dict[str, Any] | None:
         assert request.is_finished()
+
+        if request.kv_checkpoint_save_id is not None:
+            self.kv_cache_manager.create_request_checkpoint(
+                request.kv_checkpoint_save_id,
+                request,
+            )
 
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
@@ -1847,6 +1865,13 @@ class Scheduler(SchedulerInterface):
         """
         self.encoder_cache_manager.reset()
 
+    def drop_kv_checkpoints(self, checkpoint_ids: Sequence[str]) -> int:
+        dropped = 0
+        for checkpoint_id in checkpoint_ids:
+            if self.kv_cache_manager.drop_request_checkpoint(checkpoint_id):
+                dropped += 1
+        return dropped
+
     def make_stats(
         self,
         spec_decoding_stats: SpecDecodingStats | None = None,
@@ -1913,6 +1938,7 @@ class Scheduler(SchedulerInterface):
         return spec_decoding_stats
 
     def shutdown(self) -> None:
+        self.kv_cache_manager.clear_request_checkpoints()
         if self.kv_event_publisher:
             self.kv_event_publisher.shutdown()
         if self.connector is not None:
