@@ -904,16 +904,9 @@ class Scheduler(SchedulerInterface):
                     # For v2 model runner, prefill_token_ids also needs to be set
                     if self.use_v2_model_runner and nrd.prefill_token_ids is not None:
                         nrd_copy.prefill_token_ids = nrd.prefill_token_ids[:end]
-                    print(f" === Virtual request: {nrd_copy.req_id} ===")
-                    print(f"   parent: {nrd_copy.parent_req_id}")
-                    print(f"   num_computed_tokens: {nrd_copy.num_computed_tokens}")
-                    print(
-                        f"   prompt_len: {len(nrd_copy.prompt_token_ids) if nrd_copy.prompt_token_ids else 0}"
-                    )
                     block_count = (
                         len(nrd_copy.block_ids[0]) if nrd_copy.block_ids else 0
                     )
-                    print(f"   shares parent's blocks: {block_count} blocks")
                     new_reqs_data.append(nrd_copy)
                     # Track this virtual request ID for cleanup
                     virtual_gap_req_ids.add(nrd_copy.req_id)
