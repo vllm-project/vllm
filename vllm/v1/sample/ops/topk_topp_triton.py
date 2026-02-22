@@ -983,7 +983,7 @@ def apply_top_k_top_p_triton(
         k_ptr = logits  # Dummy pointer (won't be read)
 
     if p is not None:
-        assert p.ndim == 1 and p.shape[0] == batch_size 
+        assert p.ndim == 1 and p.shape[0] == batch_size
         p_ptr = p.to(torch.float32)
     else:
         p_ptr = logits  # Dummy pointer (won't be read)
