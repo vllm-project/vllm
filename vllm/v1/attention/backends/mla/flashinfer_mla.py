@@ -220,7 +220,7 @@ class FlashInferMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         return q_out, k_nope_out, k_pe_out
 
-    def _forward_decode(
+    def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,
