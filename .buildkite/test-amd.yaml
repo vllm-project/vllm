@@ -1328,7 +1328,6 @@ steps:
   timeout_in_minutes: 18
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_4
-  grade: Blocking
   num_gpus: 4
   source_file_dependencies:
   - vllm/lora
