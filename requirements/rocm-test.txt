@@ -70,7 +70,7 @@ ray[cgraph,default]>=2.48.0
 torchgeo==0.7.0
     # via terratorch
 # MTEB Benchmark Test
-mteb==2.1.2
+mteb[bm25s]>=2, <3
 
 # Utilities
 num2words==0.5.14
