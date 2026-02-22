@@ -59,14 +59,8 @@ if current_platform.is_rocm():
     torch.backends.cuda.enable_math_sdp(True)
 
 # On ROCm, floating-point reductions in attention and GEMM kernels are
-# non-associative and sensitive to batch geometry. The ref LLM (no spec
-# decode, default scheduling) and the spec-decode LLM (chunked prefill,
-# different effective batch sizes) follow different reduction orders,
-# producing numerically divergent logprobs that get mis-attributed to
-# spec-decode incorrectness.
-#
-# Force LLM instances into an identical, deterministic execution
-# mode so the test isolates spec-decode correctness only:
+# non-associative and sensitive to batch geometry. Force LLM instances
+# into an identical, deterministic execution mode:
 ROCM_DETERMINISM_ARGS: list[str] = (
     ["--max-num-seqs", "1"] if current_platform.is_rocm() else []
 )
