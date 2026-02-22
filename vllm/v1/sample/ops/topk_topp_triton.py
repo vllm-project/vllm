@@ -990,7 +990,7 @@ def apply_top_k_top_p_triton(
     else:
         p_ptr = logits  # Dummy pointer (won't be read)
 
-    num_sm = current_platform.get_num_sm(logits.device.index)
+    num_sm = current_platform.get_num_compute_units(logits.device.index)
     NUM_PROGRAMS = min(num_sm, batch_size)
 
     # Cache per-Triton Program buffer on each device.

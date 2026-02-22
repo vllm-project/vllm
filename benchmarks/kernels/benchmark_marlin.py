@@ -134,7 +134,7 @@ def bench_run(
         nonlocal allspark_supported
         if allspark_supported:
             properties = torch.cuda.get_device_properties(b.device.index)
-            sm_count = current_platform.get_num_sm(b.device.index)
+            sm_count = current_platform.get_num_compute_units(b.device.index)
             sm_version = properties.major * 10 + properties.minor
 
             supported_arch = sm_version >= 80 and sm_version < 90

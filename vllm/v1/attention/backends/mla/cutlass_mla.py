@@ -75,7 +75,7 @@ class SM100Workspace:
 
         # Pre-compute sm_count to avoid recomputing it. Use device 0 as a proxy
         # (assumes all devices are similar)
-        self._sm_count = current_platform.get_num_sm(0)
+        self._sm_count = current_platform.get_num_compute_units(0)
 
     def get_buf(self):
         return self._workspace_buf
