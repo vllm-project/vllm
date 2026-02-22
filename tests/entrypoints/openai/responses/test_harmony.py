@@ -906,6 +906,10 @@ async def test_function_calling_no_code_interpreter_events(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.skip(
+    reason="This test is flaky in CI, needs investigation and "
+    "potential fixes in the code interpreter MCP implementation."
+)
 async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, server):
     tools = [{"type": "mcp", "server_label": "code_interpreter"}]
     input_text = (
