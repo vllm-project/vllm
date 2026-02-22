@@ -586,10 +586,13 @@ class MarlinExpertsBase(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
+        # Marlin uses apply_moe_activation() callback for activation,
+        # so any activation supported there can be used here.
         return activation in [
             MoEActivation.SILU,
             MoEActivation.GELU,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
             MoEActivation.SILU_NO_MUL,
             MoEActivation.GELU_NO_MUL,
             MoEActivation.RELU2_NO_MUL,
