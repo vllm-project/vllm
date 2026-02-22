@@ -1,25 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""
-SPANS benchmarking script comparing different KV cache connectors.
-
-This script runs three tests:
-1. SegmentedPrefillOffloadConnector with preloaded documents
-2. OffloadingConnector with preloaded documents (permuted order)
-3. Baseline with spans disabled (no KVTransferConfig, no preload)
-"""
-
-from dataclasses import dataclass
-from pathlib import Path
+import hashlib
 import os
 import time
-import hashlib
-from typing import Callable, Optional
+from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 
 from vllm import LLM, SamplingParams
-from vllm.inputs import TokensPrompt
 from vllm.config import KVTransferConfig
+from vllm.inputs import TokensPrompt
 
 # =============================================================================
 # Configuration
@@ -83,10 +74,16 @@ def disable_spans():
 
 def pad_tokens(toklist: list[int], padtok: int) -> list[int]:
     """Pad token list to block size boundary."""
-    return toklist[:-1] + [padtok] * ((BLOCK_SIZE - len(toklist)) % BLOCK_SIZE) + toklist[-1:]
+    return (
+        toklist[:-1]
+        + [padtok] * ((BLOCK_SIZE - len(toklist)) % BLOCK_SIZE)
+        + toklist[-1:]
+    )
 
 
-def wrap_prompt(prompt: list[int] | list[list[int]]) -> TokensPrompt | list[TokensPrompt]:
+def wrap_prompt(
+    prompt: list[int] | list[list[int]],
+) -> TokensPrompt | list[TokensPrompt]:
     """Wrap prompt(s) in TokensPrompt objects."""
     if isinstance(prompt[0], list):
         return [TokensPrompt(prompt_token_ids=p) for p in prompt]
@@ -228,7 +225,7 @@ class KVConfigBuilder:
         return KVTransferConfig(
             kv_connector="SegmentedPrefillOffloadConnector",
             **cls.BASE_CONFIG,
-            kv_connector_extra_config={"cpu_bytes_to_use": CPU_CACHE_BYTES},
+            kv_connector_extra_config={"cpu_bytes_to_use": CPU_CACHE_BYTES, "gap_length": 64},
             kv_connector_module_path="segmented_prefill_example_connector",
         )
 
@@ -270,7 +267,7 @@ class LLMInstance:
     def create(
         cls,
         model_name: str,
-        kv_config: Optional[KVTransferConfig] = None,
+        kv_config: KVTransferConfig | None = None,
         max_generated: int = MAX_GENERATED_TOKENS,
     ) -> "LLMInstance":
         """Create a new LLM instance with the given configuration."""
@@ -292,13 +289,17 @@ class LLMInstance:
 
         return cls(llm, tokenizer_fn, samp_preload, samp_generate)
 
-    def preload(self, docs: list[list[int]], prefix: Optional[list[int]] = None) -> float:
+    def preload(self, docs: list[list[int]], prefix: list[int] | None = None) -> float:
         """Preload documents and optional prefix, returning elapsed time."""
         start = time.time()
         for doc in docs:
-            self.llm.generate(wrap_prompt(doc), sampling_params=self.sampling_params_preload)
+            self.llm.generate(
+                wrap_prompt(doc), sampling_params=self.sampling_params_preload
+            )
         if prefix:
-            self.llm.generate(wrap_prompt(prefix), sampling_params=self.sampling_params_preload)
+            self.llm.generate(
+                wrap_prompt(prefix), sampling_params=self.sampling_params_preload
+            )
         return time.time() - start
 
     def generate(self, prompt: list[int]) -> tuple:
@@ -306,7 +307,7 @@ class LLMInstance:
         start = time.time()
         response = self.llm.generate(
             wrap_prompt(prompt),
-            sampling_params=self.sampling_params_generate,
+            sampling_params=self.sampling_params_generate, # self.sampling_params_preload
             use_tqdm=False,
         )
         elapsed = time.time() - start
@@ -358,14 +359,19 @@ class DocumentSet:
 # Test Execution
 # =============================================================================
 
+
 @dataclass
 class TestResult:
     """Result of a single test run."""
+
     name: str
     preload_time: float
     generation_time: float
     output_text: str
     model_name: str
+    ttft: float = 0.0  # Time to first token
+    tpot: float = 0.0  # Time per output token
+    num_output_tokens: int = 0
 
 
 class TestRunner:
@@ -385,7 +391,19 @@ class TestRunner:
         """Print final comparison summary."""
         self.print_header("SUMMARY COMPARISON")
 
-        baseline_result = next((r for r in self.results if "baseline" in r.name.lower()), None)
+        # Find specific test results for comparisons
+        baseline_result = None
+        segmented_result = None
+        offloading_result = None
+        
+        for r in self.results:
+            name_lower = r.name.lower()
+            if "baseline" in name_lower:
+                baseline_result = r
+            elif "segmentedprefilloffload" in name_lower:
+                segmented_result = r
+            elif "offloadingconnector" in name_lower and "segmented" not in name_lower:
+                offloading_result = r
 
         for result in self.results:
             total = result.preload_time + result.generation_time
@@ -393,13 +411,112 @@ class TestRunner:
             print(f"  - Preload time: {result.preload_time:.4f} s")
             print(f"  - Generation time: {result.generation_time:.4f} s")
             print(f"  - Total time: {total:.4f} s")
+            
+            if result.ttft > 0:
+                print(f"  - TTFT: {result.ttft:.4f} s ({result.ttft * 1000:.2f} ms)")
+            if result.tpot > 0:
+                print(f"  - TPOT: {result.tpot:.4f} s ({result.tpot * 1000:.2f} ms)")
 
             if baseline_result and result != baseline_result:
                 diff = result.generation_time - baseline_result.generation_time
-                pct = ((result.generation_time / baseline_result.generation_time - 1) * 100)
+                pct = (
+                    result.generation_time / baseline_result.generation_time - 1
+                ) * 100
                 print(f"  - vs Baseline: {diff:+.4f} s ({pct:+.2f}%)")
+            
+            # Add comparison between OffloadingConnector and SegmentedPrefillOffloadConnector
+            if result == offloading_result and segmented_result:
+                diff = result.generation_time - segmented_result.generation_time
+                pct = (result.generation_time / segmented_result.generation_time - 1) * 100
+                print(f"  - vs SegmentedPrefillOffloadConnector: {diff:+.4f} s ({pct:+.2f}%)")
 
         print("=" * 80)
+
+    def save_results_to_file(self, filename: str = "test_results_summary.txt"):
+        """Save all test results to a file."""
+        with open(filename, "w") as f:
+            f.write("=" * 80 + "\n")
+            f.write("SPANS BENCHMARK RESULTS SUMMARY\n")
+            f.write("=" * 80 + "\n\n")
+            f.write(f"Model: {self.model_name}\n\n")
+
+            # Find specific test results for comparisons
+            baseline_result = None
+            segmented_result = None
+            offloading_result = None
+            
+            for r in self.results:
+                name_lower = r.name.lower()
+                if "baseline" in name_lower:
+                    baseline_result = r
+                elif "segmentedprefilloffload" in name_lower:
+                    segmented_result = r
+                elif "offloadingconnector" in name_lower and "segmented" not in name_lower:
+                    offloading_result = r
+
+            for i, result in enumerate(self.results, 1):
+                f.write("=" * 80 + "\n")
+                f.write(f"TEST {i}: {result.name}\n")
+                f.write("=" * 80 + "\n\n")
+
+                # Timing metrics
+                f.write("TIMING METRICS:\n")
+                f.write(f"  Preload time:     {result.preload_time:.4f} s\n")
+                f.write(f"  Generation time:  {result.generation_time:.4f} s\n")
+                f.write(f"  Total time:       {result.preload_time + result.generation_time:.4f} s\n")
+                
+                if result.ttft > 0:
+                    f.write(f"  TTFT:             {result.ttft:.4f} s ({result.ttft * 1000:.2f} ms)\n")
+                if result.tpot > 0:
+                    f.write(f"  TPOT:             {result.tpot:.4f} s ({result.tpot * 1000:.2f} ms)\n")
+                if result.num_output_tokens > 0:
+                    f.write(f"  Output tokens:    {result.num_output_tokens}\n")
+
+                # Comparison with baseline
+                if baseline_result and result != baseline_result:
+                    diff = result.generation_time - baseline_result.generation_time
+                    pct = (result.generation_time / baseline_result.generation_time - 1) * 100
+                    f.write(f"\n  vs Baseline:\n")
+                    f.write(f"    Generation time diff: {diff:+.4f} s ({pct:+.2f}%)\n")
+                    
+                    if result.ttft > 0 and baseline_result.ttft > 0:
+                        ttft_diff = result.ttft - baseline_result.ttft
+                        ttft_pct = (result.ttft / baseline_result.ttft - 1) * 100
+                        f.write(f"    TTFT diff:            {ttft_diff:+.4f} s ({ttft_pct:+.2f}%)\n")
+                    
+                    if result.tpot > 0 and baseline_result.tpot > 0:
+                        tpot_diff = result.tpot - baseline_result.tpot
+                        tpot_pct = (result.tpot / baseline_result.tpot - 1) * 100
+                        f.write(f"    TPOT diff:            {tpot_diff:+.4f} s ({tpot_pct:+.2f}%)\n")
+
+                # Comparison between SegmentedPrefillOffloadConnector and OffloadingConnector
+                if result == offloading_result and segmented_result:
+                    diff = result.generation_time - segmented_result.generation_time
+                    pct = (result.generation_time / segmented_result.generation_time - 1) * 100
+                    f.write(f"\n  vs SegmentedPrefillOffloadConnector:\n")
+                    f.write(f"    Generation time diff: {diff:+.4f} s ({pct:+.2f}%)\n")
+                    
+                    if result.ttft > 0 and segmented_result.ttft > 0:
+                        ttft_diff = result.ttft - segmented_result.ttft
+                        ttft_pct = (result.ttft / segmented_result.ttft - 1) * 100
+                        f.write(f"    TTFT diff:            {ttft_diff:+.4f} s ({ttft_pct:+.2f}%)\n")
+                    
+                    if result.tpot > 0 and segmented_result.tpot > 0:
+                        tpot_diff = result.tpot - segmented_result.tpot
+                        tpot_pct = (result.tpot / segmented_result.tpot - 1) * 100
+                        f.write(f"    TPOT diff:            {tpot_diff:+.4f} s ({tpot_pct:+.2f}%)\n")
+
+                # Output text
+                f.write(f"\nOUTPUT TEXT:\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"{result.output_text}\n")
+                f.write("-" * 80 + "\n\n")
+
+            f.write("=" * 80 + "\n")
+            f.write("END OF SUMMARY\n")
+            f.write("=" * 80 + "\n")
+
+        print(f"\n✓ Results saved to: {filename}")
 
 
 # =============================================================================
@@ -457,16 +574,16 @@ def main():
         print(f"  {label} length: {len(doc)}")
 
     # Preload
-    runner.print_header(
-        f"Preloading {len(all_docs)} documents + prefix"
-    )
+    runner.print_header(f"Preloading {len(all_docs)} documents + prefix")
     preload_time = instance1.preload(all_docs, prefix)
     print(f"Preload completed in {preload_time:.4f} s")
     time.sleep(2)
 
     # Build the full query
     question = "What is Northholm's value to Luminthia?"
-    full_prompt = prefix + sum(all_docs, []) + query_prefix + tokenizer(question) + query_suffix
+    full_prompt = (
+        prefix + sum(all_docs, []) + query_prefix + tokenizer(question) + query_suffix
+    )
     print(f"\nFull prompt length: {len(full_prompt)} tokens")
 
     # =============================================================================
@@ -478,13 +595,37 @@ def main():
 
     response, gen_time = instance1.generate(full_prompt)
     output_text = response[0].outputs[0].text
+    
+    # Extract metrics
+    ttft = 0.0
+    tpot = 0.0
+    num_output_tokens = len(response[0].outputs[0].token_ids)
+    
+    metrics = response[0].metrics
+    num_output_tokens = len(response[0].outputs[0].token_ids)
+    # TTFT: time from arrival to first token
+    if metrics and metrics.first_token_time and metrics.arrival_time:
+        ttft = metrics.first_token_time - metrics.arrival_time
+    else:
+        ttft = 0.0
 
+    # TPOT: time between tokens after the first
+    if metrics and metrics.finished_time and metrics.first_token_time and num_output_tokens > 1:
+        tpot = (metrics.finished_time - metrics.first_token_time) / (num_output_tokens - 1)
+    else:
+        tpot = 0.0
     print(f"Preload time: {preload_time:.4f} s")
     print(f"Generation time: {gen_time:.4f} s")
+    # TTFT and TPOT measurements don't work yet
+    # print(f"TTFT: {ttft:.4f} s ({ttft * 1000:.2f} ms)")
+    # print(f"TPOT: {tpot:.4f} s ({tpot * 1000:.2f} ms)")
+    print(f"Output tokens: {num_output_tokens}")
     print(f"Output: {output_text[:200]}...")
 
     dump_kv_cache_to_file(instance1.llm, "kv_cache_test1_segmented.txt", test_name)
-    runner.results.append(TestResult(test_name, preload_time, gen_time, output_text, model_name))
+    runner.results.append(
+        TestResult(test_name, preload_time, gen_time, output_text, model_name, ttft, tpot, num_output_tokens)
+    )
 
     # Cleanup instance 1
     runner.print_header("Destroying vLLM instance")
@@ -492,29 +633,46 @@ def main():
     time.sleep(3)
 
     # =============================================================================
-    # TEST 2: OffloadingConnector with permuted order
+    # TEST 2: OffloadingConnector 
     # =============================================================================
 
     runner.print_header("Creating new vLLM with OffloadingConnector")
     instance2 = LLMInstance.create(model_name, kv_config=KVConfigBuilder.offloading())
 
-    runner.print_header("TEST 2: OffloadingConnector (permuted docs)")
+    runner.print_header("TEST 2: OffloadingConnector")
 
-    # Preload in reverse order
-    preload_time2 = instance2.preload(list(reversed(all_docs)), prefix)
-    print(f"Preload (permuted) completed in {preload_time2:.4f} s")
+    # Preload
+    preload_time2 = instance2.preload(list(all_docs), prefix)
+    print(f"Preload completed in {preload_time2:.4f} s")
     time.sleep(2)
 
     response2, gen_time2 = instance2.generate(full_prompt)
     output_text2 = response2[0].outputs[0].text
+    
+    # Extract metrics
+    ttft2 = 0.0
+    tpot2 = 0.0
+    num_output_tokens2 = len(response2[0].outputs[0].token_ids)
+    
+    if response2[0].metrics and hasattr(response2[0].metrics, 'first_token_latency'):
+        ttft2 = response2[0].metrics.first_token_latency
+    
+    if num_output_tokens2 > 1 and ttft2 > 0:
+        tpot2 = (gen_time2 - ttft2) / (num_output_tokens2 - 1)
 
     print(f"Preload time: {preload_time2:.4f} s")
     print(f"Generation time: {gen_time2:.4f} s")
+    # TTFT and TPOT measurements don't work yet
+    # print(f"TTFT: {ttft:.4f} s ({ttft * 1000:.2f} ms)")
+    # print(f"TPOT: {tpot:.4f} s ({tpot * 1000:.2f} ms)")
+    print(f"Output tokens: {num_output_tokens2}")
     print(f"Output: {output_text2[:200]}...")
 
-    test_name2 = "OffloadingConnector (permuted, with preload)"
+    test_name2 = "OffloadingConnector (with preload)"
     dump_kv_cache_to_file(instance2.llm, "kv_cache_test2_offloading.txt", test_name2)
-    runner.results.append(TestResult(test_name2, preload_time2, gen_time2, output_text2, model_name))
+    runner.results.append(
+        TestResult(test_name2, preload_time2, gen_time2, output_text2, model_name, ttft2, tpot2, num_output_tokens2)
+    )
 
     # Cleanup instance 2
     runner.print_header("Destroying vLLM instance")
@@ -526,20 +684,39 @@ def main():
     # =============================================================================
 
     disable_spans()
-    runner.print_header("TEST 3: Baseline (SPANS DISABLED, no preload, no KVTransferConfig)")
+    runner.print_header(
+        "TEST 3: Baseline (SPANS DISABLED, no preload, no KVTransferConfig)"
+    )
 
     instance3 = LLMInstance.create(model_name, kv_config=None)
 
     print("Running generation without preload...")
     response3, gen_time3 = instance3.generate(full_prompt)
     output_text3 = response3[0].outputs[0].text
+    
+    # Extract metrics
+    ttft3 = 0.0
+    tpot3 = 0.0
+    num_output_tokens3 = len(response3[0].outputs[0].token_ids)
+    
+    if response3[0].metrics and hasattr(response3[0].metrics, 'first_token_latency'):
+        ttft3 = response3[0].metrics.first_token_latency
+    
+    if num_output_tokens3 > 1 and ttft3 > 0:
+        tpot3 = (gen_time3 - ttft3) / (num_output_tokens3 - 1)
 
     print(f"Generation time: {gen_time3:.4f} s")
+    # TTFT and TPOT measurements don't work yet
+    # print(f"TTFT: {ttft:.4f} s ({ttft * 1000:.2f} ms)")
+    # print(f"TPOT: {tpot:.4f} s ({tpot * 1000:.2f} ms)")
+    print(f"Output tokens: {num_output_tokens3}")
     print(f"Output: {output_text3[:200]}...")
 
     test_name3 = "Baseline (no preload, spans disabled)"
     dump_kv_cache_to_file(instance3.llm, "kv_cache_test3_baseline.txt", test_name3)
-    runner.results.append(TestResult(test_name3, 0.0, gen_time3, output_text3, model_name))
+    runner.results.append(
+        TestResult(test_name3, 0.0, gen_time3, output_text3, model_name, ttft3, tpot3, num_output_tokens3)
+    )
 
     instance3.cleanup()
 
@@ -548,6 +725,7 @@ def main():
     # =============================================================================
 
     runner.print_summary()
+    runner.save_results_to_file("test_results_summary.txt")
 
 
 if __name__ == "__main__":

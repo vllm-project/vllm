@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
     OffloadingConnectorMetadata,
-    ReqId
+    ReqId,
 )
 from vllm.v1.request import Request
 
@@ -36,13 +36,35 @@ class SegmentedPrefillOffloadConnectorMetadata(OffloadingConnectorMetadata):
 
 
 class SegmentedPrefillOffloadConnector(OffloadingConnector):
-    def __init__(self, vllm_config: "VllmConfig", role: KVConnectorRole, kv_cache_config: "KVCacheConfig"):
-        super().__init__(vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config)
+    DEFAULT_GAP_LENGTH = 32
+
+    def __init__(
+        self,
+        vllm_config: "VllmConfig",
+        role: KVConnectorRole,
+        kv_cache_config: "KVCacheConfig",
+    ):
+        super().__init__(
+            vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
+        )
         self._req_to_gaps: dict[str, list[tuple[int, int]]] = dict()
         self._block_size = 16
         self.current_num_computed_tokens = 0
         self.current_num_external_tokens = 0
         self.current_request: Request | None = None
+
+        # Read gap_length from config, default to 32
+        kv_transfer_config = vllm_config.kv_transfer_config
+        if kv_transfer_config is not None:
+            self._gap_length = kv_transfer_config.kv_connector_extra_config.get(
+                "gap_length", self.DEFAULT_GAP_LENGTH
+            )
+        else:
+            self._gap_length = self.DEFAULT_GAP_LENGTH
+        logger.info(
+            "SegmentedPrefillOffloadConnector initialized with gap_length=%d",
+            self._gap_length,
+        )
 
     def bind_connector_metadata(self, connector_metadata: KVConnectorMetadata) -> None:
         assert isinstance(connector_metadata, SegmentedPrefillOffloadConnectorMetadata)
@@ -59,46 +81,53 @@ class SegmentedPrefillOffloadConnector(OffloadingConnector):
                 )
 
     def _choose_gaps(
-            self, num_computed_tokens: int, num_external_tokens: int, request: Request
-        ) -> list[tuple[int, int]]:
-            # Create gaps starting at positions where token id 10 appears
-            external_start = num_computed_tokens
-            external_end = num_computed_tokens + num_external_tokens
-            gap_length = 32
-            print(f"Choosing gaps. external_end = {external_end}, external_start = {external_start}")
-            if external_end - external_start < gap_length:
-                return []
+        self, num_computed_tokens: int, num_external_tokens: int, request: Request
+    ) -> list[tuple[int, int]]:
+        # Disable gaps if gap_length is 0
+        if self._gap_length <= 0:
+            return []
 
-            gaps = []
+        # Create gaps starting at positions where token id 10 appears
+        external_start = num_computed_tokens
+        external_end = num_computed_tokens + num_external_tokens
+        print(
+            f"Choosing gaps. external_end = {external_end}, external_start = {external_start}"
+        )
+        if external_end - external_start < self._gap_length:
+            return []
 
-            # First, collect all span start positions ('10' tokens) in the external range
-            span_starts = []
-            for i, token_id in enumerate(request.prompt_token_ids):
-                if token_id == 10 and external_start <= i < external_end:
-                    span_starts.append(i)
-            print(f"Found span starts at: {span_starts}")
+        gaps = []
 
-            # Create gaps for each span, bounded by the next span start
-            for idx, gap_start in enumerate(span_starts):
-                # Find the end of this span: either the next '10' or external_end
-                if idx + 1 < len(span_starts):
-                    next_span_start = span_starts[idx + 1]
-                else:
-                    next_span_start = external_end
+        # First, collect all span start positions ('10' tokens) in the external range
+        span_starts = []
+        for i, token_id in enumerate(request.prompt_token_ids):
+            if token_id == 10 and external_start <= i < external_end:
+                span_starts.append(i)
+        print(f"Found span starts at: {span_starts}")
 
-                span_length = next_span_start - gap_start
-                print(f"Span at {gap_start}: length={span_length}, next_span at {next_span_start}")
+        # Create gaps for each span, bounded by the next span start
+        for idx, gap_start in enumerate(span_starts):
+            # Find the end of this span: either the next '10' or external_end
+            if idx + 1 < len(span_starts):
+                next_span_start = span_starts[idx + 1]
+            else:
+                next_span_start = external_end
 
-                # Gap is min(gap_length, span_length), but not exceeding external_end
-                gap_end = min(gap_start + gap_length, next_span_start, external_end)
+            span_length = next_span_start - gap_start
+            print(
+                f"Span at {gap_start}: length={span_length}, next_span at {next_span_start}"
+            )
 
-                # Only add if we have at least some gap
-                if gap_end > gap_start:
-                    print(f"  Adding gap: ({gap_start}, {gap_end})")
-                    gaps.append((gap_start, gap_end))
+            # Gap is min(self._gap_length, span_length), but not exceeding external_end
+            gap_end = min(gap_start + self._gap_length, next_span_start, external_end)
 
-            print(f"Gaps: {gaps}")
-            return gaps
+            # Only add if we have at least some gap
+            if gap_end > gap_start:
+                print(f"  Adding gap: ({gap_start}, {gap_end})")
+                gaps.append((gap_start, gap_end))
+
+        print(f"Gaps: {gaps}")
+        return gaps
 
     def _print_gaps_representation(
         self,
@@ -157,7 +186,11 @@ class SegmentedPrefillOffloadConnector(OffloadingConnector):
         logger.debug("_req_to_gaps len: %d.", len(self._req_to_gaps))
         print(f"self.current_num_external_tokens = {self.current_num_external_tokens}")
         if self.current_num_external_tokens >= self._block_size * 2:
-            gaps = self._choose_gaps(self.current_num_computed_tokens, self.current_num_external_tokens, self.current_request)
+            gaps = self._choose_gaps(
+                self.current_num_computed_tokens,
+                self.current_num_external_tokens,
+                self.current_request,
+            )
             self._req_to_gaps[self.current_request.request_id] = gaps
             print(f"Added gaps {gaps} to request_id {self.current_request.request_id}")
             print(f"Now, req_to_gaps is: {self._req_to_gaps}")
