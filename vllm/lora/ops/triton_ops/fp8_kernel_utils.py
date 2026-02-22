@@ -27,14 +27,14 @@ def _accumulate_mm(
     Core matrix multiplication and accumulation logic with quantization support.
 
     Args:
-        tiled_a: Loaded tile from A matrix
-        tiled_b: Loaded tile from B matrix
-        accumulator: Current accumulator value
-        a_scale_ptr: Scale pointer for A matrix
-        b_scale_ptr: Scale pointer for B matrix
-        a_scale_k_stride: K dimension stride for A's block-wise scales
-        b_scale_k_stride: K dimension stride for B's block-wise scales
-        iter_k: Current iteration's global K offset
+        tiled_a (tl.tensor): Loaded tile from A matrix
+        tiled_b (tl.tensor): Loaded tile from B matrix
+        accumulator (tl.tensor): Current accumulator value
+        a_scale_ptr (tl.tensor): Scale pointer for A matrix
+        b_scale_ptr (tl.tensor): Scale pointer for B matrix
+        a_scale_k_stride (int): K dimension stride for A's block-wise scales
+        b_scale_k_stride (int): K dimension stride for B's block-wise scales
+        iter_k (int): Current iteration's global K offset
         group_k: Block size for K dimension in block-wise quantization
         group_n: Block size for N dimension in block-wise quantization
         use_fp8_w8a8: Whether using FP8 W8A8 quantization
@@ -42,7 +42,7 @@ def _accumulate_mm(
         use_int8_w8a16: Whether using INT8 W8A16 quantization
 
     Returns:
-        Updated accumulator
+        tl.tensor: Updated accumulator
     """
     if use_int8_w8a16:
         accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
@@ -102,15 +102,19 @@ def fp8_mm_k(
     matrix block product with proper dequantization.
 
     Args:
-        a_ptr: Array of pointers, identifying rows of A (FP8 or other dtype)
-        b_ptr: Array of pointers, identifying columns of B (FP8 dtype)
-        a_scale_ptr: Scale pointer for A matrix (per-token or block-wise)
-        b_scale_ptr: Scale pointer for B matrix (per-channel or block-wise)
-        ak_stride: K dimension stride of the A matrix
-        bk_stride: K dimension stride of the B matrix
-        a_scale_k_stride: K dimension stride for A's block-wise scales
-        b_scale_k_stride: K dimension stride for B's block-wise scales
-        offset_k: Base offset along K dimension
+        a_ptr (tl.tensor): Array of pointers, identifying rows of A
+            (FP8 or other dtype)
+        b_ptr (tl.tensor): Array of pointers, identifying columns of B
+            (FP8 dtype)
+        a_scale_ptr (tl.tensor): Scale pointer for A matrix
+            (per-token or block-wise)
+        b_scale_ptr (tl.tensor): Scale pointer for B matrix
+            (per-channel or block-wise)
+        ak_stride (int): K dimension stride of the A matrix
+        bk_stride (int): K dimension stride of the B matrix
+        a_scale_k_stride (int): K dimension stride for A's block-wise scales
+        b_scale_k_stride (int): K dimension stride for B's block-wise scales
+        offset_k (int): Base offset along K dimension
         K: Length of the K dimension
         BLOCK_M: M dimension of the output block m x n
         BLOCK_N: N dimension of the output block m x n
@@ -124,10 +128,10 @@ def fp8_mm_k(
         use_int8_w8a16: Whether using INT8 W8A16 quantization
         per_channel_quant: Whether using per-channel quantization
         CAST_TYPE: if True, cast the values from the A matrix to the B
-          matrix dtype.
+            matrix dtype.
         b_dtype: datatype of the B matrix
         USE_GDC: Whether to use PDL. True indicates use.
-        base_k: Base offset along K dimension for current SPLIT_K group
+        base_k (int): Base offset along K dimension for current SPLIT_K group
     """
     accumulator = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
 
