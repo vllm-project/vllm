@@ -243,6 +243,7 @@ class RocmPlatform(Platform):
         "ptpc_fp8",
         "mxfp4",
         "petit_nvfp4",
+        "petit_mxfp4",
         "torchao",
         "bitsandbytes",
     ]
