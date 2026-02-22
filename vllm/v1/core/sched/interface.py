@@ -10,7 +10,11 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.distributed.kv_transfer.kv_connector.v1 import KVConnectorBase_V1
-    from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
+    from vllm.v1.core.sched.output import (
+        GrammarOutput,
+        KVCacheUsageMetrics,
+        SchedulerOutput,
+    )
     from vllm.v1.engine import EngineCoreOutputs
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.metrics.stats import SchedulerStats
@@ -224,6 +228,11 @@ class SchedulerInterface(ABC):
     @abstractmethod
     def get_request_counts(self) -> tuple[int, int]:
         """Returns (num_running_reqs, num_waiting_reqs)."""
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_kv_cache_usage(self) -> "KVCacheUsageMetrics":
+        """Return current KV cache usage (percentage, used blocks, used tokens)."""
         raise NotImplementedError
 
     @abstractmethod

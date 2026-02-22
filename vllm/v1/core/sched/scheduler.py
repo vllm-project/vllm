@@ -42,6 +42,7 @@ from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
+    KVCacheUsageMetrics,
     NewRequestData,
     SchedulerOutput,
 )
@@ -1250,6 +1251,22 @@ class Scheduler(SchedulerInterface):
             scheduler_output.scheduled_spec_decode_tokens,
         )
         return GrammarOutput(structured_output_request_ids, bitmask)
+
+    def get_kv_cache_usage(self) -> KVCacheUsageMetrics:
+        """Return current KV cache usage (percentage, used blocks, used tokens)."""
+        pool = self.kv_cache_manager.block_pool
+        total_blocks = pool.num_gpu_blocks - 1  # exclude null block
+        num_free = pool.get_num_free_blocks()
+        used_blocks = total_blocks - num_free
+        usage_fraction = self.kv_cache_manager.usage  # 0.0 to 1.0
+        usage_pct = usage_fraction * 100.0
+        used_tokens = used_blocks * self.block_size
+        return KVCacheUsageMetrics(
+            usage_pct=usage_pct,
+            used_blocks=used_blocks,
+            total_blocks=total_blocks,
+            used_tokens=used_tokens,
+        )
 
     def update_from_output(
         self,

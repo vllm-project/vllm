@@ -179,6 +179,21 @@ class CachedRequestData:
         )
 
 
+@dataclass
+class KVCacheUsageMetrics:
+    """KV cache usage metrics from the scheduler."""
+
+    # Usage as a percentage (0.0 to 100.0).
+    usage_pct: float
+    # Number of blocks currently in use (excludes the reserved null block).
+    used_blocks: int
+    # Total number of allocatable blocks (num_gpu_blocks - 1).
+    total_blocks: int
+    # Approximate number of tokens represented by
+    # used blocks (used_blocks * block_size).
+    used_tokens: int
+
+
 @bc_linter_include
 @dataclass
 class SchedulerOutput:
