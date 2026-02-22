@@ -9,6 +9,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
+from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
 from typing import Any, TypeVar, cast
@@ -594,19 +595,47 @@ class EngineCore:
 
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
-    ) -> Future[Any] | None:
-        """Pause scheduling. No-op in base EngineCore; overridden in EngineCoreProc."""
+    ) -> Future | None:
+        """Pause generation; behavior depends on mode.
+
+        All pause modes queue new adds -- "abort" and "keep" skip step();
+        "wait" allows step() so in-flight requests can drain.
+
+        - ``abort``: Set PAUSED_NEW, abort all requests, wait for abort
+          outputs to be sent (when running with output_queue), optionally
+          clear caches, then complete the returned Future.
+        - ``wait``: Set PAUSED_NEW (queue adds, keep stepping); when drained,
+          optionally clear caches, then complete the returned Future.
+        - ``keep``: Set PAUSED_ALL; return a Future that completes when the
+          output queue is empty.
+        """
+        if mode not in ("keep", "abort", "wait"):
+            raise ValueError(f"Invalid pause mode: {mode}")
+        if mode == "wait":
+            raise ValueError("'wait' mode can't be used in inproc-engine mode")
+
+        if mode == "abort":
+            self.scheduler.finish_requests(None, RequestStatus.FINISHED_ABORTED)
+
+        pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
+        self.scheduler.set_pause_state(pause_state)
+
+        if clear_cache:
+            self.reset_prefix_cache(reset_running_requests=True)
+            self.reset_mm_cache()
+            self.reset_encoder_cache()
+
         return None
 
     def resume_scheduler(self) -> None:
-        """Resume scheduling. No-op in base EngineCore; overridden in EngineCoreProc."""
+        """Resume the scheduler and flush any requests queued while paused."""
+        self.scheduler.set_pause_state(PauseState.UNPAUSED)
 
     def is_scheduler_paused(self) -> bool:
-        """Return whether the scheduler is in any pause state. False in base EngineCore
-        and overridden in EngineCoreProc."""
-        return False
+        """Return whether the scheduler is in any pause state."""
+        return self.scheduler.pause_state != PauseState.UNPAUSED
 
-    def sleep(self, level: int = 1):
+    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None | Future:
         """Put the engine to sleep at the specified level.
 
         Args:
@@ -615,13 +644,34 @@ class EngineCore:
                            but not processed. No GPU memory changes.
                 - Level 1: Offload model weights to CPU, discard KV cache.
                 - Level 2: Discard all GPU memory.
+            mode: Pause mode - how to deal with any existing requests, see
+                documentation of pause_scheduler method.
         """
-        if level == 0:
-            # Level 0: Just pause scheduling, don't touch GPU
-            self.pause_scheduler()
-        else:
-            # Level 1+: Delegate to executor for GPU memory management
-            self.model_executor.sleep(level)
+
+        # Pause scheduler before sleeping.
+        clear_prefix_cache = level >= 1
+        pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        if level < 1:
+            return pause_future
+
+        # Level 1+: Delegate to executor for GPU memory management
+        model_executor = self.model_executor
+        if pause_future is None:
+            model_executor.sleep(level)
+            return None
+
+        future = Future[Any]()
+
+        def pause_complete(f: Future):
+            try:
+                f.result()  # propagate any exception
+                future.set_result(model_executor.sleep(level))
+            except Exception as e:
+                future.set_exception(e)
+
+        logger.info("Waiting for in-flight requests to complete before sleeping...")
+        pause_future.add_done_callback(pause_complete)
+        return future
 
     def wake_up(self, tags: list[str] | None = None):
         """Wake up the engine from sleep.
@@ -630,16 +680,14 @@ class EngineCore:
             tags: Tags to wake up. Use ["scheduling"] for level 0 wake up.
         """
         if tags is not None and "scheduling" in tags:
-            # Level 0 wake up: Resume scheduling
-            self.resume_scheduler()
-            # Remove "scheduling" from tags if there are other tags to process
-            remaining_tags = [t for t in tags if t != "scheduling"]
-            if remaining_tags:
-                self.model_executor.wake_up(remaining_tags)
-        else:
-            # Full wake up
-            self.resume_scheduler()
+            # Remove "scheduling" from tags if there are other tags to process.
+            tags = [t for t in tags if t != "scheduling"]
+
+        if tags is None or tags:
             self.model_executor.wake_up(tags)
+
+        # Resume scheduling (applies to all levels)
+        self.resume_scheduler()
 
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
@@ -1377,18 +1425,19 @@ class EngineCoreProc(EngineCore):
         if mode not in ("keep", "abort", "wait"):
             raise ValueError(f"Invalid pause mode: {mode}")
 
-        future: Future[Any] = Future()
+        output_queue = self.output_queue
 
-        def wait_until_idle(engine: "EngineCoreProc") -> bool:
-            scheduler = engine.scheduler
-            out_queue = engine.output_queue
-            if scheduler.has_requests() or engine.batch_queue or not out_queue.empty():
+        def wait_until_idle(engine: "EngineCore", future: Future[Any] | None) -> bool:
+            if engine.scheduler.has_unfinished_requests() or engine.batch_queue:
+                return False
+            if output_queue.empty():
                 return False
             if clear_cache:
                 engine.reset_prefix_cache(reset_running_requests=True)
                 engine.reset_mm_cache()
                 engine.reset_encoder_cache()
-            future.set_result(None)
+            if future is not None:
+                future.set_result(None)
             return True
 
         if mode == "abort":
@@ -1399,12 +1448,15 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        if not wait_until_idle(self):
-            self.per_step_hooks.add(wait_until_idle)
-            return future
-        return None
+        if wait_until_idle(self, future=None):
+            return None
+
+        future = Future[Any]()
+        self.per_step_hooks.add(partial(wait_until_idle, future=future))
+        return future
 
     def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
+        # TODO(nick) this will be moved inside the scheduler
         if aborted_reqs:
             # Map client_index to list of request_ids that belong to that client.
             by_client = defaultdict[int, set[str]](set)
@@ -1417,14 +1469,6 @@ class EngineCoreProc(EngineCore):
                 ]
                 eco = EngineCoreOutputs(finished_requests=req_ids, outputs=outputs)
                 self.output_queue.put_nowait((client_index, eco))
-
-    def resume_scheduler(self) -> None:
-        """Resume the scheduler and flush any requests queued while paused."""
-        self.scheduler.set_pause_state(PauseState.UNPAUSED)
-
-    def is_scheduler_paused(self) -> bool:
-        """Return whether the scheduler is in any pause state."""
-        return self.scheduler.pause_state != PauseState.UNPAUSED
 
 
 class DPEngineCoreProc(EngineCoreProc):
@@ -1532,8 +1576,8 @@ class DPEngineCoreProc(EngineCoreProc):
             # 2) Step the engine core.
             executed = self._process_engine_step()
             self._maybe_publish_request_counts()
-            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
 
+            local_unfinished_reqs = self.scheduler.has_unfinished_requests()
             if not executed:
                 if not local_unfinished_reqs and not self.engines_running:
                     # All engines are idle.
