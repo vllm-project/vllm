@@ -433,6 +433,8 @@ class EngineArgs:
     )
     block_size: BlockSize = CacheConfig.block_size
     enable_prefix_caching: bool | None = None
+    enable_attention_instrumentation: bool = False
+    attention_instrumentation_layers: str | None = None
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
     )
@@ -944,6 +946,14 @@ class EngineArgs:
                 **cache_kwargs["enable_prefix_caching"],
                 "default": None,
             },
+        )
+        cache_group.add_argument(
+            "--enable-attention-instrumentation",
+            **cache_kwargs["enable_attention_instrumentation"],
+        )
+        cache_group.add_argument(
+            "--attention-instrumentation-layers",
+            **cache_kwargs["attention_instrumentation_layers"],
         )
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
@@ -1465,6 +1475,8 @@ class EngineArgs:
             num_gpu_blocks_override=self.num_gpu_blocks_override,
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
+            enable_attention_instrumentation=self.enable_attention_instrumentation,
+            attention_instrumentation_layers=self.attention_instrumentation_layers,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
             cpu_offload_gb=self.cpu_offload_gb,
             cpu_offload_params=self.cpu_offload_params,
