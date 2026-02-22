@@ -420,7 +420,7 @@ class KVCacheManager:
         self,
         request_id: str,
         num_computed_tokens: int,
-    ) -> tuple[tuple[KVCacheBlock, ...], tuple[int, ...]]:
+    ) -> tuple[tuple[tuple[KVCacheBlock, ...], ...], tuple[int, ...]]:
         request_blocks = self.coordinator.get_blocks(request_id)
         checkpoint_blocks: list[tuple[KVCacheBlock, ...]] = []
         num_cached_blocks: list[int] = []
