@@ -19,6 +19,7 @@ Example:
 
 import argparse
 import asyncio
+import io
 import signal
 import sys
 import time
@@ -28,6 +29,7 @@ from collections.abc import AsyncGenerator
 import grpc
 import uvloop
 from grpc_reflection.v1alpha import reflection
+from PIL import Image
 
 from vllm import SamplingParams, TextPrompt, TokensPrompt
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -89,11 +91,21 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             GenerateResponse protobuf messages (streaming)
         """
         request_id = request.request_id
-        logger.debug("Generate request %s received.", request_id)
+        input_type = request.WhichOneof("input")
+        has_mm = request.HasField("mm_inputs") and bool(request.mm_inputs.image_data)
+        num_images = len(request.mm_inputs.image_data) if has_mm else 0
+        logger.info(
+            "Generate request %s: input_type=%s, stream=%s, multimodal=%s (images=%d)",
+            request_id,
+            input_type,
+            request.stream,
+            has_mm,
+            num_images,
+        )
 
         try:
             # Extract tokenized input
-            if request.WhichOneof("input") == "tokenized":
+            if input_type == "tokenized":
                 prompt: TokensPrompt = {
                     "prompt_token_ids": list(request.tokenized.input_ids)
                 }
@@ -101,6 +113,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     prompt["prompt"] = request.tokenized.original_text
             else:
                 prompt: TextPrompt = {"prompt": request.text}
+
+            # Extract multimodal inputs (images)
+            if has_mm:
+                prompt["multi_modal_data"] = self._parse_mm_inputs(request.mm_inputs)
 
             # Extract kv_transfer_params for Mooncake PD disaggregation
             kv_transfer_params = None
@@ -117,8 +133,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                     "remote_host": remote_host,
                     "remote_port": remote_port,
                 }
-                logger.debug(
-                    "Request %s has kv_transfer_params: %s",
+                logger.info(
+                    "Request %s: kv_transfer_params=%s",
                     request_id,
                     kv_transfer_params,
                 )
@@ -229,7 +245,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         is_healthy = not self.async_llm.errored
         message = "Health" if is_healthy else "Engine is not alive"
 
-        logger.debug("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
+        logger.info("HealthCheck request: healthy=%s, message=%s", is_healthy, message)
 
         return vllm_engine_pb2.HealthCheckResponse(healthy=is_healthy, message=message)
 
@@ -249,7 +265,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             AbortResponse protobuf
         """
         request_ids = request.request_ids
-        logger.debug("Abort requests: %s", request_ids)
+        logger.info("Abort requests: %s", request_ids)
 
         await self.async_llm.abort(request_ids)
         return vllm_engine_pb2.AbortResponse()
@@ -315,6 +331,21 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
     # ========== Helper methods ==========
+
+    @staticmethod
+    def _parse_mm_inputs(mm_proto) -> dict:
+        """Convert raw image bytes from proto to vLLM multi_modal_data dict.
+
+        Args:
+            mm_proto: MultimodalInputs protobuf with image_data (raw JPEG/PNG bytes)
+
+        Returns:
+            Dict with "image" key mapping to list of PIL Images
+        """
+        images = [
+            Image.open(io.BytesIO(img_bytes)) for img_bytes in mm_proto.image_data
+        ]
+        return {"image": images}
 
     @staticmethod
     def _sampling_params_from_proto(
