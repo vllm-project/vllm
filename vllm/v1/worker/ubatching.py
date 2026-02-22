@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
-from typing import Optional
 
 import torch
 
@@ -15,7 +14,7 @@ logger = init_logger(__name__)
 _THREAD_ID_TO_CONTEXT: dict = {}
 # Here we hardcode the number of microbatches to 2 for default.
 _NUM_UBATCHES: int = 2
-_CURRENT_CONTEXTS: list[Optional["UBatchContext"]] = []
+_CURRENT_CONTEXTS: list["UBatchContext | None"] = []
 
 
 class UBatchContext:

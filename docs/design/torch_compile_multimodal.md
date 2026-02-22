@@ -11,14 +11,14 @@ to new models to improve performance.
 
 ## Overview
 
-We have recently enabled the `@supports_torch_compile` decorator to work for multiple nn module components within a model type; this enables
+We have recently enabled the `@support_torch_compile` decorator to work for multiple nn module components within a model type; this enables
 turning compile on for multimodal encoders, bringing performance improvements to additional components of the stack.
 
 When applied to the vision block of [`Qwen2_5_vl`](https://github.com/vllm-project/vllm/pull/23207) we observe ~4.5% e2e perf improvements with
 some increase in compilation time
 
 This feature is off by default, but can be enabled by setting `compile_mm_encoder: true` in the compilation config when models have the
-`@supports_torch_compile` decorator.
+`@support_torch_compile` decorator.
 
 ## How Compilation Works for Multimodal Components
 
@@ -26,7 +26,7 @@ This feature is off by default, but can be enabled by setting `compile_mm_encode
 
 To compile a multimodal component such as an encoder, we follow the same mechanism as the LLM text backbone, with a few additional scaffoldings:
 
-1. The `@supports_torch_compile` decorator should include `enable_if=should_torch_compile_mm_vit`. This will gate the compilation behind our
+1. The `@support_torch_compile` decorator should include `enable_if=should_torch_compile_mm_vit`. This will gate the compilation behind our
 `compile_mm_encoder` configuration
 
 2. `with set_model_tag("<component_name>", is_encoder=True)` context manager should be used around the nn.Module's instantiation. Since torch.compile
@@ -44,9 +44,9 @@ this for more configuration in the future.
 
 ## Applying torch.compile to a New Multimodal Model/Component
 
-To apply `supports_torch_compile` to a new general nn.Module, we advise following the same steps in [`debug_vllm_compile`](./debug_vllm_compile.md); this includes:
+To apply `support_torch_compile` to a new general nn.Module, we advise following the same steps in [`debug_vllm_compile`](./debug_vllm_compile.md); this includes:
 
-1. Applying `supports_torch_compile` on initially small modules (such as basic MLP layers), then raising to more general modules until one reaches a good performance
+1. Applying `support_torch_compile` on initially small modules (such as basic MLP layers), then raising to more general modules until one reaches a good performance
 tradeoff
 
 2. Leveraging [`tlparse`](https://github.com/meta-pytorch/tlparse) to identify and eliminate the source of recompiles and graph breaks

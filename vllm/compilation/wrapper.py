@@ -151,14 +151,6 @@ class TorchCompileWithNoGuardsWrapper:
                     "requires VLLM_USE_BYTECODE_HOOK=0. "
                 )
 
-                if envs.VLLM_USE_AOT_COMPILE:
-                    # disabled until https://github.com/pytorch/pytorch/pull/169239
-                    # is picked up.
-                    assert ds_type != DynamicShapesType.BACKED, (
-                        "evaluate_guards for backed shapes requires "
-                        "VLLM_USE_AOT_COMPILE=False. "
-                    )
-
                 options["guard_filter_fn"] = lambda x: [
                     entry.guard_type == "SHAPE_ENV" for entry in x
                 ]
@@ -208,8 +200,8 @@ class TorchCompileWithNoGuardsWrapper:
         if not hasattr(self._compiled_callable, "aot_compile"):
             raise RuntimeError(
                 "aot_compile is not supported by the current configuration. "
-                + "Please make sure torch.compile is enabled with the latest "
-                + f"version of PyTorch (current using torch: {torch.__version__})"
+                "Please make sure torch.compile is enabled with the latest "
+                f"version of PyTorch (current using torch: {torch.__version__})"
             )
         return self._compiled_callable.aot_compile((args, kwargs))
 

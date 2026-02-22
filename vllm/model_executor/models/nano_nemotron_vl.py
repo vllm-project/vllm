@@ -85,6 +85,7 @@ from vllm.multimodal.processing.processor import (
     PromptUpdateDetails,
     _seq2tokens,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.transformers_utils.configs.radio import RadioConfig
@@ -1189,6 +1190,9 @@ class BaseNanoNemotronVLProcessingInfo(BaseProcessingInfo):
     ) -> BaseNanoNemotronVLProcessor:
         raise NotImplementedError
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
@@ -1242,6 +1246,20 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
     @property
     def audio_extractor(self) -> ParakeetExtractor | None:
         return self.get_hf_processor().audio_extractor
+
+    def get_data_parser(self):
+        target_sr = None
+        target_channels = None
+        if extractor := self.audio_extractor:
+            target_sr = extractor.sampling_rate
+            target_channels = 1
+
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            target_sr=target_sr,
+            target_channels=target_channels,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
 
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
@@ -1378,18 +1396,6 @@ class NanoNemotronVLMultiModalProcessor(
 ):
     """MultiModalProcessor extended for video support"""
 
-    def _get_data_parser(self) -> MultiModalDataParser:
-        target_sr = None
-        target_channels = None
-        if extractor := self.info.audio_extractor:
-            target_sr = extractor.sampling_rate
-            target_channels = 1
-        return MultiModalDataParser(
-            video_needs_metadata=True,
-            target_sr=target_sr,
-            target_channels=target_channels,
-        )
-
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
@@ -1518,6 +1524,7 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         processor = self.info.get_hf_processor()
@@ -1595,6 +1602,7 @@ class NanoNemotronVLDummyInputsBuilder(
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         dummy_image = super().get_dummy_mm_data(
             seq_len=seq_len, mm_counts=mm_counts, mm_options=mm_options
@@ -2163,7 +2171,7 @@ class NemotronH_Nano_VL_V2(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -2384,3 +2392,7 @@ class NemotronH_Nano_VL_V2(
         temp_vllm_config = copy.deepcopy(vllm_config)
         temp_vllm_config.model_config.hf_config = text_config
         return NemotronHForCausalLM.get_mamba_state_dtype_from_config(temp_vllm_config)
+
+    @classmethod
+    def get_mamba_state_copy_func(cls):
+        return NemotronHForCausalLM.get_mamba_state_copy_func()

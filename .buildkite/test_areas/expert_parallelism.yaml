@@ -14,7 +14,7 @@ steps:
 - label: EPLB Execution
   timeout_in_minutes: 20
   working_dir: "/vllm-workspace/tests"
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/distributed/eplb
   - tests/distributed/test_eplb_execute.py

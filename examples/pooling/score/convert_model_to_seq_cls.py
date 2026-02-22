@@ -183,9 +183,9 @@ def parse_args():
         help="Conversion method to use",
     )
     parser.add_argument(
-        "--use-pad-token",
+        "--use-sep-token",
         action="store_true",
-        help="Enable padding token in the sequence classification model",
+        help="Enable separating token in the sequence classification model",
     )
     parser.add_argument(
         "--path",
