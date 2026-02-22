@@ -62,6 +62,9 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
     awq_marlin_quantize,
     marlin_quantize,
 )
+from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (
+    break_fp4_bytes,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
 from vllm.model_executor.model_loader.weight_utils import (
     get_quant_config,
@@ -851,7 +854,6 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
             _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, ref_hf_layer)
         else:
             _load_nemotron_vllm_weights_to_hf_model_fp8(vllm_layer, ref_hf_layer)
-
         vllm_layer.gate.quant_method.process_weights_after_loading(vllm_layer.gate)
         vllm_layer.experts.quant_method.process_weights_after_loading(
             vllm_layer.experts
@@ -918,9 +920,12 @@ def _initialize_nemotron_dummy_weights(vllm_layer, model_name: str) -> None:
                 # NVFP4 scales must be finite and non-zero for stable dequant.
                 param.data.copy_(
                     (
-                        0.5
-                        + torch.rand_like(
-                            param, dtype=torch.float32, device=param.device
+                        0.05
+                        + (
+                            torch.rand_like(
+                                param, dtype=torch.float32, device=param.device
+                            )
+                            / 10
                         )
                     ).to(param.dtype)  # noqa: E501
                 )
@@ -930,13 +935,6 @@ def _initialize_nemotron_dummy_weights(vllm_layer, model_name: str) -> None:
 
 
 def _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, hf_layer):
-    def _inv(x: torch.Tensor) -> torch.Tensor:
-        return torch.where(
-            x == 0,
-            torch.full_like(x, torch.inf, dtype=torch.float32),
-            1.0 / x.to(torch.float32),
-        )
-
     hf_layer.gate.weight.data[:] = vllm_layer.gate.weight.data
     hf_layer.gate.e_score_correction_bias.data[:] = (
         vllm_layer.gate.e_score_correction_bias.data
@@ -946,18 +944,30 @@ def _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, hf_layer):
         w13 = dequantize_nvfp4_to_dtype(
             tensor_fp4=vllm_layer.experts.w13_weight[i],
             tensor_sf=vllm_layer.experts.w13_weight_scale[i],
-            global_scale=_inv(vllm_layer.experts.w13_weight_scale_2[i].reshape(-1)[0]),
+            global_scale=vllm_layer.experts.w13_weight_scale_2[i].reshape(-1)[0],
             dtype=torch.float32,
             device=vllm_layer.experts.w13_weight.device,
             is_sf_128x4_layout=False,
         )
+        w13 = _dquantize_nvfp4(
+            weights=vllm_layer.experts.w13_weight[i],
+            scales=vllm_layer.experts.w13_weight_scale[i],
+            global_scales=vllm_layer.experts.w13_weight_scale_2[i],
+            dest_shape=hf_layer.experts[i].up_proj.weight.shape,
+        )
         w2 = dequantize_nvfp4_to_dtype(
             tensor_fp4=vllm_layer.experts.w2_weight[i],
             tensor_sf=vllm_layer.experts.w2_weight_scale[i],
-            global_scale=_inv(vllm_layer.experts.w2_weight_scale_2[i].reshape(-1)[0]),
+            global_scale=vllm_layer.experts.w2_weight_scale_2[i].reshape(-1)[0],
             dtype=torch.float32,
             device=vllm_layer.experts.w2_weight.device,
             is_sf_128x4_layout=False,
+        )
+        w2 = _dquantize_nvfp4(
+            weights=vllm_layer.experts.w2_weight[i],
+            scales=vllm_layer.experts.w2_weight_scale[i],
+            global_scales=vllm_layer.experts.w2_weight_scale_2[i],
+            dest_shape=hf_layer.experts[i].down_proj.weight.shape,
         )
         hf_layer.experts[i].up_proj.weight.data[:] = w13
         hf_layer.experts[i].down_proj.weight.data[:] = w2
@@ -965,23 +975,51 @@ def _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, hf_layer):
     up_proj = dequantize_nvfp4_to_dtype(
         tensor_fp4=vllm_layer.shared_experts.up_proj.weight.data,
         tensor_sf=vllm_layer.shared_experts.up_proj.weight_scale.data,
-        global_scale=_inv(vllm_layer.shared_experts.up_proj.weight_scale_2.data.max()),
+        global_scale=vllm_layer.shared_experts.up_proj.weight_scale_2.data.max(),
         dtype=torch.float32,
         device=vllm_layer.shared_experts.up_proj.weight.device,
         is_sf_128x4_layout=False,
     )
+    up_proj = _dquantize_nvfp4(
+        weights=vllm_layer.shared_experts.up_proj.weight.data,
+        scales=vllm_layer.shared_experts.up_proj.weight_scale.data,
+        global_scales=vllm_layer.shared_experts.up_proj.weight_scale_2.data,
+        dest_shape=hf_layer.shared_experts.up_proj.weight.shape,
+    )
     down_proj = dequantize_nvfp4_to_dtype(
         tensor_fp4=vllm_layer.shared_experts.down_proj.weight.data,
         tensor_sf=vllm_layer.shared_experts.down_proj.weight_scale.data,
-        global_scale=_inv(
-            vllm_layer.shared_experts.down_proj.weight_scale_2.data.max()
-        ),
+        global_scale=vllm_layer.shared_experts.down_proj.weight_scale_2.data.max(),
         dtype=torch.float32,
         device=vllm_layer.shared_experts.down_proj.weight.device,
         is_sf_128x4_layout=False,
     )
+    down_proj = _dquantize_nvfp4(
+        weights=vllm_layer.shared_experts.down_proj.weight.data,
+        scales=vllm_layer.shared_experts.down_proj.weight_scale.data,
+        global_scales=vllm_layer.shared_experts.down_proj.weight_scale_2.data,
+        dest_shape=hf_layer.shared_experts.down_proj.weight.shape,
+    )
     hf_layer.shared_experts.up_proj.weight.data[:] = up_proj
     hf_layer.shared_experts.down_proj.weight.data[:] = down_proj
+
+
+def _dquantize_nvfp4(weights, scales, global_scales, dest_shape):
+    quant_blocksize = 16
+    rows = dest_shape[-2]
+    cols = dest_shape[-1]
+    return (
+        (
+            break_fp4_bytes(weights, torch.float32).reshape(
+                rows, cols // quant_blocksize, quant_blocksize
+            )
+            * (
+                scales.view(torch.float8_e4m3fn).to(torch.float32) / (1 / global_scales)
+            ).unsqueeze(-1)
+        )
+        .reshape(rows, cols)
+        .to(torch.float32)
+    )
 
 
 def marlin_moe_generate_valid_test_cases():
