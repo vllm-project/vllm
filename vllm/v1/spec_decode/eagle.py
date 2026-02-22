@@ -1687,6 +1687,7 @@ class EagleProposer(SpecDecodeBaseProposer):
             pass_hidden_states_to_model=True,
             runner=runner,
         )
+        self.speculative_config.verify_equal_vocab_size()
 
 
 # NOTE(woosuk): Currently, the below code is not used and we always use argmax

@@ -31,7 +31,7 @@ class DraftModelProposer(SpecDecodeBaseProposer):
         self._raise_if_draft_tp_mismatch()
 
     def _raise_if_vocab_size_mismatch(self):
-        self.speculative_config.verify_equal_vocab_size_if_draft_model()
+        self.speculative_config.verify_equal_vocab_size()
 
     def _raise_if_draft_tp_mismatch(self):
         # Note(Tomas Ruiz) If we run the target model with TP > 1 and
