@@ -61,26 +61,42 @@ class SegmentedPrefillOffloadConnector(OffloadingConnector):
     def _choose_gaps(
             self, num_computed_tokens: int, num_external_tokens: int, request: Request
         ) -> list[tuple[int, int]]:
-            # Create gaps starting at positions where token id 10 appears, with length 32
+            # Create gaps starting at positions where token id 10 appears
             external_start = num_computed_tokens
             external_end = num_computed_tokens + num_external_tokens
             gap_length = 32
             print(f"Choosing gaps. external_end = {external_end}, external_start = {external_start}")
             if external_end - external_start < gap_length:
                 return []
-            
+
             gaps = []
-            
-            # Find all positions where token id 10 appears within the external tokens range
+
+            # First, collect all span start positions ('10' tokens) in the external range
+            span_starts = []
             for i, token_id in enumerate(request.prompt_token_ids):
                 if token_id == 10 and external_start <= i < external_end:
-                    print(f"Found SPAN start at index {i}. Starting gap...")
-                    gap_start = i
-                    gap_end = min(gap_start + gap_length, external_end)
-                    
-                    # Only add the gap if it has the full length or if it's at the boundary
-                    if gap_end - gap_start == gap_length or gap_end == external_end:
-                        gaps.append((gap_start, gap_end))
+                    span_starts.append(i)
+            print(f"Found span starts at: {span_starts}")
+
+            # Create gaps for each span, bounded by the next span start
+            for idx, gap_start in enumerate(span_starts):
+                # Find the end of this span: either the next '10' or external_end
+                if idx + 1 < len(span_starts):
+                    next_span_start = span_starts[idx + 1]
+                else:
+                    next_span_start = external_end
+
+                span_length = next_span_start - gap_start
+                print(f"Span at {gap_start}: length={span_length}, next_span at {next_span_start}")
+
+                # Gap is min(gap_length, span_length), but not exceeding external_end
+                gap_end = min(gap_start + gap_length, next_span_start, external_end)
+
+                # Only add if we have at least some gap
+                if gap_end > gap_start:
+                    print(f"  Adding gap: ({gap_start}, {gap_end})")
+                    gaps.append((gap_start, gap_end))
+
             print(f"Gaps: {gaps}")
             return gaps
 
