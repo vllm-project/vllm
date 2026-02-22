@@ -1318,11 +1318,14 @@ class Qwen2_5_VLForConditionalGeneration(
                 spatial_merge_size=self.visual.spatial_merge_size,
                 q=self.video_pruning_rate,
             )
+            # Pass tensor scalar directly to avoid GPU-CPU sync
+            # from .item(); compute_mrope_for_media accepts both
+            # Python floats and tensor scalars.
             positions = compute_mrope_for_media(
                 size,
                 merge_size,
                 tokens_per_second=tokens_per_second,
-                video_second_per_grid=video_second_per_grid_t.item(),
+                video_second_per_grid=video_second_per_grid_t,
             ).to(emb.device)
 
             emb = emb[retention_mask]

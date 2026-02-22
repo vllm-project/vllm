@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
+import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from itertools import islice
@@ -1509,15 +1510,12 @@ class Qwen3VLForConditionalGeneration(
         grid_thw_list = grid_thw.tolist()
         merge_size = self.visual.spatial_merge_size
 
-        # Cast to long to match the original code
-        # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
         second_per_grid_ts = video_input.get("second_per_grid_ts")
         if second_per_grid_ts is None:
             # For Qwen3-VL, second_per_grid_ts might not be available
             # Use default value of 1.0 for each video
-            second_per_grid_ts = torch.ones(len(grid_thw_list), dtype=torch.long)
-        else:
-            second_per_grid_ts = second_per_grid_ts.long()
+            second_per_grid_ts = torch.ones(len(grid_thw_list),
+                                            dtype=torch.long)
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
 
         video_embeds_out = []
@@ -1532,24 +1530,30 @@ class Qwen3VLForConditionalGeneration(
                 q=self.video_pruning_rate,
             )
 
-            # Debug logging for EVS pruning
-            logger.debug(
-                "EVS: Video tokens pruned from %d to %d (T=%d,H=%d,W=%d, "
-                "pruning_rate=%.2f, reduction=%.1f%%)",
-                emb.shape[0],
-                retention_mask.sum().item(),
-                size[0],
-                size[1],
-                size[2],
-                self.video_pruning_rate,
-                (1 - retention_mask.float().mean().item()) * 100,
-            )
+            # Debug logging for EVS pruning — guarded to avoid
+            # GPU-CPU sync (.item()) on the hot path.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "EVS: Video tokens pruned from %d to %d "
+                    "(T=%d,H=%d,W=%d, "
+                    "pruning_rate=%.2f, reduction=%.1f%%)",
+                    emb.shape[0],
+                    retention_mask.sum().item(),
+                    size[0],
+                    size[1],
+                    size[2],
+                    self.video_pruning_rate,
+                    (1 - retention_mask.float().mean().item()) * 100,
+                )
 
+            # Pass tensor scalar directly to avoid GPU-CPU sync
+            # from .item(); compute_mrope_for_media accepts both
+            # Python floats and tensor scalars.
             positions = compute_mrope_for_media(
                 size,
                 merge_size,
                 tokens_per_second=tokens_per_second,
-                video_second_per_grid=video_second_per_grid_t.item(),
+                video_second_per_grid=video_second_per_grid_t,
             ).to(emb.device)
 
             emb = emb[retention_mask]

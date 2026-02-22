@@ -96,7 +96,7 @@ def compute_mrope_for_media(
     video_size_thw: torch.LongTensor,
     spatial_merge_size: int,
     tokens_per_second: float = 1.0,
-    video_second_per_grid: float = 1.0,
+    video_second_per_grid: float | torch.Tensor = 1.0,
 ) -> torch.Tensor:
     """
     Computes the mrope for video embeddings based on the grid dimensions.
@@ -108,6 +108,8 @@ def compute_mrope_for_media(
         spatial_merge_size: Size reduction for rows & cols dimensions.
         tokens_per_second: Number of tokens per second.
         video_second_per_grid: Number of seconds per video.
+            Accepts Python float or a scalar torch.Tensor (avoids
+            GPU-CPU sync when passed as tensor).
 
     Returns:
         Tensor of shape `(T * H * W, 4)` where last dimension
@@ -118,9 +120,14 @@ def compute_mrope_for_media(
     llm_grid_h = video_size_thw[1] // spatial_merge_size
     llm_grid_w = video_size_thw[2] // spatial_merge_size
 
+    # Determine device so arange is created on the same device as a
+    # tensor scalar (avoids implicit GPU-CPU synchronisation).
+    device = (video_second_per_grid.device
+              if isinstance(video_second_per_grid, torch.Tensor) else None)
+
     t_index = (
         (
-            torch.arange(llm_grid_t)
+            torch.arange(llm_grid_t, device=device)
             .view(-1, 1)
             .expand(-1, llm_grid_h * llm_grid_w)
             .mul(tokens_per_second * video_second_per_grid)
