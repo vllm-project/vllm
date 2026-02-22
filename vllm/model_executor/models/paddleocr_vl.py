@@ -23,18 +23,18 @@ import numpy as np
 import torch
 import torch.nn as nn
 from einops import rearrange
-from transformers import BatchFeature, PretrainedConfig
+from transformers import BaseImageProcessor, BatchFeature, PretrainedConfig
 from transformers.activations import GELUActivation
 from transformers.modeling_outputs import (
     BaseModelOutputWithPooling,
 )
 from transformers.utils import torch_int
 
-from vllm.config import MultiModalConfig, VllmConfig
+from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
-from vllm.model_executor.layers.attention.mm_encoder_attention import (
+from vllm.model_executor.layers.attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -147,21 +147,23 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor,
+        image_processor: BaseImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
-
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
+
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = mm_kwargs.get("size", image_processor.size)
+
         resized_height, resized_width = smart_resize(
             height=image_height,
             width=image_width,
             factor=patch_size * merge_size,
-            min_pixels=image_processor.min_pixels,
-            max_pixels=image_processor.max_pixels,
+            min_pixels=size["min_pixels"],
+            max_pixels=size["max_pixels"],
         )
         preprocessed_size = ImageSize(width=resized_width, height=resized_height)
 
@@ -176,12 +178,13 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
 
     def get_image_size_with_most_features(self) -> ImageSize:
         hf_config = self.get_hf_config()
+        image_processor = self.get_image_processor()
 
         # See `smart_resize` for the calculation of the image size.
         merge_size = hf_config.vision_config.spatial_merge_size
         patch_size = hf_config.vision_config.patch_size
         factor = merge_size * patch_size
-        max_num_tokens = self.get_image_processor().max_pixels // (factor**2)
+        max_num_tokens = image_processor.max_pixels // (factor**2)
         # Find factors of max_num_tokens close to its square root
         # to create a dummy image with a reasonable aspect ratio.
         h_patches = int(math.sqrt(max_num_tokens))
@@ -204,6 +207,7 @@ class PaddleOCRVLDummyInputsBuilder(BaseDummyInputsBuilder[PaddleOCRVLProcessing
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -275,6 +279,7 @@ class PaddleOCRVLMultiModalProcessor(
                 image_width=image_size.width,
                 image_height=image_size.height,
                 image_processor=image_processor,
+                mm_kwargs=hf_processor_mm_kwargs,
             )
 
             return [image_token_id] * num_image_tokens
@@ -532,7 +537,6 @@ class SiglipAttention(nn.Module):
         num_heads: int,
         projection_size: int,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -565,7 +569,6 @@ class SiglipAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.attn",
         )
         self.apply_rotary_emb = ApplyRotaryEmb(
@@ -662,7 +665,6 @@ class SiglipEncoderLayer(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -673,14 +675,12 @@ class SiglipEncoderLayer(nn.Module):
             num_heads=config.num_attention_heads,
             projection_size=config.hidden_size,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.self_attn",
         )
         self.layer_norm2 = nn.LayerNorm(self.embed_dim, eps=config.layer_norm_eps)
         self.mlp = SiglipMLP(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.mlp",
         )
 
@@ -718,7 +718,6 @@ class SiglipEncoder(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -727,28 +726,16 @@ class SiglipEncoder(nn.Module):
         num_heads = config.num_attention_heads
         head_dim = embed_dim // num_heads
 
-        attn_backend_override = (
-            multimodal_config.mm_encoder_attn_backend if multimodal_config else None
-        )
         self.attn_backend = get_vit_attn_backend(
             head_size=head_dim,
             dtype=torch.get_default_dtype(),
-            attn_backend_override=attn_backend_override,
         )
-        if self.attn_backend not in {
-            AttentionBackendEnum.FLASH_ATTN,
-            AttentionBackendEnum.TORCH_SDPA,
-            AttentionBackendEnum.ROCM_AITER_FA,
-        }:
-            raise RuntimeError(
-                f"PaddleOCR-VL does not support {self.attn_backend} backend now."
-            )
+
         self.layers = nn.ModuleList(
             [
                 SiglipEncoderLayer(
                     config,
                     quant_config=quant_config,
-                    multimodal_config=multimodal_config,
                     prefix=f"{prefix}.layers.{layer_idx}",
                 )
                 for layer_idx in range(config.num_hidden_layers)
@@ -811,6 +798,7 @@ class SiglipEncoder(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
 
@@ -830,7 +818,6 @@ class SiglipVisionTransformer(nn.Module):
         self,
         config: PretrainedConfig,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -841,7 +828,6 @@ class SiglipVisionTransformer(nn.Module):
         self.encoder = SiglipEncoder(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.encoder",
         )
         self.post_layernorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
@@ -880,7 +866,6 @@ class SiglipVisionModel(nn.Module):
         self,
         config,
         quant_config: QuantizationConfig | None = None,
-        multimodal_config: MultiModalConfig | None = None,
         prefix: str = "",
     ):
         super().__init__()
@@ -888,7 +873,6 @@ class SiglipVisionModel(nn.Module):
         self.vision_model = SiglipVisionTransformer(
             config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             prefix=f"{prefix}.vision_model",
         )
         self.quant_config = quant_config
@@ -1009,28 +993,32 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
+        if hasattr(config, "text_config"):
+            text_config = config.text_config.to_dict()
+            unsafe_keys = ["model_type", "architectures", "tie_word_embeddings"]
+            for key in unsafe_keys:
+                text_config.pop(key, None)
+            config.update(text_config)
+
         quant_config = vllm_config.quant_config
-        multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
-        self.multimodal_config = multimodal_config
 
         with self._mark_tower_model(vllm_config, "image"):
             self.visual = SiglipVisionModel(
                 config=config.vision_config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 prefix=maybe_prefix(prefix, "visual"),
             )
             self.mlp_AR = Projector(config, config.vision_config)
 
         with self._mark_language_model(vllm_config):
-            self.language_model = language_model = Ernie4_5ForCausalLM(
+            self.language_model = Ernie4_5ForCausalLM(
                 vllm_config=vllm_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
 
-            for layer in language_model.model.layers:
+            for layer in self.language_model.model.layers:
                 if not isinstance(layer, PPMissingLayer):
                     layer.self_attn.rotary_emb.is_neox_style = True
 
@@ -1177,7 +1165,7 @@ class PaddleOCRVLForConditionalGeneration(nn.Module, SupportsMultiModal, Support
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

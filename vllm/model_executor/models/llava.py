@@ -19,7 +19,7 @@ from transformers.models.llava import LlavaProcessor
 from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -30,13 +30,14 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
+    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -53,6 +54,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .clip import CLIPVisionModel
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -120,6 +122,7 @@ class LlavaImageEmbeddingInputs(TensorSchema):
 LlavaImageInputs: TypeAlias = (
     LlavaImagePixelInputs | PixtralHFImagePixelInputs | LlavaImageEmbeddingInputs
 )
+"""Alias for supported LLaVA image input types."""
 
 
 class LlavaMultiModalProjector(nn.Module):
@@ -230,6 +233,7 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
@@ -455,7 +459,6 @@ def _get_num_hidden_layers(hf_config: LlavaLikeConfig) -> int:
 def init_vision_tower_for_llava(
     hf_config: LlavaLikeConfig,
     quant_config: QuantizationConfig | None,
-    multimodal_config: MultiModalConfig | None,
     *,
     require_post_norm: bool | None = None,
     prefix: str = "",
@@ -469,7 +472,6 @@ def init_vision_tower_for_llava(
         return CLIPVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -478,7 +480,6 @@ def init_vision_tower_for_llava(
         return SiglipVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -487,7 +488,6 @@ def init_vision_tower_for_llava(
         return PixtralHFVisionModel(
             vision_config,
             quant_config=quant_config,
-            multimodal_config=multimodal_config,
             num_hidden_layers_override=num_hidden_layers,
             require_post_norm=require_post_norm,
             prefix=prefix,
@@ -503,7 +503,7 @@ def init_vision_tower_for_llava(
     dummy_inputs=LlavaDummyInputsBuilder,
 )
 class LlavaForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP
+    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsEagle3
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -526,6 +526,13 @@ class LlavaForConditionalGeneration(
             return "<image>"
 
         raise ValueError("Only image modality is supported")
+
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.get_language_model().model.aux_hidden_state_layers = layers
+
+    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.get_language_model().model.layers)
+        return (2, num_layers // 2, num_layers - 3)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -554,7 +561,6 @@ class LlavaForConditionalGeneration(
             self.vision_tower = init_vision_tower_for_llava(
                 config,
                 quant_config=quant_config,
-                multimodal_config=multimodal_config,
                 require_post_norm=False,
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
@@ -659,7 +665,7 @@ class LlavaForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -766,10 +772,10 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
         tokenization_kwargs: Mapping[str, object] | None = None,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -782,13 +788,12 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
 
         result = super().apply(
             prompt,
-            mm_data,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
+            mm_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
-        mm_items = self._to_mm_items(mm_data)
         mm_item_counts = mm_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
         mm_hashes = result["mm_hashes"]
@@ -833,8 +838,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,

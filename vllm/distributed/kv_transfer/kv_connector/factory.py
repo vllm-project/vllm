@@ -3,7 +3,7 @@
 
 import importlib
 from collections.abc import Callable
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, cast
 
 from vllm.distributed.kv_transfer.kv_connector.base import (
     KVConnectorBase,
@@ -44,7 +44,7 @@ class KVConnectorFactory:
         cls,
         config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: Optional["KVCacheConfig"] = None,
+        kv_cache_config: "KVCacheConfig | None" = None,
     ) -> KVConnectorBase:
         kv_transfer_config = config.kv_transfer_config
         if kv_transfer_config is None:
@@ -198,6 +198,6 @@ KVConnectorFactory.register_connector(
 )
 KVConnectorFactory.register_connector(
     "MooncakeConnector",
-    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake_connector",
+    "vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_connector",
     "MooncakeConnector",
 )

@@ -16,12 +16,12 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
     ImageProcessorItems,
     MultiModalDataItems,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -32,6 +32,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -102,6 +103,9 @@ class PaliGemmaProcessingInfo(BaseProcessingInfo):
     def get_vision_encoder_info(self):
         return get_vision_encoder_info(self.get_hf_config())
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": 1}
 
@@ -128,6 +132,7 @@ class PaliGemmaDummyInputsBuilder(BaseDummyInputsBuilder[PaliGemmaProcessingInfo
         seq_len: int,
         mm_counts: Mapping[str, int],
         mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> MultiModalDataDict:
         hf_config = self.info.get_hf_config()
         vision_config = hf_config.vision_config
@@ -225,17 +230,17 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
         tokenization_kwargs: Mapping[str, object] | None = None,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         mm_inputs = super().apply(
             prompt,
-            mm_data,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
+            mm_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 
@@ -314,13 +319,14 @@ class PaliGemmaForConditionalGeneration(
             config.text_config.architectures = ["Gemma2ForCausalLM"]
 
         with self._mark_language_model(vllm_config):
-            self.language_model = language_model = init_vllm_registered_model(
+            self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
             )
+
             logit_scale = getattr(config, "logit_scale", 1.0)
-            language_model.logits_processor.scale *= logit_scale
+            self.language_model.logits_processor.scale *= logit_scale
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -388,7 +394,7 @@ class PaliGemmaForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

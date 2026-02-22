@@ -7,7 +7,7 @@ from vllm.v1.worker.utils import bind_kv_cache
 
 
 def test_bind_kv_cache(default_vllm_config):
-    from vllm.attention.layer import Attention
+    from vllm.model_executor.layers.attention import Attention
 
     ctx = {
         "layers.0.self_attn": Attention(32, 128, 0.1, prefix="layers.0.self_attn"),
@@ -35,7 +35,7 @@ def test_bind_kv_cache(default_vllm_config):
 
 
 def test_bind_kv_cache_non_attention(default_vllm_config):
-    from vllm.attention.layer import Attention
+    from vllm.model_executor.layers.attention import Attention
 
     # example from Jamba PP=2
     ctx = {
@@ -58,7 +58,7 @@ def test_bind_kv_cache_non_attention(default_vllm_config):
 
 
 def test_bind_kv_cache_draft_model(default_vllm_config):
-    from vllm.attention.layer import Attention
+    from vllm.model_executor.layers.attention import Attention
 
     layer_names = [
         "model.layers.0.attn",

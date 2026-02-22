@@ -1,15 +1,17 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
+import inspect
 
-
+import torch
 import torch.nn as nn
 
 from vllm.config import get_cached_compilation_config
 from vllm.logger import init_logger
+from vllm.model_executor.utils import maybe_disable_graph_partition
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
-
 
 # Dictionary of all custom ops (classes, indexed by registered name).
 # To check if an op with a name is enabled, call .enabled() on the class.
@@ -118,10 +120,10 @@ class CustomOp(nn.Module):
             )
         return super().__new__(op_cls_to_instantiate)
 
-    def __init__(self, enforce_enable: bool = False):
+    def __init__(self, *, enforce_enable: bool = False, compile_native: bool = False):
         super().__init__()
         self._enforce_enable = enforce_enable
-        self._forward_method = self.dispatch_forward()
+        self._forward_method = self.dispatch_forward(compile_native=compile_native)
 
     def forward(self, *args, **kwargs):
         return self._forward_method(*args, **kwargs)
@@ -162,7 +164,7 @@ class CustomOp(nn.Module):
         # PyTorch-native implementation.
         return self.forward_native(*args, **kwargs)
 
-    def dispatch_forward(self):
+    def dispatch_forward(self, compile_native: bool):
         # NOTE(woosuk): Here we assume that vLLM was built for only one
         # specific backend. Currently, we do not support dynamic dispatching.
         compilation_config = get_cached_compilation_config()
@@ -180,7 +182,9 @@ class CustomOp(nn.Module):
             compilation_config.disabled_custom_ops.update([self.__class__.name])
 
         if not enabled:
-            return self.forward_native
+            # Compile forward_native to avoid eager torch ops if inside
+            # opaque torch custom op (e.g. fused_moe, unified_attention, etc.)
+            return self.maybe_compile(self.forward_native, enable=compile_native)
 
         if current_platform.is_rocm():
             return self.forward_hip
@@ -194,6 +198,68 @@ class CustomOp(nn.Module):
             return self.forward_oot
         else:
             return self.forward_cuda
+
+    def maybe_compile(self, fn, *, enable: bool = True):
+        """
+        Compile fn if compilation enabled.
+        Useful for CustomOp instances called from within a torch custom op,
+        meaning the forward call is hidden from the model-level torch.compile.
+
+        NOTE: this does not enable fusion across ops, so opaque custom ops
+        should still be unwrapped wherever possible.
+        """
+        from vllm.config.compilation import CompilationMode
+
+        # Do not compile if compilation disabled
+        if not enable:
+            return fn
+
+        # Do not compile if global compilation disabled
+        compilation_config = get_cached_compilation_config()
+        if compilation_config.mode == CompilationMode.NONE:
+            return fn
+
+        # If eager backend is used, do not compile either
+        if compilation_config.backend == "eager":
+            return fn
+
+        compile_options = maybe_disable_graph_partition(
+            current_platform.simple_compile_backend
+        )
+        backend = current_platform.simple_compile_backend
+
+        dynamic_arg_dims = getattr(self.__class__, "_dynamic_arg_dims", None)
+        if dynamic_arg_dims is not None:
+            compiled_fn = torch.compile(
+                fn,
+                dynamic=False,
+                backend=backend,
+                options=compile_options,
+            )
+            sig = inspect.signature(fn)
+
+            @functools.wraps(fn)
+            def wrapper(*args, **kwargs):
+                bound = sig.bind(*args, **kwargs)
+                bound.apply_defaults()
+                for name, dims in dynamic_arg_dims.items():
+                    arg = bound.arguments.get(name)
+                    if arg is not None and isinstance(arg, torch.Tensor):
+                        dims_list = [dims] if isinstance(dims, int) else dims
+                        for d in dims_list:
+                            real_d = arg.ndim + d if d < 0 else d
+                            torch._dynamo.mark_dynamic(arg, real_d)
+                return compiled_fn(*args, **kwargs)
+
+            return wrapper
+
+        # dynamic=True to avoid recompilations
+        return torch.compile(
+            fn,
+            dynamic=True,
+            backend=backend,
+            options=compile_options,
+        )
 
     @classmethod
     def enabled(cls) -> bool:
@@ -232,10 +298,15 @@ class CustomOp(nn.Module):
 
     # Decorator to register custom ops.
     @classmethod
-    def register(cls, name: str):
+    def register(
+        cls,
+        name: str,
+        dynamic_arg_dims: dict[str, int | list[int]] | None = None,
+    ):
         def decorator(op_cls):
             assert name not in op_registry, f"Duplicate op name: {name}"
             op_cls.name = name
+            op_cls._dynamic_arg_dims = dynamic_arg_dims
             op_registry[name] = op_cls
             return op_cls
 

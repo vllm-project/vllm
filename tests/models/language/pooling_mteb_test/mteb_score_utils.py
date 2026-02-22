@@ -79,9 +79,9 @@ class VllmMtebCrossEncoder(MtebCrossEncoderMixin):
         outputs = self.llm.score(
             queries,
             corpus,
-            truncate_prompt_tokens=-1,
             use_tqdm=False,
             chat_template=self.chat_template,
+            tokenization_kwargs={"truncate_prompt_tokens": -1},
         )
         scores = np.array(outputs)
         scores = scores[np.argsort(r)]
@@ -191,6 +191,9 @@ def run_mteb_rerank(cross_encoder: mteb.CrossEncoderProtocol, tasks, languages):
         mteb_tasks: list[mteb.abstasks.AbsTaskRetrieval] = mteb.get_tasks(
             tasks=tasks, languages=languages, eval_splits=eval_splits
         )
+        for task in mteb_tasks:
+            if not task.data_loaded:
+                task.load_data()
 
         mteb.evaluate(
             bm25s,
