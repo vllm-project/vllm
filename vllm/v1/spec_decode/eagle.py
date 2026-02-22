@@ -100,11 +100,8 @@ class SpecDecodeBaseProposer:
         if self.parallel_drafting:
             self._init_parallel_drafting_params()
 
-        # The drafter can get longer sequences than the target model.
         max_batch_size = vllm_config.scheduler_config.max_num_seqs
-        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens + (
-            self.net_num_new_slots_per_request * max_batch_size
-        )
+        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.token_arange_np = np.arange(self.max_num_tokens)
 
         # Multi-modal data support
