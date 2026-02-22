@@ -283,7 +283,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_interleave=self.cp_interleave,
         )
 
-        self.attn_backends, self.attn_metadata_builders = init_attn_backend(
+        self.attn_backends, self.attn_groups = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
         check_attention_cp_compatibility(self.vllm_config)
@@ -291,7 +291,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # HACK(woosuk)
             self.speculator.set_attn(
                 self.kv_cache_config,
-                self.attn_metadata_builders,
+                self.attn_groups,
                 self.block_tables,
             )
 
@@ -305,9 +305,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
-        # Attention groups are not supported.
-        self.attn_groups = []  # type: ignore
-
     def prepare_dummy_attn_metadata(self, input_batch: InputBatch) -> None:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
@@ -317,7 +314,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings, self.kv_cache_config
         )
         attn_metadata = build_attn_metadata(
-            attn_metadata_builders=self.attn_metadata_builders,
+            attn_groups=self.attn_groups,
             num_reqs=input_batch.num_reqs,
             num_tokens=input_batch.num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
@@ -477,7 +474,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mrope_positions=mrope_positions,
                 inputs_embeds=inputs_embeds,
                 block_tables=self.block_tables,
-                attn_metadata_builders=self.attn_metadata_builders,
+                attn_groups=self.attn_groups,
                 kv_cache_config=self.kv_cache_config,
                 has_lora=self.lora_config is not None,
             )
@@ -712,7 +709,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
-            attn_metadata_builders=self.attn_metadata_builders,
+            attn_groups=self.attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
             query_start_loc_gpu=query_start_loc,

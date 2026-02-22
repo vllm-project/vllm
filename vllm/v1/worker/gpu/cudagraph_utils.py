@@ -13,7 +13,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.utils.math_utils import cdiv
-from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -22,6 +21,7 @@ from vllm.v1.worker.gpu.attn_utils import (
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.utils import AttentionGroup
 
 
 class CudaGraphManager:
@@ -83,7 +83,7 @@ class CudaGraphManager:
         mrope_positions: torch.Tensor | None,
         inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
         uniform_decode: bool = False,
@@ -116,7 +116,7 @@ class CudaGraphManager:
             num_tokens,
             input_buffers,
             block_tables,
-            attn_metadata_builders,
+            attn_groups,
             self.max_model_len,
             kv_cache_config,
             uniform_decode_query_len=(
@@ -232,7 +232,7 @@ class CudaGraphManager:
         mrope_positions: torch.Tensor | None,
         inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
     ) -> None:
@@ -244,7 +244,7 @@ class CudaGraphManager:
             mrope_positions=mrope_positions,
             inputs_embeds=inputs_embeds,
             block_tables=block_tables,
-            attn_metadata_builders=attn_metadata_builders,
+            attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
             has_lora=has_lora,
         )
@@ -286,6 +286,16 @@ class CudaGraphManager:
             cudagraph_mode = self.cudagraph_mode.decode_mode()
         else:
             cudagraph_mode = self.cudagraph_mode.mixed_mode()
+
+        if (
+            cudagraph_mode == CUDAGraphMode.FULL
+            and cudagraph_size is not None
+            and cudagraph_size not in self.graphs
+        ):
+            # If graph wasn't captured yet, fall back to eager.
+            # This might happen when the dummy run is called before capture.
+            cudagraph_mode = CUDAGraphMode.NONE
+            cudagraph_size = None
         return cudagraph_mode, cudagraph_size
 
     def run_fullgraph(self, num_tokens: int) -> torch.Tensor:
@@ -354,7 +364,7 @@ def prepare_inputs_to_capture(
     num_tokens: int,
     input_buffers: InputBuffers,
     block_tables: BlockTables,
-    attn_metadata_builders: list[AttentionMetadataBuilder],
+    attn_groups: list[list[AttentionGroup]],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
     uniform_decode_query_len: int = 0,
@@ -386,7 +396,7 @@ def prepare_inputs_to_capture(
     )
 
     attn_metadata = build_attn_metadata(
-        attn_metadata_builders=attn_metadata_builders,
+        attn_groups=attn_groups,
         num_reqs=num_reqs,
         num_tokens=num_tokens,
         query_start_loc_gpu=query_start_loc,
