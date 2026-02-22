@@ -9,6 +9,7 @@ import pytest
 import torch
 import torch.distributed
 
+from tests.utils import ensure_current_vllm_config
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 from vllm.distributed.device_communicators.pynccl_wrapper import NCCLLibrary
@@ -112,7 +113,8 @@ def test_pynccl_multiple_allreduce():
 @worker_fn_wrapper
 def multiple_allreduce_with_vllm_worker_fn():
     device = torch.device(f"cuda:{torch.distributed.get_rank()}")
-    ensure_model_parallel_initialized(2, 2)
+    with ensure_current_vllm_config():
+        ensure_model_parallel_initialized(2, 2)
     tensor = torch.ones(16, 1024, 1024, dtype=torch.float32, device=device)
     with graph_capture(device=device):
         # two tp groups can communicate independently
