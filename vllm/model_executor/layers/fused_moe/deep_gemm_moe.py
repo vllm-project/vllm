@@ -154,9 +154,6 @@ class DeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         # NOTE(rob): discovered an IMA with this combination. Needs investigation.
         return not moe_parallel_config.use_fi_all2allv_kernels
 
-    def supports_chunking(self) -> bool:
-        return True
-
     def supports_expert_map(self) -> bool:
         return True
 

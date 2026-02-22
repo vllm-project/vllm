@@ -157,8 +157,6 @@ def test_w8a8_block_fp8_fused_moe(
 
     torch.manual_seed(seed)
 
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", "2048")
-
     a = torch.randn((M, K), dtype=dtype) / 10
     score = torch.randn((M, E), dtype=dtype)
 
@@ -215,11 +213,8 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     if not _valid_deep_gemm_shape(M, N, K):
         pytest.skip(f"Skipping test: invalid size m={M}, n={N}, k={K}")
 
-    chunk_size = 1024
-
     torch.manual_seed(seed)
 
-    monkeypatch.setenv("VLLM_FUSED_MOE_CHUNK_SIZE", str(chunk_size))
     block_size = get_mk_alignment_for_contiguous_layout()
     dtype = torch.bfloat16
 
@@ -241,9 +236,7 @@ def test_w8a8_block_fp8_deep_gemm_fused_moe(M, N, K, E, topk, seed, monkeypatch)
     # setup code in case we are able to revisit this later.
     use_compile = False
 
-    use_cudagraph = (
-        chunk_size < M and N >= 1024 and K >= 1024 and current_platform.is_cuda_alike()
-    )
+    use_cudagraph = N >= 1024 and K >= 1024 and current_platform.is_cuda_alike()
 
     topk_weights, topk_ids, _ = fused_topk(a, score.float(), topk, False)
 

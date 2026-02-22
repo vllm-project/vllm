@@ -655,9 +655,6 @@ class MarlinExperts(MarlinExpertsBase):
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 
-    def supports_chunking(self) -> bool:
-        return True
-
     def workspace_shapes(
         self,
         M: int,
@@ -782,9 +779,6 @@ class BatchedMarlinExperts(MarlinExpertsBase):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.BatchedExperts
-
-    def supports_chunking(self) -> bool:
-        return False
 
     def workspace_shapes(
         self,
