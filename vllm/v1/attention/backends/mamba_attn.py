@@ -48,6 +48,9 @@ class BaseMambaAttentionMetadata:
     block_idx_first_scheduled_token_p: torch.Tensor | None
     block_idx_last_computed_token: torch.Tensor | None
 
+    # The following tensor is only used for prefix caching in align mode
+    seq_lens: torch.Tensor
+
     # cu_chunk_seqlen_p is a tensor of shape (nchunks+1,) that contains, for
     # each chunk, its offsets into the varlen sequence dimension. It is defined
     # such that the i-th chunk contains tokens from cu_chunk_seqlen_p[i] to
@@ -56,9 +59,6 @@ class BaseMambaAttentionMetadata:
     # last_chunk_indices_p is a tensor of shape (batch,) that contains the
     # index of the last chunk for every sequence in the (prefill) batch.
     last_chunk_indices_p: torch.Tensor | None = None
-
-    # The following tensor is only used for prefix caching in align mode
-    seq_lens: torch.Tensor
 
     # The following attributes are for triton implementation of causal_conv1d
     nums_dict: dict | None = None
