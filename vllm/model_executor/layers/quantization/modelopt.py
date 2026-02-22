@@ -114,6 +114,8 @@ QUANT_ALGOS = [
     "NVFP4",
     # MXFP8
     "MXFP8",
+    # MIXED_PRECISION,
+    "MIXED_PRECISION",
 ]
 KV_CACHE_QUANT_ALGOS = ["FP8"]
 
@@ -1841,3 +1843,208 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
 # Register the method classes for ModelOptMxFp8Config
 ModelOptMxFp8Config.LinearMethodCls = ModelOptMxFp8LinearMethod
 ModelOptMxFp8Config.KVCacheMethodCls = ModelOptFp8KVCacheMethod
+
+
+class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
+    """Config class for ModelOpt MIXED_PRECISION.
+
+    Supports checkpoints where different layers use different quantization
+    algorithms (e.g., FP8 for dense layers and NVFP4 for MoE experts).
+    The per-layer algorithm is specified in the ``quantized_layers`` dict
+    inside ``hf_quant_config.json``.
+    """
+
+    def __init__(
+        self,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        quantized_layers: dict[str, dict[str, Any]],
+        fp8_config: ModelOptFp8Config,
+        nvfp4_config: ModelOptNvFp4Config,
+    ) -> None:
+        super().__init__(exclude_modules)
+        self.kv_cache_quant_method = kv_cache_quant_method
+        self.quantized_layers = quantized_layers
+        self.fp8_config = fp8_config
+        self.nvfp4_config = nvfp4_config
+
+    def get_name(self) -> QuantizationMethods:
+        return "modelopt_mixed"
+
+    def get_supported_act_dtypes(self) -> list[torch.dtype]:
+        return [torch.bfloat16, torch.half]
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 89
+
+    @classmethod
+    def override_quantization_method(
+        cls, hf_quant_cfg, user_quant
+    ) -> QuantizationMethods | None:
+        if hf_quant_cfg is None:
+            return None
+
+        quant_method = hf_quant_cfg.get("quant_method", "").lower()
+        if quant_method != "modelopt":
+            return None
+
+        if "quantization" in hf_quant_cfg:
+            quant_config = hf_quant_cfg["quantization"]
+            if isinstance(quant_config, dict):
+                quant_algo = str(quant_config.get("quant_algo", "")).upper()
+                if quant_algo == "MIXED_PRECISION":
+                    return "modelopt_mixed"
+        else:
+            quant_algo = str(hf_quant_cfg.get("quant_algo", "")).upper()
+            if quant_algo == "MIXED_PRECISION":
+                return "modelopt_mixed"
+
+        return None
+
+    @classmethod
+    def _from_config(
+        cls,
+        *,
+        quant_method: str,
+        kv_cache_quant_method: str | None,
+        exclude_modules: list[str],
+        original_config: dict[str, Any],
+        group_size: int | None,
+        **kwargs: Any,
+    ) -> "ModelOptMixedPrecisionConfig":
+        if "quantization" in original_config:
+            quantized_layers = original_config["quantization"].get(
+                "quantized_layers", {}
+            )
+        else:
+            quantized_layers = original_config.get("quantized_layers", {})
+
+        if not quantized_layers:
+            raise ValueError(
+                "MIXED_PRECISION quant_algo requires a non-empty "
+                "'quantized_layers' mapping in the quantization config."
+            )
+
+        # Determine group_size from the first NVFP4 entry if not provided.
+        if group_size is None:
+            for layer_info in quantized_layers.values():
+                if layer_info.get("quant_algo", "").upper() == "NVFP4":
+                    group_size = layer_info.get("group_size", 16)
+                    break
+        if group_size is None:
+            group_size = 16
+
+        fp8_config = ModelOptFp8Config(
+            quant_method="FP8",
+            is_checkpoint_fp8_serialized=True,
+            kv_cache_quant_method=kv_cache_quant_method,
+            exclude_modules=[],
+        )
+        nvfp4_config = ModelOptNvFp4Config(
+            is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+            group_size=group_size,
+        )
+
+        return cls(
+            kv_cache_quant_method=kv_cache_quant_method,
+            exclude_modules=exclude_modules,
+            quantized_layers=quantized_layers,
+            fp8_config=fp8_config,
+            nvfp4_config=nvfp4_config,
+        )
+
+    def _resolve_quant_algo(self, prefix: str) -> str | None:
+        """Look up the quant_algo for a vLLM-side layer prefix.
+
+        Tries three strategies in order:
+        1. Direct lookup in ``quantized_layers``.
+        2. Packed/fused-layer lookup (unfuse via ``packed_modules_mapping``).
+        3. Prefix-based lookup for FusedMoE (any child key starts with
+           ``prefix + "."``).
+
+        Returns the upper-cased quant_algo string, or *None* if the prefix
+        is not found.
+        """
+        # 1. Direct lookup
+        if prefix in self.quantized_layers:
+            return self.quantized_layers[prefix]["quant_algo"].upper()
+
+        # 2. Packed / fused layer lookup
+        proj_name = prefix.rsplit(".", 1)[-1]
+        if self.packed_modules_mapping and proj_name in self.packed_modules_mapping:
+            algos: set[str] = set()
+            base = prefix.rsplit(".", 1)[0]
+            for shard_name in self.packed_modules_mapping[proj_name]:
+                shard_prefix = f"{base}.{shard_name}"
+                if shard_prefix in self.quantized_layers:
+                    algos.add(self.quantized_layers[shard_prefix]["quant_algo"].upper())
+            if len(algos) == 1:
+                return algos.pop()
+            if len(algos) > 1:
+                raise ValueError(
+                    f"Mixed quant_algo within fused layer {prefix}: "
+                    f"{algos}. All shards must use the same quantization."
+                )
+
+        # 3. Prefix-based lookup (for FusedMoE / parent modules)
+        prefix_dot = prefix + "."
+        for key, info in self.quantized_layers.items():
+            if key.startswith(prefix_dot):
+                return info["quant_algo"].upper()
+
+        return None
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        """Return quantize-method based on layer."""
+        # KV-cache quantization
+        if isinstance(layer, Attention):
+            if self.kv_cache_quant_method:
+                return ModelOptFp8KVCacheMethod(self)
+            return None
+
+        # Excluded layers
+        if self.is_layer_excluded(prefix):
+            if isinstance(layer, LinearBase):
+                return UnquantizedLinearMethod()
+            return None
+
+        # Legacy vision exclusion
+        if "vision_tower" in prefix or "vision_model" in prefix:
+            if isinstance(layer, LinearBase):
+                return UnquantizedLinearMethod()
+            return None
+
+        quant_algo = self._resolve_quant_algo(prefix)
+
+        if isinstance(layer, LinearBase):
+            if quant_algo == "FP8":
+                return ModelOptFp8LinearMethod(self.fp8_config)
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4LinearMethod(self.nvfp4_config)
+            # Layer not in quantized_layers — leave unquantized
+            return UnquantizedLinearMethod()
+
+        if isinstance(layer, FusedMoE):
+            if quant_algo == "FP8":
+                return ModelOptFp8MoEMethod(
+                    quant_config=self.fp8_config,
+                    moe_config=layer.moe_config,
+                )
+            if quant_algo == "NVFP4":
+                return ModelOptNvFp4FusedMoE(
+                    quant_config=self.nvfp4_config,
+                    moe_config=layer.moe_config,
+                )
+            return None
+
+        return None
+
+    def apply_vllm_mapper(self, hf_to_vllm_mapper: "WeightsMapper"):
+        super().apply_vllm_mapper(hf_to_vllm_mapper)
+        if self.quantized_layers:
+            self.quantized_layers = hf_to_vllm_mapper.apply_dict(self.quantized_layers)

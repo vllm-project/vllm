@@ -286,7 +286,9 @@ def get_quant_config(
             n_kv_heads if n_kv_heads is not None else n_heads
         )
 
-    if hf_quant_config is not None:
+    if hf_quant_config is not None and model_config.quantization != "modelopt_mixed":
+        # ModelOpt mixed-precision needs the per-layer quantized_layers map
+        # from hf_quant_config.json, which is not in config.json.
         return quant_cls.from_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
@@ -365,8 +367,8 @@ def get_quant_config(
 
         if model_config.quantization == "bitsandbytes":
             config["adapter_name_or_path"] = model_config.model
-        elif model_config.quantization == "modelopt":
-            if config["producer"]["name"] == "modelopt":
+        elif model_config.quantization in ("modelopt", "modelopt_mixed"):
+            if config.get("producer", {}).get("name") == "modelopt":
                 return quant_cls.from_config(config)
             else:
                 raise ValueError(
