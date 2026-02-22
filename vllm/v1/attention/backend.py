@@ -723,6 +723,33 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         """
         return False
 
+    def fused_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support RoPE+KVCache fusion.
+        This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
+        with the KV cache update for implementations that support it.
+        """
+        return False
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_rope_kvcache_supported` returns True, this method will be called
+        by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
+        to perform the inplace RoPE and KV cache update.
+        """
+        raise NotImplementedError
+
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     """MLA attention implementation with forward_mqa and forward_mha methods."""
