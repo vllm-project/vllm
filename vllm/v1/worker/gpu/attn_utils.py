@@ -20,8 +20,7 @@ from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     kv_cache_spec: dict[str, KVCacheSpec] = {}
-    layer_type = cast(type[Any], AttentionLayerBase)
-    attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    attn_layers = get_layers_from_vllm_config(vllm_config, AttentionLayerBase)
     for layer_name, attn_module in attn_layers.items():
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             # This layer will use KV cache of the sharing target layer.
