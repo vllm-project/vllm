@@ -3,6 +3,8 @@
 
 import importlib
 import os
+import threading
+import weakref
 from collections.abc import Callable, Sequence
 from functools import cached_property
 
@@ -38,6 +40,20 @@ class ToolParser:
     derived classes.
     """
 
+    # Class-level cache for tokenizer encode/decode results.
+    # Uses WeakKeyDictionary keyed by the tokenizer object itself so
+    # cache entries are automatically evicted when a tokenizer is
+    # garbage-collected.  This prevents stale results if a new
+    # tokenizer happens to occupy the same memory address as a
+    # previously freed one.
+    _token_id_cache: weakref.WeakKeyDictionary[TokenizerLike, dict[str, list[int]]] = (
+        weakref.WeakKeyDictionary()
+    )
+    _token_str_cache: weakref.WeakKeyDictionary[TokenizerLike, dict[int, str]] = (
+        weakref.WeakKeyDictionary()
+    )
+    _token_cache_lock = threading.Lock()
+
     def __init__(self, tokenizer: TokenizerLike):
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
@@ -52,6 +68,55 @@ class ToolParser:
         # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
+
+    def _cached_encode(self, text: str) -> list[int]:
+        """Encode text to token IDs with class-level caching.
+
+        Avoids calling tokenizer.encode() on every parser instantiation,
+        preventing concurrent-access panics in the tokenizer's Rust backend.
+        """
+        tok = self.model_tokenizer
+        per_tok = self._token_id_cache.get(tok)
+        if per_tok is not None:
+            result = per_tok.get(text)
+            if result is not None:
+                return result
+        with self._token_cache_lock:
+            # Double-check after acquiring lock
+            per_tok = self._token_id_cache.get(tok)
+            if per_tok is None:
+                per_tok = {}
+                self._token_id_cache[tok] = per_tok
+            result = per_tok.get(text)
+            if result is not None:
+                return result
+            result = tok.encode(text, add_special_tokens=False)
+            per_tok[text] = result
+            return result
+
+    def _cached_decode(self, token_id: int) -> str:
+        """Decode a single token ID to string with class-level caching.
+
+        Avoids calling tokenizer.decode() on every parser instantiation,
+        preventing concurrent-access panics in the tokenizer's Rust backend.
+        """
+        tok = self.model_tokenizer
+        per_tok = self._token_str_cache.get(tok)
+        if per_tok is not None:
+            result = per_tok.get(token_id)
+            if result is not None:
+                return result
+        with self._token_cache_lock:
+            per_tok = self._token_str_cache.get(tok)
+            if per_tok is None:
+                per_tok = {}
+                self._token_str_cache[tok] = per_tok
+            result = per_tok.get(token_id)
+            if result is not None:
+                return result
+            result = tok.decode([token_id])
+            per_tok[token_id] = result
+            return result
 
     def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
         """
