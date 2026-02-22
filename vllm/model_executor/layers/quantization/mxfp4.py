@@ -129,6 +129,10 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             )
         )
 
+        # used for triton kernel
+        self.w13_precision_config = None
+        self.w2_precision_config = None
+
     def create_weights(
         self,
         layer: torch.nn.Module,

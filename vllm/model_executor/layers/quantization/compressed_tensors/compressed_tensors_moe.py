@@ -47,6 +47,7 @@ from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
     make_mxfp4_moe_kernel,
     make_mxfp4_moe_quant_config,
 )
@@ -246,7 +247,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     def __init__(self, moe):
         super().__init__(moe)
         self.group_size = 32
-        self.mxfp4_backend = NvFp4MoeBackend.MARLIN
+        self.mxfp4_backend = Mxfp4MoeBackend.MARLIN
         self.experts_cls = MarlinExperts
 
     def create_weights(
@@ -322,7 +323,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
     ) -> FusedMoEQuantConfig | None:
         return make_mxfp4_moe_quant_config(
             mxfp4_backend=self.mxfp4_backend,
-            w13_scale=layer.w13_weight_scale,
+            w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
         )
 
@@ -361,6 +362,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             self.moe_mk = make_mxfp4_moe_kernel(
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
+                mxfp4_backend=self.mxfp4_backend,
                 experts_cls=self.experts_cls,
                 shared_experts=layer.shared_experts,
                 routing_tables=layer._maybe_init_expert_routing_tables(),

@@ -676,7 +676,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
 
         self.mxfp4_backend: Mxfp4MoeBackend | None = None
         if self.ocp_mx_scheme == "w_mxfp4":
-            self.mxfp4_backend = select_mxfp4_moe_backend(moe)
+            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
 
         if self.input_quant is not None:
             self.static_input_scales = not self.input_quant.get("is_dynamic")
