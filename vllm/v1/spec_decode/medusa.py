@@ -32,7 +32,7 @@ class MedusaProposer:
         )
         self.spec_config = vllm_config.speculative_config
         self.device = device
-        self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        self.max_num_tokens = vllm_config.max_num_tokens_per_forward_pass
         self.hidden_size = self.spec_config.draft_model_config.get_hidden_size()
         self.dtype = vllm_config.model_config.dtype
 

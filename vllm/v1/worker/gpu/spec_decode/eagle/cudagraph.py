@@ -27,7 +27,7 @@ class EagleCudaGraphManager:
 
         self.max_model_len = vllm_config.model_config.max_model_len
         self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_num_tokens = vllm_config.max_num_tokens_per_forward_pass
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None

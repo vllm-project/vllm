@@ -107,7 +107,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.vocab_size = self.model_config.get_vocab_size()
         self.max_model_len = self.model_config.max_model_len
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_num_tokens = vllm_config.max_num_tokens_per_forward_pass
         self.max_num_reqs = self.scheduler_config.max_num_seqs
         self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
 
