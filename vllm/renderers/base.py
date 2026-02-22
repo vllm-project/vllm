@@ -114,6 +114,9 @@ class BaseRenderer(ABC, Generic[_T]):
         self._clear_mm_cache_async = make_async(
             self.clear_mm_cache, executor=self._executor
         )
+        self._process_multimodal_async = make_async(
+            self._process_multimodal, executor=self._mm_executor
+        )
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 
@@ -678,16 +681,12 @@ class BaseRenderer(ABC, Generic[_T]):
 
         inputs: TokenInputs | MultiModalInputs
         if multi_modal_data := prompt.get("multi_modal_data"):
-            loop = asyncio.get_running_loop()
-            inputs = await loop.run_in_executor(
-                self._mm_executor,
-                lambda: self._process_multimodal(
-                    prompt_token_ids,
-                    multi_modal_data,
-                    mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
-                    tokenization_kwargs=None,
-                    mm_uuids=prompt.get("multi_modal_uuids"),
-                ),
+            inputs = await self._process_multimodal_async(
+                prompt_token_ids,
+                multi_modal_data,
+                mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
+                tokenization_kwargs=None,
+                mm_uuids=prompt.get("multi_modal_uuids"),
             )
         else:
             inputs = token_inputs(prompt_token_ids)
