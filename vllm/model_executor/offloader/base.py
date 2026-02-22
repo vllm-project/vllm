@@ -120,25 +120,36 @@ def set_offloader(instance: BaseOffloader) -> None:
 def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     """Create an offloader based on the offload configuration.
 
-    Priority: V2 offloading if configured, else UVA, else noop.
+    Uses the explicit ``offload_backend`` selector.  When set to ``"auto"``,
+    selects prefetch if ``offload_group_size > 0``, UVA if
+    ``cpu_offload_gb > 0``, otherwise noop.
     """
     from vllm.model_executor.offloader.uva import UVAOffloader
     from vllm.model_executor.offloader.v2 import OffloaderV2
 
-    if offload_config.offload_group_size > 0:
-        # Use V2 offloading
+    backend = offload_config.offload_backend
+    uva = offload_config.uva
+    prefetch = offload_config.prefetch
+
+    if backend == "auto":
+        if prefetch.offload_group_size > 0:
+            backend = "prefetch"
+        elif uva.cpu_offload_gb > 0:
+            backend = "uva"
+        else:
+            return NoopOffloader()
+
+    if backend == "prefetch":
         return OffloaderV2(
-            group_size=offload_config.offload_group_size,
-            num_in_group=offload_config.offload_num_in_group,
-            prefetch_step=offload_config.offload_prefetch_step,
+            group_size=prefetch.offload_group_size,
+            num_in_group=prefetch.offload_num_in_group,
+            prefetch_step=prefetch.offload_prefetch_step,
             mode="cpu",
         )
-    elif offload_config.cpu_offload_gb > 0:
-        # Use UVA offloading (legacy)
+    elif backend == "uva":
         return UVAOffloader(
-            cpu_offload_max_bytes=int(offload_config.cpu_offload_gb * 1024**3),
-            cpu_offload_params=offload_config.cpu_offload_params,
+            cpu_offload_max_bytes=int(uva.cpu_offload_gb * 1024**3),
+            cpu_offload_params=uva.cpu_offload_params,
         )
     else:
-        # No offloading
         return NoopOffloader()

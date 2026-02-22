@@ -99,13 +99,13 @@ class CacheConfig:
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
 
     DEPRECATED: This field is deprecated and will be removed in v0.16.
-    Please use OffloadConfig.cpu_offload_gb instead.
+    Please use OffloadConfig.uva.cpu_offload_gb instead.
     """
     cpu_offload_params: set[str] = Field(default_factory=set)
     """The set of parameter name segments to target for CPU offloading.
 
     DEPRECATED: This field is deprecated and will be removed in v0.16.
-    Please use OffloadConfig.cpu_offload_params instead.
+    Please use OffloadConfig.uva.cpu_offload_params instead.
     """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
