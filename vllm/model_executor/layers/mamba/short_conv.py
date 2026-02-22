@@ -88,7 +88,34 @@ class ShortConv(MambaBase, CustomOp):
         hidden_states: torch.Tensor,
         output: torch.Tensor,
     ):
-        return
+        # The logic here is the CPU equivalent of forward_cuda.
+        BCx, _ = self.in_proj(hidden_states)
+
+        B, C, x = BCx.chunk(3, dim=-1)
+
+        # The convolution is causal, so we need to pad the input on the left.
+        # The input hidden_states is a single sequence of tokens, so we treat it
+        # as a single batch.
+        # (num_tokens, dim) -> (1, dim, num_tokens)
+        Bx = (B * x).unsqueeze(0).transpose(1, 2)
+
+        padding = self.L_cache - 1
+
+        # Apply causal padding
+        padded_Bx = torch.nn.functional.pad(Bx, (padding, 0))
+
+        # The weight of self.conv is (dim, 1, L_cache), which is correct for conv1d
+        conv_output = torch.nn.functional.conv1d(
+            padded_Bx, self.conv.weight, self.conv.bias, groups=self.conv_dim
+        )
+
+        # (1, dim, num_tokens) -> (num_tokens, dim)
+        conv_output = conv_output.squeeze(0).transpose(0, 1)
+
+        y = C * conv_output
+
+        output_tensor, _ = self.out_proj(y)
+        output[: hidden_states.shape[0]] = output_tensor
 
     def forward(
         self,
@@ -235,7 +262,10 @@ def short_conv(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states, output=output)
+    if self.conv.weight.device.type == "cuda":
+        self.forward_cuda(hidden_states=hidden_states, output=output)
+    else:
+        self.forward_native(hidden_states=hidden_states, output=output)
 
 
 def short_conv_fake(
