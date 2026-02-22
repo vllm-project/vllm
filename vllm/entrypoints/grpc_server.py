@@ -19,6 +19,7 @@ Example:
 
 import argparse
 import asyncio
+import functools
 import io
 import signal
 import sys
@@ -122,8 +123,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 prompt
             )
 
-            # Extract kv_transfer_params for Mooncake PD disaggregation
-            kv_transfer_params = None
+            # Validate kv_transfer_params if present
             if request.HasField("kv_transfer_params"):
                 remote_host = request.kv_transfer_params.remote_host
                 remote_port = request.kv_transfer_params.remote_port
@@ -133,22 +133,20 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                         "Invalid kv_transfer_params: "
                         "remote_host and remote_port must be set.",
                     )
-                kv_transfer_params = {
-                    "remote_host": remote_host,
-                    "remote_port": remote_port,
-                }
                 logger.info(
-                    "Request %s: kv_transfer_params=%s",
+                    "Request %s: kv_transfer_params={remote_host=%s, remote_port=%d}",
                     request_id,
-                    kv_transfer_params,
+                    remote_host,
+                    remote_port,
                 )
 
             # Build sampling params with detokenize=False
-            # Pass kv_transfer_params via extra_args for Mooncake PD
             sampling_params = self._sampling_params_from_proto(
                 request.sampling_params,
                 stream=request.stream,
-                kv_transfer_params=kv_transfer_params,
+                kv_transfer_params=request.kv_transfer_params
+                if request.HasField("kv_transfer_params")
+                else None,
             )
 
             # Extract logprobs configuration
@@ -157,8 +155,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
             # Track first chunk per index (for input_logprobs in first chunk)
             is_first_chunk_per_index: dict[int, bool] = defaultdict(lambda: True)
-            # Track which indices have already sent Complete (for n>1 support)
-            completed_indices: set[int] = set()
 
             async for output in self.async_llm.generate(
                 prompt=prompt,
@@ -182,15 +178,14 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
                         is_first_chunk_per_index[idx] = False
 
-                        # Send Complete as each sequence finishes (n>1 support)
-                        if completion.finish_reason and idx not in completed_indices:
+                        # Send Complete when sequence finishes (n>1 support)
+                        if completion.finish_reason:
                             yield self._complete_response(
                                 output,
                                 completion=completion,
                                 num_logprobs=num_logprobs,
                                 num_prompt_logprobs=num_prompt_logprobs,
                             )
-                            completed_indices.add(idx)
 
                 # For non-streaming, send complete response when finished
                 if output.finished and not request.stream:
@@ -355,7 +350,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
     def _sampling_params_from_proto(
         params: vllm_engine_pb2.SamplingParams,
         stream: bool = True,
-        kv_transfer_params: dict | None = None,
+        kv_transfer_params: vllm_engine_pb2.KvTransferParams | None = None,
     ) -> SamplingParams:
         """
         Convert protobuf SamplingParams to vLLM SamplingParams.
@@ -363,7 +358,7 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Args:
             params: Protobuf SamplingParams message
             stream: Whether streaming is enabled
-            kv_transfer_params: KV transfer params for Mooncake PD disaggregation
+            kv_transfer_params: KV transfer params proto for Mooncake PD
 
         Returns:
             vLLM SamplingParams with detokenize=False and structured_outputs
@@ -398,7 +393,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         # Build extra_args for kv_transfer_params (Mooncake PD)
         extra_args = None
         if kv_transfer_params:
-            extra_args = {"kv_transfer_params": kv_transfer_params}
+            extra_args = {
+                "kv_transfer_params": {
+                    "remote_host": kv_transfer_params.remote_host,
+                    "remote_port": kv_transfer_params.remote_port,
+                }
+            }
 
         # Create SamplingParams
         # output_kind=DELTA: Return only new tokens in each chunk (for streaming)
@@ -440,6 +440,24 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         )
 
     @staticmethod
+    def _build_top_logprobs(
+        logprob_entry: dict,
+        num_top_logprobs: int | None,
+    ) -> vllm_engine_pb2.TopLogProbs:
+        """Build TopLogProbs proto from a logprob entry dict."""
+        top = vllm_engine_pb2.TopLogProbs()
+        if num_top_logprobs and logprob_entry:
+            sorted_entries = sorted(
+                logprob_entry.items(),
+                key=lambda x: x[1].logprob,
+                reverse=True,
+            )
+            for tid, lp in functools.islice(sorted_entries, num_top_logprobs):
+                top.token_ids.append(tid)
+                top.values.append(lp.logprob)
+        return top
+
+    @staticmethod
     def _build_output_logprobs(
         logprobs: SampleLogprobs | None,
         token_ids: list[int],
@@ -456,34 +474,24 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             OutputLogProbs proto or None
         """
-        if logprobs is None or len(logprobs) == 0:
+        if not logprobs:
             return None
 
         proto = vllm_engine_pb2.OutputLogProbs()
 
-        for i, token_id in enumerate(token_ids):
-            if i >= len(logprobs):
-                break
-
-            logprob_entry = logprobs[i]  # dict[int, Logprob]
-            if token_id in logprob_entry:
-                proto.token_logprobs.append(logprob_entry[token_id].logprob)
+        for token_id, logprob_entry in zip(token_ids, logprobs):
+            if logprob := logprob_entry.get(token_id):
+                proto.token_logprobs.append(logprob.logprob)
                 proto.token_ids.append(token_id)
 
-                # Build top logprobs for this position
-                if num_top_logprobs and num_top_logprobs > 0:
-                    top = vllm_engine_pb2.TopLogProbs()
-                    sorted_entries = sorted(
-                        logprob_entry.items(),
-                        key=lambda x: x[1].logprob,
-                        reverse=True,
-                    )[:num_top_logprobs]
-                    for tid, lp in sorted_entries:
-                        top.token_ids.append(tid)
-                        top.values.append(lp.logprob)
-                    proto.top_logprobs.append(top)
+                if num_top_logprobs:
+                    proto.top_logprobs.append(
+                        VllmEngineServicer._build_top_logprobs(
+                            logprob_entry, num_top_logprobs
+                        )
+                    )
 
-        return proto if len(proto.token_ids) > 0 else None
+        return proto if proto.token_ids else None
 
     @staticmethod
     def _build_input_logprobs(
@@ -502,16 +510,12 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
         Returns:
             InputLogProbs proto or None
         """
-        if prompt_logprobs is None or len(prompt_logprobs) == 0:
+        if not prompt_logprobs:
             return None
 
         proto = vllm_engine_pb2.InputLogProbs()
 
-        for i, token_id in enumerate(prompt_token_ids):
-            if i >= len(prompt_logprobs):
-                break
-
-            logprob_entry = prompt_logprobs[i]  # dict[int, Logprob] | None
+        for token_id, logprob_entry in zip(prompt_token_ids, prompt_logprobs):
             token_logprob = vllm_engine_pb2.InputTokenLogProb()
 
             # First token has no logprob (None)
@@ -520,23 +524,11 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
 
             proto.token_logprobs.append(token_logprob)
             proto.token_ids.append(token_id)
+            proto.top_logprobs.append(
+                VllmEngineServicer._build_top_logprobs(logprob_entry, num_top_logprobs)
+            )
 
-            # Build top logprobs
-            if num_top_logprobs and num_top_logprobs > 0 and logprob_entry:
-                top = vllm_engine_pb2.TopLogProbs()
-                sorted_entries = sorted(
-                    logprob_entry.items(),
-                    key=lambda x: x[1].logprob,
-                    reverse=True,
-                )[:num_top_logprobs]
-                for tid, lp in sorted_entries:
-                    top.token_ids.append(tid)
-                    top.values.append(lp.logprob)
-                proto.top_logprobs.append(top)
-            else:
-                proto.top_logprobs.append(vllm_engine_pb2.TopLogProbs())
-
-        return proto if len(proto.token_ids) > 0 else None
+        return proto if proto.token_ids else None
 
     @staticmethod
     def _chunk_response(
