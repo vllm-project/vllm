@@ -34,8 +34,9 @@ class AnthropicUsage(BaseModel):
 class AnthropicContentBlock(BaseModel):
     """Content block in message"""
 
-    type: Literal["text", "image", "tool_use", "tool_result"]
+    type: Literal["text", "image", "tool_use", "tool_result", "thinking"]
     text: str | None = None
+    thinking: str | None = None
     # For image content
     source: dict[str, Any] | None = None
     # For tool use/result
@@ -84,6 +85,21 @@ class AnthropicToolChoice(BaseModel):
         return self
 
 
+class AnthropicThinkingConfig(BaseModel):
+    """Thinking/reasoning configuration for extended thinking"""
+
+    type: Literal["enabled", "disabled"]
+    budget_tokens: int | None = None
+
+    @model_validator(mode="after")
+    def validate_budget_tokens(self) -> "AnthropicThinkingConfig":
+        if self.type == "enabled" and self.budget_tokens is None:
+            raise ValueError(
+                "budget_tokens is required when thinking type is 'enabled'"
+            )
+        return self
+
+
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
 
@@ -95,6 +111,7 @@ class AnthropicMessagesRequest(BaseModel):
     stream: bool | None = False
     system: str | list[AnthropicContentBlock] | None = None
     temperature: float | None = None
+    thinking: AnthropicThinkingConfig | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
     top_k: int | None = None
@@ -118,8 +135,9 @@ class AnthropicMessagesRequest(BaseModel):
 class AnthropicDelta(BaseModel):
     """Delta for streaming responses"""
 
-    type: Literal["text_delta", "input_json_delta"] | None = None
+    type: Literal["text_delta", "input_json_delta", "thinking_delta"] | None = None
     text: str | None = None
+    thinking: str | None = None
     partial_json: str | None = None
 
     # Message delta
