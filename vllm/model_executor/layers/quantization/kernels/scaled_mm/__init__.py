@@ -8,6 +8,8 @@ import torch
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+    AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
+    AiterCKPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.kernels.scaled_mm.cpu import (
@@ -66,6 +68,8 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        AiterBpreshufflePerTokenFp8ScaledMMLinearKernel,
+        AiterCKPerTokenFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
@@ -173,6 +177,7 @@ def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
     out_dtype: torch.dtype,
+    weight_shape: tuple[int, int],
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
 ) -> FP8ScaledMMLinearKernel:
@@ -180,6 +185,7 @@ def init_fp8_linear_kernel(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
         out_dtype=out_dtype,
+        weight_shape=weight_shape,
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
