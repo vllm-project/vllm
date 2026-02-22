@@ -472,7 +472,7 @@ class SkyworkR1VProcessor:
 
 class SkyworkR1VProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> SkyworkR1VProcessor:
-        return self.ctx.init_processor(
+        return self.ctx.get_hf_processor(
             SkyworkR1VProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
@@ -529,13 +529,12 @@ class SkyworkR1VDummyInputsBuilder(BaseDummyInputsBuilder[SkyworkR1VProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
