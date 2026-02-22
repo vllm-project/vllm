@@ -671,3 +671,46 @@ async def test_revert_context_checkpoint_drops_stale_current_engine_checkpoint()
     serving.engine_client.drop_kv_checkpoints.assert_awaited_once_with(
         [f"resp:{current_response_id}"]
     )
+
+
+@pytest.mark.asyncio
+async def test_drop_context_checkpoint_evicts_lru_when_session_limit_exceeded():
+    serving = _make_serving_responses_instance()
+    serving.context_manager.max_checkpoints_per_session = 1
+    serving.context_manager.checkpoint_ttl_s = None
+
+    session_id = "session-a"
+    current_response_id = "resp_current"
+    first_checkpoint_response_id = "resp_saved_1"
+    second_checkpoint_response_id = "resp_saved_2"
+
+    serving.response_store[current_response_id] = MagicMock()
+    serving.response_store[first_checkpoint_response_id] = MagicMock()
+    serving.response_store[second_checkpoint_response_id] = MagicMock()
+    serving.context_manager.set_current_state(
+        session_id,
+        current_response_id,
+        f"resp:{current_response_id}",
+    )
+
+    await serving.drop_context_checkpoint(
+        ResponsesContextCheckpointRequest(
+            session_id=session_id,
+            checkpoint_label="ckpt-1",
+            response_id=first_checkpoint_response_id,
+        )
+    )
+
+    serving.engine_client.drop_kv_checkpoints.reset_mock()
+    serving.engine_client.drop_kv_checkpoints.return_value = 1
+    await serving.drop_context_checkpoint(
+        ResponsesContextCheckpointRequest(
+            session_id=session_id,
+            checkpoint_label="ckpt-2",
+            response_id=second_checkpoint_response_id,
+        )
+    )
+
+    serving.engine_client.drop_kv_checkpoints.assert_awaited_once_with(
+        [f"resp:{first_checkpoint_response_id}"]
+    )

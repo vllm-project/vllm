@@ -427,6 +427,11 @@ class KVCacheManager:
         for idx, manager in enumerate(self.coordinator.single_type_managers):
             manager_blocks = request_blocks[idx]
             if isinstance(manager, CrossAttentionManager):
+                # Preserve the encoder-side cross-attention blocks in the
+                # checkpoint object. We do not currently restore them (see
+                # restore_request_from_checkpoint), but keeping them here makes
+                # checkpoint state self-contained and enables future multimodal
+                # restore support without changing the checkpoint format.
                 selected = tuple(manager_blocks)
             else:
                 block_cap = cdiv(num_computed_tokens, manager.block_size)
@@ -437,7 +442,11 @@ class KVCacheManager:
                 len(selected),
             )
             num_cached_blocks.append(cached_blocks)
-        return tuple(checkpoint_blocks), tuple(num_cached_blocks)
+        checkpoint_blocks_tuple: tuple[tuple[KVCacheBlock, ...], ...] = tuple(
+            checkpoint_blocks
+        )
+        num_cached_blocks_tuple: tuple[int, ...] = tuple(num_cached_blocks)
+        return checkpoint_blocks_tuple, num_cached_blocks_tuple
 
     def create_request_checkpoint(
         self,
@@ -529,6 +538,8 @@ class KVCacheManager:
             raise KeyError(checkpoint_id)
 
         if request.has_encoder_inputs:
+            # TODO: Support restoring cross-attention / encoder-side KV for
+            # multimodal and encoder-decoder requests.
             return 0
 
         max_restore_tokens = min(
@@ -554,6 +565,9 @@ class KVCacheManager:
 
             checkpoint_blocks = checkpoint.blocks[idx]
             if isinstance(manager, CrossAttentionManager):
+                # Cross-attention blocks are checkpointed for completeness, but
+                # the current restore path only supports decoder-only prefix KV
+                # replay. We leave the request's cross-attention state empty.
                 blocks_to_attach = []
             else:
                 num_blocks = min(

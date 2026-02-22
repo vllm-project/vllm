@@ -278,7 +278,13 @@ class OpenAIServingResponses(OpenAIServing):
 
         self.tool_server = tool_server
         self.context_manager = ResponseContextManager()
-        self.context_manager_lock = asyncio.Lock()
+        # Lock striping reduces contention across unrelated context sessions.
+        self._context_lock_stripes = tuple(asyncio.Lock() for _ in range(64))
+
+    def _get_context_session_lock(self, session_id: str) -> asyncio.Lock:
+        return self._context_lock_stripes[
+            hash(session_id) % len(self._context_lock_stripes)
+        ]
 
     def _validate_generator_input(
         self,
@@ -493,14 +499,15 @@ class OpenAIServingResponses(OpenAIServing):
                 param="store",
             )
 
-        async with self.context_manager_lock:
-            request.previous_response_id = self.context_manager.get_current_response_id(
-                session_id
-            )
-            summaries = self.context_manager.consume_summary_queue(session_id)
-            restore_checkpoint_id = (
-                self.context_manager.get_current_engine_checkpoint_id(session_id)
-            )
+        context_lock = self._get_context_session_lock(session_id)
+        async with context_lock:
+            (
+                request.previous_response_id,
+                restore_checkpoint_id,
+                summaries,
+                stale_checkpoint_ids,
+            ) = self.context_manager.resolve_request_session_state(session_id)
+        await self._drop_engine_checkpoints(stale_checkpoint_ids)
         self._prepend_queued_summaries(request, summaries)
         self._merge_internal_vllm_xargs(
             request,
@@ -513,8 +520,9 @@ class OpenAIServingResponses(OpenAIServing):
         request: ResponsesContextCheckpointRequest,
     ) -> ResponsesContextCheckpointResponse | ErrorResponse:
         target_response_id = request.response_id
+        context_lock = self._get_context_session_lock(request.session_id)
         if target_response_id is None:
-            async with self.context_manager_lock:
+            async with context_lock:
                 target_response_id = self.context_manager.get_current_response_id(
                     request.session_id
                 )
@@ -534,7 +542,7 @@ class OpenAIServingResponses(OpenAIServing):
                     return self._make_not_found_error(target_response_id)
 
         stale_checkpoint_ids: list[str]
-        async with self.context_manager_lock:
+        async with context_lock:
             response_id, engine_checkpoint_id, stale_checkpoint_ids = (
                 self.context_manager.drop_checkpoint(
                     session_id=request.session_id,
@@ -555,8 +563,9 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesContextCheckpointDeleteRequest,
     ) -> ResponsesContextCheckpointDeleteResponse | ErrorResponse:
+        context_lock = self._get_context_session_lock(request.session_id)
         try:
-            async with self.context_manager_lock:
+            async with context_lock:
                 checkpoint, stale_checkpoint_ids = (
                     self.context_manager.delete_checkpoint(
                         session_id=request.session_id,
@@ -597,8 +606,9 @@ class OpenAIServingResponses(OpenAIServing):
         self,
         request: ResponsesContextRevertRequest,
     ) -> ResponsesContextRevertResponse | ErrorResponse:
+        context_lock = self._get_context_session_lock(request.session_id)
         try:
-            async with self.context_manager_lock:
+            async with context_lock:
                 checkpoint = self.context_manager.peek_checkpoint(
                     session_id=request.session_id,
                     checkpoint_label=request.checkpoint_label,
@@ -636,7 +646,7 @@ class OpenAIServingResponses(OpenAIServing):
             summary = await self._build_auto_rewind_summary(request.session_id)
 
         stale_checkpoint_ids: list[str]
-        async with self.context_manager_lock:
+        async with context_lock:
             (
                 response_id,
                 engine_checkpoint_id,
@@ -1136,7 +1146,8 @@ class OpenAIServingResponses(OpenAIServing):
 
         stale_checkpoint_ids: list[str] = []
         if request.context_session_id is not None:
-            async with self.context_manager_lock:
+            context_lock = self._get_context_session_lock(request.context_session_id)
+            async with context_lock:
                 stale_checkpoint_ids = self.context_manager.set_current_state(
                     request.context_session_id,
                     response.id,
