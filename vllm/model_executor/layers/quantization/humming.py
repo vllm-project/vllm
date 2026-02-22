@@ -6,13 +6,14 @@ from typing import Any
 
 import regex as re
 import torch
-from humming import dtypes
 from humming.layer import HummingLayerMeta, HummingMethod
 
+from humming import dtypes
 from vllm import envs
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
+from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEConfig,
@@ -90,6 +91,11 @@ def parse_single_config(config):
             "block_shape": (1, 32),
             "b_dtype": dtypes.float4e2m1,
             "bs_dtype": dtypes.float8e8m0,
+        }
+    elif quant_method == "bitnet":
+        result_dict = {
+            "block_shape": (0, 0),
+            "b_dtype": dtypes.uint2,
         }
     else:
         raise AssertionError(f"Invalid quant_method: {quant_method}")
@@ -365,15 +371,22 @@ class HummingLinearMethod(LinearMethodBase):
             shard_id: str | int | None = None,
         ):
             param_name = param.param_name
-            data = self.weight_converter.convert(loaded_weight, param_name)
             if isinstance(shard_id, str):
                 shard_id = shard_id_map[shard_id]
             offset_n = sum(layer.logical_widths[: (shard_id or 0)])
-            packed = self.quant_config.ckpt_quant_method is not None
+            shape_n = self.meta.shape_n
+            if isinstance(shard_id, int):
+                shape_n = layer.logical_widths[shard_id]
+            data = self.weight_converter.convert(
+                loaded_weight,
+                param_name,
+                shape_n=shape_n,
+                shape_k=self.meta.shape_k,
+            )
             HummingMethod.load_weight(
                 layer=layer,
                 offset_n=offset_n,
-                packed=packed,
+                packed=True,
                 **data,
             )
 
@@ -511,7 +524,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             expert_id: int | None = None,
         ):
             param_name = param.param_name
-            data = self.weight_converter.convert(loaded_weight, param_name)
 
             offset_n = None
             if param.sublayer == "w13":
@@ -519,12 +531,27 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     shard_id = shard_id_map[shard_id]
                 offset_n = self.meta1.shape_n // 2 * (shard_id or 0)
 
-            packed = self.quant_config.ckpt_quant_method is not None
+            if param.sublayer == "w13":
+                shape_n = self.meta1.shape_n // 2
+                shape_k = self.meta1.shape_k
+            else:
+                shape_n = self.meta2.shape_n
+                shape_k = self.meta2.shape_k
+
+            num_experts = layer.num_experts if expert_id is None else None
+            data = self.weight_converter.convert(
+                loaded_weight,
+                param_name,
+                shape_n=shape_n,
+                shape_k=shape_k,
+                num_experts=num_experts,
+            )
+
             HummingMethod.load_weight(
                 layer=layer,
                 offset_n=offset_n,
                 expert_id=expert_id,
-                packed=packed,
+                packed=True,
                 sublayer_name=param.sublayer,
                 **data,
             )
@@ -586,7 +613,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # TODO: config tunning
         sorted_token_ids, expert_ids, num_tokens_post_padded = humming_moe_align(
             layer.humming_block_size_configs["w13"],
             topk_ids=topk_ids,
@@ -612,9 +638,6 @@ class HummingMoEMethod(FusedMoEMethodBase):
             num_tokens_post_padded=num_tokens_post_padded,
             sublayer_name="w13",
         )
-
-        # TODO: fused activation
-        from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
 
         apply_moe_activation(
             layer.activation,
