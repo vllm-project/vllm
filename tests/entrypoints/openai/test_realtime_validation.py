@@ -230,7 +230,11 @@ async def test_empty_commit_does_not_crash_engine(
                     if event["type"] == "session.updated":
                         break
             except TimeoutError:
-                pass
+                warnings.warn(
+                    f"session.updated not received within {5.0}s after "
+                    "session.update. The server may not implement this event.",
+                    stacklevel=2,
+                )
 
             # Start transcription
             await send_event(ws, {"type": "input_audio_buffer.commit"})
