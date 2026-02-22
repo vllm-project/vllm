@@ -327,7 +327,7 @@ class MambaMixer(MambaBase, PluggableLayer):
                 attn_metadata.block_idx_first_scheduled_token_p
             )
             num_computed_tokens_p = attn_metadata.num_computed_tokens_p
-            chunk_start_offsets_p = attn_metadata.chunk_start_offsets_p
+            chunk_start_offsets_p = num_computed_tokens_p % mamba_block_size
         else:
             block_idx_last_computed_token_d = None
             block_idx_last_computed_token_p = None
