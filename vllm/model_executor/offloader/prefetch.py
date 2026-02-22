@@ -10,7 +10,7 @@ graph captures, ensuring H2D copies are properly captured.
 """
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,9 +24,6 @@ from vllm.model_executor.offloader.base import BaseOffloader
 from vllm.utils.platform_utils import is_pin_memory_available
 
 logger = init_logger(__name__)
-
-_SubmoduleAccessor = Callable[[nn.Module], nn.Module]
-_WhitelistParamNamesCreator = Callable[[nn.Module], list[str]]
 
 
 @dataclass
@@ -146,11 +143,13 @@ class PrefetchOffloader(BaseOffloader):
         group_size: int,
         num_in_group: int,
         prefetch_step: int,
+        offload_params: set[str] | None = None,
         mode: str = "cpu",
     ):
         self.group_size = group_size
         self.num_in_group = num_in_group
         self.prefetch_step = prefetch_step
+        self.offload_params = offload_params or set()
         self.mode = mode
 
         # Copy stream for async H2D transfers
@@ -164,8 +163,6 @@ class PrefetchOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
-        submodule_accessor: _SubmoduleAccessor | None = None,
-        whitelist_param_names_creator: _WhitelistParamNamesCreator | None = None,
     ) -> list[nn.Module]:
         """Wrap modules with prefetch offloading logic."""
         assert len(self.module_offloaders) == 0, (
@@ -173,7 +170,7 @@ class PrefetchOffloader(BaseOffloader):
         )
 
         all_modules = []
-        offload_submodules = []
+        offload_modules = []
 
         for module_index, module in enumerate(modules_generator):
             all_modules.append(module)
@@ -181,26 +178,31 @@ class PrefetchOffloader(BaseOffloader):
             # Select layers to offload based on group pattern
             # Offload last num_in_group layers of each group_size
             if module_index % self.group_size >= self.group_size - self.num_in_group:
-                submodule = submodule_accessor(module) if submodule_accessor else module
-                whitelist_param_names = (
-                    whitelist_param_names_creator(submodule)
-                    if whitelist_param_names_creator
-                    else [name for name, _ in submodule.named_parameters()]
-                )
+                if self.offload_params:
+                    whitelist = [
+                        name
+                        for name, _ in module.named_parameters()
+                        if any(f".{p}." in f".{name}." for p in self.offload_params)
+                    ]
+                else:
+                    whitelist = [name for name, _ in module.named_parameters()]
 
-                offload_submodules.append(submodule)
+                if not whitelist:
+                    continue  # skip layers with no matching params
+
+                offload_modules.append(module)
                 self.module_offloaders.append(
                     _ModuleOffloader(
                         mode=self.mode,
-                        module=submodule,
+                        module=module,
                         copy_stream=self.copy_stream,
-                        whitelist_param_names=whitelist_param_names,
+                        whitelist_param_names=whitelist,
                         layer_idx=len(self.module_offloaders),
                     )
                 )
 
-        for index, submodule in enumerate(offload_submodules):
-            self._hook_module_forward(index, submodule)
+        for index, module in enumerate(offload_modules):
+            self._hook_module_forward(index, module)
 
         return all_modules
 

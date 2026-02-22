@@ -5,7 +5,7 @@
 """Base classes for model parameter offloading."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 from typing import TYPE_CHECKING
 
 import torch.nn as nn
@@ -16,9 +16,6 @@ if TYPE_CHECKING:
     from vllm.config import OffloadConfig
 
 logger = init_logger(__name__)
-
-_SubmoduleAccessor = Callable[[nn.Module], nn.Module]
-_WhitelistParamNamesCreator = Callable[[nn.Module], list[str]]
 
 
 """
@@ -44,17 +41,11 @@ class BaseOffloader(ABC):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
-        submodule_accessor: _SubmoduleAccessor | None = None,
-        whitelist_param_names_creator: _WhitelistParamNamesCreator | None = None,
     ) -> list[nn.Module]:
         """Wrap modules with offloading logic.
 
         Args:
             modules_generator: Generator yielding modules to potentially offload.
-            submodule_accessor: Optional function to extract a submodule from
-                each module (e.g., lambda layer: layer.mlp.experts).
-            whitelist_param_names_creator: Optional function to get parameter
-                names to offload from a submodule (e.g., ["w13_weight", "w2_weight"]).
 
         Returns:
             List of modules, potentially with offloading hooks installed.
@@ -94,8 +85,6 @@ class NoopOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
-        submodule_accessor: _SubmoduleAccessor | None = None,
-        whitelist_param_names_creator: _WhitelistParamNamesCreator | None = None,
     ) -> list[nn.Module]:
         """Return modules unchanged."""
         return list(modules_generator)
@@ -144,6 +133,7 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
             group_size=prefetch.offload_group_size,
             num_in_group=prefetch.offload_num_in_group,
             prefetch_step=prefetch.offload_prefetch_step,
+            offload_params=prefetch.offload_params,
             mode="cpu",
         )
     elif backend == "uva":

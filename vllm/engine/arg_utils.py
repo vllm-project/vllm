@@ -447,6 +447,7 @@ class EngineArgs:
     offload_group_size: int = PrefetchOffloadConfig.offload_group_size
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
+    offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
@@ -1005,6 +1006,9 @@ class EngineArgs:
         offload_group.add_argument(
             "--offload-prefetch-step",
             **prefetch_kwargs["offload_prefetch_step"],
+        )
+        offload_group.add_argument(
+            "--offload-params", **prefetch_kwargs["offload_params"]
         )
 
         # Multimodal related configs
@@ -1864,6 +1868,7 @@ class EngineArgs:
                 offload_group_size=self.offload_group_size,
                 offload_num_in_group=self.offload_num_in_group,
                 offload_prefetch_step=self.offload_prefetch_step,
+                offload_params=self.offload_params,
             ),
         )
 

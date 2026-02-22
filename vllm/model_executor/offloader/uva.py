@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """UVA-based CPU offloading using Unified Virtual Addressing."""
 
-from collections.abc import Callable, Generator
+from collections.abc import Generator
 
 import torch
 import torch.nn as nn
@@ -54,14 +54,8 @@ class UVAOffloader(BaseOffloader):
     def wrap_modules(
         self,
         modules_generator: Generator[nn.Module, None, None],
-        submodule_accessor: Callable[[nn.Module], nn.Module] | None = None,
-        whitelist_param_names_creator: Callable[[nn.Module], list[str]] | None = None,
     ) -> list[nn.Module]:
-        """Wrap modules with UVA offloading.
-
-        Note: UVA offloading operates at module level, so submodule_accessor
-        and whitelist_param_names_creator are ignored.
-        """
+        """Wrap modules with UVA offloading."""
         modules = [self._maybe_offload_to_cpu(module) for module in modules_generator]
         if self.cpu_offload_bytes > 0:
             logger.info(

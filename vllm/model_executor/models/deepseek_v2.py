@@ -47,10 +47,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.model_executor.layers.fused_moe import (
-    SharedFusedMoE,
-    find_fused_moe_submodule,
-)
+from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -1130,21 +1127,6 @@ class DeepseekV2Model(nn.Module):
                 vllm_config, prefix, topk_indices_buffer=topk_indices_buffer
             ),
             prefix=f"{prefix}.layers",
-            offloader_kwargs=dict(
-                # Extract the MLP submodule - for MoE layers, go deeper to the experts
-                submodule_accessor=lambda layer: find_fused_moe_submodule(layer.mlp),
-                # Specify which parameters to offload
-                whitelist_param_names_creator=lambda module: (
-                    [
-                        # Core MoE expert weights
-                        "w13_weight",
-                        "w2_weight",
-                    ]
-                    # Only offload from MoE experts (SharedFusedMoE/FusedMoE)
-                    if hasattr(module, "w13_weight")
-                    else []
-                ),
-            ),
         )
 
         if get_pp_group().is_last_rank:

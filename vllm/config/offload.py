@@ -67,6 +67,14 @@ class PrefetchOffloadConfig:
     """Number of layers to prefetch ahead.
     Higher values hide more latency but use more GPU memory. Default is 1."""
 
+    offload_params: set[str] = Field(default_factory=set)
+    """The set of parameter name segments to target for prefetch offloading.
+    Unmatched parameters are not offloaded. If this set is empty, ALL
+    parameters of each offloaded layer are offloaded.
+    Uses segment matching: "w13_weight" matches "mlp.experts.w13_weight"
+    but not "mlp.experts.w13_weight_scale".
+    """
+
 
 @config
 class OffloadConfig:

@@ -24,6 +24,10 @@ def test_prefetch_offload_deepseek():
             "2",
             "--offload-prefetch-step",
             "1",
+            # Selective offloading: only MoE expert weights
+            "--offload-params",
+            "w13_weight",
+            "w2_weight",
             # torch.compile is automatically disabled when prefetch offloading
             # is enabled (via enable_if in @support_torch_compile decorator)
         ],

@@ -611,7 +611,6 @@ def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
     prefix: str,
-    offloader_kwargs: dict | None = None,
 ) -> tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
@@ -620,8 +619,6 @@ def make_layers(
         num_hidden_layers: Total number of hidden layers in the model.
         layer_fn: Function to create a layer given its index.
         prefix: Prefix for layer names.
-        offloader_kwargs: Optional kwargs for offloader (submodule_accessor,
-            whitelist_param_names_creator).
 
     Returns:
         Tuple of (start_layer, end_layer, modules).
@@ -637,11 +634,7 @@ def make_layers(
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)]
         + get_offloader().wrap_modules(
-            (
-                layer_fn(prefix=f"{prefix}.{idx}")
-                for idx in range(start_layer, end_layer)
-            ),
-            **(offloader_kwargs or {}),
+            layer_fn(prefix=f"{prefix}.{idx}") for idx in range(start_layer, end_layer)
         )
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
     )
