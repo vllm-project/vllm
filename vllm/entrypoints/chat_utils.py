@@ -1272,7 +1272,7 @@ def _get_interleaved_text_prompt(
         if elem in placeholder_storage:
             texts[idx] = placeholder_storage[elem].pop(0)
 
-    return "\n".join(texts)
+    return "".join(texts)
 
 
 # TODO: Let user specify how to insert multimodal tokens into prompt
