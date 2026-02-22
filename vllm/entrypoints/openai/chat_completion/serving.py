@@ -67,13 +67,12 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
-from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tokenizers.mistral import (
@@ -145,6 +144,12 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
@@ -215,7 +220,7 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[TokPrompt]] | ErrorResponse:
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
         """
         render chat request by validating and preprocessing inputs.
 
@@ -374,7 +379,9 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text = self._extract_prompt_text(engine_prompt)
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_prompt
+                ).token_ids
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
@@ -389,6 +396,7 @@ class OpenAIServingChat(OpenAIServing):
                     else request.max_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
+                    self.override_max_tokens,
                 )
 
                 sampling_params: SamplingParams | BeamSearchParams
@@ -424,35 +432,21 @@ class OpenAIServingChat(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    tok_params = request.build_tok_params(self.model_config)
-                    tokenization_kwargs = tok_params.get_encode_kwargs()
+                    reasoning_ended = (
+                        reasoning_parser.is_reasoning_end(prompt_token_ids or [])
+                        if reasoning_parser
+                        else None
+                    )
 
-                    engine_request = self.input_processor.process_inputs(
-                        sub_request_id,
+                    generator = self.engine_client.generate(
                         engine_prompt,
                         sampling_params,
-                        lora_request=lora_request,
-                        tokenization_kwargs=tokenization_kwargs,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                        data_parallel_rank=data_parallel_rank,
-                    )
-                    reasoning_ended = None
-                    if reasoning_parser:
-                        reasoning_ended = reasoning_parser.is_reasoning_end(
-                            engine_request.prompt_token_ids or []  # type: ignore[attr-defined]
-                        )
-                        engine_request.reasoning_ended = reasoning_ended
-                    generator = self.engine_client.generate(
-                        engine_request,
-                        sampling_params,
                         sub_request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
-                        prompt_text=prompt_text,
-                        tokenization_kwargs=tokenization_kwargs,
                         data_parallel_rank=data_parallel_rank,
+                        reasoning_ended=reasoning_ended,
                     )
 
                 generators.append(generator)
