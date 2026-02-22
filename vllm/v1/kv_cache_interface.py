@@ -231,15 +231,13 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         max_model_len = vllm_config.model_config.max_model_len
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_num_tokens = vllm_config.max_num_tokens_per_forward_pass
 
         # During chunked prefill, we allocate KV cache for at most
         # `self.attention_chunk_size` computed tokens plus the newly scheduled
         # tokens. And we won't allocate KV cache for more than `max_model_len`
         # tokens.
-        num_tokens = min(
-            self.attention_chunk_size + max_num_batched_tokens, max_model_len
-        )
+        num_tokens = min(self.attention_chunk_size + max_num_tokens, max_model_len)
 
         return cdiv(num_tokens, self.block_size) * self.page_size_bytes
 
@@ -253,15 +251,13 @@ class SlidingWindowSpec(AttentionSpec):
             "DCP not support sliding window."
         )
         max_model_len = vllm_config.model_config.max_model_len
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_num_tokens = vllm_config.max_num_tokens_per_forward_pass
 
         # During chunked prefill, we allocate KV cache for the last
         # `self.sliding_window-1` computed tokens plus the newly scheduled
         # tokens. And we won't allocate KV cache for more than `max_model_len`
         # tokens.
-        num_tokens = min(
-            self.sliding_window - 1 + max_num_batched_tokens, max_model_len
-        )
+        num_tokens = min(self.sliding_window - 1 + max_num_tokens, max_model_len)
 
         # +1 here because the sliding window may not start from the beginning
         # of the block. For example, if the block size is 4 and num_token

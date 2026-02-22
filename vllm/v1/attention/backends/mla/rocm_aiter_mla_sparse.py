@@ -153,7 +153,7 @@ class ROCMAiterMLASparseMetadataBuilder(
         self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
         self.device = device
-        max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        max_num_tokens = vllm_config.max_num_tokens_per_forward_pass
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)
@@ -170,26 +170,26 @@ class ROCMAiterMLASparseMetadataBuilder(
         )
 
         self.req_id_per_token_buffer = torch.empty(
-            (vllm_config.scheduler_config.max_num_batched_tokens,),
+            (max_num_tokens,),
             dtype=torch.int32,
             device=device,
         )
         self.qo_indptr = torch.arange(
-            0, max_num_batched_tokens + 1, dtype=torch.int32, device=device
+            0, max_num_tokens + 1, dtype=torch.int32, device=device
         )
         self.paged_kv_last_page_len = torch.ones(
-            max_num_batched_tokens, dtype=torch.int32, device=device
+            max_num_tokens, dtype=torch.int32, device=device
         )
 
         # These two needs to be calculated in runtime,
         # but we still needs to prepare the buffer
         self.paged_kv_indices = torch.zeros(
-            [max_num_batched_tokens * self.topk_tokens],
+            [max_num_tokens * self.topk_tokens],
             dtype=torch.int32,
             device=device,
         )
         self.paged_kv_indptr = torch.zeros(
-            [max_num_batched_tokens + 1], dtype=torch.int32, device=device
+            [max_num_tokens + 1], dtype=torch.int32, device=device
         )
 
     def build(
