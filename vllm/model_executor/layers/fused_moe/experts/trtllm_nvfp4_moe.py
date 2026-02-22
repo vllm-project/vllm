@@ -264,7 +264,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
-        assert routed_scaling_factor is None
         assert not apply_router_weight_on_input
 
         # Prepare routing bias into kernel format.
@@ -302,7 +301,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
-            routed_scaling_factor=None,
+            routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             do_finalize=True,
         )[0]
