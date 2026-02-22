@@ -237,8 +237,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # DeepGEMM indexer constraint (fp8_paged_mqa_logits only supports next_n <= 2)
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
-        props = torch.cuda.get_device_properties(device)
-        sm_count = props.multi_processor_count
+        sm_count = current_platform.get_num_sm()
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
         self.mla_dims = get_mla_dims(self.model_config)

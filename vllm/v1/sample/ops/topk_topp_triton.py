@@ -11,6 +11,7 @@ using Pivot-based Truncation and Selection" By Park et al.
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import next_power_of_2
 
@@ -989,7 +990,7 @@ def apply_top_k_top_p_triton(
     else:
         p_ptr = logits  # Dummy pointer (won't be read)
 
-    num_sm = torch.cuda.get_device_properties(logits.device).multi_processor_count
+    num_sm = current_platform.get_num_sm()
     NUM_PROGRAMS = min(num_sm, batch_size)
 
     # Cache per-Triton Program buffer on each device.

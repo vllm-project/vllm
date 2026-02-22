@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
+from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -74,8 +75,7 @@ class SM100Workspace:
 
         # Pre-compute sm_count to avoid recomputing it. Use device 0 as a proxy
         # (assumes all devices are similar)
-        properties = torch.cuda.get_device_properties(torch.device("cuda:0"))
-        self._sm_count = properties.multi_processor_count
+        self._sm_count = current_platform.get_num_sm(0)
 
     def get_buf(self):
         return self._workspace_buf
