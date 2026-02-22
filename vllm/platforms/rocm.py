@@ -244,10 +244,8 @@ class RocmPlatform(Platform):
         "mxfp4",
         "petit_nvfp4",
         "torchao",
+        "bitsandbytes",
     ]
-    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
-    if not on_gfx9():
-        supported_quantization += ["bitsandbytes"]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -384,6 +382,7 @@ class RocmPlatform(Platform):
         return [
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
         ]
 
