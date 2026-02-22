@@ -176,22 +176,19 @@ class TopKTopPSampler(nn.Module):
         k: torch.Tensor | None,
         p: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        # FIXME: Fix aiter_sampler's accuracy issue and remove this flag
-        DISABLE_AITER_SAMPLER = True
         """Optimized ROCm/aiter path (same structure as forward_cuda)."""
-        if (k is None and p is None) or generators:
-            if generators:
+        if (k is None and p is None) or generators or (p is not None):
+            if generators or (p is not None):
                 logger.warning_once(
-                    "aiter sampler does not support per-request generators; "
-                    "falling back to PyTorch-native."
+                    "aiter sampler does not support per-request generators "
+                    "or Top-P sampling; falling back to PyTorch-native"
+                    "to ensure correctness."
                 )
             return self.forward_native(logits, generators, k, p)
         assert self.logprobs_mode not in (
             "processed_logits",
             "processed_logprobs",
         ), "aiter sampler does not support returning logits/logprobs."
-        if DISABLE_AITER_SAMPLER:
-            return self.forward_native(logits, generators, k, p)
         return self.aiter_sample(logits, k, p, generators), None
 
     def aiter_sample(
