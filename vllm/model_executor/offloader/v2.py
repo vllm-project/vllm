@@ -12,6 +12,7 @@ to join CUDA graph captures, ensuring H2D copies are properly captured.
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator
 from dataclasses import dataclass
+from typing import Any
 
 import torch
 import torch.nn as nn
@@ -535,8 +536,15 @@ class _BaseParamOffloader(ABC):
 
     @property
     def _param(self) -> nn.Parameter:
-        """Get the parameter being offloaded."""
-        return getattr(self._module, self._param_name)
+        """Get the parameter being offloaded.
+
+        Supports dotted names (e.g. 'self_attn.qkv_proj.weight') by
+        traversing the module hierarchy.
+        """
+        obj: Any = self._module
+        for attr in self._param_name.split("."):
+            obj = getattr(obj, attr)
+        return obj
 
     def post_init(self):
         """Initialize offloading (move parameter to storage)."""
