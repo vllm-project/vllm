@@ -747,7 +747,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
-            attn_metadata_builders=self.attn_metadata_builders,
+            attn_groups=self.attn_groups,
             num_reqs=attn_num_reqs,
             num_tokens=attn_num_tokens,
             query_start_loc_gpu=attn_query_start_loc,
