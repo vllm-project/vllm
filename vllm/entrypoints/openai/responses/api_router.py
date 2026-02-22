@@ -10,6 +10,12 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesContextCheckpointDeleteRequest,
+    ResponsesContextCheckpointDeleteResponse,
+    ResponsesContextCheckpointRequest,
+    ResponsesContextCheckpointResponse,
+    ResponsesContextRevertRequest,
+    ResponsesContextRevertResponse,
     ResponsesRequest,
     ResponsesResponse,
     StreamingResponsesResponse,
@@ -78,6 +84,66 @@ async def create_responses(request: ResponsesRequest, raw_request: Request):
     return StreamingResponse(
         content=_convert_stream_to_sse_events(generator), media_type="text/event-stream"
     )
+
+
+@router.post("/v1/responses/context/checkpoints")
+@load_aware_call
+async def drop_context_checkpoint(
+    request: ResponsesContextCheckpointRequest,
+    raw_request: Request,
+):
+    handler = responses(raw_request)
+    if handler is None:
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server.create_error_response(
+            message="The model does not support Responses API"
+        )
+
+    result = await handler.drop_context_checkpoint(request)
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+    assert isinstance(result, ResponsesContextCheckpointResponse)
+    return JSONResponse(content=result.model_dump())
+
+
+@router.post("/v1/responses/context/checkpoints/delete")
+@load_aware_call
+async def delete_context_checkpoint(
+    request: ResponsesContextCheckpointDeleteRequest,
+    raw_request: Request,
+):
+    handler = responses(raw_request)
+    if handler is None:
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server.create_error_response(
+            message="The model does not support Responses API"
+        )
+
+    result = await handler.delete_context_checkpoint(request)
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+    assert isinstance(result, ResponsesContextCheckpointDeleteResponse)
+    return JSONResponse(content=result.model_dump())
+
+
+@router.post("/v1/responses/context/revert")
+@load_aware_call
+async def revert_context_checkpoint(
+    request: ResponsesContextRevertRequest,
+    raw_request: Request,
+):
+    handler = responses(raw_request)
+    if handler is None:
+        base_server = raw_request.app.state.openai_serving_tokenization
+        return base_server.create_error_response(
+            message="The model does not support Responses API"
+        )
+
+    result = await handler.revert_context_checkpoint(request)
+    if isinstance(result, ErrorResponse):
+        return JSONResponse(content=result.model_dump(), status_code=result.error.code)
+    assert isinstance(result, ResponsesContextRevertResponse)
+    return JSONResponse(content=result.model_dump())
 
 
 @router.get("/v1/responses/{response_id}")

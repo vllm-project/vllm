@@ -69,6 +69,11 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     parse_response_input,
     render_for_completion,
 )
+from vllm.entrypoints.openai.responses.checkpointing import (
+    ContextCheckpointNotFoundError,
+    ContextSessionNotFoundError,
+    ResponseContextManager,
+)
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -83,6 +88,12 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseCreatedEvent,
     ResponseInProgressEvent,
     ResponseInputOutputMessage,
+    ResponsesContextCheckpointDeleteRequest,
+    ResponsesContextCheckpointDeleteResponse,
+    ResponsesContextCheckpointRequest,
+    ResponsesContextCheckpointResponse,
+    ResponsesContextRevertRequest,
+    ResponsesContextRevertResponse,
     ResponsesRequest,
     ResponsesResponse,
     ResponseUsage,
@@ -110,6 +121,10 @@ from vllm.parser import ParserManager
 from vllm.sampling_params import SamplingParams, StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import random_uuid
+from vllm.v1.kv_checkpointing import (
+    KV_CHECKPOINT_RESTORE_ID_ARG,
+    KV_CHECKPOINT_SAVE_ID_ARG,
+)
 
 logger = init_logger(__name__)
 
@@ -262,6 +277,14 @@ class OpenAIServingResponses(OpenAIServing):
         self.background_tasks: dict[str, asyncio.Task] = {}
 
         self.tool_server = tool_server
+        self.context_manager = ResponseContextManager()
+        # Lock striping reduces contention across unrelated context sessions.
+        self._context_lock_stripes = tuple(asyncio.Lock() for _ in range(64))
+
+    def _get_context_session_lock(self, session_id: str) -> asyncio.Lock:
+        return self._context_lock_stripes[
+            hash(session_id) % len(self._context_lock_stripes)
+        ]
 
     def _validate_generator_input(
         self,
@@ -317,7 +340,333 @@ class OpenAIServingResponses(OpenAIServing):
                 status_code=HTTPStatus.BAD_REQUEST,
                 param="previous_response_id",
             )
+        if request.context_session_id and request.previous_response_id:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="Only one of `context_session_id` and "
+                "`previous_response_id` can be set.",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="context_session_id",
+            )
+        if request.context_session_id and request.previous_input_messages:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message="`context_session_id` cannot be used with "
+                "`previous_input_messages`.",
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="context_session_id",
+            )
         return None
+
+    def _format_rewind_summary_message(self, summaries: list[str]) -> str:
+        header = (
+            "Context rewind summaries from prior noisy loops. "
+            "Treat these as authoritative findings."
+        )
+        body = "\n\n".join(
+            f"Summary {idx + 1}:\n{summary}" for idx, summary in enumerate(summaries)
+        )
+        return f"{header}\n\n{body}"
+
+    def _prepend_queued_summaries(
+        self, request: ResponsesRequest, summaries: list[str]
+    ) -> None:
+        if not summaries:
+            return
+        summary_message = self._format_rewind_summary_message(summaries)
+        if isinstance(request.input, str):
+            if request.input:
+                request.input = (
+                    f"{summary_message}\n\nCurrent user input:\n{request.input}"
+                )
+            else:
+                request.input = summary_message
+            return
+
+        request.input = [
+            {
+                "role": "system",
+                "content": summary_message,
+            },
+            *request.input,
+        ]
+
+    def _response_engine_checkpoint_id(self, response_id: str) -> str:
+        return f"resp:{response_id}"
+
+    def _merge_internal_vllm_xargs(
+        self,
+        request: ResponsesRequest,
+        *,
+        restore_checkpoint_id: str | None,
+    ) -> None:
+        xargs = dict(request.vllm_xargs or {})
+        if restore_checkpoint_id is not None:
+            xargs[KV_CHECKPOINT_RESTORE_ID_ARG] = restore_checkpoint_id
+        else:
+            xargs.pop(KV_CHECKPOINT_RESTORE_ID_ARG, None)
+        xargs[KV_CHECKPOINT_SAVE_ID_ARG] = self._response_engine_checkpoint_id(
+            request.request_id
+        )
+        request.vllm_xargs = xargs
+
+    async def _drop_engine_checkpoints(self, checkpoint_ids: Sequence[str]) -> int:
+        if not checkpoint_ids:
+            return 0
+        unique_ids = list(dict.fromkeys(checkpoint_ids))
+        try:
+            return await self.engine_client.drop_kv_checkpoints(unique_ids)
+        except NotImplementedError:
+            logger.warning_once(
+                "Engine client does not support dropping KV checkpoints; "
+                "stale checkpoints may remain until reset."
+            )
+        except Exception:
+            logger.exception(
+                "Failed to drop engine checkpoints: %s",
+                unique_ids,
+            )
+        return 0
+
+    async def _build_auto_rewind_summary(self, session_id: str) -> str:
+        session = self.context_manager.get_session(session_id)
+        current_response_id = session.current_response_id
+        if current_response_id is None:
+            return (
+                "Automatic rewind summary: no explicit summary was provided and "
+                "there is no prior response to summarize."
+            )
+
+        async with self.response_store_lock:
+            response = self.response_store.get(current_response_id)
+
+        if response is None:
+            return (
+                "Automatic rewind summary: no explicit summary was provided and "
+                "the previous response is unavailable in store."
+            )
+
+        snippets: list[str] = []
+        for item in response.output:
+            if isinstance(item, ResponseOutputMessage):
+                for content in item.content:
+                    if getattr(content, "text", None):
+                        snippets.append(content.text)
+            elif isinstance(item, ResponseReasoningItem):
+                if item.content:
+                    snippets.extend(
+                        content.text
+                        for content in item.content
+                        if getattr(content, "text", None)
+                    )
+                if item.summary:
+                    snippets.extend(
+                        content.text
+                        for content in item.summary
+                        if getattr(content, "text", None)
+                    )
+
+        if not snippets:
+            return (
+                "Automatic rewind summary: no explicit summary was provided and "
+                "no textual output was available from the discarded loop."
+            )
+
+        excerpt = "\n\n".join(snippets)
+        excerpt = excerpt[:4000]
+        return (
+            "Automatic rewind summary generated because no summary was provided.\n\n"
+            "Discarded-loop excerpt:\n"
+            f"{excerpt}"
+        )
+
+    async def _resolve_context_session(
+        self, request: ResponsesRequest
+    ) -> ErrorResponse | None:
+        session_id = request.context_session_id
+        if session_id is None:
+            return None
+
+        if not request.store:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    "`context_session_id` requires stored responses. "
+                    "Set `store=True` and enable "
+                    "`VLLM_ENABLE_RESPONSES_API_STORE=1` on the server."
+                ),
+                status_code=HTTPStatus.BAD_REQUEST,
+                param="store",
+            )
+
+        context_lock = self._get_context_session_lock(session_id)
+        async with context_lock:
+            (
+                request.previous_response_id,
+                restore_checkpoint_id,
+                summaries,
+                stale_checkpoint_ids,
+            ) = self.context_manager.resolve_request_session_state(session_id)
+        await self._drop_engine_checkpoints(stale_checkpoint_ids)
+        self._prepend_queued_summaries(request, summaries)
+        self._merge_internal_vllm_xargs(
+            request,
+            restore_checkpoint_id=restore_checkpoint_id,
+        )
+        return None
+
+    async def drop_context_checkpoint(
+        self,
+        request: ResponsesContextCheckpointRequest,
+    ) -> ResponsesContextCheckpointResponse | ErrorResponse:
+        target_response_id = request.response_id
+        context_lock = self._get_context_session_lock(request.session_id)
+        if target_response_id is None:
+            async with context_lock:
+                target_response_id = self.context_manager.get_current_response_id(
+                    request.session_id
+                )
+                target_engine_checkpoint_id = (
+                    self.context_manager.get_current_engine_checkpoint_id(
+                        request.session_id
+                    )
+                )
+        else:
+            target_engine_checkpoint_id = self._response_engine_checkpoint_id(
+                target_response_id
+            )
+
+        if target_response_id is not None:
+            async with self.response_store_lock:
+                if target_response_id not in self.response_store:
+                    return self._make_not_found_error(target_response_id)
+
+        stale_checkpoint_ids: list[str]
+        async with context_lock:
+            response_id, engine_checkpoint_id, stale_checkpoint_ids = (
+                self.context_manager.drop_checkpoint(
+                    session_id=request.session_id,
+                    checkpoint_label=request.checkpoint_label,
+                    response_id=target_response_id,
+                    engine_checkpoint_id=target_engine_checkpoint_id,
+                )
+            )
+        await self._drop_engine_checkpoints(stale_checkpoint_ids)
+        return ResponsesContextCheckpointResponse(
+            session_id=request.session_id,
+            checkpoint_label=request.checkpoint_label,
+            response_id=response_id,
+            engine_checkpoint_id=engine_checkpoint_id,
+        )
+
+    async def delete_context_checkpoint(
+        self,
+        request: ResponsesContextCheckpointDeleteRequest,
+    ) -> ResponsesContextCheckpointDeleteResponse | ErrorResponse:
+        context_lock = self._get_context_session_lock(request.session_id)
+        try:
+            async with context_lock:
+                checkpoint, stale_checkpoint_ids = (
+                    self.context_manager.delete_checkpoint(
+                        session_id=request.session_id,
+                        checkpoint_label=request.checkpoint_label,
+                    )
+                )
+        except ContextSessionNotFoundError:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    f"Context session '{request.session_id}' not found. "
+                    "Create a request with this session_id first."
+                ),
+                status_code=HTTPStatus.NOT_FOUND,
+                param="session_id",
+            )
+        except ContextCheckpointNotFoundError:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    f"Checkpoint '{request.checkpoint_label}' not found in "
+                    f"session '{request.session_id}'."
+                ),
+                status_code=HTTPStatus.NOT_FOUND,
+                param="checkpoint_label",
+            )
+
+        dropped = await self._drop_engine_checkpoints(stale_checkpoint_ids)
+        return ResponsesContextCheckpointDeleteResponse(
+            session_id=request.session_id,
+            checkpoint_label=request.checkpoint_label,
+            response_id=checkpoint.response_id,
+            engine_checkpoint_id=checkpoint.engine_checkpoint_id,
+            dropped_engine_checkpoints=dropped,
+        )
+
+    async def revert_context_checkpoint(
+        self,
+        request: ResponsesContextRevertRequest,
+    ) -> ResponsesContextRevertResponse | ErrorResponse:
+        context_lock = self._get_context_session_lock(request.session_id)
+        try:
+            async with context_lock:
+                checkpoint = self.context_manager.peek_checkpoint(
+                    session_id=request.session_id,
+                    checkpoint_label=request.checkpoint_label,
+                )
+        except ContextSessionNotFoundError:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    f"Context session '{request.session_id}' not found. "
+                    "Create a request with this session_id first."
+                ),
+                status_code=HTTPStatus.NOT_FOUND,
+                param="session_id",
+            )
+        except ContextCheckpointNotFoundError:
+            return self.create_error_response(
+                err_type="invalid_request_error",
+                message=(
+                    f"Checkpoint '{request.checkpoint_label}' not found in "
+                    f"session '{request.session_id}'."
+                ),
+                status_code=HTTPStatus.NOT_FOUND,
+                param="checkpoint_label",
+            )
+
+        checkpoint_response_id = checkpoint.response_id
+        checkpoint_engine_id = checkpoint.engine_checkpoint_id
+        if checkpoint_response_id is not None:
+            async with self.response_store_lock:
+                if checkpoint_response_id not in self.response_store:
+                    return self._make_not_found_error(checkpoint_response_id)
+
+        summary = request.summary.strip() if request.summary else ""
+        if not summary:
+            summary = await self._build_auto_rewind_summary(request.session_id)
+
+        stale_checkpoint_ids: list[str]
+        async with context_lock:
+            (
+                response_id,
+                engine_checkpoint_id,
+                queued_summaries,
+                stale_checkpoint_ids,
+            ) = self.context_manager.revert_and_queue_summary(
+                session_id=request.session_id,
+                checkpoint_label=request.checkpoint_label,
+                summary=summary,
+            )
+        await self._drop_engine_checkpoints(stale_checkpoint_ids)
+        if engine_checkpoint_id is None:
+            engine_checkpoint_id = checkpoint_engine_id
+        return ResponsesContextRevertResponse(
+            session_id=request.session_id,
+            checkpoint_label=request.checkpoint_label,
+            response_id=response_id,
+            engine_checkpoint_id=engine_checkpoint_id,
+            queued_summaries=queued_summaries,
+        )
 
     async def create_responses(
         self,
@@ -350,6 +699,10 @@ class OpenAIServingResponses(OpenAIServing):
             # (i.e., their request's `store=True` just because it's the default
             # value).
             request.store = False
+
+        maybe_context_error = await self._resolve_context_session(request)
+        if maybe_context_error is not None:
+            return maybe_context_error
 
         # Handle the previous response ID.
         prev_response_id = request.previous_response_id
@@ -790,6 +1143,17 @@ class OpenAIServingResponses(OpenAIServing):
             status=status,
             usage=usage,
         )
+
+        stale_checkpoint_ids: list[str] = []
+        if request.context_session_id is not None:
+            context_lock = self._get_context_session_lock(request.context_session_id)
+            async with context_lock:
+                stale_checkpoint_ids = self.context_manager.set_current_state(
+                    request.context_session_id,
+                    response.id,
+                    self._response_engine_checkpoint_id(response.id),
+                )
+        await self._drop_engine_checkpoints(stale_checkpoint_ids)
 
         if request.store:
             async with self.response_store_lock:

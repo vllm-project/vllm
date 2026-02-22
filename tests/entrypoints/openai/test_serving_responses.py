@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from contextlib import AsyncExitStack
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
+from openai.types.responses import ResponseOutputMessage, ResponseOutputText
 from openai.types.responses.tool import (
     CodeInterpreterContainerCodeInterpreterToolAuto,
     LocalShell,
@@ -20,7 +21,12 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
 )
 from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
-from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesContextCheckpointDeleteRequest,
+    ResponsesContextCheckpointRequest,
+    ResponsesContextRevertRequest,
+    ResponsesRequest,
+)
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
@@ -29,6 +35,35 @@ from vllm.entrypoints.openai.responses.serving import (
 from vllm.inputs.data import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
+from vllm.v1.kv_checkpointing import (
+    KV_CHECKPOINT_RESTORE_ID_ARG,
+    KV_CHECKPOINT_SAVE_ID_ARG,
+)
+
+
+def _make_serving_responses_instance() -> OpenAIServingResponses:
+    engine_client = MagicMock()
+
+    model_config = MagicMock()
+    model_config.max_model_len = 100
+    model_config.hf_config.model_type = "test"
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+    engine_client.drop_kv_checkpoints = AsyncMock(return_value=0)
+
+    models = MagicMock()
+
+    return OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
 
 
 class MockConversationContext(ConversationContext):
@@ -139,6 +174,7 @@ class TestInitializeToolSessions:
         engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
         engine_client.renderer = MagicMock()
+        engine_client.drop_kv_checkpoints = AsyncMock(return_value=0)
 
         models = MagicMock()
 
@@ -439,3 +475,242 @@ class TestExtractAllowedToolsFromMcpRequests:
             "server1": ["tool1"],
             "server2": ["tool2"],
         }
+
+
+@pytest.mark.asyncio
+async def test_context_session_rewind_injects_summary_for_string_input():
+    serving = _make_serving_responses_instance()
+    session_id = "session-a"
+    response_id = "resp_1"
+    checkpoint_label = "before-loop"
+    engine_checkpoint_id = f"resp:{response_id}"
+
+    # Register response in store so checkpoint validation can succeed.
+    serving.response_store[response_id] = MagicMock()
+    serving.context_manager.set_current_state(
+        session_id,
+        response_id,
+        engine_checkpoint_id,
+    )
+
+    checkpoint_resp = await serving.drop_context_checkpoint(
+        ResponsesContextCheckpointRequest(
+            session_id=session_id,
+            checkpoint_label=checkpoint_label,
+        )
+    )
+    assert checkpoint_resp.response_id == response_id
+    assert checkpoint_resp.engine_checkpoint_id == engine_checkpoint_id
+
+    revert_resp = await serving.revert_context_checkpoint(
+        ResponsesContextRevertRequest(
+            session_id=session_id,
+            checkpoint_label=checkpoint_label,
+            summary="Loop produced one deterministic fix and two dead ends.",
+        )
+    )
+    assert revert_resp.response_id == response_id
+    assert revert_resp.engine_checkpoint_id == engine_checkpoint_id
+    assert revert_resp.queued_summaries == 1
+
+    request = ResponsesRequest(
+        input="Continue with the fix implementation.",
+        context_session_id=session_id,
+        store=True,
+    )
+    maybe_error = await serving._resolve_context_session(request)
+    assert maybe_error is None
+    assert request.previous_response_id == response_id
+    assert isinstance(request.input, str)
+    assert "Loop produced one deterministic fix" in request.input
+    assert request.vllm_xargs is not None
+    assert request.vllm_xargs[KV_CHECKPOINT_RESTORE_ID_ARG] == engine_checkpoint_id
+    assert request.vllm_xargs[KV_CHECKPOINT_SAVE_ID_ARG] == f"resp:{request.request_id}"
+
+
+@pytest.mark.asyncio
+async def test_revert_context_checkpoint_returns_not_found_for_unknown_checkpoint():
+    serving = _make_serving_responses_instance()
+    response = await serving.revert_context_checkpoint(
+        ResponsesContextRevertRequest(
+            session_id="session-a",
+            checkpoint_label="missing",
+            summary="summary",
+        )
+    )
+    assert isinstance(response, ErrorResponse)
+    assert response.error.code == 404
+
+
+@pytest.mark.asyncio
+async def test_revert_context_checkpoint_auto_summary_when_missing():
+    serving = _make_serving_responses_instance()
+    session_id = "session-a"
+    response_id = "resp_1"
+    checkpoint_label = "before-loop"
+    engine_checkpoint_id = f"resp:{response_id}"
+
+    serving.response_store[response_id] = MagicMock(
+        output=[
+            ResponseOutputMessage(
+                id="msg_1",
+                role="assistant",
+                type="message",
+                status="completed",
+                content=[
+                    ResponseOutputText(
+                        type="output_text",
+                        text="Collected traceback and narrowed failure to parser.",
+                        annotations=[],
+                    )
+                ],
+            )
+        ]
+    )
+    serving.context_manager.set_current_state(
+        session_id,
+        response_id,
+        engine_checkpoint_id,
+    )
+    await serving.drop_context_checkpoint(
+        ResponsesContextCheckpointRequest(
+            session_id=session_id,
+            checkpoint_label=checkpoint_label,
+        )
+    )
+
+    revert_resp = await serving.revert_context_checkpoint(
+        ResponsesContextRevertRequest(
+            session_id=session_id,
+            checkpoint_label=checkpoint_label,
+            summary=None,
+        )
+    )
+    assert revert_resp.response_id == response_id
+    assert revert_resp.engine_checkpoint_id == engine_checkpoint_id
+    assert revert_resp.queued_summaries == 1
+
+    queued = serving.context_manager.consume_summary_queue(session_id)
+    assert len(queued) == 1
+    assert "Automatic rewind summary generated" in queued[0]
+    assert "narrowed failure to parser" in queued[0]
+
+
+@pytest.mark.asyncio
+async def test_delete_context_checkpoint_drops_unreferenced_engine_checkpoint():
+    serving = _make_serving_responses_instance()
+    session_id = "session-a"
+    current_response_id = "resp_current"
+    checkpoint_response_id = "resp_saved"
+    checkpoint_label = "before-loop"
+
+    serving.response_store[current_response_id] = MagicMock()
+    serving.response_store[checkpoint_response_id] = MagicMock()
+    serving.context_manager.set_current_state(
+        session_id,
+        current_response_id,
+        f"resp:{current_response_id}",
+    )
+    await serving.drop_context_checkpoint(
+        ResponsesContextCheckpointRequest(
+            session_id=session_id,
+            checkpoint_label=checkpoint_label,
+            response_id=checkpoint_response_id,
+        )
+    )
+
+    serving.engine_client.drop_kv_checkpoints.return_value = 1
+    delete_resp = await serving.delete_context_checkpoint(
+        ResponsesContextCheckpointDeleteRequest(
+            session_id=session_id,
+            checkpoint_label=checkpoint_label,
+        )
+    )
+    assert delete_resp.response_id == checkpoint_response_id
+    assert delete_resp.engine_checkpoint_id == f"resp:{checkpoint_response_id}"
+    assert delete_resp.dropped_engine_checkpoints == 1
+    serving.engine_client.drop_kv_checkpoints.assert_awaited_with(
+        [f"resp:{checkpoint_response_id}"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_revert_context_checkpoint_drops_stale_current_engine_checkpoint():
+    serving = _make_serving_responses_instance()
+    session_id = "session-a"
+    current_response_id = "resp_current"
+    checkpoint_response_id = "resp_saved"
+    checkpoint_label = "before-loop"
+
+    serving.response_store[current_response_id] = MagicMock(output=[])
+    serving.response_store[checkpoint_response_id] = MagicMock(output=[])
+    serving.context_manager.set_current_state(
+        session_id,
+        current_response_id,
+        f"resp:{current_response_id}",
+    )
+    await serving.drop_context_checkpoint(
+        ResponsesContextCheckpointRequest(
+            session_id=session_id,
+            checkpoint_label=checkpoint_label,
+            response_id=checkpoint_response_id,
+        )
+    )
+
+    serving.engine_client.drop_kv_checkpoints.reset_mock()
+    serving.engine_client.drop_kv_checkpoints.return_value = 1
+    revert_resp = await serving.revert_context_checkpoint(
+        ResponsesContextRevertRequest(
+            session_id=session_id,
+            checkpoint_label=checkpoint_label,
+            summary="summary",
+        )
+    )
+    assert revert_resp.response_id == checkpoint_response_id
+    assert revert_resp.engine_checkpoint_id == f"resp:{checkpoint_response_id}"
+    serving.engine_client.drop_kv_checkpoints.assert_awaited_once_with(
+        [f"resp:{current_response_id}"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_drop_context_checkpoint_evicts_lru_when_session_limit_exceeded():
+    serving = _make_serving_responses_instance()
+    serving.context_manager.max_checkpoints_per_session = 1
+    serving.context_manager.checkpoint_ttl_s = None
+
+    session_id = "session-a"
+    current_response_id = "resp_current"
+    first_checkpoint_response_id = "resp_saved_1"
+    second_checkpoint_response_id = "resp_saved_2"
+
+    serving.response_store[current_response_id] = MagicMock()
+    serving.response_store[first_checkpoint_response_id] = MagicMock()
+    serving.response_store[second_checkpoint_response_id] = MagicMock()
+    serving.context_manager.set_current_state(
+        session_id,
+        current_response_id,
+        f"resp:{current_response_id}",
+    )
+
+    await serving.drop_context_checkpoint(
+        ResponsesContextCheckpointRequest(
+            session_id=session_id,
+            checkpoint_label="ckpt-1",
+            response_id=first_checkpoint_response_id,
+        )
+    )
+
+    serving.engine_client.drop_kv_checkpoints.reset_mock()
+    serving.engine_client.drop_kv_checkpoints.return_value = 1
+    await serving.drop_context_checkpoint(
+        ResponsesContextCheckpointRequest(
+            session_id=session_id,
+            checkpoint_label="ckpt-2",
+            response_id=second_checkpoint_response_id,
+        )
+    )
+
+    serving.engine_client.drop_kv_checkpoints.assert_awaited_once_with(
+        [f"resp:{first_checkpoint_response_id}"]
+    )
