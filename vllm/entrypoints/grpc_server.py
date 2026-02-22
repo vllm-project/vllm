@@ -118,6 +118,10 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if has_mm:
                 prompt["multi_modal_data"] = self._parse_mm_inputs(request.mm_inputs)
 
+            prompt = self.async_llm.input_processor.input_preprocessor.preprocess(
+                prompt
+            )
+
             # Extract kv_transfer_params for Mooncake PD disaggregation
             kv_transfer_params = None
             if request.HasField("kv_transfer_params"):
