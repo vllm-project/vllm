@@ -45,7 +45,7 @@ def _generate_optimal_warmup_m_values(
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
     block_ns = list(range(16, min(257, n + 1), 16))
-    num_sms = current_platform.get_num_compute_units(device.index)
+    num_sms = current_platform.num_compute_units(device.index)
 
     m_values = set()
 

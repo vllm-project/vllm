@@ -693,13 +693,13 @@ class Platform:
         return {}
 
     @classmethod
-    def get_num_compute_units(cls, device_id: int = 0) -> int:
+    def num_compute_units(cls, device_id: int = 0) -> int:
         """
         Get the number of compute units for the current platform.
         (NVIDIA SM / AMD CU / Intel EU)
         """
         raise NotImplementedError(
-            "get_num_compute_units is not implemented for the current platform."
+            "num_compute_units is not implemented for the current platform."
         )
 
 

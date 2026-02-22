@@ -35,7 +35,7 @@ def rocm_per_tensor_float_w8a8_scaled_mm_impl(
             out_dtype,
             As,
             Bs,
-            current_platform.get_num_compute_units(),
+            current_platform.num_compute_units(),
             bias,
         )
     # Fallback

@@ -219,7 +219,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             )
         self.reorder_batch_threshold += self.num_speculative_tokens
 
-        sm_count = current_platform.get_num_compute_units()
+        sm_count = current_platform.num_compute_units()
         self.num_sms = sm_count
 
         self.decode_lens_buffer = torch.empty(

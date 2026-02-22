@@ -279,5 +279,5 @@ class XPUPlatform(Platform):
         dst_cache[:, dst_block_indices] = _src_cache.cpu()
 
     @classmethod
-    def get_num_compute_units(cls, device_id: int = 0) -> int:
+    def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.xpu.get_device_properties(device_id).max_compute_units

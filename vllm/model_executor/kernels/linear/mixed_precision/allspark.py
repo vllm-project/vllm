@@ -46,7 +46,7 @@ class AllSparkLinearKernel(MPLinearKernel):
 
         # prepare the parameters required for the kernel
         properties = torch.cuda.get_device_properties(device.index)
-        sm_count = current_platform.get_num_compute_units(device.index)
+        sm_count = current_platform.num_compute_units(device.index)
         sm_version = properties.major * 10 + properties.minor
         gemm_args = {}
         gemm_args["sm_count"] = sm_count

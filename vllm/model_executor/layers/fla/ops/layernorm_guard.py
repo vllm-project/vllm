@@ -166,7 +166,7 @@ def layer_norm_fwd_kernel(
 @lru_cache
 def _get_sm_count(device: torch.device) -> int:
     """Get and cache the SM count for a given device."""
-    return current_platform.get_num_compute_units(device.index)
+    return current_platform.num_compute_units(device.index)
 
 
 def calc_rows_per_block(M: int, device: torch.device) -> int:
