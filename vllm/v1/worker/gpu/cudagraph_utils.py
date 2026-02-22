@@ -286,6 +286,16 @@ class CudaGraphManager:
             cudagraph_mode = self.cudagraph_mode.decode_mode()
         else:
             cudagraph_mode = self.cudagraph_mode.mixed_mode()
+
+        if (
+            cudagraph_mode == CUDAGraphMode.FULL
+            and cudagraph_size is not None
+            and cudagraph_size not in self.graphs
+        ):
+            # If graph wasn't captured yet, fall back to eager.
+            # This might happen when the dummy run is called before capture.
+            cudagraph_mode = CUDAGraphMode.NONE
+            cudagraph_size = None
         return cudagraph_mode, cudagraph_size
 
     def run_fullgraph(self, num_tokens: int) -> torch.Tensor:
