@@ -197,7 +197,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # CUDA graphs.
         self.cudagraph_manager = CudaGraphManager(
-            self.vllm_config, self.uses_mrope, self.device
+            self.vllm_config,
+            self.uses_mrope,
+            self.use_aux_hidden_state_outputs,
+            self.device,
         )
         # Structured outputs worker.
         self.structured_outputs_worker = StructuredOutputsWorker(
@@ -1044,7 +1047,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states,
             input_batch,
             kv_connector_output,
-        )
+        )  # type: ignore
         return None
 
     @torch.inference_mode()
