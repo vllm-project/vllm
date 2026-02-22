@@ -299,37 +299,41 @@ class StructuredOutputManager:
             return request.structured_output_request.reasoning_ended
         return True
 
-    def should_advance(self, request: "Request") -> bool:
+    def should_advance(
+        self,
+        request: "Request",
+        new_token_ids: list[int] | None = None,
+    ) -> bool:
         if not request.use_structured_output:
             return False
 
-        # To determine whether we can advance the FSM.
-        # Supports thinking usage where we skip the reasoning components.
-        if TYPE_CHECKING:
-            assert request.structured_output_request is not None
-            assert request.structured_output_request.grammar is not None
-        # by default, we should always advance
-        # for cases that don't use thinking mode.
+        # If no reasoning parser is used, always advance.
         if self.reasoner is None:
             return True
 
-        # if the model needs structured in reasoning, we should advance
+        # If structured output is enabled inside reasoning, always advance.
         if self.enable_in_reasoning:
             return True
 
         structured_req = request.structured_output_request
+        if structured_req is None or structured_req.grammar is None:
+            return True
+
+        # If reasoning already ended in a previous step, advance.
         if structured_req.reasoning_ended:
             return True
 
-        # Check if reasoning ends in *this* step
-        delta_from = request.num_computed_tokens - request.num_output_placeholders
-        all_token_ids = request.all_token_ids
+        # If we don't have new tokens, we cannot detect reasoning end yet.
+        if not new_token_ids:
+            return False
+
+        # Detect reasoning end using the actual new tokens.
         if self.reasoner.is_reasoning_end_streaming(
-            all_token_ids, all_token_ids[delta_from:]
+            request.all_token_ids,
+            new_token_ids,
         ):
-            # Reasoning just ended, so we shouldn't advance til
-            # next pass
             structured_req.reasoning_ended = True
+            return False  # Stop here; advance next step.
 
         return False
 
