@@ -21,7 +21,6 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
-    AttentionLayer,
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
@@ -347,6 +346,8 @@ class TritonAttentionBackend(AttentionBackend):
 
 
 class TritonAttentionImpl(AttentionImpl):
+    forward_includes_kv_cache_update: bool = False
+
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return quant_key == kFp8StaticTensorSym
 
@@ -566,16 +567,21 @@ class TritonAttentionImpl(AttentionImpl):
 
     def do_kv_cache_update(
         self,
-        layer: AttentionLayer,
+        layer: torch.nn.Module,
         key: torch.Tensor,
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
-    ):
+    ) -> None:
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             # For encoder attention,
             # we use direct Q, K, V tensors without caching
             return
+
+        if self.kv_sharing_target_layer_name is not None:
+            # Skip this if sharing KV cache with an earlier attention layer.
+            return
+
         # For decoder and cross-attention, use KV cache as before
         key_cache, value_cache = kv_cache.unbind(1)
 
@@ -586,13 +592,16 @@ class TritonAttentionImpl(AttentionImpl):
             # triton kernel does not support uint8 kv_cache
             #  (because some explicit casts (e.g. float8_e4m3fnuz)
             #   are not supported)
-        triton_reshape_and_cache_flash(
-            key,
-            value,
-            key_cache,
-            value_cache,
-            slot_mapping,
-            self.kv_cache_dtype,
-            layer._k_scale,
-            layer._v_scale,
-        )
+
+        # NOTE: key/value may be padded while slot_mapping is not.
+        if key is not None and value is not None:
+            triton_reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
