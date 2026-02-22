@@ -7,12 +7,12 @@ import argparse
 import html as _html
 import json
 import os
+from contextlib import nullcontext
 from dataclasses import dataclass
 from importlib import util
 from pathlib import Path
 
 import pandas as pd
-import regex as re
 
 pd.options.display.float_format = "{:.2f}".format
 plotly_found = util.find_spec("plotly.express") is not None
@@ -34,6 +34,37 @@ pd.set_option("display.float_format", lambda x: f"{x:.2f}")
 
 
 # -----------------------------
+# Concurrency normalization (NEW, small)
+# -----------------------------
+def _find_concurrency_col(df: pd.DataFrame) -> str:
+    for c in [
+        "# of max concurrency.",
+        "# of max concurrency",
+        "Max Concurrency",
+        "max_concurrency",
+        "Concurrency",
+    ]:
+        if c in df.columns:
+            return c
+    for c in df.columns:
+        if df[c].dtype.kind in "iu" and df[c].nunique() > 1 and df[c].min() >= 1:
+            return c
+    return "# of max concurrency."
+
+
+def _normalize_concurrency_in_df(
+    df: pd.DataFrame, canonical: str = "# of max concurrency."
+) -> pd.DataFrame:
+    if canonical in df.columns:
+        return df
+    detected = _find_concurrency_col(df)
+    if detected in df.columns and detected != canonical:
+        return df.rename(columns={detected: canonical})
+    df[canonical] = pd.NA
+    return df
+
+
+# -----------------------------
 # Core data compare
 # -----------------------------
 def compare_data_columns(
@@ -52,19 +83,25 @@ def compare_data_columns(
     - Concat along axis=1 (indexes align), then reset_index so callers can
       group by columns.
     - If --debug, add a <file_label>_name column per file.
+
+    Minimal fix to support different max_concurrency lists across files:
+      - normalize concurrency column naming to "# of max concurrency."
+      - align on UNION of keys (missing points become NaN)
+      - BUGFIX: don't drop throughput rows based on P99/Median presence
     """
     print("\ncompare_data_column:", data_column)
 
     frames = []
     raw_data_cols: list[str] = []
-    compare_frames = []
 
+    # Determine key cols after normalizing concurrency
     cols_per_file: list[set] = []
     for f in files:
         try:
             df_tmp = pd.read_json(f, orient="records")
         except Exception as err:
             raise ValueError(f"Failed to read {f}") from err
+        df_tmp = _normalize_concurrency_in_df(df_tmp, canonical="# of max concurrency.")
         cols_per_file.append(set(df_tmp.columns))
 
     key_cols = [c for c in info_cols if all(c in cset for cset in cols_per_file)]
@@ -75,12 +112,25 @@ def compare_data_columns(
             "No common key columns found from info_cols across the input files."
         )
 
-    meta_added = False
+    union_index = None
+    metas: list[pd.DataFrame] = []
+    staged: list[tuple[str, pd.Series, pd.Series | None]] = []
 
     for file in files:
         df = pd.read_json(file, orient="records")
+        df = _normalize_concurrency_in_df(df, canonical="# of max concurrency.")
 
-        if drop_column in df.columns:
+        # BUGFIX: only drop rows for latency-like metrics; throughput rows may have
+        # NaN in P99/Median columns even if the column exists in the JSON.
+        metric_lc = str(data_column).lower()
+        is_latency_metric = (
+            "ttft" in metric_lc
+            or "tpot" in metric_lc
+            or "p99" in metric_lc
+            or "median" in metric_lc
+            or metric_lc.strip() in {"p99", "median"}
+        )
+        if is_latency_metric and drop_column in df.columns:
             df = df.dropna(subset=[drop_column], ignore_index=True)
 
         for c in (
@@ -105,35 +155,61 @@ def compare_data_columns(
             meta = meta.groupby(level=key_cols, dropna=False).first()
 
         file_label = "/".join(file.split("/")[:-1]) or os.path.basename(file)
-        s = df_idx[data_column]
-        if not s.index.is_unique:
-            s = s.groupby(level=key_cols, dropna=False).mean()
+
+        if data_column in df_idx.columns:
+            s = df_idx[data_column]
+            if not s.index.is_unique:
+                s = s.groupby(level=key_cols, dropna=False).mean()
+        else:
+            # keep NA series to preserve meta keys for union_index
+            s = pd.Series(pd.NA, index=meta.index)
         s.name = file_label
 
-        if not meta_added:
-            frames.append(meta)
-            meta_added = True
-
+        name_s = None
         if debug and name_column in df_idx.columns:
             name_s = df_idx[name_column]
             if not name_s.index.is_unique:
                 name_s = name_s.groupby(level=key_cols, dropna=False).first()
             name_s.name = f"{file_label}_name"
-            frames.append(name_s)
 
-        frames.append(s)
+        if union_index is None:
+            union_index = meta.index
+        else:
+            union_index = union_index.union(meta.index)
+        metas.append(meta)
+
+        staged.append((file_label, s, name_s))
+
+    if union_index is None:
+        raise ValueError("No data found after loading inputs.")
+
+    # meta first (union-aligned): build UNION meta across all files
+    if metas:
+        meta_union = pd.concat(metas, axis=0)
+        # Collapse duplicates on the MultiIndex; keep first non-null per column
+        meta_union = meta_union.groupby(level=key_cols, dropna=False).first()
+        frames.append(meta_union.reindex(union_index))
+
+    # values + ratios (union-aligned)
+    metric_series_aligned: list[pd.Series] = []
+    for file_label, s, name_s in staged:
+        s_aligned = s.reindex(union_index)
+        frames.append(s_aligned)
         raw_data_cols.append(file_label)
-        compare_frames.append(s)
+        metric_series_aligned.append(s_aligned)
 
-        if len(compare_frames) >= 2:
-            base = compare_frames[0]
-            current = compare_frames[-1]
-            if "P99" in data_column or "Median" in data_column:
+        if debug and name_s is not None:
+            frames.append(name_s.reindex(union_index))
+
+        if len(metric_series_aligned) >= 2:
+            base = metric_series_aligned[0]
+            current = metric_series_aligned[-1]
+            if "P99" in str(data_column) or "Median" in str(data_column):
                 ratio = base / current
             else:
                 ratio = current / base
             ratio = ratio.mask(base == 0)
-            ratio.name = f"Ratio 1 vs {len(compare_frames)}"
+            ratio.name = f"Ratio 1 vs {len(metric_series_aligned)}"
             frames.append(ratio)
 
     concat_df = pd.concat(frames, axis=1).reset_index(drop=True)
@@ -204,22 +280,6 @@ def split_json_by_tp_pp(
 # -----------------------------
 # Styling helpers
 # -----------------------------
-def _find_concurrency_col(df: pd.DataFrame) -> str:
-    for c in [
-        "# of max concurrency.",
-        "# of max concurrency",
-        "Max Concurrency",
-        "max_concurrency",
-        "Concurrency",
-    ]:
-        if c in df.columns:
-            return c
-    for c in df.columns:
-        if df[c].dtype.kind in "iu" and df[c].nunique() > 1 and df[c].min() >= 1:
-            return c
-    return "# of max concurrency."
-
-
 def _highlight_threshold(
     df: pd.DataFrame, threshold: float
 ) -> pd.io.formats.style.Styler:
@@ -286,11 +346,30 @@ def _sanitize_sheet_name(name: str) -> str:
       - max 31 chars
       - cannot contain: : \ / ? * [ ]
       - cannot be empty
+
+    NOTE: Use fast, non-regex operations here to avoid the third-party `regex`
+    module's compile overhead/edge-cases on some systems.
     """
     name = "sheet" if name is None else str(name)
-    name = re.sub(r"[:\\/?*\[\]]", "_", name)
+
+    # Replace illegal characters with underscore.
+    trans = str.maketrans(
+        {
+            ":": "_",
+            "\\": "_",
+            "/": "_",
+            "?": "_",
+            "*": "_",
+            "[": "_",
+            "]": "_",
+        }
+    )
+    name = name.translate(trans)
+
+    # Strip quotes/spaces and collapse whitespace.
     name = name.strip().strip("'")
-    name = re.sub(r"\s+", " ", name)
+    name = " ".join(name.split())
+
     if not name:
         name = "sheet"
     return name[:31]
@@ -320,8 +399,16 @@ def _write_tables_to_excel_sheet(
 
 
 def _safe_filename(s: str) -> str:
-    s = re.sub(r"[^\w\-.]+", "_", str(s).strip())
-    return s[:180] if len(s) > 180 else s
+    # Fast path without the third-party `regex` module.
+    s = " ".join(str(s).strip().split())
+    allowed = []
+    for ch in s:
+        if ch.isalnum() or ch in "._-":
+            allowed.append(ch)
+        else:
+            allowed.append("_")
+    out = "".join(allowed)
+    return out[:180] if len(out) > 180 else out
 
 
 # -----------------------------
@@ -751,7 +838,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Reference limit for TPOT plots (ms)",
     )
 
-    # ---- NEW: export options ----
+    # ---- export options ----
     parser.add_argument(
         "--excel-out",
         type=str,
@@ -962,22 +1049,31 @@ def write_report_group_first(
         csv_dir.mkdir(parents=True, exist_ok=True)
 
     excel_path = args.excel_out or "perf_comparison.xlsx"
-    with pd.ExcelWriter(excel_path, engine="openpyxl") as xw:
+    disable_excel = os.getenv("VLLM_COMPARE_DISABLE_EXCEL", "0") == "1"
+    xw_ctx = (
+        nullcontext(None)
+        if disable_excel
+        else pd.ExcelWriter(excel_path, engine="openpyxl")
+    )
+    with xw_ctx as xw:
+        used_sheets: set[str] = set()
         # ---- Environment sheet (first) ----
         env_sheet = _sanitize_sheet_name("Environment")
         env_df = _load_env_df_for_inputs(args, files)
-        if env_df is None or env_df.empty:
-            pd.DataFrame(
-                [
-                    {
-                        "Section": "Environment",
-                        "Key": "vllm_env.txt",
-                        "Value": "NOT FOUND (or empty)",
-                    }
-                ]
-            ).to_excel(xw, sheet_name=env_sheet, index=False)
-        else:
-            env_df.to_excel(xw, sheet_name=env_sheet, index=False)
+        if xw is not None:
+            if env_df is None or env_df.empty:
+                pd.DataFrame(
+                    [
+                        {
+                            "Section": "Environment",
+                            "Key": "vllm_env.txt",
+                            "Value": "NOT FOUND (or empty)",
+                        }
+                    ]
+                ).to_excel(xw, sheet_name=env_sheet, index=False)
+            else:
+                env_df.to_excel(xw, sheet_name=env_sheet, index=False)
+            used_sheets.add(env_sheet)
         with open("perf_comparison.html", "w", encoding="utf-8") as main_fh:
             main_fh.write('<meta charset="utf-8">\n')
             for gkey in group_keys:
@@ -993,12 +1089,15 @@ def write_report_group_first(
 
                 main_fh.write(group_header)
 
+                do_excel = xw is not None
                 sheet = _group_to_sheet_base(group_cols_canonical, gkey_tuple)
                 sheet_base = sheet
-                dedup_i = 1
-                while sheet in xw.sheets:
-                    dedup_i += 1
-                    sheet = _sanitize_sheet_name(f"{sheet_base}_{dedup_i}")
+                if do_excel:
+                    dedup_i = 1
+                    while sheet in used_sheets:
+                        dedup_i += 1
+                        sheet = _sanitize_sheet_name(f"{sheet_base}_{dedup_i}")
+                    used_sheets.add(sheet)
 
                 excel_blocks: list[tuple[str, pd.DataFrame]] = []
 
@@ -1097,9 +1196,13 @@ def write_report_group_first(
                             )
                             summary_df.to_csv(csv_dir / f"{fn}.csv", index=False)
 
-                _write_tables_to_excel_sheet(xw, sheet, excel_blocks)
+                if do_excel:
+                    _write_tables_to_excel_sheet(xw, sheet, excel_blocks)
 
-    print(f"Wrote Excel: {excel_path}")
+    if disable_excel:
+        print("Skipped Excel generation (VLLM_COMPARE_DISABLE_EXCEL=1).")
+    else:
+        print(f"Wrote Excel: {excel_path}")
     if csv_dir:
         print(f"Wrote CSVs under: {csv_dir}")
 
