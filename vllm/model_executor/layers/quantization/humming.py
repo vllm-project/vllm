@@ -35,7 +35,7 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.utils.humming_moe_utils import (
     humming_moe_align,
 )
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
+from vllm.model_executor.layers.quantization.utils.humming_weight_utils import (
     WEIGHT_CONVERTER_MAP,
 )
 from vllm.model_executor.utils import set_weight_attrs
