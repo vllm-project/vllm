@@ -4,6 +4,7 @@
 import asyncio
 import base64
 import json
+import warnings
 
 import librosa
 import numpy as np
@@ -92,7 +93,11 @@ async def test_multi_chunk_streaming(
                     if event["type"] == "session.updated":
                         break
             except TimeoutError:
-                pass
+                warnings.warn(
+                    f"session.updated not received within {5.0}s after "
+                    "session.update. The server may not implement this event.",
+                    stacklevel=2,
+                )
 
             # (ROCm) Warm-up: send a non-final commit (required to start
             # transcription) with a small audio chunk to trigger aiter
@@ -189,7 +194,11 @@ async def test_empty_commit_does_not_crash_engine(
                     if event["type"] == "session.updated":
                         break
             except TimeoutError:
-                pass
+                warnings.warn(
+                    f"session.updated not received within {5.0}s after "
+                    "session.update. The server may not implement this event.",
+                    stacklevel=2,
+                )
 
             # Start generation without sending any audio
             await send_event(ws, {"type": "input_audio_buffer.commit"})
