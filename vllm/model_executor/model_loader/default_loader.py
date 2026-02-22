@@ -295,12 +295,19 @@ class DefaultModelLoader(BaseModelLoader):
             self.counter_after_loading_weights - self.counter_before_loading_weights,
             scope="local",
         )
-        # We only enable strict check for non-quantized models
-        # that have loaded weights tracking currently.
-        if model_config.quantization is None and loaded_weights is not None:
+        if loaded_weights is not None:
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
-                raise ValueError(
-                    "Following weights were not initialized from "
-                    f"checkpoint: {weights_not_loaded}"
-                )
+                if model_config.quantization is None:
+                    raise ValueError(
+                        "Following weights were not initialized from "
+                        f"checkpoint: {weights_not_loaded}"
+                    )
+                else:
+                    logger.warning(
+                        "Some weights were not initialized from "
+                        "checkpoint for quantized model (%s): %s. "
+                        "This may indicate missing shard files.",
+                        model_config.quantization,
+                        weights_not_loaded,
+                    )
