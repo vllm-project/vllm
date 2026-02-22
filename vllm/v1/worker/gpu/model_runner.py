@@ -155,7 +155,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.speculator = None
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
-            self.do_spec_decode = True
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -166,7 +165,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if self.pp_size > 1:
                     raise ValueError("EAGLE3 with pipeline parallel is not supported.")
         else:
-            self.do_spec_decode = False
             self.num_speculative_steps = 0
 
         # Draft tokens propagation - for spec-dec + struct outputs.
@@ -248,7 +246,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         prepare_communication_buffer_for_model(self.model)
-        if self.do_spec_decode:
+        if self.speculative_config is not None:
             speculator_model = getattr(self.speculator, "model", None)
             if speculator_model is not None:
                 prepare_communication_buffer_for_model(speculator_model)
