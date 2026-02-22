@@ -132,7 +132,7 @@ class OffloadConfig:
         """
         Provide a hash that uniquely identifies all the offload configs.
 
-        All fields are included because OffloaderV2 patches module
+        All fields are included because PrefetchOffloader patches module
         forwards and inserts custom ops (wait_prefetch, start_prefetch)
         into the computation graph. Changing any offload setting can
         alter which layers are hooked and how prefetch indices are

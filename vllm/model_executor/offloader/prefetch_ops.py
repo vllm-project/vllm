@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Custom ops for V2 offloader torch.compile + CUDA graph compatibility.
+"""Custom ops for prefetch offloader torch.compile + CUDA graph compatibility.
 
 These ops use mutates_args to create data dependencies that prevent
 the compiler from reordering prefetch/sync operations.
@@ -77,8 +77,8 @@ def _start_prefetch_fake(
     return output_tensor
 
 
-def register_v2_offloader_ops() -> None:
-    """Register custom ops for V2 offloader.
+def register_prefetch_offloader_ops() -> None:
+    """Register custom ops for prefetch offloader.
 
     Must be called before the ops are used. This is typically done
     at module import time.
@@ -99,4 +99,4 @@ def register_v2_offloader_ops() -> None:
 
 
 # Register ops at module import time
-register_v2_offloader_ops()
+register_prefetch_offloader_ops()

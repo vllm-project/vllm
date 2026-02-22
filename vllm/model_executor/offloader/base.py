@@ -26,7 +26,7 @@ class relation:
 
 BaseOffloader (ABC)
   * implemented by: UVAOffloader
-  * implemented by: OffloaderV2
+  * implemented by: PrefetchOffloader
     * uses: _ModuleOffloader
         * uses: _BaseParamOffloader (ABC)
             * implemented by: _CpuParamOffloader
@@ -124,8 +124,8 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
     selects prefetch if ``offload_group_size > 0``, UVA if
     ``cpu_offload_gb > 0``, otherwise noop.
     """
+    from vllm.model_executor.offloader.prefetch import PrefetchOffloader
     from vllm.model_executor.offloader.uva import UVAOffloader
-    from vllm.model_executor.offloader.v2 import OffloaderV2
 
     backend = offload_config.offload_backend
     uva = offload_config.uva
@@ -140,7 +140,7 @@ def create_offloader(offload_config: "OffloadConfig") -> BaseOffloader:
             return NoopOffloader()
 
     if backend == "prefetch":
-        return OffloaderV2(
+        return PrefetchOffloader(
             group_size=prefetch.offload_group_size,
             num_in_group=prefetch.offload_num_in_group,
             prefetch_step=prefetch.offload_prefetch_step,

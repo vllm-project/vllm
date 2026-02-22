@@ -2,11 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Adapted from
 # https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/utils/offloader.py
-"""OffloaderV2: CPU offloading with async prefetching.
+"""Prefetch-based CPU offloading with async prefetching.
 
-This version uses static buffers and event-based stream forking for
-torch.compile + CUDA graph compatibility. Events allow the copy stream
-to join CUDA graph captures, ensuring H2D copies are properly captured.
+Uses static buffers and event-based stream forking for torch.compile +
+CUDA graph compatibility. Events allow the copy stream to join CUDA
+graph captures, ensuring H2D copies are properly captured.
 """
 
 from abc import ABC, abstractmethod
@@ -17,8 +17,8 @@ from typing import Any
 import torch
 import torch.nn as nn
 
-# Import v2_ops to register custom ops at module load time
-import vllm.model_executor.offloader.v2_ops  # noqa: F401
+# Import prefetch_ops to register custom ops at module load time
+import vllm.model_executor.offloader.prefetch_ops  # noqa: F401
 from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import BaseOffloader
 from vllm.utils.platform_utils import is_pin_memory_available
@@ -127,9 +127,10 @@ class StaticBufferPool:
         return self._buffers[key][slot_idx % self.slot_capacity]
 
 
-class OffloaderV2(BaseOffloader):
-    """Advanced offloader with group-based selection and async prefetching.
+class PrefetchOffloader(BaseOffloader):
+    """Prefetching-based offloader with group-based layer selection.
 
+    Groups layers and uses async H2D prefetch to hide transfer latency.
     Uses static buffers and stream synchronization for torch.compile and
     CUDA graph compatibility.
 
@@ -166,7 +167,7 @@ class OffloaderV2(BaseOffloader):
         submodule_accessor: _SubmoduleAccessor | None = None,
         whitelist_param_names_creator: _WhitelistParamNamesCreator | None = None,
     ) -> list[nn.Module]:
-        """Wrap modules with V2 offloading and prefetching logic."""
+        """Wrap modules with prefetch offloading logic."""
         assert len(self.module_offloaders) == 0, (
             "wrap_modules should only be called once"
         )
@@ -351,7 +352,7 @@ class OffloaderV2(BaseOffloader):
             self.total_offloaded_bytes += offloader.offloaded_bytes
 
         logger.info_once(
-            f"[OffloaderV2] Initialized {len(self.module_offloaders)} modules. "
+            f"[PrefetchOffloader] Initialized {len(self.module_offloaders)} modules. "
             f"Total GPU memory saved: {self.total_offloaded_bytes / 1e9:.4f} GB, "
             f"Static buffer pool: {self.buffer_pool.total_bytes / 1e9:.4f} GB "
             f"(group_size={self.group_size}, num_in_group={self.num_in_group}, "
