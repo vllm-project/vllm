@@ -28,7 +28,7 @@ class HummingBaseWeightConverter:
     def _check_shape(
         self,
         tensor: torch.Tensor,
-        dims: tuple[int],
+        dims: tuple[int, ...],
         num_experts: int | None = None,
         pack_dim: int | None = None,
         group_dim: int | None = None,
@@ -72,9 +72,7 @@ class HummingBaseWeightConverter:
         shape_k: int,
         num_experts: int | None = None,
     ) -> dict[str, torch.Tensor]:
-        if num_experts is None and tensor.ndim == 1:
-            tensor = tensor.unsqueeze(-1)
-        elif num_experts is None and tensor.ndim == 2:
+        if tensor.ndim == (1 if num_experts is None else 2):
             tensor = tensor.unsqueeze(-1)
         self._check_shape(tensor, (shape_n, shape_k), num_experts, group_dim=1)
         return {"weight_scale": tensor}
@@ -86,9 +84,7 @@ class HummingBaseWeightConverter:
         shape_k: int,
         num_experts: int | None = None,
     ) -> dict[str, torch.Tensor]:
-        if num_experts is None and tensor.ndim == 1:
-            tensor = tensor.unsqueeze(-1)
-        elif num_experts is None and tensor.ndim == 2:
+        if tensor.ndim == (1 if num_experts is None else 2):
             tensor = tensor.unsqueeze(-1)
         assert tensor.dtype == torch.int32
         self._check_shape(
