@@ -793,6 +793,9 @@ class Scheduler(SchedulerInterface):
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
+                # Count the number of externally cached tokens.
+                if request.num_external_cached_tokens < 0:
+                    request.num_external_cached_tokens = num_external_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
@@ -1419,6 +1422,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         num_cached_tokens=request.num_cached_tokens,
+                        num_external_cached_tokens=request.num_external_cached_tokens,
                         num_external_computed_tokens=request.num_external_computed_tokens,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
