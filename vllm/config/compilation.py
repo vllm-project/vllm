@@ -119,6 +119,8 @@ class PassConfig:
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
     """Enable sequence parallelism."""
+    enable_sp_moe: bool = Field(default=None)
+    """Enable sequence parallelism rewrite for MoE communication."""
     fuse_gemm_comms: bool = Field(default=None)
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
@@ -195,6 +197,7 @@ class PassConfig:
         "fuse_act_quant",
         "fuse_attn_quant",
         "enable_sp",
+        "enable_sp_moe",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
         "fuse_act_padding",

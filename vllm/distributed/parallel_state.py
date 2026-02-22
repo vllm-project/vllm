@@ -49,6 +49,7 @@ from vllm.distributed.device_communicators.base_device_communicator import (
 from vllm.distributed.utils import StatelessProcessGroup
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.math_utils import cdiv
 from vllm.utils.network_utils import get_distributed_init_method
 from vllm.utils.system_utils import suppress_stdout
 from vllm.utils.torch_utils import (
@@ -143,11 +144,47 @@ def reduce_scatter(
     return group._reduce_scatter_out_place(tensor, dim)
 
 
+def reduce_scatter_with_padding(
+    tensor: torch.Tensor, dim: int, world_size: int, group_name: str
+) -> torch.Tensor:
+    assert group_name in _groups, f"Group {group_name} is not found."
+    group = _groups[group_name]()
+    if group is None:
+        raise ValueError(f"Group {group_name} is destroyed.")
+
+    if dim < 0:
+        dim += tensor.dim()
+    assert 0 <= dim < tensor.dim(), (
+        f"Invalid dim ({dim}) for input tensor with shape {tensor.size()}"
+    )
+
+    remainder = tensor.shape[dim] % world_size
+    if remainder != 0:
+        pad_len = world_size - remainder
+        x = tensor.movedim(dim, 0)
+        pad = torch.zeros(
+            (pad_len, *x.shape[1:]),
+            dtype=tensor.dtype,
+            device=tensor.device,
+        )
+        tensor = torch.cat((x, pad), dim=0).movedim(0, dim)
+
+    return group._reduce_scatter_out_place(tensor, dim)
+
+
 def reduce_scatter_fake(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
     new_shape = list(tensor.shape)
     new_shape[dim] = tensor.shape[dim] // world_size
+    return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
+
+
+def reduce_scatter_with_padding_fake(
+    tensor: torch.Tensor, dim: int, world_size: int, group_name: str
+) -> torch.Tensor:
+    new_shape = list(tensor.shape)
+    new_shape[dim] = cdiv(tensor.shape[dim], world_size)
     return torch.empty(new_shape, dtype=tensor.dtype, device=tensor.device)
 
 
@@ -263,6 +300,12 @@ direct_register_custom_op(
     op_name="reduce_scatter",
     op_func=reduce_scatter,
     fake_impl=reduce_scatter_fake,
+)
+
+direct_register_custom_op(
+    op_name="reduce_scatter_with_padding",
+    op_func=reduce_scatter_with_padding,
+    fake_impl=reduce_scatter_with_padding_fake,
 )
 
 direct_register_custom_op(
