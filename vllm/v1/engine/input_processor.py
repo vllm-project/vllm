@@ -2,8 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+import warnings
 from collections.abc import Mapping
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
@@ -11,7 +12,6 @@ from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
     SingletonInputs,
-    SingletonPrompt,
 )
 from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
@@ -20,22 +20,17 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFeatureSpec,
-    MultiModalUUIDDict,
 )
-from vllm.multimodal.parse import ModalityDataItems, MultiModalDataItems
-from vllm.multimodal.processing.context import set_request_id
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
-from vllm.renderers.inputs import DictPrompt, TokPrompt
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.jsontree import json_iter_leaves
-from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.engine import EngineCoreRequest
 
 logger = init_logger(__name__)
@@ -79,6 +74,33 @@ class InputProcessor:
             mm_registry=mm_registry,
         )
 
+        from vllm.platforms import current_platform
+
+        platform_validate_request = current_platform.validate_request
+        if supports_kw(platform_validate_request, "prompt"):
+            logger.warning_once(
+                "The signature of Platform.validate_request has changed from "
+                "`(cls, prompt, params, processed_inputs) -> None` to "
+                "`(cls, processed_inputs, params) -> None`. The old signature "
+                "will no longer be supported starting from v0.18."
+            )
+
+            orig_validate_request = platform_validate_request
+
+            def compat_validate_request(
+                processed_inputs: ProcessorInputs,
+                params: SamplingParams | PoolingParams,
+            ):
+                return orig_validate_request(
+                    processed_inputs,
+                    params,
+                    processed_inputs,  # type: ignore
+                )  # type: ignore
+
+            platform_validate_request = compat_validate_request
+
+        self._platform_validate_request = platform_validate_request
+
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.renderer.tokenizer
@@ -94,6 +116,16 @@ class InputProcessor:
         supported_tasks: tuple[SupportedTask, ...] | None,
     ):
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
+        if params.truncate_prompt_tokens is not None:
+            params_type = type(params).__name__
+            warnings.warn(
+                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
+                "is deprecated and will be removed in v0.17. "
+                "Please pass it via `tokenization_kwargs` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         if isinstance(params, SamplingParams):
             params.verify(
                 self.model_config,
@@ -133,81 +165,6 @@ class InputProcessor:
                 f"but got {type(params).__name__}"
             )
 
-    def _parse_mm_items(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
-        mm_processor = self.renderer.get_mm_processor()
-        return mm_processor.info.parse_mm_data(mm_data)
-
-    def _validate_singleton_mm_uuids(self, prompt: SingletonPrompt) -> None:
-        if not isinstance(prompt, dict):
-            return
-
-        mm_data = cast(MultiModalDataDict, prompt.get("multi_modal_data") or {})
-        mm_uuids = cast(MultiModalUUIDDict, prompt.get("multi_modal_uuids") or {})
-        if not mm_data and not mm_uuids:
-            return
-
-        mm_data_parsed = self._parse_mm_items(
-            {k: v for k, v in mm_data.items() if v is not None}
-        )
-        mm_uuids_parsed = {
-            k: [v] if isinstance(v, str) else v
-            for k, v in mm_uuids.items()
-            if v is not None
-        }
-
-        # NOTE: Include the keys corresponding to `None`
-        modalities = mm_data.keys() | mm_uuids.keys()
-
-        for modality in modalities:
-            data_items = cast(
-                ModalityDataItems | list[Any], mm_data_parsed.get(modality, [])
-            )
-            uuid_items = cast(list[str | None], mm_uuids_parsed.get(modality, []))
-
-            if len(data_items) > 0:
-                if len(uuid_items) > 0 and len(data_items) != len(uuid_items):
-                    raise ValueError(
-                        f"If given, multi_modal_uuids[{modality!r}] must have "
-                        f"same length as multi_modal_data[{modality!r}], but "
-                        f"got {len(uuid_items)} vs {len(data_items)}."
-                    )
-
-                for i, item in enumerate(data_items):
-                    if item is None:
-                        if not uuid_items:
-                            raise ValueError(
-                                f"multi_modal_data[{modality!r}][{i}] is empty but "
-                                f"multi_modal_uuids[{modality!r}] is missing."
-                            )
-
-                        if uuid_items[i] is None:
-                            raise ValueError(
-                                f"multi_modal_data[{modality!r}][{i}] is empty but "
-                                f"multi_modal_uuids[{modality!r}][{i}] is missing."
-                            )
-            else:
-                if len(uuid_items) == 0:
-                    raise ValueError(
-                        f"multi_modal_data[{modality!r}] is empty but "
-                        f"multi_modal_uuids[{modality!r}] is missing."
-                    )
-
-    def _validate_mm_uuids(self, prompt: PromptType | DictPrompt | TokPrompt) -> None:
-        """
-        Validate that user-provided multi_modal_uuids align with
-        multi_modal_data in the incoming request prompt(s).
-        Only checks lengths; `None` entries are allowed and will be
-        auto-hashed downstream.
-        """
-
-        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
-            self._validate_singleton_mm_uuids(prompt["encoder_prompt"])  # type: ignore[typeddict-item]
-
-            if (dec_prompt := prompt["decoder_prompt"]) is not None:  # type: ignore[typeddict-item]
-                self._validate_singleton_mm_uuids(dec_prompt)
-        else:
-            self._validate_singleton_mm_uuids(prompt)
-
     def _validate_lora(self, lora_request: LoRARequest | None) -> None:
         if lora_request is None:
             return
@@ -226,47 +183,6 @@ class InputProcessor:
                 "with its own tokenizer, consider specifying `--tokenizer "
                 "[lora_path]` to use the LoRA tokenizer."
             )
-
-    def _extract_singleton_mm_data(
-        self, prompt: SingletonPrompt
-    ) -> MultiModalDataDict | None:
-        if not isinstance(prompt, dict):
-            return None
-
-        return prompt.get("multi_modal_data")
-
-    def _extract_mm_data(
-        self, prompt: PromptType | DictPrompt | TokPrompt
-    ) -> MultiModalDataDict | None:
-        if isinstance(prompt, dict) and "encoder_prompt" in prompt:
-            return self._extract_singleton_mm_data(prompt["encoder_prompt"])  # type: ignore[typeddict-item]
-        else:
-            return self._extract_singleton_mm_data(prompt)
-
-    def _maybe_build_mm_uuids(
-        self,
-        request_id: str,
-        prompt: PromptType | DictPrompt | TokPrompt,
-    ) -> MultiModalUUIDDict | None:
-        """Build per-item multimodal hash overrides when enabled. In this case,
-        multimodal data items are identified by their request id, modality and
-        index rather than their content.
-
-        Returns a dictionary of modality -> list[str] of overrides, or None if
-        disabled or no multimodal data is present.
-        """
-        mm_data = self._extract_mm_data(prompt)
-        if not mm_data:
-            return None
-
-        mm_items = self._parse_mm_items(
-            {k: v for k, v in mm_data.items() if v is not None}
-        )
-
-        return {
-            modality: [f"{request_id}-{modality}-{i}" for i in range(data_count)]
-            for modality, data_count in mm_items.get_all_counts().items()
-        }
 
     def _get_mm_identifier(
         self,
@@ -309,7 +225,7 @@ class InputProcessor:
     def process_inputs(
         self,
         request_id: str,
-        prompt: PromptType | DictPrompt | TokPrompt,
+        prompt: PromptType | ProcessorInputs,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -333,52 +249,34 @@ class InputProcessor:
                 f"is out of range [0, {num_ranks})."
             )
 
-        if arrival_time is None:
-            arrival_time = time.time()
-
-        # Optionally generate multimodal hash overrides to avoid hashing
-        # multimodal data items by their content as their identifiers.
-
-        # NOTE: when users explicitly turn off BOTH prefix caching and input
-        # processing caching, no multimodal features or embeddings will be
-        # reused across requests, therefore identifying multimodal data items
-        # by their content is no longer necessary, and we create uuids with
-        # request id-modality-index as multimodal hash overrides.
-        if (
-            self.model_config.multimodal_config
-            and self.model_config.multimodal_config.mm_processor_cache_gb == 0
-            and not self.cache_config.enable_prefix_caching
-        ):
-            mm_uuids = self._maybe_build_mm_uuids(request_id, prompt)
-        else:
-            # Otherwise, use user-provided uuids as multimodal hash overrides
-            # if provided.
-            self._validate_mm_uuids(prompt)
-            if isinstance(prompt, dict):
-                mm_uuids = cast(
-                    MultiModalUUIDDict | None, prompt.get("multi_modal_uuids")
+        if isinstance(prompt, dict) and "type" in prompt:
+            if tokenization_kwargs:
+                logger.warning_once(
+                    "Passing tokenization_kwargs to InputProcessor is deprecated "
+                    "and will be removed in v0.18. You should instead pass "
+                    "them to Renderer.render_cmpl() or Renderer.render_chat()."
                 )
-            else:
-                mm_uuids = None
 
-        # Process inputs, which includes:
-        # 1. Tokenize text prompt, with LoRA request if one exists.
-        # 2. For multimodal models with a merged preprocessor, preprocess
-        #   multimodal data and expand prompt token ids accordingly.
-        with set_request_id(request_id), set_default_torch_num_threads():
-            processed_inputs: ProcessorInputs = self.input_preprocessor.preprocess(
-                prompt,
-                tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
+            if arrival_time is None:
+                arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
+
+            processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
+        else:
+            logger.warning_once(
+                "Passing raw prompts to InputProcessor is deprecated "
+                "and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
             )
 
-        from vllm.platforms import current_platform
+            if arrival_time is None:
+                arrival_time = time.time()
 
-        current_platform.validate_request(
-            prompt=prompt,
-            params=params,
-            processed_inputs=processed_inputs,
-        )
+            processed_inputs = self.input_preprocessor.preprocess(
+                prompt,
+                tokenization_kwargs=tokenization_kwargs,
+            )
+
+        self._platform_validate_request(processed_inputs, params)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
