@@ -891,16 +891,19 @@ class Scheduler(SchedulerInterface):
                     # Virtual request shares ALL parent's blocks so slot mappings
                     # point to correct positions in parent's KV cache
                     nrd_copy.block_ids = nrd.block_ids
-                    # For virtual gap request, only include the gap tokens
-                    # (tokens from start to end, not all tokens up to end)
+                    # For virtual gap request, include prefix + gap tokens (tokens
+                    # up to end). This ensures token_indices correctly map to
+                    # position num_computed_tokens=start, since positions are
+                    # based on num_computed_tokens and prompt_token_ids must
+                    # include the prefix the model assumes is computed.
                     nrd_copy.prompt_token_ids = (
-                        nrd.prompt_token_ids[start:end]
+                        nrd.prompt_token_ids[:end]
                         if nrd.prompt_token_ids is not None
                         else None
                     )
                     # For v2 model runner, prefill_token_ids also needs to be set
                     if self.use_v2_model_runner and nrd.prefill_token_ids is not None:
-                        nrd_copy.prefill_token_ids = nrd.prefill_token_ids[start:end]
+                        nrd_copy.prefill_token_ids = nrd.prefill_token_ids[:end]
                     print(f" === Virtual request: {nrd_copy.req_id} ===")
                     print(f"   parent: {nrd_copy.parent_req_id}")
                     print(f"   num_computed_tokens: {nrd_copy.num_computed_tokens}")
@@ -913,8 +916,7 @@ class Scheduler(SchedulerInterface):
                     print(f"   shares parent's blocks: {block_count} blocks")
                     new_reqs_data.append(nrd_copy)
                     # Track this virtual request ID for cleanup
-                    if self.use_v2_model_runner:
-                        virtual_gap_req_ids.add(nrd_copy.req_id)
+                    virtual_gap_req_ids.add(nrd_copy.req_id)
 
         with record_function_or_nullcontext("schedule: make_cached_request_data"):
             cached_reqs_data = self._make_cached_request_data(
