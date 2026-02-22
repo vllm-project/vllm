@@ -246,9 +246,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         prepare_communication_buffer_for_model(self.model)
-        if self.speculative_config is not None:
-            speculator_model = getattr(self.speculator, "model", None)
-            if speculator_model is not None:
+        if self.speculator is not None:
                 prepare_communication_buffer_for_model(speculator_model)
 
     def get_model(self) -> nn.Module:
