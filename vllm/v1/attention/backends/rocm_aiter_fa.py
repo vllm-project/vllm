@@ -37,7 +37,7 @@ if current_platform.is_rocm():
         return min(65536 // x.element_size(), triton.next_power_of_2(head_dim))
 
     def num_programs(total_tokens):
-        return min(total_tokens, current_platform.get_num_sm())
+        return min(total_tokens, current_platform.get_num_compute_units())
 
     @triton.jit
     def cp_mha_gather_cache_kernel(

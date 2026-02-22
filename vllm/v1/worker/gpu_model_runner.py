@@ -911,7 +911,7 @@ class GPUModelRunner(
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties"""
 
-        self.num_sms = current_platform.get_num_sm(self.device.index)
+        self.num_sms = current_platform.get_num_compute_units(self.device.index)
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:

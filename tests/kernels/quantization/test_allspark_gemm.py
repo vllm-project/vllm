@@ -78,7 +78,7 @@ def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
     if has_zp:
         zp = zp.to(dtype)
     properties = torch.cuda.get_device_properties(qw.device.index)
-    sm_count = current_platform.get_num_sm(qw.device.index)
+    sm_count = current_platform.get_num_compute_units(qw.device.index)
     sm_version = properties.major * 10 + properties.minor
 
     n_32align = (n + 32 - 1) // 32 * 32
