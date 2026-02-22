@@ -23,6 +23,7 @@ from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
@@ -726,9 +727,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
             attn_num_tokens = num_tokens_after_padding
             if attn_num_reqs > num_reqs:
-                # fill -1 for the padded blocks
+                # Fill PAD_SLOT_ID for padded block-table rows.
                 for input_block_table in self.block_tables.input_block_tables:
-                    input_block_table[num_reqs:attn_num_reqs].fill_(-1)
+                    input_block_table[num_reqs:attn_num_reqs].fill_(PAD_SLOT_ID)
             attn_block_tables = tuple(
                 input_block_table[:attn_num_reqs]
                 for input_block_table in self.block_tables.input_block_tables
