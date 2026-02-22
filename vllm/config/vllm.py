@@ -295,6 +295,21 @@ class VllmConfig:
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
 
+    max_num_tokens_per_forward_pass: int = Field(default=0, ge=0)
+    """Maximum tokens processable in a single forward pass.
+
+    This accounts for speculative decoding where the model executor may need
+    to process more tokens than the scheduler schedules (due to draft tokens).
+
+    - Without speculative decoding: equals max_num_batched_tokens
+    - With draft model/eagle (sequential): max_num_batched_tokens + max_num_seqs
+    - With parallel drafting: max_num_batched_tokens +
+                              (num_speculative_tokens * max_num_seqs)
+
+    This value is computed automatically in __post_init__ and should not be
+    set directly.
+    """
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -878,6 +893,9 @@ class VllmConfig:
                 "--kv-sharing-fast-prefill requires changes on model side for "
                 "correctness and to realize prefill savings."
             )
+
+        self._set_max_num_tokens_per_forward_pass()
+
         # TODO: Move after https://github.com/vllm-project/vllm/pull/26847 lands
         self._set_compile_ranges()
 
@@ -1185,6 +1203,30 @@ class VllmConfig:
             if size % self.parallel_config.tensor_parallel_size == 0
         ]
 
+    def _set_max_num_tokens_per_forward_pass(self) -> None:
+        """Compute max tokens per forward pass accounting for speculative decoding.
+
+        The model executor may need to process more tokens than the scheduler
+        schedules when using speculative decoding with draft models or EAGLE,
+        because draft tokens are added during the drafting phase.
+        """
+        base = self.scheduler_config.max_num_batched_tokens
+
+        if self.speculative_config is None or not (
+            self.speculative_config.uses_draft_model()
+            or self.speculative_config.use_eagle()
+        ):
+            self.max_num_tokens_per_forward_pass = base
+            return
+
+        max_num_seqs = self.scheduler_config.max_num_seqs
+        multiplier = (
+            self.speculative_config.num_speculative_tokens
+            if self.speculative_config.parallel_drafting
+            else 1
+        )
+        self.max_num_tokens_per_forward_pass = base + (multiplier * max_num_seqs)
+
     def _set_cudagraph_sizes(self):
         """
         vLLM defines the default candidate list of batch sizes for CUDA graph
@@ -1346,23 +1388,10 @@ class VllmConfig:
         compilation_config = self.compilation_config
         computed_compile_ranges_split_points = []
 
-        # The upper bound of the compile ranges is the max_num_batched_tokens.
-        # For speculative decoding, the compile range must be extended
-        # - Sequential: + 1 * max_num_seqs (one draft token per iteration)
-        # - Parallel draft: + num_speculative_tokens * max_num_seqs
-        compile_range_end = self.scheduler_config.max_num_batched_tokens
-        if compile_range_end is not None:
-            if self.speculative_config is not None and (
-                self.speculative_config.uses_draft_model()
-                or self.speculative_config.use_eagle()
-            ):
-                multiplier = (
-                    self.speculative_config.num_speculative_tokens
-                    if self.speculative_config.parallel_drafting
-                    else 1
-                )
-                compile_range_end += multiplier * self.scheduler_config.max_num_seqs
-
+        # The upper bound of the compile ranges is max_num_tokens_per_forward_pass,
+        # which already accounts for speculative decoding extensions.
+        compile_range_end = self.max_num_tokens_per_forward_pass
+        if compile_range_end is not None and compile_range_end > 0:
             computed_compile_ranges_split_points.append(compile_range_end)
 
         # Add the compile ranges for flashinfer

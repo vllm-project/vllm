@@ -40,9 +40,7 @@ class WorkerLoRAManager:
         self.embedding_modules = embedding_modules
         self._cached_dummy_lora: None | Literal[False] | LoRAModel = False
         self.max_num_seqs = vllm_config.scheduler_config.max_num_seqs
-        self.max_num_batched_tokens = (
-            vllm_config.scheduler_config.max_num_batched_tokens
-        )
+        self.max_num_batched_tokens = vllm_config.max_num_tokens_per_forward_pass
         self.vocab_size = vllm_config.model_config.get_vocab_size()
         self.lora_config = vllm_config.lora_config
 

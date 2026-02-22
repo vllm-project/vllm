@@ -294,7 +294,7 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
             device=device,
         )
         self.req_id_per_token_buffer = torch.empty(
-            (vllm_config.scheduler_config.max_num_batched_tokens,),
+            (vllm_config.max_num_tokens_per_forward_pass,),
             dtype=torch.int32,
             device=device,
         )
