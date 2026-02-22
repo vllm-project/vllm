@@ -19,30 +19,26 @@ from vllm.utils.torch_utils import direct_register_custom_op
 def _wait_prefetch_impl(
     input_tensor: torch.Tensor,
     layer_idx: int,
-) -> torch.Tensor:
+) -> None:
     """Wait for prefetch of layer_idx to complete.
 
     Synchronizes the compute stream with the copy stream to ensure
     the prefetched weights are ready for use.
 
     Args:
-        input_tensor: Input to the layer (e.g., hidden_states) - returned
-            to create data dependency chain.
+        input_tensor: Input to the layer (e.g., hidden_states) - declared
+            as mutated to create data dependency for torch.compile.
         layer_idx: Index of the layer to wait for.
-
-    Returns:
-        input_tensor unchanged, but creates data dependency for torch.compile.
     """
     get_offloader()._wait_for_layer(layer_idx)
-    return input_tensor
 
 
 def _wait_prefetch_fake(
     input_tensor: torch.Tensor,
     layer_idx: int,
-) -> torch.Tensor:
+) -> None:
     """Fake implementation for torch.compile tracing."""
-    return input_tensor
+    return
 
 
 # --- start_prefetch op ---
@@ -51,30 +47,26 @@ def _wait_prefetch_fake(
 def _start_prefetch_impl(
     output_tensor: torch.Tensor,
     layer_idx: int,
-) -> torch.Tensor:
+) -> None:
     """Start async prefetch of layer_idx weights.
 
     Initiates H2D copy on the copy stream for the specified layer.
 
     Args:
-        output_tensor: Output from forward - returned to create ordering
-            dependency. This prevents torch.compile from reordering
-            this op before the computation that produces output_tensor.
+        output_tensor: Output from forward - declared as mutated to
+            prevent torch.compile from reordering this op before the
+            computation that produces output_tensor.
         layer_idx: Index of the layer to prefetch.
-
-    Returns:
-        output_tensor unchanged, creating data dependency for torch.compile.
     """
     get_offloader()._start_prefetch(layer_idx)
-    return output_tensor
 
 
 def _start_prefetch_fake(
     output_tensor: torch.Tensor,
     layer_idx: int,
-) -> torch.Tensor:
+) -> None:
     """Fake implementation for torch.compile tracing."""
-    return output_tensor
+    return
 
 
 def register_prefetch_offloader_ops() -> None:

@@ -215,28 +215,22 @@ class PrefetchOffloader(BaseOffloader):
             module.forward = original_forward
 
             # Wait for this layer's prefetch to complete
+            # mutates_args on input_tensor creates data dependency for torch.compile
             input_tensor = args[0] if args else kwargs.get("hidden_states")
-            input_tensor = torch.ops.vllm.wait_prefetch(input_tensor, index)
-
-            # Replace the first arg with the returned tensor to maintain dependency
-            if args:
-                args = (input_tensor,) + args[1:]
-            else:
-                kwargs["hidden_states"] = input_tensor
+            torch.ops.vllm.wait_prefetch(input_tensor, index)
 
             # No parameter swapping needed - parameters already point to
             # GPU static buffers (set in assign_static_buffer)
             output = original_forward(*args, **kwargs)
 
             # Start prefetch for next layer (circular)
-            # Custom op returns output_tensor to create data dependency
+            # mutates_args on output_tensor creates ordering dependency
             next_index = (index + self.prefetch_step) % len(self.module_offloaders)
             # Handle tuple output (e.g., (hidden_states, residual))
             if isinstance(output, tuple):
-                output_tensor = torch.ops.vllm.start_prefetch(output[0], next_index)
-                output = (output_tensor,) + output[1:]
+                torch.ops.vllm.start_prefetch(output[0], next_index)
             else:
-                output = torch.ops.vllm.start_prefetch(output, next_index)
+                torch.ops.vllm.start_prefetch(output, next_index)
 
             # No explicit offload needed - static buffers are reused implicitly
 
