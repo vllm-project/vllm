@@ -1518,10 +1518,25 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
                     item["function"]["arguments"] = {}
 
 
+def _resolve_interleave_mm_strings(
+    content_format: ChatTemplateContentFormat,
+    model_config: ModelConfig,
+    interleave_mm_strings: bool | None,
+) -> bool:
+    if content_format != "string":
+        return False
+
+    if interleave_mm_strings is None and (cfg := model_config.multimodal_config):
+        interleave_mm_strings = cfg.interleave_mm_strings
+
+    return bool(interleave_mm_strings)
+
+
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
+    interleave_mm_strings: bool | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -1529,17 +1544,18 @@ def parse_chat_messages(
 ]:
     conversation: list[ConversationMessage] = []
     mm_tracker = MultiModalItemTracker(model_config)
+    interleave_strings = _resolve_interleave_mm_strings(
+        content_format,
+        model_config,
+        interleave_mm_strings,
+    )
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
             msg,
             mm_tracker,
             content_format,
-            interleave_strings=(
-                content_format == "string"
-                and model_config.multimodal_config is not None
-                and model_config.multimodal_config.interleave_mm_strings
-            ),
+            interleave_strings=interleave_strings,
         )
 
         conversation.extend(sub_messages)
@@ -1555,6 +1571,7 @@ async def parse_chat_messages_async(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: ChatTemplateContentFormat,
+    interleave_mm_strings: bool | None = None,
 ) -> tuple[
     list[ConversationMessage],
     MultiModalDataDict | None,
@@ -1562,17 +1579,18 @@ async def parse_chat_messages_async(
 ]:
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config)
+    interleave_strings = _resolve_interleave_mm_strings(
+        content_format,
+        model_config,
+        interleave_mm_strings,
+    )
 
     for msg in messages:
         sub_messages = _parse_chat_message_content(
             msg,
             mm_tracker,
             content_format,
-            interleave_strings=(
-                content_format == "string"
-                and model_config.multimodal_config is not None
-                and model_config.multimodal_config.interleave_mm_strings
-            ),
+            interleave_strings=interleave_strings,
         )
 
         conversation.extend(sub_messages)

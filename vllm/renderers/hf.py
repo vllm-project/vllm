@@ -635,6 +635,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            interleave_mm_strings=params.interleave_mm_strings,
         )
 
         prompt_raw = safe_apply_chat_template(
@@ -689,6 +690,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
                 tokenizer=tokenizer,
                 model_config=model_config,
             ),
+            interleave_mm_strings=params.interleave_mm_strings,
         )
 
         prompt_raw = safe_apply_chat_template(

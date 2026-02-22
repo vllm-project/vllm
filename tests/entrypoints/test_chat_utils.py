@@ -1638,6 +1638,43 @@ async def test_parse_chat_messages_multiple_images_interleave_async(
 
 
 @pytest.mark.asyncio
+async def test_parse_chat_messages_multiple_images_interleave_request_override_async(
+    phi3v_model_config,
+    image_url,
+):
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
+        [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "I need you to compare this image",
+                    },
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": "and this one"},
+                    {"type": "image_url", "image_url": {"url": image_url}},
+                    {"type": "text", "text": "Do they have differences?"},
+                ],
+            }
+        ],
+        phi3v_model_config,
+        content_format="string",
+        interleave_mm_strings=True,
+    )
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": "I need you to compare this image\n<|image_1|>\nand this one\n<|image_2|>\n"  # noqa: E501
+            "Do they have differences?",
+        }
+    ]
+    _assert_mm_data_is_image_input(mm_data, 2)
+    _assert_mm_uuids(mm_uuids, 2, expected_uuids=[None, None])
+
+
+@pytest.mark.asyncio
 async def test_parse_chat_messages_multiple_images_with_uuids_interleave_async(
     phi3v_model_config_mm_interleaved,
     image_url,
