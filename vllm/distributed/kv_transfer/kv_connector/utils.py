@@ -82,7 +82,7 @@ class KVOutputAggregator:
         finished_sending = set[str]()
         finished_recving = set[str]()
         aggregated_kv_connector_stats = None
-        combined_kv_cache_events = None
+        aggregated_kv_connector_worker_meta = None
         invalid_block_ids = set[int]()
         for model_runner_output in outputs:
             assert model_runner_output is not None
@@ -124,18 +124,16 @@ class KVOutputAggregator:
                         aggregated_kv_connector_stats.aggregate(kv_connector_stats)
                     )
 
-            # Combine kv_cache_events from all workers.
-            if combined_kv_cache_events is None:
-                # Use the first worker's kv_cache events as start event list.
-                combined_kv_cache_events = kv_output.kv_cache_events
-            elif kv_cache_events := kv_output.kv_cache_events:
-                assert isinstance(
-                    combined_kv_cache_events,
-                    type(kv_cache_events),
+            # Aggregate kv_connector_worker_meta from all workers.
+            if aggregated_kv_connector_worker_meta is None:
+                # Use the first worker's kv_connector_worker_meta as accumulator.
+                aggregated_kv_connector_worker_meta = kv_output.kv_connector_worker_meta
+            elif kv_connector_worker_meta := kv_output.kv_connector_worker_meta:
+                aggregated_kv_connector_worker_meta = (
+                    aggregated_kv_connector_worker_meta.aggregate(
+                        kv_connector_worker_meta
+                    )
                 )
-                worker_kv_cache_events = kv_cache_events.get_all_events()
-                combined_kv_cache_events.add_events(worker_kv_cache_events)
-                combined_kv_cache_events.increment_workers(1)
 
             invalid_block_ids |= kv_output.invalid_block_ids
 
@@ -147,7 +145,7 @@ class KVOutputAggregator:
             finished_sending=finished_sending or None,
             finished_recving=finished_recving or None,
             kv_connector_stats=aggregated_kv_connector_stats or None,
-            kv_cache_events=combined_kv_cache_events or None,
+            kv_connector_worker_meta=aggregated_kv_connector_worker_meta or None,
             invalid_block_ids=invalid_block_ids,
             expected_finished_count=self._expected_finished_count,
         )
