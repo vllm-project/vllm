@@ -188,6 +188,7 @@ return curr_o @ W_O
 """
 
 import functools
+import os
 from abc import abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
@@ -1974,6 +1975,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # num_heads=128, nope_dim=128, rope_dim=64
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
+            and os.environ.get("VLLM_DISABLE_FLASHINFER_CONCAT_MLA_K", "0") != "1"
             and (self.num_heads == 128)
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
