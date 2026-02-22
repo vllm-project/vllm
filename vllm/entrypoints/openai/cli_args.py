@@ -153,6 +153,15 @@ class FrontendArgs:
     disable_frontend_multiprocessing: bool = False
     """If specified, will run the OpenAI frontend server in the same process as
     the model serving engine."""
+    multi_server_frontend: bool = False
+    """If specified alongside --api-server-count > 1, run a lightweight
+    frontend process on --port that aggregates /health checks from all N
+    backend API servers and triggers a pod shutdown if any backend crashes.
+    Each backend server gets its own dedicated port (--port+1, --port+2, ...).
+    Use this in Kubernetes deployments where pod-level liveness/startup probes
+    should reflect the health of every backend server.
+    When not set, the default behavior is used: all N servers share --port
+    via SO_REUSEPORT."""
     enable_request_id_headers: bool = False
     """If specified, API server will add X-Request-Id header to responses."""
     enable_auto_tool_choice: bool = False
