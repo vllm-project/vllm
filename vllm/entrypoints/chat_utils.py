@@ -1701,6 +1701,7 @@ def parse_chat_messages_futures(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
     content_format: _ChatTemplateContentFormat,
+    interleave_mm_strings: bool | None = None,
 ) -> tuple[
     list[ConversationMessage],
     Awaitable[MultiModalDataDict | None],
@@ -1709,15 +1710,16 @@ def parse_chat_messages_futures(
     conversation: list[ConversationMessage] = []
     mm_tracker = AsyncMultiModalItemTracker(model_config)
 
+    if interleave_mm_strings is None and (cfg := model_config.multimodal_config):
+        interleave_mm_strings = cfg.interleave_mm_strings
+
     for msg in messages:
         sub_messages = _parse_chat_message_content(
             msg,
             mm_tracker,
             content_format,
-            interleave_strings=(
-                content_format == "string"
-                and model_config.multimodal_config is not None
-                and model_config.multimodal_config.interleave_mm_strings
+            interleave_strings=bool(
+                content_format == "string" and interleave_mm_strings
             ),
         )
 

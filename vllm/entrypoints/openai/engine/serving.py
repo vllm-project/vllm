@@ -1209,6 +1209,7 @@ class OpenAIServing:
             messages,
             model_config,
             content_format=resolved_content_format,
+            interleave_mm_strings=getattr(request, "interleave_mm_strings", None),
         )
 
         _chat_template_kwargs: dict[str, Any] = dict(
