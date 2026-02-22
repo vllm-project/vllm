@@ -614,22 +614,18 @@ def flashinfer_mm_mxfp8(
     assert a.ndim == 2 and b.ndim == 2
     assert a.shape[1] == b.shape[1]  # K dimension must match
 
-    # For 1D swizzled scales, pass as-is to mm_mxfp8
-    # For 2D non-swizzled scales, transpose weight scale for mm_mxfp8 format
-    if block_scale_b.ndim == 2:
-        # 2D format - transpose to (K/32, N) for mm_mxfp8
-        # Note: This path has lower accuracy than swizzled scales!
-        block_scale_b_final = block_scale_b.t()
-    else:
-        # 1D swizzled format - optimal for CUTLASS kernel
-        block_scale_b_final = block_scale_b
+    if block_scale_b.ndim != 1:
+        raise ValueError(
+            "mm_mxfp8 expects 1D swizzled weight scales for CUTLASS; "
+            f"got shape={tuple(block_scale_b.shape)}"
+        )
 
     # Output tensor [M, N]
     return mm_mxfp8(
         a,
         b.t(),  # Transpose weight: [N, K] -> [K, N]
         block_scale_a,
-        block_scale_b_final,
+        block_scale_b,
         out_dtype,
         backend=backend,
     )
