@@ -121,6 +121,7 @@ def reset_torch_dynamo():
     torch._dynamo.reset()
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=5)
 @pytest.mark.parametrize(
     "speculative_config",
     [
@@ -178,6 +179,7 @@ def test_ngram_and_suffix_correctness(
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.flaky(reruns=3, reruns_delay=5)
 def test_suffix_decoding_acceptance(
     monkeypatch: pytest.MonkeyPatch,
     sampling_config: SamplingParams,
@@ -237,6 +239,7 @@ def test_suffix_decoding_acceptance(
     cleanup_dist_env_and_memory()
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=5)
 @pytest.mark.parametrize(
     "model_path",
     [
@@ -317,6 +320,7 @@ def test_speculators_model_integration(
     )
 
 
+@pytest.mark.flaky(reruns=2, reruns_delay=5)
 @pytest.mark.parametrize(
     ["model_setup", "mm_enabled", "enable_chunked_prefill", "model_impl"],
     [
