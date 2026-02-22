@@ -6,6 +6,10 @@ Run `pytest tests/kernels/test_moe.py`.
 """
 
 import functools
+import importlib
+import importlib.machinery
+import sys
+import types
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -23,7 +27,6 @@ from tests.kernels.moe.utils import (
     make_dummy_moe_config,
     modular_triton_fused_moe,
 )
-from tests.kernels.quantization.nvfp4_utils import dequantize_nvfp4_to_dtype
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
@@ -76,6 +79,59 @@ from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
 from vllm.utils.torch_utils import set_default_torch_dtype, set_random_seed
 from vllm.v1.worker.workspace import init_workspace_manager
+
+
+def _install_mamba_ssm_stub_if_missing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Provide a minimal mamba_ssm stub for HF Nemotron import in MoE-only tests."""
+    if "mamba_ssm.ops.triton.layernorm_gated" in sys.modules:
+        return
+
+    try:
+        importlib.import_module("mamba_ssm.ops.triton.layernorm_gated")
+        return
+    except ImportError:
+        pass
+
+    from transformers.utils import import_utils as hf_import_utils
+
+    monkeypatch.setattr(hf_import_utils, "is_mamba_2_ssm_available", lambda: False)
+
+    def _new_pkg_module(name: str) -> types.ModuleType:
+        module = types.ModuleType(name)
+        spec = importlib.machinery.ModuleSpec(name=name, loader=None, is_package=True)
+        spec.submodule_search_locations = []
+        module.__spec__ = spec
+        module.__dict__["__path__"] = []
+        module.__package__ = name
+        return module
+
+    def _new_module(name: str) -> types.ModuleType:
+        module = types.ModuleType(name)
+        module.__spec__ = importlib.machinery.ModuleSpec(
+            name=name, loader=None, is_package=False
+        )
+        module.__package__ = name.rpartition(".")[0]
+        return module
+
+    def _unsupported_rmsnorm_fn(*args, **kwargs):
+        raise RuntimeError("mamba_ssm stub was invoked in a non-MoE code path")
+
+    mamba_ssm_module = _new_pkg_module("mamba_ssm")
+    ops_module = _new_pkg_module("mamba_ssm.ops")
+    triton_module = _new_pkg_module("mamba_ssm.ops.triton")
+    layernorm_module = _new_module("mamba_ssm.ops.triton.layernorm_gated")
+    layernorm_module.__dict__["rmsnorm_fn"] = _unsupported_rmsnorm_fn
+
+    mamba_ssm_module.__dict__["ops"] = ops_module
+    ops_module.__dict__["triton"] = triton_module
+    triton_module.__dict__["layernorm_gated"] = layernorm_module
+
+    monkeypatch.setitem(sys.modules, "mamba_ssm", mamba_ssm_module)
+    monkeypatch.setitem(sys.modules, "mamba_ssm.ops", ops_module)
+    monkeypatch.setitem(sys.modules, "mamba_ssm.ops.triton", triton_module)
+    monkeypatch.setitem(
+        sys.modules, "mamba_ssm.ops.triton.layernorm_gated", layernorm_module
+    )
 
 
 def iterative_moe(
@@ -844,6 +900,8 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
             ).cuda()
         _initialize_nemotron_dummy_weights(vllm_layer, model_name)
 
+        # Mock mambas_ssm module instead of installing it.
+        _install_mamba_ssm_stub_if_missing(monkeypatch)
         hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         hf_model = AutoModelForCausalLM.from_config(hf_config, trust_remote_code=True)
         ref_hf_layer = hf_model.backbone.layers[1].mixer.cuda()
@@ -878,21 +936,25 @@ def _load_nemotron_vllm_weights_to_hf_model_fp8(vllm_layer, hf_layer):
     )
 
     for i in range(vllm_layer.experts.w13_weight.shape[0]):
-        w13 = vllm_layer.experts.w13_weight[i].to(torch.float)
-        w2 = vllm_layer.experts.w2_weight[i].to(torch.float)
-        if hasattr(vllm_layer.experts, "w13_weight_scale"):
-            w13 = w13 * vllm_layer.experts.w13_weight_scale[i]
-        if hasattr(vllm_layer.experts, "w2_weight_scale"):
-            w2 = w2 * vllm_layer.experts.w2_weight_scale[i]
+        w13 = (
+            vllm_layer.experts.w13_weight[i].to(torch.float)
+            * vllm_layer.experts.w13_weight_scale[i]
+        )
+        w2 = (
+            vllm_layer.experts.w2_weight[i].to(torch.float)
+            * vllm_layer.experts.w2_weight_scale[i]
+        )
         hf_layer.experts[i].up_proj.weight.data[:] = w13
         hf_layer.experts[i].down_proj.weight.data[:] = w2
 
-    up_proj = vllm_layer.shared_experts.up_proj.weight.data.to(torch.float)
-    down_proj = vllm_layer.shared_experts.down_proj.weight.data.to(torch.float)
-    if hasattr(vllm_layer.shared_experts.up_proj, "weight_scale"):
-        up_proj = up_proj * vllm_layer.shared_experts.up_proj.weight_scale
-    if hasattr(vllm_layer.shared_experts.down_proj, "weight_scale"):
-        down_proj = down_proj * vllm_layer.shared_experts.down_proj.weight_scale
+    up_proj = (
+        vllm_layer.shared_experts.up_proj.weight.data.to(torch.float)
+        * vllm_layer.shared_experts.up_proj.weight_scale
+    )
+    down_proj = (
+        vllm_layer.shared_experts.down_proj.weight.data.to(torch.float)
+        * vllm_layer.shared_experts.down_proj.weight_scale
+    )
     hf_layer.shared_experts.up_proj.weight.data[:] = up_proj
     hf_layer.shared_experts.down_proj.weight.data[:] = down_proj
 
@@ -917,7 +979,6 @@ def _initialize_nemotron_dummy_weights(vllm_layer, model_name: str) -> None:
                 continue
 
             if "scale" in name:
-                # NVFP4 scales must be finite and non-zero for stable dequant.
                 param.data.copy_(
                     (
                         0.05
@@ -941,27 +1002,11 @@ def _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, hf_layer):
     )
 
     for i in range(vllm_layer.experts.w13_weight.shape[0]):
-        w13 = dequantize_nvfp4_to_dtype(
-            tensor_fp4=vllm_layer.experts.w13_weight[i],
-            tensor_sf=vllm_layer.experts.w13_weight_scale[i],
-            global_scale=vllm_layer.experts.w13_weight_scale_2[i].reshape(-1)[0],
-            dtype=torch.float32,
-            device=vllm_layer.experts.w13_weight.device,
-            is_sf_128x4_layout=False,
-        )
         w13 = _dquantize_nvfp4(
             weights=vllm_layer.experts.w13_weight[i],
             scales=vllm_layer.experts.w13_weight_scale[i],
             global_scales=vllm_layer.experts.w13_weight_scale_2[i],
             dest_shape=hf_layer.experts[i].up_proj.weight.shape,
-        )
-        w2 = dequantize_nvfp4_to_dtype(
-            tensor_fp4=vllm_layer.experts.w2_weight[i],
-            tensor_sf=vllm_layer.experts.w2_weight_scale[i],
-            global_scale=vllm_layer.experts.w2_weight_scale_2[i].reshape(-1)[0],
-            dtype=torch.float32,
-            device=vllm_layer.experts.w2_weight.device,
-            is_sf_128x4_layout=False,
         )
         w2 = _dquantize_nvfp4(
             weights=vllm_layer.experts.w2_weight[i],
@@ -972,27 +1017,11 @@ def _load_nemotron_vllm_weights_to_hf_model_nvfp4(vllm_layer, hf_layer):
         hf_layer.experts[i].up_proj.weight.data[:] = w13
         hf_layer.experts[i].down_proj.weight.data[:] = w2
 
-    up_proj = dequantize_nvfp4_to_dtype(
-        tensor_fp4=vllm_layer.shared_experts.up_proj.weight.data,
-        tensor_sf=vllm_layer.shared_experts.up_proj.weight_scale.data,
-        global_scale=vllm_layer.shared_experts.up_proj.weight_scale_2.data.max(),
-        dtype=torch.float32,
-        device=vllm_layer.shared_experts.up_proj.weight.device,
-        is_sf_128x4_layout=False,
-    )
     up_proj = _dquantize_nvfp4(
         weights=vllm_layer.shared_experts.up_proj.weight.data,
         scales=vllm_layer.shared_experts.up_proj.weight_scale.data,
         global_scales=vllm_layer.shared_experts.up_proj.weight_scale_2.data,
         dest_shape=hf_layer.shared_experts.up_proj.weight.shape,
-    )
-    down_proj = dequantize_nvfp4_to_dtype(
-        tensor_fp4=vllm_layer.shared_experts.down_proj.weight.data,
-        tensor_sf=vllm_layer.shared_experts.down_proj.weight_scale.data,
-        global_scale=vllm_layer.shared_experts.down_proj.weight_scale_2.data.max(),
-        dtype=torch.float32,
-        device=vllm_layer.shared_experts.down_proj.weight.device,
-        is_sf_128x4_layout=False,
     )
     down_proj = _dquantize_nvfp4(
         weights=vllm_layer.shared_experts.down_proj.weight.data,
