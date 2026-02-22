@@ -2797,14 +2797,34 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
             Klocal[token_depth][qkhe_depth].u16x8, Qlocal[qkhe_depth].u16x8,
             dout[token_depth]);
       } else {
-        // FP8 KV cache: each _B16x8 contains 16 FP8 values (16 bytes).
-        // Split into two _B8x8 (8 FP8 each), convert to _B16x8 (8 f16/bf16),
-        // and do two WMMA calls. QKHELOOP is halved for FP8, so total WMMA
-        // iterations remain the same.
+        // FP8 KV cache: each row loads 16 FP8 K values covering different
+        // head-element ranges (row 0: base+[0..15], row 1: base+[16..31]).
+        // But Q is loaded with 16 contiguous head elements per WMMA split
+        // across both rows (row 0: lower 8, row 1: upper 8).
+        // Splitting the 16 FP8 bytes into xy[0]/xy[1] by byte position
+        // creates a cross-row mismatch:
+        //   j=0: row0=[0..7] OK, row1=[16..23] WRONG (Q expects [8..15])
+        //   j=1: row0=[8..15] WRONG (Q expects [16..23]), row1=[24..31] OK
+        // Fix: exchange inner halves between rows via cross-row shuffle.
         auto Ktmp = Klocal[token_depth][qkhe_depth];
         _B8x16 Ktmp8x16 = *reinterpret_cast<_B8x16*>(&Ktmp);
+
+        // Row 0 sends xy[1] (he 8..15), row 1 sends xy[0] (he 16..23).
+        // After shfl_xor: row 0 gets he 16..23, row 1 gets he 8..15.
+        const _B8x8 inner = Ktmp8x16.xy[1 - rowid];
+        _B8x8 cross;
+        cross.x = __shfl_xor(inner.x, 16);
+        cross.y = __shfl_xor(inner.y, 16);
+
+  #pragma unroll
         for (int j = 0; j < 2; j++) {
-          _B16x8 Kconv = convert_b8x8_to_b16x8<scalar_t>(Ktmp8x16.xy[j]);
+          // j==rowid: use own outer half; j!=rowid: use cross-row data.
+          // j=0: row0=xy[0](he 0..7), row1=cross(he 8..15)  -> he [0..15]
+          // j=1: row0=cross(he 16..23), row1=xy[1](he 24..31) -> he [16..31]
+          _B8x8 Kfp8;
+          Kfp8.x = (j == rowid) ? Ktmp8x16.xy[j].x : cross.x;
+          Kfp8.y = (j == rowid) ? Ktmp8x16.xy[j].y : cross.y;
+          _B16x8 Kconv = convert_b8x8_to_b16x8<scalar_t>(Kfp8);
           dout[token_depth] = gcn_wmma16x16x16_instr<scalar_t, 0, 0, 0>(
               Kconv.u16x8, Qlocal[qkhe_depth * 2 + j].u16x8, dout[token_depth]);
         }
