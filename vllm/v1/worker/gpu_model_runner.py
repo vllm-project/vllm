@@ -378,7 +378,7 @@ class GPUModelRunner(
         self.calculate_kv_scales = self.cache_config.calculate_kv_scales
         self.dcp_world_size = self.parallel_config.decode_context_parallel_size
         self.dcp_rank = 0 if self.dcp_world_size <= 1 else get_dcp_group().rank_in_group
-        self.max_num_tokens = vllm_config.max_num_tokens_per_forward_pass
+        self.max_num_tokens = scheduler_config.max_num_batched_tokens
         self.max_num_reqs = scheduler_config.max_num_seqs
 
         # Broadcast PP output for external_launcher (torchrun)
@@ -4689,7 +4689,7 @@ class GPUModelRunner(
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
-        assert num_tokens <= self.max_num_tokens
+        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
             assert not uniform_decode
