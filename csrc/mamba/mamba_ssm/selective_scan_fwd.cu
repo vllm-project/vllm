@@ -171,38 +171,43 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
                                           reinterpret_cast<const int*>(params.block_idx_last_scheduled_token_ptr) : nullptr;
     const int* initial_state_idx = params.initial_state_idx_ptr != nullptr ?
                                    reinterpret_cast<const int*>(params.initial_state_idx_ptr) : nullptr;
-    const int* chunk_start_offsets = params.chunk_start_offsets_ptr != nullptr ?
-                                     reinterpret_cast<const int*>(params.chunk_start_offsets_ptr) : nullptr;
+    const int* cu_chunk_seqlen = params.cu_chunk_seqlen_ptr != nullptr ?
+                                 reinterpret_cast<const int*>(params.cu_chunk_seqlen_ptr) : nullptr;
+    const int* last_chunk_indices = params.last_chunk_indices_ptr != nullptr ?
+                                    reinterpret_cast<const int*>(params.last_chunk_indices_ptr) : nullptr;
 
     const size_t load_cache_slot = params.cache_enabled && batch_cache_indices != nullptr ? batch_cache_indices[initial_state_idx[batch_id]] : cache_index;
-
-    // chunk_start_offset is (num_computed_tokens % block_size) - where we start within the first block
-    const int chunk_start_offset = (params.cache_enabled && chunk_start_offsets != nullptr) ?
-                                    chunk_start_offsets[batch_id] : 0;
 
     const int block_idx_first = (params.cache_enabled && block_idx_first_scheduled != nullptr) ?
                                  block_idx_first_scheduled[batch_id] : 0;
 
-    // Calculate aligned chunk sizes:
-    // - First chunk: tokens needed to complete the current block (or all tokens if less)
-    // - Subsequent chunks: full block_size each (or remaining if less)
-    const int first_chunk_size = (chunk_start_offset > 0) ?
-                                  min(seqlen, block_size - chunk_start_offset) :
-                                  min(seqlen, block_size);
-    const int remaining_after_first = max(0, seqlen - first_chunk_size);
-    const int n_chunks = 1 + (remaining_after_first + block_size - 1) / block_size;
+    // Determine chunk boundaries from pre-computed metadata (APC mode)
+    // or fall back to simple block_size chunking.
+    int first_chunk_idx, n_chunks;
+    int current_position;
 
-    // Track how many tokens we've processed and our absolute position in the sequence
+    if (cu_chunk_seqlen != nullptr && last_chunk_indices != nullptr) {
+        const int last_chunk_idx = last_chunk_indices[batch_id];
+        first_chunk_idx = (batch_id == 0) ? 0 : last_chunk_indices[batch_id - 1] + 1;
+        n_chunks = last_chunk_idx - first_chunk_idx + 1;
+        // Derive current_position: if the first chunk is partial (fills remainder
+        // of a started block), offset into the block accordingly.
+        const int first_chunk_tokens = cu_chunk_seqlen[first_chunk_idx + 1] - cu_chunk_seqlen[first_chunk_idx];
+        const int chunk_start_offset = (n_chunks > 1 && first_chunk_tokens < block_size)
+                                        ? (block_size - first_chunk_tokens) : 0;
+        current_position = block_idx_first * block_size + chunk_start_offset;
+    } else {
+        first_chunk_idx = 0;
+        n_chunks = (seqlen + block_size - 1) / block_size;
+        current_position = 0;
+    }
+
     int tokens_processed = 0;
-    int current_position = block_idx_first * block_size + chunk_start_offset;
 
     for (int chunk = 0; chunk < n_chunks; ++chunk) {
-        int chunk_tokens;
-        if (chunk == 0) {
-            chunk_tokens = first_chunk_size;
-        } else {
-            chunk_tokens = min(block_size, seqlen - tokens_processed);
-        }
+        const int chunk_tokens = (cu_chunk_seqlen != nullptr)
+            ? cu_chunk_seqlen[first_chunk_idx + chunk + 1] - cu_chunk_seqlen[first_chunk_idx + chunk]
+            : min(block_size, seqlen - tokens_processed);
         if (chunk_tokens <= 0) break;
         input_t u_vals[kNRows][kNItems], delta_vals_load[kNRows][kNItems];
 
@@ -529,7 +534,8 @@ void set_ssm_params_fwd(SSMParamsBase &params,
                         const std::optional<torch::Tensor> &block_idx_first_scheduled_token,
                         const std::optional<torch::Tensor> &block_idx_last_scheduled_token,
                         const std::optional<torch::Tensor> &initial_state_idx,
-                        const std::optional<torch::Tensor> &chunk_start_offsets) {
+                        const std::optional<torch::Tensor> &cu_chunk_seqlen,
+                        const std::optional<torch::Tensor> &last_chunk_indices) {
 
     // Reset the parameters
     memset(&params, 0, sizeof(params));
@@ -571,7 +577,8 @@ void set_ssm_params_fwd(SSMParamsBase &params,
     params.block_idx_first_scheduled_token_ptr = block_idx_first_scheduled_token.has_value() ? block_idx_first_scheduled_token.value().data_ptr() : nullptr;
     params.block_idx_last_scheduled_token_ptr = block_idx_last_scheduled_token.has_value() ? block_idx_last_scheduled_token.value().data_ptr() : nullptr;
     params.initial_state_idx_ptr = initial_state_idx.has_value() ? initial_state_idx.value().data_ptr() : nullptr;
-    params.chunk_start_offsets_ptr = chunk_start_offsets.has_value() ? chunk_start_offsets.value().data_ptr() : nullptr;
+    params.cu_chunk_seqlen_ptr = cu_chunk_seqlen.has_value() ? cu_chunk_seqlen.value().data_ptr() : nullptr;
+    params.last_chunk_indices_ptr = last_chunk_indices.has_value() ? last_chunk_indices.value().data_ptr() : nullptr;
 
     // All stride are in elements, not bytes.
     params.A_d_stride = A.stride(0);
@@ -658,7 +665,8 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                   const std::optional<torch::Tensor> &block_idx_first_scheduled_token,
                   const std::optional<torch::Tensor> &block_idx_last_scheduled_token,
                   const std::optional<torch::Tensor> &initial_state_idx,
-                  const std::optional<torch::Tensor> &chunk_start_offsets) {
+                  const std::optional<torch::Tensor> &cu_chunk_seqlen,
+                  const std::optional<torch::Tensor> &last_chunk_indices) {
     auto input_type = u.scalar_type();
     auto weight_type = A.scalar_type();
     TORCH_CHECK(input_type == at::ScalarType::Float || input_type == at::ScalarType::Half || input_type == at::ScalarType::BFloat16);
@@ -804,7 +812,8 @@ void selective_scan_fwd(const torch::Tensor &u, const torch::Tensor &delta,
                        block_idx_first_scheduled_token,
                        block_idx_last_scheduled_token,
                        initial_state_idx,
-                       chunk_start_offsets
+                       cu_chunk_seqlen,
+                       last_chunk_indices
                        );
 
     

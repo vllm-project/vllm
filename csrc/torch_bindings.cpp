@@ -641,7 +641,8 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? block_idx_first_scheduled_token,"
       "Tensor? block_idx_last_scheduled_token,"
       "Tensor? initial_state_idx,"
-      "Tensor? chunk_start_offsets) -> ()");
+      "Tensor? cu_chunk_seqlen,"
+      "Tensor? last_chunk_indices) -> ()");
   ops.impl("selective_scan_fwd", torch::kCUDA, &selective_scan_fwd);
 
   // Hadamard transforms
