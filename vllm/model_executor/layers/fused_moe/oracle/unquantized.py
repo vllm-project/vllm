@@ -9,7 +9,7 @@ from torch.nn import Module
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config.parallel import MoEBackend
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -111,7 +111,7 @@ def select_unquantized_moe_backend(
     rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
 
     # Handle explicit moe_backend from user.
-    runner_backend = moe_config.moe_parallel_config.moe_backend
+    runner_backend = moe_config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_unquantized_backend(runner_backend)
         if requested_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM:

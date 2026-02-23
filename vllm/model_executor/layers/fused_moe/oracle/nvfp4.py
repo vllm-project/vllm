@@ -6,7 +6,7 @@ import torch
 
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.config.parallel import MoEBackend
+from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
@@ -189,7 +189,7 @@ def select_nvfp4_moe_backend(
         raise ValueError(_make_log_unsupported(backend, reason))
 
     # Handle explicit moe_backend from user.
-    runner_backend = config.moe_parallel_config.moe_backend
+    runner_backend = config.moe_backend
     if runner_backend != "auto":
         requested_backend = map_nvfp4_backend(runner_backend)
         if requested_backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:

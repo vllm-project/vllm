@@ -67,6 +67,7 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
+from vllm.config.kernel import MoEBackend
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
@@ -83,7 +84,6 @@ from vllm.config.parallel import (
     DataParallelBackend,
     DistributedExecutorBackend,
     ExpertPlacementStrategy,
-    MoEBackend,
 )
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
@@ -414,7 +414,7 @@ class EngineArgs:
     data_parallel_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
-    moe_backend: MoEBackend = ParallelConfig.moe_backend
+    moe_backend: MoEBackend = KernelConfig.moe_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
@@ -879,9 +879,6 @@ class EngineArgs:
             "-ep",
             **parallel_kwargs["enable_expert_parallel"],
         )
-        moe_backend_kwargs = parallel_kwargs["moe_backend"]
-        moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
-        parallel_group.add_argument("--moe-backend", **moe_backend_kwargs)
         parallel_group.add_argument(
             "--all2all-backend", **parallel_kwargs["all2all_backend"]
         )
@@ -1196,6 +1193,9 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        moe_backend_kwargs = kernel_kwargs["moe_backend"]
+        moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1662,7 +1662,6 @@ class EngineArgs:
             data_parallel_hybrid_lb=self.data_parallel_hybrid_lb,
             is_moe_model=model_config.is_moe,
             enable_expert_parallel=self.enable_expert_parallel,
-            moe_backend=self.moe_backend,
             all2all_backend=self.all2all_backend,
             enable_dbo=self.enable_dbo,
             ubatch_size=self.ubatch_size,
@@ -1788,6 +1787,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.moe_backend != "auto":
+            kernel_config.moe_backend = self.moe_backend
 
         load_config = self.create_load_config()
 
