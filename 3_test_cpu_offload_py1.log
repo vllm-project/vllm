@@ -1,0 +1,427 @@
+--- XPU Test Session Started: Fri Feb 20 23:41:13 UTC 2026 ---
+TARGET: tests/basic_correctness/test_cpu_offload.py
+============================= test session starts ==============================
+platform linux -- Python 3.12.3, pytest-9.0.2, pluggy-1.6.0 -- /opt/venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /workspace
+configfile: pyproject.toml
+plugins: timeout-2.4.0, asyncio-1.3.0, anyio-4.12.1
+timeout: 300.0s
+timeout method: signal
+timeout func_only: False
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+tests/basic_correctness/test_cpu_offload.py::test_cpu_offload FAILED     [100%]
+
+=================================== FAILURES ===================================
+_______________________________ test_cpu_offload _______________________________
+
+    def test_cpu_offload():
+>       compare_two_settings(
+            "hmellor/tiny-random-LlamaForCausalLM", [], ["--cpu-offload-gb", "1"]
+        )
+
+tests/basic_correctness/test_cpu_offload.py:8: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+tests/utils.py:677: in compare_two_settings
+    compare_all_settings(
+tests/utils.py:761: in compare_all_settings
+    results += _test_completion(client, model, prompt, token_ids)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+client = <openai.OpenAI object at 0x7862125f2930>
+model = 'hmellor/tiny-random-LlamaForCausalLM', prompt = 'Hello, my name is'
+token_ids = [1, 15043, 29892, 590, 1024, 338]
+
+    def _test_completion(
+        client: openai.OpenAI,
+        model: str,
+        prompt: str,
+        token_ids: list[int],
+    ):
+        results = []
+    
+        # test with text prompt
+        completion = client.completions.create(
+            model=model, prompt=prompt, max_tokens=5, temperature=0.0
+        )
+    
+        results.append(
+            {
+                "test": "single_completion",
+>               "text": completion.choices[0].text,
+                        ^^^^^^^^^^^^^^^^^^^^^
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            }
+        )
+E       TypeError: 'NoneType' object is not subscriptable
+
+tests/utils.py:420: TypeError
+----------------------------- Captured stdout call -----------------------------
+INFO 02-20 23:41:26 [model.py:531] Resolved architecture: LlamaForCausalLM
+INFO 02-20 23:41:26 [model.py:1555] Using max model len 8192
+Launching RemoteOpenAIServer with: vllm serve hmellor/tiny-random-LlamaForCausalLM --load-format dummy --port 46719 --seed 0
+Environment variables: {'TBBROOT': '/opt/intel/oneapi/tbb/2022.3/env/..', 'no_proxy': 'localhost,127.0.0.1,10.23.14.76,.intel.com',
+(APIServer pid=11446) INFO 02-20 23:41:37 [utils.py:287] 
+(APIServer pid=11446) INFO 02-20 23:41:37 [utils.py:287]        █     █     █▄   ▄█
+(APIServer pid=11446) INFO 02-20 23:41:37 [utils.py:287]  ▄▄ ▄█ █     █     █ ▀▄▀ █  version 0.1.dev13788+ga2443de5f.d20260220
+(APIServer pid=11446) INFO 02-20 23:41:37 [utils.py:287]   █▄█▀ █     █     █     █  model   hmellor/tiny-random-LlamaForCausalLM
+(APIServer pid=11446) INFO 02-20 23:41:37 [utils.py:287]    ▀▀  ▀▀▀▀▀ ▀▀▀▀▀ ▀     ▀
+(APIServer pid=11446) INFO 02-20 23:41:37 [utils.py:287] 
+(APIServer pid=11446) INFO 02-20 23:41:37 [utils.py:223] non-default args: {'model_tag': 'hmellor/tiny-random-LlamaForCausalLM', 'api_server_count': 1, 'port': 46719, 'model': 'hmellor/tiny-random-LlamaForCausalLM', 'load_format': 'dummy'}
+(APIServer pid=11446) INFO 02-20 23:41:38 [model.py:531] Resolved architecture: LlamaForCausalLM
+(APIServer pid=11446) INFO 02-20 23:41:38 [model.py:1555] Using max model len 8192
+(APIServer pid=11446) INFO 02-20 23:41:38 [scheduler.py:224] Chunked prefill is enabled with max_num_batched_tokens=2048.
+(APIServer pid=11446) INFO 02-20 23:41:38 [vllm.py:689] Asynchronous scheduling is enabled.
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:49 [core.py:97] Initializing a V1 LLM engine (v0.1.dev13788+ga2443de5f.d20260220) with config: model='hmellor/tiny-random-LlamaForCausalLM', speculative_config=None, tokenizer='hmellor/tiny-random-LlamaForCausalLM', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=dummy, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=xpu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=hmellor/tiny-random-LlamaForCausalLM, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': True, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': None, 'fast_moe_cold_start': True, 'static_all_moe_layers': []}
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:49 [parallel_state.py:1234] world_size=1 rank=0 local_rank=0 distributed_init_method=tcp://10.23.14.76:39987 backend=xccl
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:49 [parallel_state.py:1445] rank 0 in world size 1 is assigned as DP rank 0, PP rank 0, PCP rank 0, TP rank 0, EP rank N/A
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:50 [gpu_model_runner.py:4124] Starting to load model hmellor/tiny-random-LlamaForCausalLM...
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:51 [xpu.py:55] Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; only NHD layout is supported by XPU attention kernels.
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:51 [xpu.py:84] Using Flash Attention backend.
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:52 [gpu_model_runner.py:4221] Model loading took 0.0 GiB memory and 0.696822 seconds
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:54 [backends.py:916] Using cache directory: /root/.cache/vllm/torch_compile_cache/4474d2da14/rank_0_0/backbone for vLLM's torch.compile
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:54 [backends.py:976] Dynamo bytecode transform time: 2.09 s
+(EngineCore_DP0 pid=11727) INFO 02-20 23:41:56 [backends.py:351] Cache the graph of compile range (1, 2048) for later use
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:02 [backends.py:368] Compiling a graph for compile range (1, 2048) takes 7.68 s
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:02 [monitor.py:34] torch.compile takes 9.77 s in total
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:02 [decorators.py:574] saving AOT compiled function to /root/.cache/vllm/torch_aot_compile/9b587cc8437808cea3ee641d76d99b16c9bdfb65c1b701fdf82aacd1a41d1fe9/rank_0_0/model
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:02 [decorators.py:578] saved AOT compiled function to /root/.cache/vllm/torch_aot_compile/9b587cc8437808cea3ee641d76d99b16c9bdfb65c1b701fdf82aacd1a41d1fe9/rank_0_0/model
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:05 [gpu_worker.py:373] Available KV cache memory: 27.01 GiB
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:05 [kv_cache_utils.py:1308] GPU KV cache size: 14,161,280 tokens
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:05 [kv_cache_utils.py:1313] Maximum concurrency for 8,192 tokens per request: 1728.67x
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:05 [utils.py:59] `_KV_CACHE_LAYOUT_OVERRIDE` variable detected. Setting KV cache layout to NHD.
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:05 [gpu_worker.py:461] Compile and warming up model for size 2048
+(EngineCore_DP0 pid=11727) WARNING 02-20 23:42:05 [gpu_model_runner.py:5187] Skipping CUDA graph capture. To turn on CUDA graph capture, ensure `cudagraph_mode` was not manually set to `NONE`
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:05 [core.py:278] init engine (profile, create kv cache, warmup model) took 13.73 seconds
+(EngineCore_DP0 pid=11727) INFO 02-20 23:42:07 [vllm.py:689] Asynchronous scheduling is enabled.
+(APIServer pid=11446) INFO 02-20 23:42:07 [api_server.py:495] Supported tasks: ['generate']
+(APIServer pid=11446) INFO 02-20 23:42:08 [serving.py:188] Warming up chat template processing...
+(APIServer pid=11446) INFO 02-20 23:42:09 [hf.py:318] Detected the chat template content format to be 'string'. You can set `--chat-template-content-format` to override this.
+(APIServer pid=11446) INFO 02-20 23:42:09 [serving.py:213] Chat template warmup completed in 1249.1ms
+(APIServer pid=11446) INFO 02-20 23:42:10 [api_server.py:500] Starting vLLM API server 0 on http://0.0.0.0:46719
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:38] Available routes are:
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /openapi.json, Methods: GET, HEAD
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /docs, Methods: GET, HEAD
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /docs/oauth2-redirect, Methods: GET, HEAD
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /redoc, Methods: GET, HEAD
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /tokenize, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /detokenize, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /load, Methods: GET
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /version, Methods: GET
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /health, Methods: GET
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /metrics, Methods: GET
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/models, Methods: GET
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /ping, Methods: GET
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /ping, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /invocations, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/chat/completions, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/chat/completions/render, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/responses, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/responses/{response_id}, Methods: GET
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/responses/{response_id}/cancel, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/completions, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/completions/render, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /v1/messages, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /inference/v1/generate, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /scale_elastic_ep, Methods: POST
+(APIServer pid=11446) INFO 02-20 23:42:10 [launcher.py:47] Route: /is_scaling_elastic_ep, Methods: POST
+(APIServer pid=11446) INFO:     127.0.0.1:34176 - "GET /health HTTP/1.1" 200 OK
+(APIServer pid=11446) INFO:     127.0.0.1:34190 - "GET /v1/models HTTP/1.1" 200 OK
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [dump_input.py:72] Dumping input data for V1 LLM engine (v0.1.dev13788+ga2443de5f.d20260220) with config: model='hmellor/tiny-random-LlamaForCausalLM', speculative_config=None, tokenizer='hmellor/tiny-random-LlamaForCausalLM', skip_tokenizer_init=False, tokenizer_mode=auto, revision=None, tokenizer_revision=None, trust_remote_code=False, dtype=torch.bfloat16, max_seq_len=8192, download_dir=None, load_format=dummy, tensor_parallel_size=1, pipeline_parallel_size=1, data_parallel_size=1, disable_custom_all_reduce=True, quantization=None, enforce_eager=False, enable_return_routed_experts=False, kv_cache_dtype=auto, device_config=xpu, structured_outputs_config=StructuredOutputsConfig(backend='auto', disable_fallback=False, disable_any_whitespace=False, disable_additional_properties=False, reasoning_parser='', reasoning_parser_plugin='', enable_in_reasoning=False), observability_config=ObservabilityConfig(show_hidden_metrics_for_version=None, otlp_traces_endpoint=None, collect_detailed_traces=None, kv_cache_metrics=False, kv_cache_metrics_sample=0.01, cudagraph_metrics=False, enable_layerwise_nvtx_tracing=False, enable_mfu_metrics=False, enable_mm_processor_stats=False, enable_logging_iteration_details=False), seed=0, served_model_name=hmellor/tiny-random-LlamaForCausalLM, enable_prefix_caching=True, enable_chunked_prefill=True, pooler_config=None, compilation_config={'level': None, 'mode': <CompilationMode.VLLM_COMPILE: 3>, 'debug_dump_path': None, 'cache_dir': '/root/.cache/vllm/torch_compile_cache/4474d2da14', 'compile_cache_save_format': 'binary', 'backend': 'inductor', 'custom_ops': ['none'], 'splitting_ops': ['vllm::unified_attention', 'vllm::unified_attention_with_output', 'vllm::unified_mla_attention', 'vllm::unified_mla_attention_with_output', 'vllm::mamba_mixer2', 'vllm::mamba_mixer', 'vllm::short_conv', 'vllm::linear_attention', 'vllm::plamo2_mamba_mixer', 'vllm::gdn_attention_core', 'vllm::kda_attention', 'vllm::sparse_attn_indexer', 'vllm::rocm_aiter_sparse_attn_indexer', 'vllm::unified_kv_cache_update'], 'compile_mm_encoder': False, 'compile_sizes': [], 'compile_ranges_split_points': [2048], 'inductor_compile_config': {'enable_auto_functionalized_v2': False, 'combo_kernels': True, 'benchmark_combo_kernel': True}, 'inductor_passes': {}, 'cudagraph_mode': <CUDAGraphMode.NONE: 0>, 'cudagraph_num_of_warmups': 0, 'cudagraph_capture_sizes': None, 'cudagraph_copy_inputs': False, 'cudagraph_specialize_lora': True, 'use_inductor_graph_partition': False, 'pass_config': {'fuse_norm_quant': False, 'fuse_act_quant': False, 'fuse_attn_quant': False, 'eliminate_noops': True, 'enable_sp': False, 'fuse_gemm_comms': False, 'fuse_allreduce_rms': False, 'fuse_act_padding': False}, 'max_cudagraph_capture_size': None, 'dynamic_shapes_config': {'type': <DynamicShapesType.BACKED: 'backed'>, 'evaluate_guards': False, 'assume_32_bit_indexing': False}, 'local_cache_dir': '/root/.cache/vllm/torch_compile_cache/4474d2da14/rank_0_0/backbone', 'fast_moe_cold_start': True, 'static_all_moe_layers': []}, 
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [dump_input.py:79] Dumping scheduler output for model execution: SchedulerOutput(scheduled_new_reqs=[NewRequestData(req_id=cmpl-8001a336c290d04c-0-b958a13d,prompt_token_ids_len=6,prefill_token_ids_len=None,mm_features=[],sampling_params=SamplingParams(n=1, presence_penalty=0.0, frequency_penalty=0.0, repetition_penalty=1.0, temperature=0.0, top_p=1.0, top_k=0, min_p=0.0, seed=None, stop=[], stop_token_ids=[], bad_words=[], include_stop_str_in_output=False, ignore_eos=False, max_tokens=5, min_tokens=0, logprobs=None, prompt_logprobs=None, skip_special_tokens=True, spaces_between_special_tokens=True, truncate_prompt_tokens=None, structured_outputs=None, extra_args=None),block_ids=([1],),num_computed_tokens=0,lora_request=None,prompt_embeds_shape=None)], scheduled_cached_reqs=CachedRequestData(req_ids=[],resumed_req_ids=set(),new_token_ids_lens=[],all_token_ids_lens={},new_block_ids=[],num_computed_tokens=[],num_output_tokens=[]), num_scheduled_tokens={cmpl-8001a336c290d04c-0-b958a13d: 6}, total_num_scheduled_tokens=6, scheduled_spec_decode_tokens={}, scheduled_encoder_inputs={}, num_common_prefix_blocks=[1], finished_req_ids=[], free_encoder_mm_hashes=[], preempted_req_ids=[], has_structured_output_requests=false, pending_structured_output_tokens=false, num_invalid_spec_tokens=null, kv_connector_metadata=null, ec_connector_metadata=null)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [dump_input.py:81] Dumping scheduler stats: SchedulerStats(num_running_reqs=1, num_waiting_reqs=0, step_counter=0, current_wave=0, kv_cache_usage=4.519385905843443e-06, encoder_cache_usage=0.0, prefix_cache_stats=PrefixCacheStats(reset=False, requests=1, queries=6, hits=0, preempted_requests=0, preempted_queries=0, preempted_hits=0), connector_prefix_cache_stats=None, kv_cache_eviction_events=[], spec_decoding_stats=None, kv_connector_stats=None, waiting_lora_adapters={}, running_lora_adapters={}, cudagraph_stats=None, perf_stats=None)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008] EngineCore encountered a fatal error.
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008] Traceback (most recent call last):
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 999, in run_engine_core
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     engine_core.run_busy_loop()
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1026, in run_busy_loop
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     self._process_engine_step()
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1060, in _process_engine_step
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     outputs, model_executed = self.step_fn()
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]                               ^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 518, in step_with_batch_queue
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     exec_model_fut.result()
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self.__get_result()
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     raise self._exception
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 79, in collective_rpc
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     result = run_method(self.driver_worker, method, args, kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/serial_utils.py", line 459, in run_method
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return func(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/worker_base.py", line 361, in execute_model
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self.worker.execute_model(scheduler_output)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return func(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py", line 652, in execute_model
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     output = self.model_runner.execute_model(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return func(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 3538, in execute_model
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     model_output = self._model_forward(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]                    ^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 3047, in _model_forward
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self.model(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self._call_impl(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return forward_call(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/model_executor/models/llama.py", line 589, in forward
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     model_output = self.model(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]                    ^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/compilation/decorators.py", line 402, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self.aot_compiled_fn(self, *args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/_dynamo/aot_compile.py", line 124, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self.fn(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/model_executor/models/llama.py", line 401, in forward
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     def forward(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/compilation/caching.py", line 185, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self.optimized_call(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 936, in call_wrapped
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self._wrapped_call(self, *args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 455, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     raise e
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 442, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return super(self.cls, obj).__call__(*args, **kwargs)  # type: ignore[misc]
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self._call_impl(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return forward_call(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "<eval_with_key>.7", line 28, in forward
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     submod_1 = self.submod_1(getitem, s72, getitem_1, getitem_2, getitem_3);  getitem = getitem_1 = getitem_2 = submod_1 = None
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 936, in call_wrapped
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self._wrapped_call(self, *args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 455, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     raise e
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 442, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return super(self.cls, obj).__call__(*args, **kwargs)  # type: ignore[misc]
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self._call_impl(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return forward_call(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "<eval_with_key>.9", line 6, in forward
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     unified_attention_with_output = torch.ops.vllm.unified_attention_with_output(query_2, key_2, value, output_3, 'model.layers.0.self_attn.attn', kv_cache_dummy_dep = unified_kv_cache_update);  query_2 = key_2 = value = output_3 = unified_kv_cache_update = unified_attention_with_output = None
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/_ops.py", line 1209, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self._op(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/attention/kv_transfer_utils.py", line 39, in wrapper
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return func(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/attention/attention.py", line 696, in unified_attention_with_output
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     self.impl.forward(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/attention/backends/flash_attn.py", line 707, in forward
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     flash_attn_varlen_func(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm/_ipex_ops.py", line 112, in flash_attn_varlen_func
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return flash_attn_varlen_func(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/vllm_xpu_kernels/flash_attn_interface.py", line 99, in flash_attn_varlen_func
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]   File "/opt/venv/lib/python3.12/site-packages/torch/_ops.py", line 1209, in __call__
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]     return self._op(*args, **kwargs)
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008]            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) ERROR 02-20 23:42:11 [core.py:1008] RuntimeError: Only XE2 cutlass kernel is supported currently.
+(APIServer pid=11446) ERROR 02-20 23:42:11 [async_llm.py:710] AsyncLLM output_handler failed.
+(APIServer pid=11446) ERROR 02-20 23:42:11 [async_llm.py:710] Traceback (most recent call last):
+(APIServer pid=11446) ERROR 02-20 23:42:11 [async_llm.py:710]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/async_llm.py", line 666, in output_handler
+(APIServer pid=11446) ERROR 02-20 23:42:11 [async_llm.py:710]     outputs = await engine_core.get_output_async()
+(APIServer pid=11446) ERROR 02-20 23:42:11 [async_llm.py:710]               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(APIServer pid=11446) ERROR 02-20 23:42:11 [async_llm.py:710]   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core_client.py", line 910, in get_output_async
+(APIServer pid=11446) ERROR 02-20 23:42:11 [async_llm.py:710]     raise self._format_exception(outputs) from None
+(APIServer pid=11446) ERROR 02-20 23:42:11 [async_llm.py:710] vllm.v1.engine.exceptions.EngineDeadError: EngineCore encountered an issue. See stack trace (above) for the root cause.
+(APIServer pid=11446) INFO:     127.0.0.1:34190 - "POST /v1/completions HTTP/1.1" 200 OK
+(APIServer pid=11446) INFO 02-20 23:42:11 [launcher.py:122] Shutting down FastAPI HTTP server.
+[RemoteOpenAIServer] Server 11446 terminated gracefully
+----------------------------- Captured stderr call -----------------------------
+sycl_arch not recognized: 21483225088
+(APIServer pid=11446) INFO:     Started server process [11446]
+(APIServer pid=11446) INFO:     Waiting for application startup.
+(APIServer pid=11446) INFO:     Application startup complete.
+(EngineCore_DP0 pid=11727) Process EngineCore_DP0:
+(EngineCore_DP0 pid=11727) Traceback (most recent call last):
+(EngineCore_DP0 pid=11727)   File "/usr/lib/python3.12/multiprocessing/process.py", line 314, in _bootstrap
+(EngineCore_DP0 pid=11727)     self.run()
+(EngineCore_DP0 pid=11727)   File "/usr/lib/python3.12/multiprocessing/process.py", line 108, in run
+(EngineCore_DP0 pid=11727)     self._target(*self._args, **self._kwargs)
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1010, in run_engine_core
+(EngineCore_DP0 pid=11727)     raise e
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 999, in run_engine_core
+(EngineCore_DP0 pid=11727)     engine_core.run_busy_loop()
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1026, in run_busy_loop
+(EngineCore_DP0 pid=11727)     self._process_engine_step()
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 1060, in _process_engine_step
+(EngineCore_DP0 pid=11727)     outputs, model_executed = self.step_fn()
+(EngineCore_DP0 pid=11727)                               ^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 518, in step_with_batch_queue
+(EngineCore_DP0 pid=11727)     exec_model_fut.result()
+(EngineCore_DP0 pid=11727)   File "/usr/lib/python3.12/concurrent/futures/_base.py", line 449, in result
+(EngineCore_DP0 pid=11727)     return self.__get_result()
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/usr/lib/python3.12/concurrent/futures/_base.py", line 401, in __get_result
+(EngineCore_DP0 pid=11727)     raise self._exception
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/executor/uniproc_executor.py", line 79, in collective_rpc
+(EngineCore_DP0 pid=11727)     result = run_method(self.driver_worker, method, args, kwargs)
+(EngineCore_DP0 pid=11727)              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/serial_utils.py", line 459, in run_method
+(EngineCore_DP0 pid=11727)     return func(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/worker_base.py", line 361, in execute_model
+(EngineCore_DP0 pid=11727)     return self.worker.execute_model(scheduler_output)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(EngineCore_DP0 pid=11727)     return func(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_worker.py", line 652, in execute_model
+(EngineCore_DP0 pid=11727)     output = self.model_runner.execute_model(
+(EngineCore_DP0 pid=11727)              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/utils/_contextlib.py", line 124, in decorate_context
+(EngineCore_DP0 pid=11727)     return func(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 3538, in execute_model
+(EngineCore_DP0 pid=11727)     model_output = self._model_forward(
+(EngineCore_DP0 pid=11727)                    ^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/worker/gpu_model_runner.py", line 3047, in _model_forward
+(EngineCore_DP0 pid=11727)     return self.model(
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+(EngineCore_DP0 pid=11727)     return self._call_impl(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+(EngineCore_DP0 pid=11727)     return forward_call(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/model_executor/models/llama.py", line 589, in forward
+(EngineCore_DP0 pid=11727)     model_output = self.model(
+(EngineCore_DP0 pid=11727)                    ^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/compilation/decorators.py", line 402, in __call__
+(EngineCore_DP0 pid=11727)     return self.aot_compiled_fn(self, *args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/_dynamo/aot_compile.py", line 124, in __call__
+(EngineCore_DP0 pid=11727)     return self.fn(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/model_executor/models/llama.py", line 401, in forward
+(EngineCore_DP0 pid=11727)     def forward(
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/compilation/caching.py", line 185, in __call__
+(EngineCore_DP0 pid=11727)     return self.optimized_call(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 936, in call_wrapped
+(EngineCore_DP0 pid=11727)     return self._wrapped_call(self, *args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 455, in __call__
+(EngineCore_DP0 pid=11727)     raise e
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 442, in __call__
+(EngineCore_DP0 pid=11727)     return super(self.cls, obj).__call__(*args, **kwargs)  # type: ignore[misc]
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+(EngineCore_DP0 pid=11727)     return self._call_impl(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+(EngineCore_DP0 pid=11727)     return forward_call(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "<eval_with_key>.7", line 28, in forward
+(EngineCore_DP0 pid=11727)     submod_1 = self.submod_1(getitem, s72, getitem_1, getitem_2, getitem_3);  getitem = getitem_1 = getitem_2 = submod_1 = None
+(EngineCore_DP0 pid=11727)                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 936, in call_wrapped
+(EngineCore_DP0 pid=11727)     return self._wrapped_call(self, *args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 455, in __call__
+(EngineCore_DP0 pid=11727)     raise e
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/fx/graph_module.py", line 442, in __call__
+(EngineCore_DP0 pid=11727)     return super(self.cls, obj).__call__(*args, **kwargs)  # type: ignore[misc]
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1776, in _wrapped_call_impl
+(EngineCore_DP0 pid=11727)     return self._call_impl(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/nn/modules/module.py", line 1787, in _call_impl
+(EngineCore_DP0 pid=11727)     return forward_call(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "<eval_with_key>.9", line 6, in forward
+(EngineCore_DP0 pid=11727)     unified_attention_with_output = torch.ops.vllm.unified_attention_with_output(query_2, key_2, value, output_3, 'model.layers.0.self_attn.attn', kv_cache_dummy_dep = unified_kv_cache_update);  query_2 = key_2 = value = output_3 = unified_kv_cache_update = unified_attention_with_output = None
+(EngineCore_DP0 pid=11727)                                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/_ops.py", line 1209, in __call__
+(EngineCore_DP0 pid=11727)     return self._op(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/attention/kv_transfer_utils.py", line 39, in wrapper
+(EngineCore_DP0 pid=11727)     return func(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/model_executor/layers/attention/attention.py", line 696, in unified_attention_with_output
+(EngineCore_DP0 pid=11727)     self.impl.forward(
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/attention/backends/flash_attn.py", line 707, in forward
+(EngineCore_DP0 pid=11727)     flash_attn_varlen_func(
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/_ipex_ops.py", line 112, in flash_attn_varlen_func
+(EngineCore_DP0 pid=11727)     return flash_attn_varlen_func(
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm_xpu_kernels/flash_attn_interface.py", line 99, in flash_attn_varlen_func
+(EngineCore_DP0 pid=11727)     out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
+(EngineCore_DP0 pid=11727)                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/_ops.py", line 1209, in __call__
+(EngineCore_DP0 pid=11727)     return self._op(*args, **kwargs)
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727) RuntimeError: Only XE2 cutlass kernel is supported currently.
+(EngineCore_DP0 pid=11727) Exception ignored in atexit callback: <function dump_compile_times at 0x71383d3cf740>
+(EngineCore_DP0 pid=11727) Traceback (most recent call last):
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/_dynamo/utils.py", line 860, in dump_compile_times
+(EngineCore_DP0 pid=11727)     log.info(compile_times(repr="str", aggregate=True))
+(EngineCore_DP0 pid=11727)              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/_dynamo/utils.py", line 846, in compile_times
+(EngineCore_DP0 pid=11727)     out += tabulate(rows, headers=("Function", "Runtimes (s)"))
+(EngineCore_DP0 pid=11727)            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/torch/_dynamo/utils.py", line 242, in tabulate
+(EngineCore_DP0 pid=11727)     import tabulate
+(EngineCore_DP0 pid=11727)   File "<frozen importlib._bootstrap>", line 1360, in _find_and_load
+(EngineCore_DP0 pid=11727)   File "<frozen importlib._bootstrap>", line 1331, in _find_and_load_unlocked
+(EngineCore_DP0 pid=11727)   File "<frozen importlib._bootstrap>", line 935, in _load_unlocked
+(EngineCore_DP0 pid=11727)   File "<frozen importlib._bootstrap_external>", line 991, in exec_module
+(EngineCore_DP0 pid=11727)   File "<frozen importlib._bootstrap_external>", line 1124, in get_code
+(EngineCore_DP0 pid=11727)   File "<frozen importlib._bootstrap_external>", line 753, in _compile_bytecode
+(EngineCore_DP0 pid=11727)   File "/opt/venv/lib/python3.12/site-packages/vllm/v1/engine/core.py", line 945, in signal_handler
+(EngineCore_DP0 pid=11727)     raise SystemExit()
+(EngineCore_DP0 pid=11727) SystemExit: 
+(APIServer pid=11446) INFO:     Shutting down
+(APIServer pid=11446) INFO:     Waiting for application shutdown.
+(APIServer pid=11446) INFO:     Application shutdown complete.
+--------------------------- Captured stdout teardown ---------------------------
+WARNING 02-20 23:42:14 [parallel_state.py:1644] torch._C._host_emptyCache() only available in Pytorch >=2.5
+=============================== warnings summary ===============================
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyPacked has no __module__ attribute
+
+<frozen importlib._bootstrap>:488
+  <frozen importlib._bootstrap>:488: DeprecationWarning: builtin type SwigPyObject has no __module__ attribute
+
+../opt/venv/lib/python3.12/site-packages/torch/jit/_script.py:362: 14 warnings
+  /opt/venv/lib/python3.12/site-packages/torch/jit/_script.py:362: DeprecationWarning: `torch.jit.script_method` is deprecated. Please switch to `torch.compile` or `torch.export`.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+------------------ generated xml file: /workspace/results.xml ------------------
+=========================== short test summary info ============================
+FAILED tests/basic_correctness/test_cpu_offload.py::test_cpu_offload - TypeEr...
+======================= 1 failed, 16 warnings in 51.74s ========================
+sys:1: DeprecationWarning: builtin type swigvarlink has no __module__ attribute
