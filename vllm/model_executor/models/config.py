@@ -354,10 +354,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
                 )
-                assert not vllm_config.speculative_config, (
-                    "Mamba cache mode 'align' is currently not compatible "
-                    "with speculative decoding."
-                )
             logger.info(
                 "Warning: Prefix caching in Mamba cache '%s' "
                 "mode is currently enabled. "
