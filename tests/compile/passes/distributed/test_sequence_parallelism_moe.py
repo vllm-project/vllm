@@ -24,25 +24,51 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.models.utils import sequence_parallel_chunk
 from vllm.utils.system_utils import update_environment_variables
 from vllm.utils.torch_utils import set_random_seed
 
 
-class TestAllReduceChunkModel(torch.nn.Module):
+class TestAllReduceRMSNormChunkModel(torch.nn.Module):
+    def __init__(self, hidden_size: int, eps: float = 1e-5):
+        super().__init__()
+        self.norm = RMSNorm(hidden_size, eps)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         # Avoid matching directly on a graph input.
         y = torch.relu(x)
         y = tensor_model_parallel_all_reduce(y)
+        y = self.norm(y)
         return sequence_parallel_chunk(y)
 
 
+class TestAllReduceFusedAddRMSNormChunkModel(torch.nn.Module):
+    def __init__(self, hidden_size: int, eps: float = 1e-5):
+        super().__init__()
+        self.norm = RMSNorm(hidden_size, eps)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # Avoid matching directly on a graph input.
+        y = torch.relu(x)
+        residual = torch.sigmoid(residual)
+        y = tensor_model_parallel_all_reduce(y)
+        y, residual = self.norm(y, residual)
+        return sequence_parallel_chunk(y), residual
+
+
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("with_residual", [False, True])
 @pytest.mark.parametrize("seq_len", [16, 15])
 @pytest.mark.parametrize("hidden_size", [32])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only on CUDA")
 def test_sequence_parallelism_moe_pass(
+    with_residual: bool,
     seq_len: int,
     hidden_size: int,
     dtype: torch.dtype,
@@ -51,7 +77,7 @@ def test_sequence_parallelism_moe_pass(
 
     torch.multiprocessing.spawn(
         sequence_parallelism_moe_pass_on_test_model,
-        args=(num_processes, seq_len, hidden_size, dtype),
+        args=(num_processes, with_residual, seq_len, hidden_size, dtype),
         nprocs=num_processes,
     )
 
@@ -59,6 +85,7 @@ def test_sequence_parallelism_moe_pass(
 def sequence_parallelism_moe_pass_on_test_model(
     local_rank: int,
     world_size: int,
+    with_residual: bool,
     seq_len: int,
     hidden_size: int,
     dtype: torch.dtype,
@@ -86,6 +113,7 @@ def sequence_parallelism_moe_pass_on_test_model(
     compilation_config = CompilationConfig(
         splitting_ops=[],
         cudagraph_mode=CUDAGraphMode.NONE,
+        custom_ops=["+rms_norm"],
         pass_config=PassConfig(
             enable_sp=False,
             enable_sp_moe=True,
@@ -103,14 +131,28 @@ def sequence_parallelism_moe_pass_on_test_model(
     with set_current_vllm_config(vllm_config):
         sequence_parallelism_moe_pass = SequenceParallelismMoEPass(vllm_config)
         backend = TestBackend(sequence_parallelism_moe_pass)
-        model = TestAllReduceChunkModel()
+        model: torch.nn.Module = (
+            TestAllReduceFusedAddRMSNormChunkModel(hidden_size)
+            if with_residual
+            else TestAllReduceRMSNormChunkModel(hidden_size)
+        )
         hidden_states = torch.randn((seq_len, hidden_size), dtype=dtype)
+        residual = torch.randn((seq_len, hidden_size), dtype=dtype)
 
-        eager_output = model(hidden_states)
+        if with_residual:
+            eager_output = model(hidden_states, residual)
+        else:
+            eager_output = model(hidden_states)
+
         compiled_model = torch.compile(model, backend=backend)
-        compiled_output = compiled_model(hidden_states)
+        if with_residual:
+            compiled_output = compiled_model(hidden_states, residual)
+            torch.testing.assert_close(compiled_output[0], eager_output[0])
+            torch.testing.assert_close(compiled_output[1], eager_output[1])
+        else:
+            compiled_output = compiled_model(hidden_states)
+            torch.testing.assert_close(compiled_output, eager_output)
 
-        torch.testing.assert_close(compiled_output, eager_output)
         assert sequence_parallelism_moe_pass.matched_count == 1
 
         assert backend.op_count(torch.ops.vllm.all_reduce.default, before=True) == 1
@@ -126,10 +168,19 @@ def sequence_parallelism_moe_pass_on_test_model(
             )
             == 1
         )
+        if with_residual:
+            assert (
+                backend.op_count(torch.ops.vllm.all_gather.default, before=False) == 1
+            )
+        else:
+            assert (
+                backend.op_count(torch.ops.vllm.all_gather.default, before=False) == 0
+            )
         assert backend.op_count(torch.ops.vllm.all_reduce.default, before=False) == 0
+        expected_chunk_after = 1 if with_residual else 0
         assert (
             backend.op_count(
                 torch.ops.vllm.sequence_parallel_chunk_impl.default, before=False
             )
-            == 0
+            == expected_chunk_after
         )

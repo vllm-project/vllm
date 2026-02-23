@@ -14,6 +14,7 @@ from vllm.logger import init_logger
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
+from .matcher_utils import MatcherFusedAddRMSNorm, MatcherRMSNorm
 
 logger = init_logger(__name__)
 
@@ -21,7 +22,15 @@ logger = init_logger(__name__)
 class _SequenceParallelismMoEPatternHelper:
     """Helper for sequence-parallel MoE communication patterns."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        self.epsilon = epsilon
+        self.dtype = dtype
+        self.device = device
         self.tp_group = get_tp_group()
         self.tp_size = get_tensor_model_parallel_world_size()
 
@@ -39,42 +48,159 @@ class _SequenceParallelismMoEPatternHelper:
             group_name=self.tp_group.unique_name,
         )
 
+    def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.ops.vllm.all_gather.default(
+            x,
+            dim=0,
+            world_size=self.tp_size,
+            group_name=self.tp_group.unique_name,
+        )
 
-class AllReduceSequenceParallelChunkPattern(_SequenceParallelismMoEPatternHelper):
-    def get_inputs(
+
+class AllReduceRMSNormSequenceParallelChunkPattern(
+    _SequenceParallelismMoEPatternHelper
+):
+    def __init__(
         self,
+        epsilon: float,
         dtype: torch.dtype,
         device: str | None,
+    ) -> None:
+        super().__init__(epsilon, dtype, device)
+        self.rmsnorm_matcher = MatcherRMSNorm(epsilon)
+        if self.rmsnorm_matcher.model_dtype is None:
+            self.rmsnorm_matcher.model_dtype = dtype
+
+    def get_inputs(
+        self,
     ) -> list[torch.Tensor]:
-        input_ = torch.empty([8, 4], device=device or "cuda", dtype=dtype)
-        return [input_]
+        input_ = torch.empty([8, 4], device=self.device, dtype=self.dtype)
+        weight = torch.empty([4], device=self.device, dtype=self.dtype)
+        return [input_, weight]
 
     def register(
         self,
         pm_pass: PatternMatcherPass,
-        dtype: torch.dtype,
-        device: str | None,
     ) -> None:
-        def pattern(input_: torch.Tensor) -> torch.Tensor:
+        def pattern(
+            input_: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> torch.Tensor:
             all_reduce = self._all_reduce(input_)
-            return self._sequence_parallel_chunk(all_reduce)
+            rmsnorm = self.rmsnorm_matcher(all_reduce, weight)
+            return self._sequence_parallel_chunk(rmsnorm)
 
-        def replacement(input_: torch.Tensor) -> torch.Tensor:
-            return self._reduce_scatter_with_padding(input_)
+        def replacement(
+            input_: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> torch.Tensor:
+            reduce_scatter = self._reduce_scatter_with_padding(input_)
+            return self.rmsnorm_matcher(reduce_scatter, weight)
 
         pm.register_replacement(
             pattern,
             replacement,
-            self.get_inputs(dtype, device),
+            self.get_inputs(),
             pm.fwd_only,
             pm_pass,
+            skip_duplicates=True,
+        )
+
+
+class AllReduceFusedAddRMSNormSequenceParallelChunkPattern(
+    _SequenceParallelismMoEPatternHelper
+):
+    def __init__(
+        self,
+        epsilon: float,
+        dtype: torch.dtype,
+        device: str | None,
+    ) -> None:
+        super().__init__(epsilon, dtype, device)
+        self.rmsnorm_matcher = MatcherFusedAddRMSNorm(epsilon)
+        if self.rmsnorm_matcher.model_dtype is None:
+            self.rmsnorm_matcher.model_dtype = dtype
+
+    def get_inputs(self) -> list[torch.Tensor]:
+        residual = torch.empty([8, 4], device=self.device, dtype=self.dtype)
+        input_ = torch.empty([8, 4], device=self.device, dtype=self.dtype)
+        weight = torch.empty([4], device=self.device, dtype=self.dtype)
+        return [residual, input_, weight]
+
+    def register(
+        self,
+        pm_pass: PatternMatcherPass,
+    ) -> None:
+        def pattern_first(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> torch.Tensor:
+            all_reduce = self._all_reduce(input_)
+            rmsnorm, _ = self.rmsnorm_matcher(all_reduce, weight, residual)
+            return self._sequence_parallel_chunk(rmsnorm)
+
+        def pattern(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            all_reduce = self._all_reduce(input_)
+            rmsnorm, residual_out = self.rmsnorm_matcher(all_reduce, weight, residual)
+            return self._sequence_parallel_chunk(rmsnorm), residual_out
+
+        def replacement(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> tuple[torch.Tensor, torch.Tensor]:
+            reduce_scatter = self._reduce_scatter_with_padding(input_)
+            residual_chunk = self._sequence_parallel_chunk(residual)
+            rmsnorm, residual_out = self.rmsnorm_matcher(
+                reduce_scatter,
+                weight,
+                residual_chunk,
+            )
+            residual_full = self._all_gather(residual_out)
+            residual_full = residual_full[: residual.size(0), ...]
+            return rmsnorm, residual_full
+
+        def replacement_first(
+            residual: torch.Tensor,
+            input_: torch.Tensor,
+            weight: torch.Tensor,
+        ) -> torch.Tensor:
+            reduce_scatter = self._reduce_scatter_with_padding(input_)
+            residual_chunk = self._sequence_parallel_chunk(residual)
+            rmsnorm, _ = self.rmsnorm_matcher(
+                reduce_scatter,
+                weight,
+                residual_chunk,
+            )
+            return rmsnorm
+
+        pm.register_replacement(
+            pattern,
+            replacement,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            skip_duplicates=True,
+        )
+        pm.register_replacement(
+            pattern_first,
+            replacement_first,
+            self.get_inputs(),
+            pm.fwd_only,
+            pm_pass,
+            skip_duplicates=True,
         )
 
 
 class SequenceParallelismMoEPass(VllmPatternMatcherPass):
     """
-    Replace `all_reduce + sequence_parallel_chunk` with
-    `reduce_scatter_with_padding`.
+    Replace `all_reduce + (fused) rmsnorm + sequence_parallel_chunk` with
+    local-rank computation based on `reduce_scatter_with_padding`.
     """
 
     @enable_fake_mode
@@ -85,15 +211,30 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
             pass_name="sequence_parallelism_moe_pass"
         )
 
-        # Register once to avoid duplicate pattern graph errors in Inductor.
-        pattern_dtype = self.model_dtype or torch.float16
-        AllReduceSequenceParallelChunkPattern().register(
-            self.patterns, pattern_dtype, self.device
-        )
+        pattern_dtype = self.model_dtype or torch.get_default_dtype()
+        for epsilon in [1e-5, 1e-6]:
+            AllReduceRMSNormSequenceParallelChunkPattern(
+                epsilon, pattern_dtype, self.device
+            ).register(self.patterns)
+            AllReduceFusedAddRMSNormSequenceParallelChunkPattern(
+                epsilon, pattern_dtype, self.device
+            ).register(self.patterns)
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        return True
+        # Keep the same applicability behavior as sequence_parallelism.py:
+        # always allow full-graph mode, and require concrete divisible size in
+        # piecewise mode.
+        if (
+            not self.compilation_config.splitting_ops
+            or self.compilation_config.use_inductor_graph_partition
+        ):
+            return True
+        tp_size = get_tensor_model_parallel_world_size()
+        result: bool = (compile_range.is_single_size()) and (
+            compile_range.end % tp_size == 0
+        )
+        return result
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
