@@ -552,21 +552,21 @@ class InputBatch:
 
         # instead, we need to temporarily copy the data for one of the indices
         # optimize this by only copying valid indices (active token prefix)
-        num_tokens1 = self.num_tokens_no_spec[i1] + len(self.spec_token_ids[i1])
-        num_tokens2 = self.num_tokens_no_spec[i2] + len(self.spec_token_ids[i2])
+        len_of_orig_i2 = self.num_tokens_no_spec[i1] + len(self.spec_token_ids[i1])
+        len_of_orig_i1 = self.num_tokens_no_spec[i2] + len(self.spec_token_ids[i2])
 
-        tmp_tokens = self.token_ids_cpu[i1, :num_tokens1].copy()
-        tmp_is_token_ids = self.is_token_ids[i1, :num_tokens1].copy()
+        tmp_tokens = self.token_ids_cpu[i1, :len_of_orig_i1].copy()
+        tmp_is_token_ids = self.is_token_ids[i1, :len_of_orig_i1].copy()
 
-        self.token_ids_cpu[i1, :num_tokens2] = self.token_ids_cpu[i2, :num_tokens2]
-        self.is_token_ids[i1, :num_tokens2] = self.is_token_ids[i2, :num_tokens2]
-        if num_tokens1 > num_tokens2:
-            self.is_token_ids[i1, num_tokens2:num_tokens1] = False
+        self.token_ids_cpu[i1, :len_of_orig_i2] = self.token_ids_cpu[i2, :len_of_orig_i2]
+        self.is_token_ids[i1, :len_of_orig_i2] = self.is_token_ids[i2, :len_of_orig_i2]
+        if len_of_orig_i1 > len_of_orig_i2:
+            self.is_token_ids[i1, len_of_orig_i2:len_of_orig_i1] = False
 
-        self.token_ids_cpu[i2, :num_tokens1] = tmp_tokens
-        self.is_token_ids[i2, :num_tokens1] = tmp_is_token_ids
-        if num_tokens2 > num_tokens1:
-            self.is_token_ids[i2, num_tokens1:num_tokens2] = False
+        self.token_ids_cpu[i2, :len_of_orig_i1] = tmp_tokens
+        self.is_token_ids[i2, :len_of_orig_i1] = tmp_is_token_ids
+        if len_of_orig_i2 > len_of_orig_i1:
+            self.is_token_ids[i2, len_of_orig_i1:len_of_orig_i2] = False
 
         # Swap prompt embeddings if they exist
         embeds_i1 = self.req_prompt_embeds.get(i1)
