@@ -292,6 +292,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         has_col_major_scales: bool = False,
         is_e8m0: bool = False,
         match_rocm_aiter: bool = False,
+        is_tma_aligned: bool = False,
     ) -> None:
         if enabled is None:
             enabled = QuantFP8.enabled()
@@ -301,6 +302,7 @@ class MatcherQuantFP8(MatcherCustomOp):
         self.has_col_major_scales = has_col_major_scales
         self.is_e8m0 = is_e8m0
         self.match_rocm_aiter = match_rocm_aiter
+        self.is_tma_aligned = is_tma_aligned
 
         if match_rocm_aiter:
             assert not quant_key.scale.group_shape.is_per_tensor(), (
@@ -336,6 +338,7 @@ class MatcherQuantFP8(MatcherCustomOp):
             quant_key.scale.group_shape,
             column_major_scales=has_col_major_scales,
             use_ue8m0=is_e8m0,
+            tma_aligned_scales=self.is_tma_aligned,
             compile_native=False,
         )
 
@@ -367,8 +370,11 @@ class MatcherQuantFP8(MatcherCustomOp):
         )
 
         if self.quant_key.scale.group_shape.is_per_group():
-            assert scale is None
-            scale = self.make_scale(input, transposed=self.has_col_major_scales)
+            # for tma_aligned, the scale must be passed to forward_custom
+            # tma_aligned fusion then matches by custom op arguments
+            if not self.is_tma_aligned:
+                assert scale is None
+                scale = self.make_scale(input, transposed=self.has_col_major_scales)
 
             finfo = torch.finfo(self.quant_key.dtype)
             fp8_min = finfo.min
@@ -384,6 +390,8 @@ class MatcherQuantFP8(MatcherCustomOp):
                 fp8_min=fp8_min,
                 fp8_max=fp8_max,
                 scale_ue8m0=self.is_e8m0,
+                dummy_is_scale_transposed=self.has_col_major_scales,
+                dummy_is_tma_aligned=self.is_tma_aligned,
             )
             return result, scale
 
