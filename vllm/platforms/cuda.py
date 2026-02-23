@@ -352,7 +352,7 @@ class CudaPlatformBase(Platform):
             if excluded:
                 names = ", ".join(b.name for b in excluded)
                 logger.warning(
-                    "--block-size %d excluded higher-priority backend(s) "
+                    "--block-size %d precluded higher-priority backend(s) "
                     "%s. Using %s instead, which may result in reduced "
                     "performance. Consider removing --block-size to "
                     "auto-select the optimal block size.",
