@@ -3,7 +3,7 @@
 """Sampling parameters for text generation."""
 
 import copy
-import json
+import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -791,7 +791,7 @@ class SamplingParams(
                 skip_guidance = False
                 if so_params.json:
                     if isinstance(so_params.json, str):
-                        schema = json.loads(so_params.json)
+                        schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
