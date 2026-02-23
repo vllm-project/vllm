@@ -32,3 +32,6 @@ class FpKernel(w8a8_linear.FpKernel):
         weight = layer.weight
         weight_scale = layer.weight_scale
         return torch.ops._xpu_C.fp8_gemm_w8a16(x, weight, weight_scale, bias)
+
+    def apply_scaled_mm(self, *, A, B, out_dtype, As, Bs, bias, output_shape):
+        pass
