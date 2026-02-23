@@ -8,7 +8,6 @@ import pytest
 import torch
 from safetensors import safe_open
 
-from tests.utils import large_gpu_mark
 from vllm import LLM, ModelRegistry, SamplingParams
 
 
@@ -83,7 +82,6 @@ def register_predictable_model():
     yield
 
 
-@large_gpu_mark(min_gb=16)
 def test_extract_hidden_states_with_predictable_dummy_model(
     predictable_llama_config_path, tmp_path
 ):
