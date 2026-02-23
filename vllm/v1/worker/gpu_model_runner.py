@@ -3384,7 +3384,7 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
-            if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+            if envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
                 torch.cuda.nvtx.range_push(
                     f"execute_model: reqs={num_reqs}, tokens={num_tokens_unpadded}"
                 )
@@ -3573,13 +3573,13 @@ class GPUModelRunner(
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
-                    if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+                    if envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
                         torch.cuda.nvtx.range_pop()
                     return hidden_states
 
                 if self.is_pooling_model:
                     # Return the pooling output.
-                    if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+                    if envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
                         torch.cuda.nvtx.range_pop()
                     return self._pool(
                         hidden_states,
@@ -3633,7 +3633,7 @@ class GPUModelRunner(
             slot_mappings,
         )
         self.kv_connector_output = kv_connector_output
-        if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+        if envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
             torch.cuda.nvtx.range_pop()
         return None
 
