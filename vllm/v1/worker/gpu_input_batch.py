@@ -558,7 +558,9 @@ class InputBatch:
         tmp_tokens = self.token_ids_cpu[i1, :len_of_orig_i1].copy()
         tmp_is_token_ids = self.is_token_ids[i1, :len_of_orig_i1].copy()
 
-        self.token_ids_cpu[i1, :len_of_orig_i2] = self.token_ids_cpu[i2, :len_of_orig_i2]
+        self.token_ids_cpu[i1, :len_of_orig_i2] = self.token_ids_cpu[
+            i2, :len_of_orig_i2
+        ]
         self.is_token_ids[i1, :len_of_orig_i2] = self.is_token_ids[i2, :len_of_orig_i2]
         if len_of_orig_i1 > len_of_orig_i2:
             self.is_token_ids[i1, len_of_orig_i2:len_of_orig_i1] = False
