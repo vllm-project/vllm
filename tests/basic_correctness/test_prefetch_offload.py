@@ -1,21 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Test prefetch offloading correctness with DeepSeek V2 model."""
+"""Test prefetch offloading correctness with Llama model."""
 
 from ..utils import compare_two_settings
 
 
-def test_prefetch_offload_deepseek():
-    """Test prefetch CPU offloading with DeepSeek-V2-Lite.
+def test_prefetch_offload_llama():
+    """Test prefetch CPU offloading with Llama-3.2-1B-Instruct.
 
     Compares outputs between:
     1. Baseline (no offloading)
     2. Prefetch offloading (group_size=8, num_in_group=2, prefetch_step=1)
 
-    This tests prefetching-based offloading on a MoE model.
+    This tests prefetching-based offloading on a dense model.
     """
     compare_two_settings(
-        "deepseek-ai/DeepSeek-V2-Lite",
+        "meta-llama/Llama-3.2-1B-Instruct",
         [
             # Prefetch offloading configuration
             "--offload-group-size",
@@ -24,10 +24,10 @@ def test_prefetch_offload_deepseek():
             "2",
             "--offload-prefetch-step",
             "1",
-            # Selective offloading: only MoE expert weights
+            # Selective offloading: only MLP weights
             "--offload-params",
-            "w13_weight",
-            "w2_weight",
+            "gate_up_proj",
+            "down_proj",
             # torch.compile is automatically disabled when prefetch offloading
             # is enabled (via enable_if in @support_torch_compile decorator)
         ],
