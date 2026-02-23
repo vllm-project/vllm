@@ -28,8 +28,6 @@ def test_prefetch_offload_llama():
             "--offload-params",
             "gate_up_proj",
             "down_proj",
-            # torch.compile is automatically disabled when prefetch offloading
-            # is enabled (via enable_if in @support_torch_compile decorator)
         ],
         [],  # Baseline: no offloading
     )
