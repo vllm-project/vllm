@@ -277,11 +277,13 @@ def select_fp8_moe_backend(
                     activation_format,
                 )
 
-            if supported:
-                logger.info_once(_make_log_backend(backend), scope="local")
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason), scope="local")
+                if supported:
+                    logger.info_once(_make_log_backend(backend), scope="local")
+                    return backend, k_cls
+                else:
+                    logger.debug_once(
+                        _make_log_unsupported(backend, reason), scope="local"
+                    )
 
             raise NotImplementedError(
                 "Found VLLM_USE_FLASHINFER_MOE_FP8=1, but no "
