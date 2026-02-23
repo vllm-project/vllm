@@ -89,11 +89,12 @@ class TTModelInput:
     # allowed_token_ids_mask: list of (num_reqs, vocab_size) bool tensors
     allowed_token_ids_mask_list: list[torch.Tensor | None]
     # list of dicts mapping req_index -> generator for each DP rank
-    # only set for host sampling
+    # only gathered when host sampling
     generators_list: list[dict[int, torch.Generator]]
+    # max_num_logprobs: per-DP-rank list of max logprobs values
+    # only gathered when host sampling
+    max_num_logprobs: list[int]
 
-    # max_num_logprobs: max logprobs value across all requests
-    max_num_logprobs: int
     # Optional: tokens for sampling with penalties during decode
     prompt_tokens: torch.Tensor | None = None
     output_tokens: torch.Tensor | None = None
@@ -722,7 +723,7 @@ class TTModelRunner:
             # Host-only sampling params - wrapped in lists for DP compatibility
             allowed_token_ids_mask_list=[allowed_token_ids_mask],
             bad_words_token_ids_list=[input_batch.sampling.bad_words_token_ids],
-            max_num_logprobs=input_batch.max_num_logprobs,
+            max_num_logprobs=[input_batch.max_num_logprobs],
             logitsprocs_list=[input_batch.sampling.logitsprocs],
             generators_list=[generators],
         )
@@ -872,7 +873,7 @@ class TTModelRunner:
             host_only_sample_params = {
                 "allowed_token_ids_mask": model_input.allowed_token_ids_mask_list[0],
                 "bad_words_token_ids": model_input.bad_words_token_ids_list[0],
-                "max_num_logprobs": model_input.max_num_logprobs,
+                "max_num_logprobs": model_input.max_num_logprobs[0],
                 "logitsprocs": model_input.logitsprocs_list[0],
                 "generators": model_input.generators_list[0],
             }
@@ -929,13 +930,13 @@ class TTModelRunner:
         allowed_token_ids_mask_list: list[torch.Tensor | None] = []
         bad_words_token_ids_list: list[dict[int, list[list[int]]]] = []
         logitsprocs_list: list[LogitsProcessors | None] = []
-        max_num_logprobs: int = 0
+        max_num_logprobs: list[int] = []
         generators_list: list[dict[int, torch.Generator]] = []
 
         if is_decode:
             # For decode, given gathered flattened tensors from all DP ranks.
             # Ints: [toks(B), positions(B), block_tables(B*W),
-            #        bs(1), top_k(B), seed(B)]
+            #        bs(1), top_k(B), seed(B), enable_log_probs(B)]
             #   - If any_structured_inputs, also has at the end of the list:
             #     [has_structured_inputs(1), bitmasks(B*bitmask_size)]
             # Floats: [temperature(B), top_p(B), presence_penalty(B),
@@ -1023,22 +1024,24 @@ class TTModelRunner:
                             rank_params.get("allowed_token_ids_mask")
                         )
                         bad_words_token_ids_list.append(
-                            rank_params.get("bad_words_token_ids", {})
+                            rank_params.get("bad_words_token_ids")
                         )
                         logitsprocs_list.append(rank_params.get("logitsprocs"))
-                        rank_logprobs = rank_params.get("max_num_logprobs")
-                        max_num_logprobs = max(max_num_logprobs, rank_logprobs)
+                        max_num_logprobs.append(rank_params.get("max_num_logprobs"))
                         generators_list.append(rank_params.get("generators", {}))
                     else:
                         allowed_token_ids_mask_list.append(None)
                         bad_words_token_ids_list.append({})
                         logitsprocs_list.append(None)
+                        max_num_logprobs.append(0)
                         generators_list.append({})
             else:
                 # No host-only sampling params - create empty lists
+                # Happens if we didn't skipped gather (when device sampling)
                 allowed_token_ids_mask_list = [None] * world
                 bad_words_token_ids_list = [{}] * world
                 logitsprocs_list = [None] * world
+                max_num_logprobs = [0] * world
                 generators_list = [{}] * world
 
             off_f = 0
@@ -1136,12 +1139,13 @@ class TTModelRunner:
                     )
                     bad_words_token_ids_list.append(mi.bad_words_token_ids_list[0])
                     logitsprocs_list.append(mi.logitsprocs_list[0])
-                    max_num_logprobs = max(max_num_logprobs, mi.max_num_logprobs)
+                    max_num_logprobs.append(mi.max_num_logprobs[0])
                     generators_list.append(mi.generators_list[0])
                 else:
                     allowed_token_ids_mask_list.append(None)
                     bad_words_token_ids_list.append({})
                     logitsprocs_list.append(None)
+                    max_num_logprobs.append(0)
                     generators_list.append({})
 
             input_tokens = torch.cat(input_tokens_list, dim=0)
@@ -1455,7 +1459,10 @@ class TTModelRunner:
         # tt_out can be a tuple of (logits_or_tokens, logprobs) when device
         # sampling is enabled with logprobs. Extract both components.
         tt_log_probs = None
-        if perform_device_sampling and model_input.max_num_logprobs > 0:
+
+        # Always tensors - turned into lists only right before passing to model
+        assert isinstance(sampling_params.enable_log_probs, torch.Tensor)
+        if perform_device_sampling and sampling_params.enable_log_probs.any():
             assert isinstance(tt_out, tuple) and len(tt_out) == 2
             tt_out, tt_log_probs = tt_out
         elif isinstance(tt_out, tuple):
@@ -1595,7 +1602,7 @@ class TTModelRunner:
                 # Get host-only sampling params from model_input
                 # (per-rank lists).
                 # These are populated for both DP and non-DP cases.
-                rank_max_num_logprobs = model_input.max_num_logprobs
+                rank_max_num_logprobs = model_input.max_num_logprobs[dp_rank]
                 allowed_token_ids_mask = model_input.allowed_token_ids_mask_list[  # noqa: E501
                     dp_rank
                 ]
@@ -1641,7 +1648,10 @@ class TTModelRunner:
                 next_token_ids = tt_out[start : start + sz]
 
                 # Extract logprobs if available from device sampling
-                if model_input.max_num_logprobs:
+                # Always tensors - turned into lists only when passing to model
+                assert isinstance(sampling_params.enable_log_probs, torch.Tensor)
+                rank_enable_lp = sampling_params.enable_log_probs[start : start + sz]
+                if rank_enable_lp.any():
                     # Sanity check for if we correctly detect
                     # when logprobs are supported.
                     assert tt_log_probs is not None, (

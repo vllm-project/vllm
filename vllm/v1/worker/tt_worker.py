@@ -238,7 +238,7 @@ class TTWorker(WorkerBase):
                 has_penalties = int(not self.model_runner.input_batch.no_penalties)
                 reset_batch = int(model_input.reset_batch)
                 can_sample_device = int(model_input.perform_device_sampling)
-                needs_logprobs = int(model_input.max_num_logprobs is not None)
+                needs_logprobs = int(model_input.max_num_logprobs[0] > 0)
         max_blocks = model_input.block_tables.shape[1] if model_input else 0
         has_structured_input = (
             int(model_input.grammar_bitmask[0] is not None) if model_input else 0
