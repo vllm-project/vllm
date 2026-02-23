@@ -20,6 +20,7 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <torch/all.h>
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
