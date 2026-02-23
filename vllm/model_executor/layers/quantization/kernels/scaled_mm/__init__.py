@@ -201,15 +201,13 @@ def init_fp8_linear_kernel(
 
 
 def init_int8_linear_kernel(
-    is_channelwise: bool,
-    is_static_input_scheme: bool,
-    input_symmetric: bool,
+    activation_quant_key: QuantKey,
+    weight_quant_key: QuantKey,
     module_name: str,
 ) -> Int8ScaledMMLinearKernel:
     config = Int8ScaledMMLinearLayerConfig(
-        is_channelwise=is_channelwise,
-        is_static_input_scheme=is_static_input_scheme,
-        input_symmetric=input_symmetric,
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
     )
 
     kernel_type = choose_scaled_mm_linear_kernel(
