@@ -109,6 +109,11 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    use_local_argmax_reduction: bool = False
+    """Use vocab-parallel local argmax instead of all-gathering full logits
+    for draft token generation. Reduces communication from O(vocab_size) to
+    O(2 * tp_size) per token. Only applies to greedy draft selection in
+    non-tree speculation."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -749,6 +754,22 @@ class SpeculativeConfig:
                     f"Using models with different tokenizers can cause out-of-bounds "
                     f"errors during speculative decoding."
                 )
+
+    @property
+    def max_num_new_slots_for_drafting(self) -> int:
+        """
+        Calculate the maximum number of new slots that might be added to the batch
+        when drafting.
+        """
+        slots_per_req = 0  # for serial non-draft-model methods, no change needed
+        if self.parallel_drafting:
+            # For parallel drafting, we need one new slot per 'masked' token
+            slots_per_req = self.num_speculative_tokens - 1
+        if self.uses_draft_model():
+            # For draft model-based speculation, we need one new slot per request
+            # Since we do not slice the draft tokens
+            slots_per_req += 1
+        return slots_per_req
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
