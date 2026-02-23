@@ -13,6 +13,7 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
+
 from typing import Generic, Protocol, TypeVar
 
 import torch
@@ -120,16 +121,17 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
 
 _KernelT = TypeVar("_KernelT", bound=w8a8.Kernel)
 _KernelConfigT = TypeVar("_KernelConfigT", bound=w8a8.KernelConfig)
-_KernelModuleT = TypeVar("_KernelModuleT", _FpW8A8KernelModule, _IntW8A8KernelModule)
 
 
 def choose_w8a8_linear_kernel(
     config: _KernelConfigT,
-    possible_kernel_modules: dict[PlatformEnum, list[_KernelModuleT]],
-    kernel_attr: str,  # "FpKernel" or "IntKernel"
+    kernel_classes: list[type[_KernelT]],
     compute_capability: int | None = None,
     force_kernel: type[_KernelT] | None = None,
 ) -> type[_KernelT]:
+    """
+    Choose a w8a8 linear kernel implementation.
+    """
     if compute_capability is None:
         _cc = current_platform.get_device_capability()
         if _cc is not None:
@@ -151,8 +153,7 @@ def choose_w8a8_linear_kernel(
         )
         failure_reason_list.extend(failure_reason)
 
-    for kernel_module in possible_kernel_modules[current_platform._enum]:
-        kernel_class = getattr(kernel_module, kernel_attr)
+    for kernel_class in kernel_classes:
         maybe_kernel, failure_reason = kernel_class.try_select(
             config, compute_capability
         )
@@ -164,6 +165,24 @@ def choose_w8a8_linear_kernel(
         "Failed to find a kernel that can implement the w8a8 linear layer. "
         "Reasons: \n" + "\n".join(failure_reason_list)
     )
+
+
+def choose_fp_w8a8_linear_kernel(
+    config: w8a8.FpKernelConfig,
+    compute_capability: int | None = None,
+    force_kernel: type[w8a8.FpKernel] | None = None,
+) -> type[w8a8.FpKernel]:
+    kernel_classes = [m.FpKernel for m in _POSSIBLE_FP_W8A8_KERNEL_MODULES[current_platform._enum]]
+    return choose_w8a8_linear_kernel(config, kernel_classes, compute_capability, force_kernel)
+
+
+def choose_int_w8a8_linear_kernel(
+    config: w8a8.IntKernelConfig,
+    compute_capability: int | None = None,
+    force_kernel: type[w8a8.IntKernel] | None = None,
+) -> type[w8a8.IntKernel]:
+    kernel_classes = [m.IntKernel for m in _POSSIBLE_INT_W8A8_KERNEL_MODULES[current_platform._enum]]
+    return choose_w8a8_linear_kernel(config, kernel_classes, compute_capability, force_kernel)
 
 
 def create_w8a8_fp_kernel(
@@ -182,8 +201,8 @@ def create_w8a8_fp_kernel(
         out_dtype=out_dtype,
     )
 
-    kernel_type = choose_w8a8_linear_kernel(
-        config, _POSSIBLE_FP_W8A8_KERNEL_MODULES, "FpKernel", force_kernel=force_kernel
+    kernel_type = choose_fp_w8a8_linear_kernel(
+        config, force_kernel=force_kernel
     )
 
     if module_name:
@@ -216,11 +235,8 @@ def create_w8a8_int_kernel(
         input_symmetric=input_symmetric,
     )
 
-    kernel_type = choose_w8a8_linear_kernel(
-        config,
-        _POSSIBLE_INT_W8A8_KERNEL_MODULES,
-        "IntKernel",
-        force_kernel=force_kernel,
+    kernel_type = choose_int_w8a8_linear_kernel(
+        config, force_kernel=force_kernel
     )
 
     if module_name:
