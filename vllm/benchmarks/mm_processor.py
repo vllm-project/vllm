@@ -60,9 +60,9 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
     Example:
         {
             'request-123': {
-                'apply_hf_processor_secs': 0.45,
                 'get_mm_hashes_secs': 0.02,
                 'get_cache_missing_items_secs': 0.01,
+                'apply_hf_processor_secs': 0.45,
                 'merge_mm_kwargs_secs': 0.01,
                 'apply_prompt_updates_secs': 0.03,
                 'preprocessor_total_secs': 0.51,
