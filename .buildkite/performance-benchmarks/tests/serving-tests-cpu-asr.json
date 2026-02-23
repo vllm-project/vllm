@@ -1,0 +1,37 @@
+{
+  "defaults": {
+    "qps_list": [
+      "inf"
+    ],
+    "max_concurrency_list": [12, 16, 24, 32, 64, 128, 200],
+    "server_environment_variables": {
+      "VLLM_RPC_TIMEOUT": 100000,
+      "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120
+    },
+    "server_parameters": {
+      "dtype": "bfloat16",
+      "model": "openai/whisper-large-v3-turbo"
+    },
+    "client_parameters": {
+      "model": "openai/whisper-large-v3-turbo",
+      "backend": "openai-audio",
+      "endpoint": "/v1/audio/transcriptions",
+      "dataset_name": "hf",
+      "dataset_path": "openslr/librispeech_asr",
+      "hf_subset": "clean",
+      "hf_split": "test",
+      "no_stream": "",
+      "no_oversample": "",
+      "num_prompts": 200
+    }
+  },
+  "tests": [
+    {
+      "test_name": "serving_whisper_large_v3_turbo_librispeech_clean_tp1",
+      "server_parameters": {
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {}
+    }
+  ]
+}
