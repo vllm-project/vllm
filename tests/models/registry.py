@@ -546,6 +546,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
 _EMBEDDING_EXAMPLE_MODELS = {
     # [Text-only]
     "BertModel": _HfExamplesInfo("BAAI/bge-base-en-v1.5"),
+    "ErnieModel": _HfExamplesInfo("shibing624/text2vec-base-chinese-sentence"),
     "BertSpladeSparseEmbeddingModel": _HfExamplesInfo(
         "naver/splade-v3",
         hf_overrides={"architectures": ["BertSpladeSparseEmbeddingModel"]},
@@ -659,6 +660,9 @@ _REWARD_EXAMPLE_MODELS = {
 
 _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
     "BertForTokenClassification": _HfExamplesInfo("boltuix/NeuroBERT-NER"),
+    "ErnieForTokenClassification": _HfExamplesInfo(
+        "gyr66/Ernie-3.0-base-chinese-finetuned-ner"
+    ),
     "ModernBertForTokenClassification": _HfExamplesInfo(
         "disham993/electrical-ner-ModernBERT-base"
     ),
@@ -670,6 +674,9 @@ _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
     ),
     "GPT2ForSequenceClassification": _HfExamplesInfo(
         "nie3e/sentiment-polish-gpt2-small"
+    ),
+    "ErnieForSequenceClassification": _HfExamplesInfo(
+        "Forrest20231206/ernie-3.0-base-zh-cls"
     ),
     "GteNewForSequenceClassification": _HfExamplesInfo(
         "Alibaba-NLP/gte-multilingual-reranker-base",
