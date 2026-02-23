@@ -70,6 +70,37 @@ def _get_token_offs(
         )
 
 
+@triton.jit
+def _get_c_ptrs(
+    cur_c_ptr,
+    lora_id,
+    pid_m,
+    offs,
+    offs_token,
+    offs_cn,
+    stride_cm,
+    stride_cn,
+    EM: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr,
+    sort_c: tl.constexpr,
+):
+    # When sort_c is true, store the output in c_ptr using token order defined
+    # in sorted_token_ids_ptr; otherwise, use the original token order from the prompt
+    if sort_c:
+        offs_token_id = pid_m * BLOCK_SIZE_M + offs
+        c_ptrs = (
+            cur_c_ptr
+            + lora_id * EM * stride_cm
+            + stride_cm * offs_token_id[:, None]
+            + stride_cn * offs_cn[None, :]
+        )
+    else:
+        c_ptrs = (
+            cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
+        )
+    return c_ptrs
+
+
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
@@ -266,21 +297,11 @@ def _fused_moe_lora_kernel(
 
     if USE_TMA and a_desc is not None:
         # Expand path - with TMA enabled, load from A using TMA descriptor
-        pid_m_offset = 1 if naive_block_assignment else BLOCK_SIZE_M
-        per_lora_tokens = tl.cdiv(EM, top_k_num) * top_k_num
-        if naive_block_assignment:
-            # 4D buffer: (num_slices, M_padded, top_k, lora_rank)
-            offs_am = (
-                slice_id * per_lora_tokens
-                + pid_m * pid_m_offset // token_mapping_factor
-            )
-        else:
-            # 5D buffer: (num_slices, max_loras, M_padded, top_k, lora_rank)
-            offs_am = (
-                slice_id * max_loras * per_lora_tokens
-                + lora_id * per_lora_tokens
-                + pid_m * pid_m_offset // token_mapping_factor
-            )
+        offs_am = (
+            slice_id * max_loras * EM
+            + lora_id * EM
+            + pid_m * BLOCK_SIZE_M // token_mapping_factor
+        )
         offs_ak = pid_sk * BLOCK_SIZE_K
     else:
         # Shrink path - load hidden states based on order defined in
@@ -320,7 +341,6 @@ def _fused_moe_lora_kernel(
         # GDC launch dependents hints the runtime system to launch dependent kernels.
         tl.extra.cuda.gdc_launch_dependents()
 
-    # accumulator
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     if USE_GDC and not IS_PRIMARY:
@@ -363,21 +383,19 @@ def _fused_moe_lora_kernel(
     accumulator = accumulator.to(c_ptr.dtype.element_ty)
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-
-    # When sort_c is true, store the output in c_ptr using token order defined
-    # in sorted_token_ids_ptr; otherwise, use the original token order from the prompt
-    if sort_c:
-        offs_token_id = pid_m * BLOCK_SIZE_M + offs
-        c_ptrs = (
-            cur_c_ptr
-            + lora_id * tl.cdiv(EM, top_k_num) * top_k_num * stride_cm
-            + stride_cm * offs_token_id[:, None]
-            + stride_cn * offs_cn[None, :]
-        )
-    else:
-        c_ptrs = (
-            cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
-        )
+    c_ptrs = _get_c_ptrs(
+        cur_c_ptr,
+        lora_id,
+        pid_m,
+        offs,
+        offs_token,
+        offs_cn,
+        stride_cm,
+        stride_cn,
+        EM,
+        BLOCK_SIZE_M,
+        sort_c,
+    )
     c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
 
     if SPLIT_K == 1:
@@ -585,10 +603,11 @@ def _fused_moe_lora_expand(
     a_desc = None
     b_desc = None
     if use_tma:
-        a_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
-            a_intermediate_cache1,
-            [expand_config["BLOCK_SIZE_M"], expand_config["BLOCK_SIZE_K"]],
-        )
+        if sorted_token_ids is not None:
+            a_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
+                a_intermediate_cache1,
+                [expand_config["BLOCK_SIZE_M"], expand_config["BLOCK_SIZE_K"]],
+            )
         if num_slices == 1:
             b_desc = triton.tools.tensor_descriptor.TensorDescriptor.from_tensor(
                 lora_b_stacked[0],
@@ -723,7 +742,7 @@ def _fused_moe_lora(
 
     intermediate_cache_shape = (
         num_slices,
-        triton.cdiv(EM, top_k_num),
+        M,
         top_k_num,
         max_lora_rank,
     )
@@ -738,8 +757,8 @@ def _fused_moe_lora(
         if sorted_token_ids is not None:
             intermediate_cache_shape = (
                 num_slices,
-                sorted_token_ids.shape[0] * triton.cdiv(EM, top_k_num),
-                top_k_num,
+                sorted_token_ids.shape[0],
+                EM,
                 max_lora_rank,
             )
 
