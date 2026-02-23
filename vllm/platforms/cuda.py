@@ -185,6 +185,8 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        default_block_size = 16
+
         cache_config = vllm_config.cache_config
         if cache_config.block_size is not None:
             # User specified --block-size; keep it.
@@ -195,7 +197,7 @@ class CudaPlatformBase(Platform):
         # Skip hybrid models — their block_size is managed by
         # HybridAttentionMambaModelConfig.
         if model_config is None or model_config.is_hybrid:
-            cache_config.block_size = 16
+            cache_config.block_size = default_block_size
             return
 
         from vllm.config.vllm import (
@@ -211,14 +213,14 @@ class CudaPlatformBase(Platform):
             AttentionLayerBase,
         )
         if not attn_layers:
-            cache_config.block_size = 16
+            cache_config.block_size = default_block_size
             return
 
         first_layer = next(iter(attn_layers.values()))
         backend_cls = first_layer.get_attn_backend()
         with set_current_vllm_config(vllm_config):
-            preferred = backend_cls.get_preferred_block_size(16)
-        if preferred != 16:
+            preferred = backend_cls.get_preferred_block_size(default_block_size)
+        if preferred != default_block_size:
             logger.info(
                 "Setting kv cache block size to %d for %s backend.",
                 preferred,
