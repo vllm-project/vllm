@@ -215,7 +215,7 @@ class SiglipMultiModalProcessor(BaseMultiModalProcessor[SiglipProcessingInfo]):
             # only contain the dummy image tokens
             inputs.tokenization_kwargs = {
                 **inputs.tokenization_kwargs,
-                "tokenization_kwargs": False,
+                "add_special_tokens": False,
             }
 
         return super().apply(inputs, timing_ctx)
