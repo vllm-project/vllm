@@ -925,9 +925,14 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
+
         if max_pixels is None:
             image_processor = self.get_image_processor()
-            max_pixels = image_processor.size["longest_edge"]
+
+            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+            size = mm_kwargs.get("size", image_processor.size)
+            max_pixels = size["longest_edge"]
+
         unit = patch_size * merge_size
         max_seq_len = max_pixels // (unit * unit)
 
@@ -1027,22 +1032,18 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        mm_processor_kwargs = mm_processor_kwargs or {}
-        target_width, target_height = self.info.get_image_size_with_most_features(
-            max_pixels=mm_processor_kwargs.get("max_pixels", None)
-        )
+        target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(

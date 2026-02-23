@@ -195,6 +195,7 @@ def get_text_token_prompts(
             inputs = dummy_inputs.get_dummy_processor_inputs(
                 model_config.max_model_len,
                 mm_counts,
+                mm_options={},
             )
             text_prompt = None
             token_prompt = (
@@ -224,6 +225,7 @@ def get_text_token_prompts(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
+            mm_options={},
         )
         assert isinstance(inputs.prompt, str)
 
