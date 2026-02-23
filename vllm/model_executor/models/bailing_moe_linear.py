@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
 import math
+import os
 from collections.abc import Iterable
 
 import torch
@@ -327,11 +328,14 @@ class BailingMoeV25(nn.Module):
     ):
         super().__init__()
 
+        self.layer_id = layer_id
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.num_experts = config.num_experts
         self.top_k = config.num_experts_per_tok
-        self.norm_expert_prob = getattr(config, "norm_topk_prob", False)
+        norm_topk_prob = getattr(config, "norm_topk_prob", None)
+        # Ring-2.5 reference implementations normalize routing weights by default.
+        self.norm_expert_prob = True if norm_topk_prob is None else bool(norm_topk_prob)
         self.hidden_size = config.hidden_size
         self.quant_config = quant_config
         self.num_shared_experts = config.num_shared_experts
@@ -343,7 +347,7 @@ class BailingMoeV25(nn.Module):
 
         router_dtype = getattr(config, "router_dtype", None)
         if router_dtype is None:
-            self.router_dtype = None
+            self.router_dtype = torch.float32
         elif router_dtype == "fp32":
             self.router_dtype = torch.float32
         else:
@@ -355,6 +359,16 @@ class BailingMoeV25(nn.Module):
             params_dtype=self.router_dtype,
             prefix=f"{prefix}.gate",
         )
+        correction_bias = self.gate.expert_bias if self.gate.expert_bias is not None else None
+        if self.score_function is not None:
+            assert (
+                self.score_function == "softmax" and correction_bias is None
+            ) or (
+                self.score_function == "sigmoid" and correction_bias is not None
+            ), (
+                "score_function and correction_bias should be "
+                "(softmax, None) or (sigmoid, not None)"
+            )
 
         # Shared experts (using BailingMLP)
         if self.num_shared_experts > 0:
@@ -385,19 +399,88 @@ class BailingMoeV25(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.experts",
             scoring_func=self.score_function,
+            e_score_correction_bias=correction_bias,
             num_expert_group=self.n_group,
             topk_group=self.topk_group,
             use_grouped_topk=self.use_grouped_topk,
             router_logits_dtype=self.router_dtype,
         )
 
+    def _should_dump_debug_moe(self, num_tokens: int) -> bool:
+        debug_dir = os.getenv("VLLM_BAILING_DEBUG_IO_DIR", "").strip()
+        if not debug_dir:
+            return False
+        max_tokens = int(os.getenv("VLLM_BAILING_DEBUG_MAX_TOKENS", "64"))
+        if num_tokens == 0 or num_tokens > max_tokens:
+            return False
+        ids_path = os.path.join(debug_dir, "vllm_input_ids.pt")
+        if not os.path.exists(ids_path):
+            return False
+        layer_ids_env = os.getenv("VLLM_BAILING_DEBUG_LAYER_IDS", "").strip()
+        if layer_ids_env:
+            try:
+                layer_ids = {int(x.strip()) for x in layer_ids_env.split(",") if x.strip()}
+            except ValueError:
+                layer_ids = set()
+            if self.layer_id not in layer_ids:
+                return False
+        if get_tensor_model_parallel_rank() != 0:
+            return False
+        return True
+
+    def _save_debug_moe_tensor(self, name: str, tensor: torch.Tensor, num_tokens: int) -> None:
+        if not self._should_dump_debug_moe(num_tokens):
+            return
+        debug_dir = os.getenv("VLLM_BAILING_DEBUG_IO_DIR", "").strip()
+        os.makedirs(debug_dir, exist_ok=True)
+        phase = "prefill" if num_tokens > 1 else "decode"
+        dump_path = os.path.join(
+            debug_dir, f"vllm_{phase}_layer{self.layer_id:02d}_moe_{name}.pt"
+        )
+        if not os.path.exists(dump_path):
+            torch.save(tensor.detach().contiguous().cpu(), dump_path)
+        cfg_path = os.path.join(
+            debug_dir, f"vllm_{phase}_layer{self.layer_id:02d}_moe_router_cfg.pt"
+        )
+        if not os.path.exists(cfg_path):
+            routed_scaling = float(
+                getattr(self.experts.router, "routed_scaling_factor", -1.0)
+            )
+            renormalize = float(
+                bool(getattr(self.experts.router, "renormalize", False))
+            )
+            num_expert_group = float(
+                getattr(self.experts.router, "num_expert_group", -1) or -1
+            )
+            topk_group = float(getattr(self.experts.router, "topk_group", -1) or -1)
+            torch.save(
+                torch.tensor(
+                    [routed_scaling, renormalize, num_expert_group, topk_group],
+                    dtype=torch.float32,
+                ),
+                cfg_path,
+            )
+
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         num_tokens, hidden_size = hidden_states.shape
-        hidden_states = hidden_states.view(-1, hidden_size)
+        # Ensure contiguous token-major layout before router/projections.
+        hidden_states = hidden_states.contiguous().view(-1, hidden_size)
 
         # router_logits: (num_tokens, n_experts)
         router_logits = self.gate(hidden_states.to(self.router_dtype))
         router_logits = router_logits.to(hidden_states.dtype)
+        self._save_debug_moe_tensor("router_logits", router_logits, num_tokens)
+        if self._should_dump_debug_moe(num_tokens):
+            try:
+                topk_weights, topk_ids = self.experts.router.select_experts(
+                    hidden_states=hidden_states,
+                    router_logits=router_logits,
+                )
+                self._save_debug_moe_tensor("topk_weights", topk_weights, num_tokens)
+                self._save_debug_moe_tensor("topk_ids", topk_ids, num_tokens)
+            except Exception:
+                # Keep debug dump best-effort to avoid impacting inference.
+                pass
 
         final_hidden_states = self.experts(
             hidden_states=hidden_states, router_logits=router_logits
@@ -634,12 +717,22 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         )
 
         # use fp32 rotary embedding
+        rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
+        if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
+            rope_parameters["rope_theta"] = getattr(config, "rope_theta")
+        rope_scaling = getattr(config, "rope_scaling", None)
+        if isinstance(rope_scaling, dict):
+            rope_scaling = copy.deepcopy(rope_scaling)
+            if "type" in rope_scaling and "rope_type" not in rope_scaling:
+                rope_scaling["rope_type"] = rope_scaling.pop("type")
+            rope_parameters.update(rope_scaling)
+
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
             is_neox_style=True,
             dtype=torch.float32,
-            rope_parameters=getattr(config, "rope_parameters", None),
+            rope_parameters=rope_parameters or None,
         )
 
         # Build slope tensor for linear attention decay
@@ -737,8 +830,17 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         else:
             num_actual_tokens = hidden_states.shape[0]
 
+        # DEBUG: Layer 0 tracing
+        save_debug = (
+            get_tensor_model_parallel_rank() == 0
+            and self.layer_id == 0
+            and num_actual_tokens > 1
+        )
+        
         # QKV projection
         qkv, _ = self.qkv_proj(hidden_states[:num_actual_tokens])
+        if save_debug and num_actual_tokens <= 10:
+            torch.save(qkv.cpu(), "/tmp/l0_qkv.pt")
 
         # use rotary_emb support fp32
         qkv = qkv.to(torch.float32)
@@ -751,6 +853,10 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
             [self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank],
             dim=-1,
         )
+        if save_debug and num_actual_tokens <= 10:
+            torch.save(q.cpu(), "/tmp/l0_q.pt")
+            torch.save(k.cpu(), "/tmp/l0_k.pt")
+            torch.save(v.cpu(), "/tmp/l0_v.pt")
 
         # Apply QK norm if needed
         if self.use_qk_norm:
@@ -770,21 +876,33 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
                 eps=self.rms_norm_eps,
                 is_rms_norm=True,
             )
+            if save_debug and num_actual_tokens <= 10:
+                torch.save(q.cpu(), "/tmp/l0_q_norm.pt")
+                torch.save(k.cpu(), "/tmp/l0_k_norm.pt")
             q = q.reshape(-1, self.q_size_per_rank)
             k = k.reshape(-1, self.kv_size_per_rank)
 
         # Apply rotary embeddings
         if self.linear_rope:
             q, k = self.rotary_emb(positions[:num_actual_tokens], q, k)
+            if save_debug and num_actual_tokens <= 10:
+                torch.save(q.cpu(), "/tmp/l0_q_rope.pt")
+                torch.save(k.cpu(), "/tmp/l0_k_rope.pt")
 
         # Reshape to [batch, heads, seq_len, head_dim]
         q = q.view((qkv.shape[0], self.tp_heads, self.head_dim))
         k = k.view((qkv.shape[0], self.tp_kv_heads, self.head_dim))
         v = v.view((qkv.shape[0], self.tp_kv_heads, self.head_dim))
+        if save_debug and num_actual_tokens <= 10:
+            torch.save(q.cpu(), "/tmp/l0_q_final.pt")
+            torch.save(k.cpu(), "/tmp/l0_k_final.pt")
+            torch.save(v.cpu(), "/tmp/l0_v_final.pt")
 
         # Apply scaling if using minimax backend
         if self.linear_scale:
             q = q * self.scaling
+            if save_debug and num_actual_tokens <= 10:
+                torch.save(q.cpu(), "/tmp/l0_q_scaled.pt")
 
         # Get KV cache and state indices
         if attn_metadata is not None:
@@ -815,6 +933,14 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
 
         # Compute attention
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
+        
+        # Debug: Save kv_cache and slope before attention
+        if save_debug and num_actual_tokens <= 10:
+            # Save the kv_cache slice for the first prefill
+            if not decode_only and num_prefills > 0:
+                first_slot = state_indices_tensor[num_decode_tokens]
+                torch.save(kv_cache[first_slot, ...].cpu(), "/tmp/l0_kv_cache.pt")
+            torch.save(self.tp_slope.cpu(), "/tmp/l0_slope.pt")
         if attn_metadata is None:
             hidden = torch.empty(
                 (q.shape[0], q.shape[1] * q.shape[2]), device=q.device, dtype=q.dtype
@@ -828,19 +954,30 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
                 hidden = self._decode_infer(
                     q, k, v, kv_cache, state_indices_tensor, attn_metadata
                 )
+        if save_debug and num_actual_tokens <= 10:
+            torch.save(hidden.cpu(), "/tmp/l0_attn.pt")
 
         # Apply group norm and gate (matching SGLang behavior)
         gate, _ = self.g_proj(hidden_states[:num_actual_tokens])
+        if save_debug and num_actual_tokens <= 10:
+            torch.save(gate.cpu(), "/tmp/l0_gate.pt")
+        
         if self.group_norm_size > 1:
             hidden = self.g_norm(hidden, gate)
         else:
             hidden = self.g_norm(hidden)
             hidden = F.sigmoid(gate) * hidden
+        
+        if save_debug and num_actual_tokens <= 10:
+            torch.save(hidden.cpu(), "/tmp/l0_gated.pt")
 
         hidden = hidden.to(hidden_states.dtype)
 
         # Output projection
-        output[:num_actual_tokens], _ = self.dense(hidden)
+        dense_out, _ = self.dense(hidden)
+        if save_debug and num_actual_tokens <= 10:
+            torch.save(dense_out.cpu(), "/tmp/l0_dense.pt")
+        output[:num_actual_tokens] = dense_out
 
     def _prefill_and_mix_infer(
         self, q, k, v, kv_cache, state_indices_tensor, attn_metadata
@@ -1072,6 +1209,49 @@ class BailingMoeV25DecoderLayer(nn.Module):
         self.input_layernorm = RMSNorm(self.hidden_size, eps=rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(self.hidden_size, eps=rms_norm_eps)
 
+    def _save_debug_layer_io(self, name: str, hidden_states: torch.Tensor) -> None:
+        debug_dir = os.getenv("VLLM_BAILING_DEBUG_IO_DIR", "").strip()
+        if not debug_dir:
+            return
+
+        layer_ids_env = os.getenv("VLLM_BAILING_DEBUG_LAYER_IDS", "").strip()
+        if layer_ids_env:
+            try:
+                layer_ids = {
+                    int(x.strip()) for x in layer_ids_env.split(",") if x.strip()
+                }
+            except ValueError:
+                layer_ids = set()
+            if self.layer_id not in layer_ids:
+                return
+        else:
+            num_layers_to_save = int(os.getenv("VLLM_BAILING_DEBUG_LAYERS", "10"))
+            if self.layer_id >= num_layers_to_save:
+                return
+
+        max_tokens = int(os.getenv("VLLM_BAILING_DEBUG_MAX_TOKENS", "64"))
+        if hidden_states.shape[0] == 0 or hidden_states.shape[0] > max_tokens:
+            return
+
+        tensor = hidden_states.detach().contiguous()
+        tp_size = get_tensor_model_parallel_world_size()
+        if tp_size > 1 and tensor.shape[-1] * tp_size == self.hidden_size:
+            from vllm.distributed.communication_op import tensor_model_parallel_all_gather
+
+            # Gather full hidden states for TP shards before dumping.
+            tensor = tensor_model_parallel_all_gather(tensor, dim=-1)
+
+        if get_tensor_model_parallel_rank() != 0:
+            return
+
+        os.makedirs(debug_dir, exist_ok=True)
+        phase = "prefill" if hidden_states.shape[0] > 1 else "decode"
+        dump_path = os.path.join(
+            debug_dir, f"vllm_{phase}_layer{self.layer_id:02d}_{name}.pt"
+        )
+        if not os.path.exists(dump_path):
+            torch.save(tensor.cpu(), dump_path)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -1079,6 +1259,8 @@ class BailingMoeV25DecoderLayer(nn.Module):
         attn_metadata: AttentionMetadata | None = None,
         residual: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        self._save_debug_layer_io("input", hidden_states)
+
         # Input layernorm
         if residual is None:
             residual = hidden_states
@@ -1098,20 +1280,25 @@ class BailingMoeV25DecoderLayer(nn.Module):
         else:
             # Full attention
             self_attention_output = self.self_attn(hidden_states, positions)
+        self._save_debug_layer_io("self_attn_out", self_attention_output)
 
         # Residual connection
         hidden_states = residual + self_attention_output
+        self._save_debug_layer_io("attn_residual", hidden_states)
 
         residual = hidden_states
 
         # Post attention layernorm
         hidden_states = self.post_attention_layernorm(hidden_states)
+        self._save_debug_layer_io("post_attn_norm", hidden_states)
 
         # MLP
         mlp_output = self.mlp(hidden_states)
+        self._save_debug_layer_io("mlp_out", mlp_output)
 
         # Residual connection
         hidden_states = residual + mlp_output
+        self._save_debug_layer_io("output", hidden_states)
 
         return hidden_states, None
 
@@ -1211,6 +1398,17 @@ class BailingMoeV25Model(nn.Module):
 
         if get_pp_group().is_first_rank:
             if inputs_embeds is None:
+                debug_dir = os.getenv("VLLM_BAILING_DEBUG_IO_DIR", "").strip()
+                if (
+                    debug_dir
+                    and input_ids is not None
+                    and (input_ids != 0).any()
+                    and get_tensor_model_parallel_rank() == 0
+                ):
+                    os.makedirs(debug_dir, exist_ok=True)
+                    ids_path = os.path.join(debug_dir, "vllm_input_ids.pt")
+                    if not os.path.exists(ids_path):
+                        torch.save(input_ids.detach().cpu(), ids_path)
                 hidden_states = self.word_embeddings(input_ids)
             else:
                 hidden_states = inputs_embeds
@@ -1303,7 +1501,79 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
-        return self.logits_processor(self.lm_head, hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
+
+        debug_dir = os.getenv("VLLM_BAILING_DEBUG_IO_DIR", "").strip()
+        if debug_dir and get_tensor_model_parallel_rank() == 0:
+            if hidden_states.shape[0] == 0:
+                return logits
+            ids_path = os.path.join(debug_dir, "vllm_input_ids.pt")
+            # Skip profile/dummy runs before real request input ids are seen.
+            if not os.path.exists(ids_path):
+                return logits
+            attn_metadata = None
+            # Profile/dummy runs may call compute_logits without forward context.
+            try:
+                forward_context = get_forward_context()
+                attn_metadata = getattr(forward_context, "attn_metadata", None)
+            except AssertionError:
+                attn_metadata = None
+
+            # Only dump when phase can be determined from runtime metadata.
+            phase = None
+            if isinstance(attn_metadata, dict):
+                total_prefill_tokens = 0
+                total_decode_tokens = 0
+                for metadata in attn_metadata.values():
+                    total_prefill_tokens += int(
+                        getattr(metadata, "num_prefill_tokens", 0) or 0
+                    )
+                    total_decode_tokens += int(
+                        getattr(metadata, "num_decode_tokens", 0) or 0
+                    )
+                if total_prefill_tokens > 0 and total_decode_tokens == 0:
+                    phase = "prefill"
+                elif total_decode_tokens > 0 and total_prefill_tokens == 0:
+                    phase = "decode"
+                elif total_decode_tokens > 0:
+                    phase = "decode"
+            elif attn_metadata is not None:
+                total_prefill_tokens = int(
+                    getattr(attn_metadata, "num_prefill_tokens", 0) or 0
+                )
+                total_decode_tokens = int(
+                    getattr(attn_metadata, "num_decode_tokens", 0) or 0
+                )
+                if total_prefill_tokens > 0 and total_decode_tokens == 0:
+                    phase = "prefill"
+                elif total_decode_tokens > 0:
+                    phase = "decode"
+            if phase is None:
+                prefill_path = os.path.join(debug_dir, "vllm_prefill_logits.pt")
+                decode_path = os.path.join(debug_dir, "vllm_decode_logits.pt")
+                if not os.path.exists(prefill_path):
+                    phase = "prefill"
+                elif not os.path.exists(decode_path):
+                    phase = "decode"
+                else:
+                    phase = "decode" if hidden_states.shape[0] == 1 else "prefill"
+
+            tensor = logits.detach().contiguous()
+            if tensor.ndim >= 2:
+                tp_size = get_tensor_model_parallel_world_size()
+                if tensor.shape[-1] * tp_size == self.config.vocab_size:
+                    from vllm.distributed.communication_op import (
+                        tensor_model_parallel_all_gather,
+                    )
+
+                    tensor = tensor_model_parallel_all_gather(tensor, dim=-1)
+
+            os.makedirs(debug_dir, exist_ok=True)
+            logits_path = os.path.join(debug_dir, f"vllm_{phase}_logits.pt")
+            if not os.path.exists(logits_path):
+                torch.save(tensor.cpu(), logits_path)
+
+        return logits
 
     def make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device
@@ -1518,32 +1788,72 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                         continue
                 # Handle MoE expert weights (including FP8 scales)
                 elif is_moe:
-                    for (
-                        param_name,
-                        weight_name,
-                        expert_id,
-                        shard_id,
-                    ) in expert_params_mapping:
-                        if weight_name not in original_name:
-                            continue
-                        name = original_name.replace(weight_name, param_name)
-                        if is_pp_missing_parameter(name, self):
-                            continue
-                        param = params_dict[name]
-                        weight_loader = param.weight_loader
-                        # Use name (param_name format like mlp.experts.w13_weight_scale)
-                        # This matches what FusedMoE.weight_loader expects
-                        weight_loader(
-                            param,
-                            loaded_weight,
-                            name,  # Use mapped param name for proper identification
-                            expert_id=expert_id,
-                            shard_id=shard_id,
+                    if (
+                        "mlp.experts.e_score_correction_bias" in original_name
+                        or "mlp.experts.expert_bias" in original_name
+                    ):
+                        # MoE router bias can appear under experts.* in checkpoints.
+                        # In this implementation it may exist as aliases under both
+                        # experts.* and gate.* names when remove_duplicate=False.
+                        mapped_name = original_name.replace(
+                            "mlp.experts.e_score_correction_bias", "mlp.gate.expert_bias"
                         )
-                        break
+                        mapped_name = mapped_name.replace(
+                            "mlp.experts.expert_bias", "mlp.gate.expert_bias"
+                        )
+
+                        # Prefer loading by checkpoint key if present in params_dict.
+                        if (
+                            original_name in params_dict
+                            and not is_pp_missing_parameter(original_name, self)
+                        ):
+                            name = original_name
+                        elif (
+                            mapped_name in params_dict
+                            and not is_pp_missing_parameter(mapped_name, self)
+                        ):
+                            name = mapped_name
+                        else:
+                            continue
+
+                        param = params_dict[name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+
+                        # Mark aliases as loaded to avoid false "unloaded" warnings.
+                        if original_name in params_dict:
+                            loaded_params.add(original_name)
+                        if mapped_name in params_dict:
+                            loaded_params.add(mapped_name)
                     else:
-                        # Not an expert weight that needs mapping
-                        continue
+                        for (
+                            param_name,
+                            weight_name,
+                            expert_id,
+                            shard_id,
+                        ) in expert_params_mapping:
+                            if weight_name not in original_name:
+                                continue
+                            name = original_name.replace(weight_name, param_name)
+                            if is_pp_missing_parameter(name, self):
+                                continue
+                            param = params_dict[name]
+                            weight_loader = param.weight_loader
+                            # Use name (param_name format like mlp.experts.w13_weight_scale)
+                            # This matches what FusedMoE.weight_loader expects
+                            weight_loader(
+                                param,
+                                loaded_weight,
+                                name,  # Use mapped param name for proper identification
+                                expert_id=expert_id,
+                                shard_id=shard_id,
+                            )
+                            break
+                        else:
+                            # Not an expert weight that needs mapping
+                            continue
                 else:
                     # Handle attention weight name mapping
                     if "attention.query_key_value" in name:
@@ -1604,8 +1914,17 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                                 )
                         else:
                             name = name.replace("attention.dense", "self_attn.dense")
-                    elif "mlp.gate.e_score_correction_bias" in name:
-                        # Handle e_score_correction_bias -> gate.expert_bias
+                    elif (
+                        "mlp.experts.e_score_correction_bias" in name
+                        or "mlp.gate.e_score_correction_bias" in name
+                    ):
+                        # Handle expert bias naming variants:
+                        # checkpoint key "mlp.experts.e_score_correction_bias"
+                        # (and legacy "mlp.gate.e_score_correction_bias")
+                        # should map to model param "mlp.gate.expert_bias".
+                        name = name.replace(
+                            "mlp.experts.e_score_correction_bias", "mlp.gate.expert_bias"
+                        )
                         name = name.replace(
                             "mlp.gate.e_score_correction_bias", "mlp.gate.expert_bias"
                         )
@@ -1684,6 +2003,16 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             loaded_params.add(name)
 
             # For MLA parameters shared across locations, mark alternates as loaded
+            if "mlp.gate.expert_bias" in name:
+                alt_name = name.replace(
+                    "mlp.gate.expert_bias", "mlp.experts.e_score_correction_bias"
+                )
+                if alt_name in params_dict:
+                    loaded_params.add(alt_name)
+                alt_name = name.replace("mlp.gate.expert_bias", "mlp.experts.expert_bias")
+                if alt_name in params_dict:
+                    loaded_params.add(alt_name)
+
             if "self_attn.kv_b_proj" in name:
                 # kv_b_proj also at mla_attn.kv_b_proj
                 alt_name1 = name.replace(
