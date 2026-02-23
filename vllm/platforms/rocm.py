@@ -146,7 +146,7 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
     Parse (major, minor) from a GCN arch string, mirroring how
     HIP derives hipDeviceProp_t.major / .minor.
 
-    Format: gfx[MAJOR][MINOR][STEPPING]
+    Format: gfx<MAJOR><MINOR><STEPPING>
       - 1-digit major  (gfx9xx):  "gfx" + M + m + stepping
       - 2-digit major  (gfx1xxx): "gfx" + MM + m + stepping
 
@@ -155,7 +155,7 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
       gfx1100 -> (11, 0)   gfx1101 -> (11, 0)   gfx1200 -> (12, 0)
 
     Returns None only when the string is not gfx-prefixed at all
-    (i.e. not a ROCm arch string). Raises on any string that *looks*
+    (i.e. not a ROCm arch string). Raises on any string that looks
     like a GCN arch but does not match a known layout.
     """
     m = re.match(r"gfx(\d+)", gcn_arch)
