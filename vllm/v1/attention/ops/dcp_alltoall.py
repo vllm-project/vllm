@@ -285,8 +285,8 @@ def dcp_a2a_lse_reduce(
     cp_group: GroupCoordinator,
     ctx: CPTritonContext | None = None,
     return_lse: bool = False,
-    is_lse_base_on_e=True,
-):
+    is_lse_base_on_e: bool = True,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Combine partial attention outputs across DCP ranks using All-to-All.
 
