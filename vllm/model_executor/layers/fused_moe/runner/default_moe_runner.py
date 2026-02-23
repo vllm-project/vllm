@@ -6,7 +6,6 @@ from contextlib import nullcontext
 import torch
 import torch.nn.functional as F
 
-import vllm.envs as envs
 from vllm.distributed import (
     get_ep_group,
     get_pcp_group,
@@ -170,7 +169,6 @@ class DefaultMoERunner(MoERunner):
         quant_method: FusedMoEMethodBase,
         reduce_results: bool,
         enable_dbo: bool,
-        enable_eplb: bool,
     ):
         super().__init__()
         self.moe_config = moe_config
@@ -181,10 +179,10 @@ class DefaultMoERunner(MoERunner):
         self.quant_method = quant_method
         self.reduce_results = reduce_results
         self.enable_dbo = enable_dbo
-        self.enable_eplb = enable_eplb
+        self.enable_eplb = moe_config.moe_parallel_config.enable_eplb
 
         # Chunked all2all staging tensor
-        # TODO rename these
+        # TODO rename these?
         # These need to exist ahead of time due to CUDAgraph construction
         # needing a fixed buffer address.
         # TODO: these could be global, i.e. shared by all layers
@@ -192,33 +190,31 @@ class DefaultMoERunner(MoERunner):
         self.batched_router_logits: torch.Tensor | None = None
         self._maybe_init_dp_chunking()
 
-        self.use_dp_chunking = (
-            self.moe_config.moe_parallel_config.use_pplx_kernels
-            or self.moe_config.moe_parallel_config.use_deepep_ll_kernels
-            or self.moe_config.moe_parallel_config.use_mori_kernels
-            or self.moe_config.moe_parallel_config.use_fi_all2allv_kernels
-        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
+        self.use_dp_chunking = self.moe_config.moe_parallel_config.use_dp_chunking
 
         # Needed for string -> FusedMoE layer lookup in custom ops.
         self.layer_name = layer.layer_name
 
-        self.moe_forward = self._select_forward(layer)
+        self.moe_forward, self.moe_forward_impl = self._select_forward(layer)
 
-    # XXXXXX used by layer.py and lora/layers/fused_moe.py
-    def _get_shared_experts(self) -> SharedExperts | None:
-        return self.shared_experts
-
-    def _select_forward(self, layer: torch.nn.Module) -> Callable:
+    def _select_forward(self, layer: torch.nn.Module) -> tuple[Callable, Callable]:
+        forward_impl_fn = (
+            self.forward_impl_chunked if self.use_dp_chunking else self.forward_impl
+        )
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped forward_impl.
-            return _moe_forward if self.shared_experts is None else _moe_forward_shared
+            return (
+                _moe_forward if self.shared_experts is None else _moe_forward_shared,
+                forward_impl_fn,
+            )
 
         return (
             torch.ops.vllm.moe_forward
             if self.shared_experts is None
-            else torch.ops.vllm.moe_forward_shared
+            else torch.ops.vllm.moe_forward_shared,
+            forward_impl_fn,
         )
 
     def _maybe_init_dp_chunking(self):
@@ -287,6 +283,9 @@ class DefaultMoERunner(MoERunner):
         TODO: For latent MoE bandwidth optimization, fc2_latent_proj could be
         moved inside SharedFusedMoE to all-reduce on the smaller latent
         dimension.
+
+        Returns (possibly transformed) hidden states and the input for shared
+        experts (or None if there are no shared experts).
         """
         if self.routed_input_transform is not None:
             result = self.routed_input_transform(hidden_states)
@@ -299,7 +298,7 @@ class DefaultMoERunner(MoERunner):
         return (
             hidden_states,
             hidden_states if self.shared_experts is not None else None,
-        )  # XXXXX
+        )
 
     def _maybe_reduce_output(
         self,
@@ -341,10 +340,12 @@ class DefaultMoERunner(MoERunner):
 
     def _maybe_pad_hidden_states(
         self,
-        shared_experts_input: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, list[int]]:
-        shared_experts_hidden_dim = shared_experts_input.shape[-1]
+        shared_experts_hidden_dim = (
+            shared_experts_input.shape[-1] if shared_experts_input is not None else 0
+        )
         transformed_hidden_dim = hidden_states.shape[-1]
         if self.moe_config.hidden_dim != transformed_hidden_dim:
             hidden_states = F.pad(
@@ -554,17 +555,39 @@ class DefaultMoERunner(MoERunner):
         else:
             return hidden_states
 
-    #
-    #  forward
-    #    - self.moe_forward (_moe_forward or _moe_forward_shared)
-    #      - forward_dispatch
-    #        - forward_impl or forward_impl_chunked
-    #
     def forward(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        """Invoke the fused moe layer.
+
+        Input:
+        - hidden_states
+        - router_logits
+
+        Output:
+        - The new hidden_states.
+        or
+        - A tuple of (shared experts output, new hidden_states).
+
+        Calling sequence
+        - forward
+          - self.moe_forward (_moe_forward or _moe_forward_shared custom op)
+            - forward_dispatch
+              - moe_forward_impl (forward_impl or forward_impl_chunked)
+
+        Note: The existence of _moe_forward and _moe_forward_shared custom ops are due
+        to the following reasons:
+        1. the chunking loop in forward_impl_chunked cannot be compiled by torch.compile
+        2. pytorch cannot handle union types in custom op signatures so _moe_forward and
+           _moe_forward_shared must be split.
+
+        If forward_impl_chunked can be implemented via torch.scan we can potentially get
+        rid of _moe_forward and _moe_forward_shared and collapse the whole sequence into
+        the 'forward' method.
+        """
+
         # Apply transform for routed experts (e.g., latent projection for latent MoE)
         hidden_states, shared_experts_input = self.apply_routed_input_transform(
             hidden_states
@@ -602,20 +625,12 @@ class DefaultMoERunner(MoERunner):
         )
 
         with self._sequence_parallel_context():
-            if self.use_dp_chunking:
-                return self.forward_impl_chunked(
-                    layer,
-                    hidden_states,
-                    router_logits,
-                    shared_experts_input,
-                )
-            else:
-                return self.forward_impl(
-                    layer,
-                    hidden_states,
-                    router_logits,
-                    shared_experts_input,
-                )
+            return self.moe_forward_impl(
+                layer,
+                hidden_states,
+                router_logits,
+                shared_experts_input,
+            )
 
     def _slice_and_copy_input(
         self,

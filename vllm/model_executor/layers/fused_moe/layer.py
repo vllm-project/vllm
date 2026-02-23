@@ -636,19 +636,16 @@ class FusedMoE(CustomOp):
         if self._shared_experts is None:
             return None
 
-        reduce_shared_output = (
-            self.reduce_results
-            # XXXX ordering issue
-            and self.quant_method.moe_mk is not None
-            and self.quant_method.moe_mk.output_is_reduced()
-        )
-
         return SharedExperts(
             self._shared_experts,
             moe_config=self.moe_config,
-            has_separate_shared_experts=not self.quant_method.mk_owns_shared_expert,
-            use_dp_chunking=self.use_dp_chunking,  # XXXXXXXXXXXXXX
-            must_reduce_shared_expert_outputs=reduce_shared_output,
+            # Note: For now we must pass quant_method along to SharedExperts so it
+            # can property determine where the shared experts are supposed to be
+            # called, i.e. by a MK or by the MoERunner.
+            # Once the MK can be created upfront, we can just pass in the proper
+            # flags dervied from the quant_method's MK.
+            reduce_results=self.reduce_results,
+            quant_method=self.quant_method,
         )
 
     def _init_runner(self) -> DefaultMoERunner:
@@ -665,7 +662,6 @@ class FusedMoE(CustomOp):
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
-            enable_eplb=self.enable_eplb,
         )
 
     # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
@@ -704,7 +700,7 @@ class FusedMoE(CustomOp):
                     self,
                     self.quant_method,
                     prepare_finalize,
-                    self.runner._get_shared_experts(),  # XXXXXXXXXXXXXXXXX
+                    self.shared_experts,
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
