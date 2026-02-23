@@ -17,8 +17,9 @@ import argparse
 import dataclasses
 import json
 import time
+from collections import defaultdict
 from datetime import datetime
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import numpy as np
 
@@ -59,12 +60,13 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
     Example:
         {
             'request-123': {
-                'hf_processor_time': 0.45,
-                'hashing_time': 0.02,
-                'cache_lookup_time': 0.01,
-                'prompt_update_time': 0.03,
-                'preprocessor_total_time': 0.51,
-                'encoder_forward_time': 0.23,
+                'apply_hf_processor_secs': 0.45,
+                'get_mm_hashes_secs': 0.02,
+                'get_cache_missing_items_secs': 0.01,
+                "merge_mm_kwargs_ms": 0.01,
+                'apply_prompt_updates_secs': 0.03,
+                'preprocessor_total_secs': 0.51,
+                'encoder_forward_secs': 0.23,
                 'num_encoder_calls': 1
             }
         }
@@ -74,8 +76,7 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
         return {}
 
     renderer = llm_engine.renderer
-    mm_processor = renderer.get_mm_processor()
-    preprocessing_stats = mm_processor.info.ctx.get_all_timing_stats()
+    mm_timing_registry = renderer._mm_timing_registry
 
     encoder_stats = dict[str, dict[str, float]]()
     for worker_stats in llm_engine.collective_rpc("get_encoder_timing_stats"):
@@ -88,10 +89,10 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
             else:
                 # Aggregate timing metrics across workers
                 current_time = encoder_stats[request_id].get(
-                    "encoder_forward_time", 0.0
+                    "encoder_forward_secs", 0.0
                 )
-                new_time = stats_dict.get("encoder_forward_time", 0.0)
-                encoder_stats[request_id]["encoder_forward_time"] = max(
+                new_time = stats_dict.get("encoder_forward_secs", 0.0)
+                encoder_stats[request_id]["encoder_forward_secs"] = max(
                     current_time, new_time
                 )
 
@@ -103,7 +104,7 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
 
     merged_stats = dict[str, dict[str, float]]()
 
-    for request_id, prep_dict in preprocessing_stats.items():
+    for request_id, prep_dict in mm_timing_registry.get_all_stats_dict().items():
         merged_stats[request_id] = dict(prep_dict)
 
     for request_id, enc_dict in encoder_stats.items():
@@ -124,34 +125,18 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
     return merged_stats
 
 
-def collect_mm_processor_stats(
-    llm_engine: LLMEngine,
-    num_warmup_reqs: int = 0,
-) -> dict[str, list[float]]:
+def collect_mm_processor_stats(llm_engine: LLMEngine) -> dict[str, list[float]]:
     """
     Collect multimodal processor timing stats.
     Returns a dictionary mapping stage names to lists of timing values (in seconds).
     """
     all_stats = get_timing_stats_from_engine(llm_engine)
 
-    stat_keys = [
-        "hf_processor_time",
-        "hashing_time",
-        "cache_lookup_time",
-        "prompt_update_time",
-        "preprocessor_total_time",
-        "encoder_forward_time",
-        "num_encoder_calls",
-    ]
-    stats_by_stage = {key: [] for key in stat_keys}
+    stats_by_stage = defaultdict[str, list[float]](list)
 
-    # Skip warmup requests
-    stats_list = list(all_stats.values())[num_warmup_reqs:]
-
-    for stats_dict in stats_list:
-        for key in stat_keys:
-            if key in stats_dict:
-                stats_by_stage[key].append(stats_dict[key])
+    for stats_dict in all_stats.values():
+        for stat_key, stat_val in stats_dict.items():
+            stats_by_stage[stat_key].append(stat_val)
 
     return stats_by_stage
 
@@ -159,13 +144,20 @@ def collect_mm_processor_stats(
 def calculate_mm_processor_metrics(
     stats_by_stage: dict[str, list[float]],
     selected_percentiles: list[float],
+    *,
+    unit: Literal["us", "ms", "s"] = "ms",
 ) -> dict[str, dict[str, float]]:
     """
     Calculate aggregate metrics from stats by stage.
     """
+    unit2mult = {"us": 1000000, "ms": 1000, "s": 1}
+    unit_mult = unit2mult[unit]
+
     metrics = {}
 
-    for stage_name, times in stats_by_stage.items():
+    for stage, times in stats_by_stage.items():
+        stage_name = stage.replace("_secs", "_" + unit)
+
         if not times:
             metrics[stage_name] = {
                 "mean": 0.0,
@@ -175,8 +167,8 @@ def calculate_mm_processor_metrics(
             }
             continue
 
-        is_count_metric = stage_name == "num_encoder_calls"
-        values = times if is_count_metric else [t * 1000 for t in times]
+        is_count_metric = stage == "num_encoder_calls"
+        values = times if is_count_metric else [t * unit_mult for t in times]
 
         metrics[stage_name] = {
             "mean": float(np.mean(values)),
@@ -284,6 +276,10 @@ def benchmark_multimodal_processor(
             warmup_sampling_params,
             use_tqdm=not getattr(args, "disable_tqdm", False),
         )
+
+    renderer = llm.llm_engine.renderer
+    mm_timing_registry = renderer._mm_timing_registry
+    mm_timing_registry.clear()
 
     print(f"Processing {len(prompts)} requests...")
     start_time = time.perf_counter()

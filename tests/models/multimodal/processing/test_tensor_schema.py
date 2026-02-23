@@ -108,7 +108,7 @@ def create_batched_mm_kwargs(
     # video metadata will be added back to the resized video data here.
     text_prompt, token_prompt = get_text_token_prompts(processor, resized_mm_data)
 
-    mm_kwargs = processor.apply(
+    mm_kwargs = processor(
         prompt=token_prompt if text_prompt is None else text_prompt,
         mm_items=processor.info.parse_mm_data(resized_mm_data),
         hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
