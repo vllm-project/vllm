@@ -58,8 +58,6 @@ class CrossLayerGroup:
     tensor: torch.Tensor
     layer_names: list[str]
     page_size_bytes: int
-    spec: KVCacheSpec
-    backend: type[AttentionBackend]
 
 
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
@@ -415,7 +413,7 @@ class KVConnectorModelRunnerMixin:
             )
 
             rep_name = members[0][1].shared_by[0]
-            rep_spec, rep_backend, _ = layer_info[rep_name]
+            rep_spec, _, _ = layer_info[rep_name]
             page_size = rep_spec.page_size_bytes
 
             assert first_size % page_size == 0
@@ -486,8 +484,6 @@ class KVConnectorModelRunnerMixin:
                     tensor=cross_layer_tensor,
                     layer_names=group_layer_names,
                     page_size_bytes=page_size,
-                    spec=rep_spec,
-                    backend=rep_backend,
                 )
             )
 
