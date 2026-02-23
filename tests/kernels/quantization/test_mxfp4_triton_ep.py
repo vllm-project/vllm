@@ -109,18 +109,20 @@ class TestTritonMoeForwardExpertMap:
     def test_routing_path_selection(self, expert_map_present):
         """Verify that the EP-aware routing path is taken when expert_map
         is present, and the legacy_routing path is taken otherwise."""
+
+        device = "cuda"
         # This is a structural test: we mock the routing functions to
         # verify the correct path is exercised.
-        mock_expert_map = torch.tensor([0, -1, 1, -1]) if expert_map_present else None
+        mock_expert_map = (
+            torch.tensor([0, -1, 1, -1], device=device) if expert_map_present else None
+        )
 
         with (
             patch(
                 "vllm.model_executor.layers.fused_moe."
                 "gpt_oss_triton_kernels_moe.legacy_routing"
             ) as mock_legacy,
-            patch(
-                "vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe.topk"
-            ) as mock_topk,
+            patch("triton_kernels.topk.topk") as mock_topk,
             patch(
                 "vllm.model_executor.layers.fused_moe."
                 "gpt_oss_triton_kernels_moe.make_routing_data"
@@ -156,12 +158,12 @@ class TestTritonMoeForwardExpertMap:
                     mock_scatter,
                 )
 
-            mock_fused_experts.return_value = torch.zeros(1, 8)
+            mock_fused_experts.return_value = torch.zeros((1, 8), device=device)
 
-            hidden = torch.randn(1, 8)
-            w1 = torch.randn(2, 8, 16)
-            w2 = torch.randn(2, 8, 8)
-            logits = torch.randn(1, 4)
+            hidden = torch.randn((1, 8), device=device)
+            w1 = torch.randn((2, 8, 16), device=device)
+            w2 = torch.randn((2, 8, 8), device=device)
+            logits = torch.randn((1, 4), device=device)
 
             triton_kernel_moe_forward(
                 hidden_states=hidden,
