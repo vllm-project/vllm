@@ -599,7 +599,7 @@ class TestAudioChunking:
         """Audio shorter than max_clip_duration_s should not be split."""
 
         # 10 seconds of audio at 16kHz
-        audio = np.random.randn(160000).astype(np.float32)
+        audio = np.linspace(-1.0, 1.0, 160000, dtype=np.float32)
 
         chunks = split_audio(
             audio_data=audio,
@@ -616,7 +616,7 @@ class TestAudioChunking:
         """Audio exactly at max_clip_duration_s should not be split."""
 
         # Exactly 30 seconds at 16kHz
-        audio = np.random.randn(480000).astype(np.float32)
+        audio = np.linspace(-1.0, 1.0, 480000, dtype=np.float32)
 
         chunks = split_audio(
             audio_data=audio,
@@ -633,7 +633,7 @@ class TestAudioChunking:
         """Long audio should be split into multiple chunks."""
 
         # 65 seconds of audio at 16kHz
-        audio = np.random.randn(1040000).astype(np.float32)
+        audio = np.linspace(-1.0, 1.0, 1040000, dtype=np.float32)
 
         chunks = split_audio(
             audio_data=audio,
@@ -653,7 +653,7 @@ class TestAudioChunking:
         """Each chunk (except last) should be approximately max_clip_duration_s."""
 
         # 65 seconds of audio at 16kHz
-        audio = np.random.randn(1040000).astype(np.float32)
+        audio = np.linspace(-1.0, 1.0, 1040000, dtype=np.float32)
 
         chunks = split_audio(
             audio_data=audio,
@@ -744,7 +744,7 @@ class TestAudioChunking:
         """Test chunking works with different sample rates."""
 
         # 40 seconds at 8kHz
-        audio_8k = np.random.randn(320000).astype(np.float32)
+        audio_8k = np.linspace(-1.0, 1.0, 320000, dtype=np.float32)
 
         chunks = split_audio(
             audio_data=audio_8k,
@@ -757,7 +757,7 @@ class TestAudioChunking:
         assert len(chunks) >= 2
 
         # 40 seconds at 48kHz
-        audio_48k = np.random.randn(1920000).astype(np.float32)
+        audio_48k = np.linspace(-1.0, 1.0, 1920000, dtype=np.float32)
 
         chunks_48k = split_audio(
             audio_data=audio_48k,
