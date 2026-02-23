@@ -284,16 +284,6 @@ def moe_kernel_quantize_input(
         return A, A_scale
 
 
-def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """
-    A permutation routine that works on fp8 types.
-    """
-    if torch.is_floating_point(m) and m.dtype.itemsize == 1:
-        return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
-    else:
-        return m[idx, ...]
-
-
 def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
     if scales is not None:
         if scales.numel() == 1:
