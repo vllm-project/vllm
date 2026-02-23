@@ -85,4 +85,15 @@ class DeepSeekV3ReasoningWithThinkingParser(DeepSeekV3ReasoningParser):
             chat_kwargs["thinking"] = True
             chat_kwargs["enable_thinking"] = True
             kwargs["chat_template_kwargs"] = chat_kwargs
+
+        # Check for deprecated parser usage with kimi_k25 model
+        model_type = kwargs.get("model_type", "")
+        reasoning_parser_name = kwargs.get("reasoning_parser_name", "")
+        if model_type == "kimi_k25" and reasoning_parser_name == "kimi_k2":
+            logger.warning(
+                "Consider using 'kimi_k25' as reasoning parser for Kimi K-2.5 "
+                "instead of '%s'.",
+                reasoning_parser_name,
+            )
+
         super().__init__(tokenizer, *args, **kwargs)

@@ -129,6 +129,7 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_log_deltas = enable_log_deltas
 
         # set up reasoning parser
+        self.reasoning_parser_name = reasoning_parser
         self.reasoning_parser_cls = ParserManager.get_reasoning_parser(
             reasoning_parser_name=reasoning_parser
         )
@@ -343,6 +344,8 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_parser = self.reasoning_parser_cls(
                     tokenizer,
                     chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+                    model_type=self.model_config.hf_text_config.model_type,
+                    reasoning_parser_name=self.reasoning_parser_name,
                 )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
