@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal, get_args
 from pydantic import Field, SkipValidation, model_validator
 from typing_extensions import Self
 
+from vllm.config import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -37,6 +38,7 @@ MTPModelTypes = Literal[
     "ernie_mtp",
     "exaone_moe_mtp",
     "qwen3_next_mtp",
+    "qwen3_5_mtp",
     "longcat_flash_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
@@ -107,6 +109,11 @@ class SpeculativeConfig:
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    use_local_argmax_reduction: bool = False
+    """Use vocab-parallel local argmax instead of all-gathering full logits
+    for draft token generation. Reduces communication from O(vocab_size) to
+    O(2 * tp_size) per token. Only applies to greedy draft selection in
+    non-tree speculation."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -159,6 +166,10 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
+    draft_load_config: LoadConfig | None = None
+    """Load config for the draft model. If not specified, will use the load
+    config from the target model."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -181,7 +192,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type in ("deepseek_v3", "deepseek_v32"):
+        if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "glm_moe_dsa"):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -263,6 +274,16 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
             )
 
+        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
+            is_moe = hf_config.model_type == "qwen3_5_moe"
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                }
+            )
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
@@ -288,6 +309,13 @@ class SpeculativeConfig:
         # will be detected automatically if possible. If the speculative method
         # can not be detected, it will be considered as the "draft_model" by
         # default.
+
+        # infer method from user args
+        if self.method is None:
+            if self.model in ("ngram", "[ngram]"):
+                self.method = "ngram"
+            else:
+                self.method = "draft_model"
 
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
@@ -317,13 +345,6 @@ class SpeculativeConfig:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
                 )
-
-        # Automatically configure the method for ngram when "model" is used
-        # instead of "method"
-        if self.method is None and (
-            self.model is not None and self.model in ("ngram", "[ngram]")
-        ):
-            self.method = "ngram"
 
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
@@ -489,6 +510,13 @@ class SpeculativeConfig:
                         )
 
                 if self.speculative_token_tree is None:
+                    if self.num_speculative_tokens is None:
+                        raise ValueError(
+                            "A speculative model was provided, but neither "
+                            "`speculative_token_tree` nor `num_speculative_tokens` "
+                            "was provided"
+                        )
+
                     # Generate chain of tokens.
                     self.speculative_token_tree = str(
                         [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
@@ -726,6 +754,22 @@ class SpeculativeConfig:
                     f"Using models with different tokenizers can cause out-of-bounds "
                     f"errors during speculative decoding."
                 )
+
+    @property
+    def max_num_new_slots_for_drafting(self) -> int:
+        """
+        Calculate the maximum number of new slots that might be added to the batch
+        when drafting.
+        """
+        slots_per_req = 0  # for serial non-draft-model methods, no change needed
+        if self.parallel_drafting:
+            # For parallel drafting, we need one new slot per 'masked' token
+            slots_per_req = self.num_speculative_tokens - 1
+        if self.uses_draft_model():
+            # For draft model-based speculation, we need one new slot per request
+            # Since we do not slice the draft tokens
+            slots_per_req += 1
+        return slots_per_req
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")

@@ -44,10 +44,14 @@ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalUUIDDict,
     NestedTensors,
 )
-from vllm.multimodal.parse import ImageProcessorItems, ImageSize, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    ImageSize,
+    MultiModalDataItems,
+    MultiModalUUIDItems,
+)
 from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
@@ -217,28 +221,13 @@ class PixtralProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
-    def get_vision_config(
-        self,
-        processor: PixtralProcessorAdapter | None = None,
-    ):
-        if processor is None:
-            processor = self.get_hf_processor()
-
-        return PixtralVisionConfig(
-            image_size=processor.image_size,
-            patch_size=processor.patch_size,
-        )
-
     def get_num_image_tokens(
         self,
         *,
         image_width: int,
         image_height: int,
-        processor: PixtralProcessorAdapter | None = None,
+        processor: PixtralProcessorAdapter,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         ncols, nrows = processor.image_processor._image_to_num_tokens(
             Image.new("RGB", (image_width, image_height))
         )
@@ -260,13 +249,13 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -281,7 +270,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
@@ -357,16 +346,16 @@ class PixtralMultiModalProcessor(BaseMultiModalProcessor[PixtralProcessingInfo])
         self,
         prompt: str | list[int],
         mm_data_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems | None,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
+            mm_uuid_items=mm_uuid_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
 
         # NOTE: The tokens are already inserted by the chat template
