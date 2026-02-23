@@ -25,6 +25,11 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     _swizzle_mxfp4,
     get_padding_alignment,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kMxfp4Static,
+    kMxfp8Dynamic,
+)
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
@@ -195,11 +200,13 @@ def select_mxfp4_moe_backend(
     def _return_or_raise(
         backend: Mxfp4MoeBackend,
         config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Mxfp4MoeBackend, type[mk.FusedMoEPermuteExpertsUnpermute]]:
         k_cls = backend_to_kernel_cls(backend)
         supported, reason = k_cls.is_supported_config(
-            k_cls, config, None, None, activation_format
+            k_cls, config, weight_key, activation_key, activation_format
         )
         if supported:
             logger.info_once(_make_log_backend(backend), scope="local")
@@ -217,13 +224,25 @@ def select_mxfp4_moe_backend(
         else:
             if current_platform.is_device_capability(90):
                 backend = Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16
-                return _return_or_raise(backend, config, activation_format)
+                return _return_or_raise(
+                    backend,
+                    config,
+                    kMxfp4Static,
+                    None,
+                    activation_format,
+                )
             if current_platform.is_device_capability_family(100):
                 # Using modular interface
                 # unifying them after #32564 is merged
                 if config.dp_size > 1 and config.use_ep:
                     backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16
-                    return _return_or_raise(backend, config, activation_format)
+                    return _return_or_raise(
+                        backend,
+                        config,
+                        kMxfp4Static,
+                        None,
+                        activation_format,
+                    )
                 else:
                     backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
                     return backend, None
@@ -238,7 +257,13 @@ def select_mxfp4_moe_backend(
             )
         if config.dp_size > 1 and config.use_ep:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8
-            return _return_or_raise(backend, config, activation_format)
+            return _return_or_raise(
+                backend,
+                config,
+                kMxfp4Static,
+                kMxfp8Dynamic,
+                activation_format,
+            )
         else:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC
             return backend, None
@@ -249,7 +274,13 @@ def select_mxfp4_moe_backend(
             AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8)
         else:
             backend = Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8
-            return _return_or_raise(backend, config, activation_format)
+            return _return_or_raise(
+                backend,
+                config,
+                kMxfp4Static,
+                kMxfp8Dynamic,
+                activation_format,
+            )
 
     # Handle explicit Marlin MXFP4 configuration.
     if envs.is_set("VLLM_MXFP4_USE_MARLIN"):
@@ -258,21 +289,35 @@ def select_mxfp4_moe_backend(
             AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.BATCHED_MARLIN)
         else:
             backend = Mxfp4MoeBackend.MARLIN
-            return _return_or_raise(backend, config, activation_format)
+            return _return_or_raise(
+                backend,
+                config,
+                kMxfp4Static,
+                None,
+                activation_format,
+            )
 
     # FIXME(zyongye): manually select default kernels
     # change to automatic after monolithic kernel PR is merged
     if current_platform.is_device_capability_family(100):
         if config.dp_size > 1 and config.use_ep:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16
-            return _return_or_raise(backend, config, activation_format)
+            return _return_or_raise(
+                backend, config, kMxfp4Static, None, activation_format
+            )
         else:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
             return backend, None
     elif current_platform.is_device_capability(90):
         if config.dp_size > 1 and config.use_ep:
             backend = Mxfp4MoeBackend.TRITON
-            return _return_or_raise(backend, config, activation_format)
+            return _return_or_raise(
+                backend,
+                config,
+                kMxfp4Static,
+                None,
+                activation_format,
+            )
         else:
             backend = Mxfp4MoeBackend.TRITON_MONOLITHIC
             return backend, None
@@ -282,7 +327,13 @@ def select_mxfp4_moe_backend(
             if activation_format == mk.FusedMoEActivationFormat.Standard
             else Mxfp4MoeBackend.BATCHED_MARLIN
         )
-        return _return_or_raise(backend, config, activation_format)
+        return _return_or_raise(
+            backend,
+            config,
+            kMxfp4Static,
+            None,
+            activation_format,
+        )
     elif current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
         return backend, None

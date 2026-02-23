@@ -413,12 +413,6 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             layer.eplb_state.logical_replica_count,
         ), "MXFP4 are not supported with this configuration."
 
-        # assert (
-        #     self.mxfp4_backend == Mxfp4Backend.SM100_FI_MXFP4_MXFP8_CUTLASS
-        #     or self.mxfp4_backend == Mxfp4Backend.SM90_FI_MXFP4_BF16
-        #     or self.mxfp4_backend == Mxfp4Backend.MARLIN
-        # )
-
         assert self.moe_mk is not None
         return self.moe_mk(
             hidden_states=x,
