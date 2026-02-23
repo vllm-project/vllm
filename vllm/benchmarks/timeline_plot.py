@@ -73,7 +73,29 @@ def generate_timeline_plot(
         color="type",
         color_discrete_map=labels_colors,
         category_orders={"type": labels_order},
-        hover_data=["prompt_tokens", "output_tokens", "start_time", "finish_time"],
+        hover_data=[
+            "prompt_tokens",
+            "output_tokens",
+            "req_start_time",
+            "req_finish_time",
+            "segment_start",
+            "segment_end",
+            "duration",
+        ],
+    )
+
+    # Customize hover template to show only time without date
+    fig.update_traces(
+        hovertemplate="<b>%{y}</b><br>"
+        "Type: %{fullData.name}<br>"
+        "Start: %{customdata[4]}<br>"
+        "End: %{customdata[5]}<br>"
+        "Duration: %{customdata[6]}<br>"
+        "Prompt Tokens: %{customdata[0]}<br>"
+        "Output Tokens: %{customdata[1]}<br>"
+        "Request Start Time: %{customdata[2]}<br>"
+        "Request End Time: %{customdata[3]}<br>"
+        "<extra></extra>"
     )
 
     fig.update_yaxes(autorange="reversed")
@@ -149,11 +171,11 @@ def construct_timeline_data(
 
         # Normalize start time
         start_time = start_time - t0
-        start_time_str = f"2025-01-01 {tostr(start_time)}"
+        start_time_str = tostr(start_time)
 
         # TTFT segment
         ttft_end = start_time + ttft
-        ttft_end_str = f"2025-01-01 {tostr(ttft_end)}"
+        ttft_end_str = tostr(ttft_end)
 
         timeline_data.append(
             {
@@ -163,8 +185,11 @@ def construct_timeline_data(
                 "type": "TTFT",
                 "prompt_tokens": prompt_len,
                 "output_tokens": output_tokens,
-                "start_time": tostr(start_time),
-                "finish_time": tostr(start_time + latency),
+                "req_start_time": tostr(start_time),
+                "req_finish_time": tostr(start_time + latency),
+                "segment_start": start_time_str,
+                "segment_end": ttft_end_str,
+                "duration": f"{ttft:.3f}s",
             }
         )
 
@@ -174,7 +199,7 @@ def construct_timeline_data(
 
         for itl_value in itl:
             itl_end = prev_time + itl_value
-            itl_end_str = f"2025-01-01 {tostr(itl_end)}"
+            itl_end_str = tostr(itl_end)
 
             timeline_data.append(
                 {
@@ -184,8 +209,11 @@ def construct_timeline_data(
                     "type": itl_type(itl_value),
                     "prompt_tokens": prompt_len,
                     "output_tokens": output_tokens,
-                    "start_time": tostr(start_time),
-                    "finish_time": tostr(start_time + latency),
+                    "req_start_time": tostr(start_time),
+                    "req_finish_time": tostr(start_time + latency),
+                    "segment_start": prev_time_str,
+                    "segment_end": itl_end_str,
+                    "duration": f"{itl_value:.3f}s",
                 }
             )
 
