@@ -97,6 +97,7 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
+        mm_options={},
     )
     mm_items = processor_inputs.mm_items
     resized_mm_data = {
