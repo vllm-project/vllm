@@ -23,6 +23,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEPermuteExpertsUnpermute,
     FusedMoEPrepareAndFinalize,
     FusedMoeWeightScaleSupported,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -180,18 +181,9 @@ class Fp8Config(QuantizationConfig):
             weight_block_size=weight_block_size,
         )
 
-    def get_xpu_quant_method(
-        self, layer: torch.nn.Module, prefix: str
-    ) -> "QuantizeMethodBase | None":
-        raise NotImplementedError(
-            "FP8 quantization is not supported during xpu kernel migration."
-        )
-
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
-        if current_platform.is_xpu():
-            return self.get_xpu_quant_method(layer, prefix)
         if isinstance(layer, LinearBase):
             if is_layer_skipped(
                 prefix=prefix,
@@ -300,7 +292,7 @@ class Fp8LinearMethod(LinearMethodBase):
             or envs.VLLM_TEST_FORCE_FP8_MARLIN
         )
         # Disable marlin for rocm
-        if current_platform.is_rocm():
+        if current_platform.is_rocm() or current_platform.is_xpu():
             self.use_marlin = False
         if vllm_is_batch_invariant():
             self.use_marlin = False
@@ -534,6 +526,8 @@ class Fp8LinearMethod(LinearMethodBase):
 class Fp8OnlineLinearMethod(Fp8LinearMethod):
     """Online version of Fp8LinearMethod, loads the fp16/bf16 checkpoint
     and quantized the weights during loading."""
+
+    uses_meta_device: bool = True
 
     def create_weights(
         self,
@@ -974,7 +968,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         # TODO(rob): convert this to MK.
         if layer.enable_eplb:
             raise NotImplementedError("EPLB not supported for `Fp8MoEMethod` yet.")
-        assert layer.activation == "silu", (
+        assert layer.activation == MoEActivation.SILU, (
             f"Expected 'silu' activation but got {layer.activation}"
         )
 
@@ -1019,6 +1013,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.moe_mk is not None
         assert not self.is_monolithic
@@ -1032,6 +1027,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
         )
 
 
@@ -1044,6 +1040,8 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
     Args:
         quant_config: The quantization config.
     """
+
+    uses_meta_device: bool = True
 
     def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
         super().__init__(quant_config, layer)

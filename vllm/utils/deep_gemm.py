@@ -91,14 +91,16 @@ def is_deep_gemm_e8m0_used() -> bool:
     _lazy_init()
 
     if _fp8_gemm_nt_impl is None:
-        logger.info_once("DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found")
+        logger.info_once(
+            "DeepGEMM E8M0 disabled: _fp8_gemm_nt_impl not found", scope="local"
+        )
         return False
 
     if envs.VLLM_USE_DEEP_GEMM_E8M0:
-        logger.info_once("DeepGEMM E8M0 enabled on current platform.")
+        logger.info_once("DeepGEMM E8M0 enabled on current platform.", scope="local")
         return True
 
-    logger.info_once("DeepGEMM E8M0 disabled on current configuration.")
+    logger.info_once("DeepGEMM E8M0 disabled on current configuration.", scope="local")
     return False
 
 
@@ -347,7 +349,7 @@ def _align(x: int, y: int) -> int:
 
 
 # Taken from https://github.com/deepseek-ai/DeepGEMM/blob/v2.1.1/csrc/utils/math.hpp#L19
-def get_tma_aligned_size(x: int, element_size: int):
+def get_tma_aligned_size(x: int, element_size: int) -> int:
     return _align(x, 16 // element_size)
 
 
