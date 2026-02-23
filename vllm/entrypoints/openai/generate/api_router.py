@@ -52,6 +52,10 @@ def _check_chat_template_available(
     Returns:
         True if chat template is available, False otherwise.
     """
+    if engine_client.renderer.tokenizer is None:
+        # If tokenizer is not initialized, chat template is not available.
+        return False
+
     from vllm.entrypoints.logger import init_logger
     from vllm.renderers.hf import resolve_chat_template
 
