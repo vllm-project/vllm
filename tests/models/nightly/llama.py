@@ -523,134 +523,95 @@ def test_accuracy_gsm8k(server: RemoteOpenAIServer, model_name: str) -> None:
     print(f"{'='*60}\n")
     assert accuracy >= 0.0, "GSM8K accuracy should be non-negative"
 
+def test_run_guidellm_benchmark(
+    server: RemoteOpenAIServer,
+    model_name: str,
+    num_requests: int = 100,
+    max_concurrency: Optional[int] = None,
+    request_rate: Optional[float] = None,
+    prompt_tokens: int = 100,
+    output_tokens: int = 100,
+    timeout: int = 600,
+) -> Dict[str, Any]:
+    """
+    Run guidellm benchmark and collect performance metrics.
 
-def run_guidellm_benchmark(
-      server: RemoteOpenAIServer,                                                                                                                  
-      model_name: str,
-      num_requests: int = 100,                                                                                                                     
-      max_concurrency: Optional[int] = None,                                                                                                       
-      request_rate: Optional[float] = None,
-      prompt_tokens: int = 100,
-      output_tokens: int = 100,
-      timeout: int = 600,
-  ) -> Dict[str, Any]:
-      """
-      Run guidellm benchmark and collect performance metrics.
+    Args:
+        server: RemoteOpenAIServer instance with the running vLLM server
+        model_name: Name of the model to benchmark
+        num_requests: Total number of requests to send
+        max_concurrency: Maximum number of concurrent requests (default: None for unlimited)
+        request_rate: Request rate in requests/second (default: None for max throughput)
+        prompt_tokens: Number of prompt tokens per request
+        output_tokens: Number of output tokens to generate per request
+        timeout: Timeout in seconds for the benchmark
 
-      Args:
-          server: RemoteOpenAIServer instance with the running vLLM server
-          model_name: Name of the model to benchmark
-          num_requests: Total number of requests to send
-          max_concurrency: Maximum number of concurrent requests (default: None for unlimited)
-          request_rate: Request rate in requests/second (default: None for max throughput)
-          prompt_tokens: Number of prompt tokens per request
-          output_tokens: Number of output tokens to generate per request
-          timeout: Timeout in seconds for the benchmark
+    Returns:
+        Dictionary containing benchmark results with keys:
+            - throughput: Requests per second
+            - mean_latency: Average latency in seconds
+            - p50_latency: 50th percentile latency
+            - p95_latency: 95th percentile latency
+            - p99_latency: 99th percentile latency
+            - total_tokens: Total tokens processed
+            - tokens_per_second: Token throughput
+            - success_rate: Percentage of successful requests
+            - raw_output: Raw guidellm output
+    """
+    # Get server URL
+    server_url = server.url_for("v1")
 
-      Returns:
-          Dictionary containing benchmark results with keys:
-              - throughput: Requests per second
-              - mean_latency: Average latency in seconds
-              - p50_latency: 50th percentile latency
-              - p95_latency: 95th percentile latency
-              - p99_latency: 99th percentile latency
-              - total_tokens: Total tokens processed
-              - tokens_per_second: Token throughput
-              - success_rate: Percentage of successful requests
-              - raw_output: Raw guidellm output
-      """
-      # Get server URL
-      server_url = server.url_for("v1")
+    # Build guidellm command
+    cmd = [
+        "guidellm",
+        "--backend", "openai",
+        "--base-url", server_url,
+        "--model", model_name,
+        "--num-requests", str(num_requests),
+        "--prompt-tokens", str(prompt_tokens),
+        "--output-tokens", str(output_tokens),
+        "--output-format", "json",
+    ]
 
-      # Build guidellm command
-      cmd = [
-          "guidellm",
-          "--backend", "openai",
-          "--base-url", server_url,
-          "--model", model_name,
-          "--num-requests", str(num_requests),
-          "--prompt-tokens", str(prompt_tokens),
-          "--output-tokens", str(output_tokens),
-          "--output-format", "json",
-      ]
+    if max_concurrency is not None:
+        cmd.extend(["--max-concurrency", str(max_concurrency)])
 
-      if max_concurrency is not None:
-          cmd.extend(["--max-concurrency", str(max_concurrency)])
+    if request_rate is not None:
+        cmd.extend(["--request-rate", str(request_rate)])
 
-      if request_rate is not None:
-          cmd.extend(["--request-rate", str(request_rate)])
+    print(f"\n{'='*60}")
+    print(f"Running guidellm benchmark:")
+    print(f"  Model: {model_name}")
+    print(f"  Server: {server_url}")
+    print(f"  Requests: {num_requests}")
+    print(f"  Concurrency: {max_concurrency if max_concurrency else 'unlimited'}")
+    print(f"  Request rate: {request_rate if request_rate else 'max throughput'}")
+    print(f"  Prompt tokens: {prompt_tokens}")
+    print(f"  Output tokens: {output_tokens}")
+    print(f"{'='*60}\n")
 
-      print(f"\n{'='*60}")
-      print(f"Running guidellm benchmark:")
-      print(f"  Model: {model_name}")
-      print(f"  Server: {server_url}")
-      print(f"  Requests: {num_requests}")
-      print(f"  Concurrency: {max_concurrency if max_concurrency else 'unlimited'}")
-      print(f"  Request rate: {request_rate if request_rate else 'max throughput'}")
-      print(f"  Prompt tokens: {prompt_tokens}")
-      print(f"  Output tokens: {output_tokens}")
-      print(f"{'='*60}\n")
+    try:
+        # Run guidellm
+        start_time = time.time()
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=True,
+        )
+        elapsed = time.time() - start_time
 
-      try:
-          # Run guidellm
-          start_time = time.time()
-          result = subprocess.run(
-              cmd,
-              capture_output=True,
-              text=True,
-              timeout=timeout,
-              check=True,
-          )
-          elapsed = time.time() - start_time
+        # Print the raw JSON output
+        print(result.stdout)
 
-          # Parse JSON output
-          try:
-              benchmark_data = json.loads(result.stdout)
-          except json.JSONDecodeError:
-              # If JSON parsing fails, create a basic result structure
-              print("Warning: Could not parse guidellm JSON output, using raw output")
-              benchmark_data = {
-                  "raw_output": result.stdout,
-                  "stderr": result.stderr,
-              }
-
-          # Extract key metrics (adjust based on actual guidellm output format)
-          metrics = {
-              "throughput": benchmark_data.get("throughput", 0.0),
-              "mean_latency": benchmark_data.get("mean_latency", 0.0),
-              "p50_latency": benchmark_data.get("p50_latency", 0.0),
-              "p95_latency": benchmark_data.get("p95_latency", 0.0),
-              "p99_latency": benchmark_data.get("p99_latency", 0.0),
-              "total_tokens": benchmark_data.get("total_tokens", 0),
-              "tokens_per_second": benchmark_data.get("tokens_per_second", 0.0),
-              "success_rate": benchmark_data.get("success_rate", 0.0),
-              "total_time": elapsed,
-              "raw_output": result.stdout,
-              "full_data": benchmark_data,
-          }
-
-          print(f"\n{'='*60}")
-          print(f"Guidellm benchmark completed in {elapsed:.2f}s")
-          print(f"  Throughput: {metrics['throughput']:.2f} req/s")
-          print(f"  Mean latency: {metrics['mean_latency']:.3f}s")
-          print(f"  P95 latency: {metrics['p95_latency']:.3f}s")
-          print(f"  P99 latency: {metrics['p99_latency']:.3f}s")
-          print(f"  Tokens/sec: {metrics['tokens_per_second']:.2f}")
-          print(f"  Success rate: {metrics['success_rate']:.1%}")
-          print(f"{'='*60}\n")
-
-          return metrics
-
-      except subprocess.TimeoutExpired:
-          raise RuntimeError(f"Guidellm benchmark timed out after {timeout} seconds")
-      except subprocess.CalledProcessError as e:
-          raise RuntimeError(
-              f"Guidellm benchmark failed with exit code {e.returncode}:\n"
-              f"stdout: {e.stdout}\n"
-              f"stderr: {e.stderr}"
-          )
-      except FileNotFoundError:
-          raise RuntimeError(
-              "guidellm command not found. Please install guidellm:\n"
-              "  pip install guidellm"
-          )
+        # Parse JSON output
+        try:
+            benchmark_data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            # If JSON parsing fails, create a basic result structure
+            print("Warning: Could not parse guidellm JSON output, using raw output")
+            benchmark_data = {
+                "raw_output": result.stdout,
+                "stderr": result.stderr,
+            }
