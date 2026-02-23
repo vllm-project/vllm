@@ -1529,6 +1529,7 @@ steps:
   optional: true
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  optional: true
   # grade: Blocking
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
@@ -1545,6 +1546,7 @@ steps:
   optional: true
   mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  optional: true
   # grade: Blocking
   num_gpus: 4
   working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
