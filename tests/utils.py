@@ -68,6 +68,7 @@ FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
     import atexit
+    import threading
 
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
@@ -76,14 +77,32 @@ if current_platform.is_rocm():
         amdsmi_shut_down,
     )
 
-    try:
-        amdsmi_init()
-        atexit.register(amdsmi_shut_down)
-    except Exception as e:
-        warnings.warn(f"Failed to initialize amdsmi: {e}", stacklevel=2)
+    _amdsmi_lock = threading.Lock()
+    _amdsmi_init_pid: int | None = None
+
+    def _ensure_amdsmi_init():
+        """Initialize amdsmi if not yet done in this process.
+
+        Handles both thread safety (lock) and fork safety (PID check).
+        After os.fork(), the child inherits memory but not valid driver
+        handles, so we must re-initialize.
+        """
+        global _amdsmi_init_pid
+        with _amdsmi_lock:
+            if _amdsmi_init_pid != os.getpid():
+                try:
+                    amdsmi_init()
+                    _amdsmi_init_pid = os.getpid()
+                except Exception as e:
+                    warnings.warn(f"Failed to initialize amdsmi: {e}", stacklevel=3)
+
+    # Initialize eagerly for the main process
+    _ensure_amdsmi_init()
+    atexit.register(amdsmi_shut_down)
 
     @contextmanager
     def _nvml():
+        _ensure_amdsmi_init()
         yield
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (
