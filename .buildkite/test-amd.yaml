@@ -2734,9 +2734,6 @@ steps:
   - pytest -v -s -x lora/test_llama_tp.py
   - pytest -v -s -x lora/test_llm_with_multi_loras.py
   - pytest -v -s -x lora/test_olmoe_tp.py
-  - export VLLM_ROCM_USE_AITER_MHA=0 
-  - export VLLM_ROCM_USE_AITER=1
-  - export VLLM_USE_AITER_UNIFIED_ATTENTION=1 
   - pytest -v -s -x lora/test_gptoss_tp.py
 
 
