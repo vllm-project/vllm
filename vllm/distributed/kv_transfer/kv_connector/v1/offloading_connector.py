@@ -358,15 +358,18 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
-        # No external tokens to load. This also happens when OffloadingConnector isn't
-        # the connector chosen to load tokens by the MultiConnector.
-        if num_external_tokens == 0:
+        # Skip if no blocks allocated. MultiConnector scenario where another connector
+        # is handling this request and we have empty blocks. Do not store blocks.
+        block_groups = blocks.get_block_ids(allow_none=True)
+        if block_groups is None:
             return
         self._requests[request.request_id] = request
         # the block ids are updated in _get_reqs_to_store
         self._request_block_ids[request.request_id] = []
 
-        block_groups = blocks.get_block_ids()
+        if num_external_tokens == 0:
+            return
+
         block_ids = block_groups[0]
 
         num_computed_gpu_blocks = sum(
