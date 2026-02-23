@@ -1,9 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-
 from typing import cast
 
 import torch
+import torch.nn.functional as F
 
 from vllm.model_executor.models import VllmModelForPooling, is_pooling_model
 from vllm.tasks import PoolingTask
@@ -32,14 +32,9 @@ class PoolingRunner:
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
     ) -> list[torch.Tensor | None]:
-        num_reqs = input_batch.num_reqs
-        query_start_loc_list = input_batch.query_start_loc_np.tolist()
-
-        out: list[torch.Tensor | None] = []
-        for i in range(num_reqs):
-            last = query_start_loc_list[i + 1] - 1
-            out.append(hidden_states[last])
-        return out
+        last_hidden_states = hidden_states[input_batch.logits_indices]
+        last_hidden_states = F.normalize(last_hidden_states, p=2, dim=-1)
+        return list(last_hidden_states.unbind(dim=0))
 
     def dummy_pooler_run(self, hidden_states: torch.Tensor) -> PoolerOutput:
         return
