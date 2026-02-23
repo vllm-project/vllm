@@ -186,23 +186,20 @@ class KVConnectorModelRunnerMixin:
         spec: KVCacheSpec,
         backend: type[AttentionBackend],
         cache_dtype: CacheDType,
-        tensor_idx: int,
     ) -> tuple:
         """Compute the grouping key for a layer.
 
         Examines the backend's stride order (with layers dimension) to
         determine how this layer should be grouped:
 
-        - ``("solo", idx)``: blocks is not at physical position 0, so
-          this layer cannot share a cross-layer tensor efficiently.
         - ``("ordered", prefix_sizes, remaining_bytes)``: blocks is first
           and heads comes before layers.  ``prefix_sizes`` are the
           dimension sizes between blocks and layers in physical order.
           Layers with the same prefix share a tensor shaped
           ``(num_blocks, *prefix_sizes, num_layers, remaining_bytes)``.
         - ``("default", page_size_bytes)``: everything else (including
-          non-attention specs).  Layers share a tensor shaped
-          ``(num_blocks, num_layers, page_size_bytes)``.
+          non-attention specs or heads after layers).  Layers share a
+          tensor shaped ``(num_blocks, num_layers, page_size_bytes)``.
         """
         if not isinstance(spec, AttentionSpec):
             return ("default", spec.page_size_bytes)
@@ -219,20 +216,14 @@ class KVConnectorModelRunnerMixin:
                 spec.head_size,
                 cache_dtype_str=cache_dtype,
             )
-            blocks_base = base_shape.index(_B)
             heads_base = base_shape.index(_H)
         except (AttributeError, NotImplementedError, ValueError, AssertionError):
             return ("default", spec.page_size_bytes)
 
         # With layers prepended, every base dim index shifts up by 1.
         log_to_phys = {dim: pos for pos, dim in enumerate(stride_order_wl)}
-        blocks_phys = log_to_phys[blocks_base + 1]
         layers_phys = log_to_phys[0]
         heads_phys = log_to_phys[heads_base + 1]
-
-        # Blocks must be outermost so one block = one contiguous chunk.
-        if blocks_phys != 0:
-            return ("solo", tensor_idx)
 
         # Heads after layers means no useful prefix to extract.
         if heads_phys >= layers_phys:
@@ -369,14 +360,14 @@ class KVConnectorModelRunnerMixin:
         """Allocate cross-layer KV caches, one tensor per group.
 
         Each attention layer is classified via ``_cross_layer_group_key``
-        into one of three categories:
+        into one of two categories:
 
-        - **solo**: blocks not at physical position 0 — one layer per group.
         - **ordered**: blocks first *and* heads before layers — layers with
           matching stride-order prefix share a tensor shaped
           ``(num_blocks, *prefix_dims, num_layers, remaining_bytes)``.
-        - **default**: everything else — grouped by ``page_size_bytes``
-          with shape ``(num_blocks, num_layers, page_size_bytes)``.
+        - **default**: everything else (including non-attention specs or
+          heads after layers) — grouped by ``page_size_bytes`` with shape
+          ``(num_blocks, num_layers, page_size_bytes)``.
 
         Assumes use_uniform_kv_cache() returned True.
         """
@@ -397,7 +388,6 @@ class KVConnectorModelRunnerMixin:
                 spec,
                 backend,
                 cache_dtype,
-                tensor_idx,
             )
             grouped[key].append((tensor_idx, kv_tensor))
 
