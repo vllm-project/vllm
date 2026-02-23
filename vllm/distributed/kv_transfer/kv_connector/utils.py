@@ -356,7 +356,7 @@ class TpKVTopology:
         # In the default non-cross layers layout the block_size position
         # is logical while in the cross layers case it is the physical
         # position. This matches the shape of the actual kv cache tensors
-        # passed at register_kv_caches()/register_cross_layers_kv_cache()
+        # passed at register_kv_caches()
         block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
 
         assert block_size_position is not None

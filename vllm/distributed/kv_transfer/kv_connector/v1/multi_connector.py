@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -35,6 +35,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+    from vllm.v1.worker.kv_connector_model_runner_mixin import CrossLayerGroup
 
 logger = init_logger(__name__)
 
@@ -172,16 +173,13 @@ class MultiConnector(KVConnectorBase_V1):
             )
         return ret
 
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+        cross_layer_groups: "list[CrossLayerGroup] | None" = None,
     ):
-        # Register on all connectors
         for c in self._connectors:
-            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
-
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        for c in self._connectors:
-            c.register_kv_caches(kv_caches)
+            c.register_kv_caches(kv_caches, cross_layer_groups)
 
     # We must override the base class method here because we need to bind
     # the metadata to each connector in the order of the connectors in the

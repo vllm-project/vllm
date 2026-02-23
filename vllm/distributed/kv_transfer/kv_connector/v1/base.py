@@ -46,7 +46,7 @@ from typing import TYPE_CHECKING, Any, Literal
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+    from vllm.v1.worker.kv_connector_model_runner_mixin import CrossLayerGroup
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
 CopyBlocksOp = Callable[
@@ -231,30 +232,23 @@ class KVConnectorBase_V1(ABC):
         """
         return self._connector_metadata is not None
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+        cross_layer_groups: "list[CrossLayerGroup] | None" = None,
+    ):
         """
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
 
         Args:
-            kv_caches: dictionary of layer names, kv cache
-        """
-        return
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
-    ):
-        """
-        Initialize with a single KV cache tensor used by all layers.
-        The first dimension should be num_layers.
-        This function will only be called for models with uniform layers,
-        and only if the prefers_cross_layer_blocks is set to True.
-        Only one of the functions
-        {register_kv_caches, register_cross_layers_kv_cache} will be called.
-
-        Args:
-            kv_cache: a cross-layers kv cache tensor
-            attn_backend: The attention backend that corresponds to all layers
+            kv_caches: dictionary mapping layer names to per-layer KV cache
+                tensors (or lists of tensors for Mamba layers).
+            cross_layer_groups: optional list of CrossLayerGroup objects.
+                When present, each group contains a contiguous cross-layer
+                tensor that connectors can use for efficient bulk transfers.
+                Connectors that do not support cross-layer blocks can ignore
+                this argument and use kv_caches instead.
         """
         return
 

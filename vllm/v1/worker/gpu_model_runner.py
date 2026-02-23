@@ -6097,18 +6097,7 @@ class GPUModelRunner(
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()
-            if (
-                self.cross_layer_groups is not None
-                and len(self.cross_layer_groups) == 1
-                and isinstance(self.cross_layer_groups[0].spec, AttentionSpec)
-            ):
-                # Optimized path: single attention group can use cross-layer API
-                group = self.cross_layer_groups[0]
-                kv_transfer_group.register_cross_layers_kv_cache(
-                    group.tensor, group.backend
-                )
-            else:
-                kv_transfer_group.register_kv_caches(kv_caches)
+            kv_transfer_group.register_kv_caches(kv_caches, self.cross_layer_groups)
             kv_transfer_group.set_host_xfer_buffer_ops(copy_kv_blocks)
 
         if self.model_config.enable_return_routed_experts:

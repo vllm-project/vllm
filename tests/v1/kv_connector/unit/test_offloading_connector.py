@@ -7,7 +7,6 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-import torch
 
 from vllm import SamplingParams
 from vllm.config import KVTransferConfig, VllmConfig
@@ -20,7 +19,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
 )
 from vllm.forward_context import ForwardContext
 from vllm.utils.hashing import sha256
-from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
     get_request_block_hasher,
@@ -175,10 +173,7 @@ class RequestRunner:
         self.worker_connector = OffloadingConnector(vllm_config, KVConnectorRole.WORKER)
 
         # register worker kv_caches to enable OffloadingWorker creations
-        self.worker_connector.register_cross_layers_kv_cache(
-            kv_cache=torch.empty(0),
-            attn_backend=FlashAttentionBackend,
-        )
+        self.worker_connector.register_kv_caches(kv_caches={})
 
         # extract connector of scheduler
         scheduler_connector = self.scheduler.connector

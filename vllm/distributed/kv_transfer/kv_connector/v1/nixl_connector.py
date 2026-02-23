@@ -54,7 +54,7 @@ from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import make_zmq_path, make_zmq_socket
-from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
+from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.block_table import BlockTable
@@ -63,6 +63,7 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+    from vllm.v1.worker.kv_connector_model_runner_mixin import CrossLayerGroup
 
 TransferHandle = int
 ReqId = str
@@ -412,19 +413,20 @@ class NixlConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
-        assert self.connector_worker is not None
-        self.connector_worker.register_kv_caches(kv_caches)
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+        cross_layer_groups: "list[CrossLayerGroup] | None" = None,
     ):
         assert self.connector_worker is not None
-
-        cross_layer_name = "ALL_LAYERS"
-        kv_caches = {cross_layer_name: kv_cache}
-
-        self.connector_worker.register_kv_caches(kv_caches)
+        if cross_layer_groups is not None:
+            caches: dict[str, torch.Tensor] = {
+                f"cross_layer_{i}": group.tensor
+                for i, group in enumerate(cross_layer_groups)
+            }
+            self.connector_worker.register_kv_caches(caches, cross_layer_groups)
+        else:
+            self.connector_worker.register_kv_caches(kv_caches)
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         assert self.connector_worker is not None
@@ -1304,9 +1306,14 @@ class NixlConnectorWorker:
 
         fut.add_done_callback(request_ready)
 
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor],
+        cross_layer_groups: "list[CrossLayerGroup] | None" = None,
+    ):
         """Register the KV Cache data in nixl."""
 
+        first_tensor = next(iter(kv_caches.values()))
         self.kv_topo = TpKVTopology(
             tp_rank=self.tp_rank,
             engine_id=self.engine_id,
@@ -1315,7 +1322,7 @@ class NixlConnectorWorker:
             is_mla=self.use_mla,
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             attn_backend=self.attn_backend,
-            tensor_shape=next(iter(kv_caches.values())).shape,
+            tensor_shape=first_tensor.shape,
         )
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.kv_topo.cross_layers_blocks
@@ -1357,6 +1364,11 @@ class NixlConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         tensor_size_bytes = None
 
+        # block_size_position only applies to attention tensors.
+        attn_tensor_ptrs: set[int] | None = None
+        if cross_layer_groups is not None:
+            attn_tensor_ptrs = {first_tensor.data_ptr()}
+
         # Enable different block lengths for different layers when MLA is used.
         self.block_len_per_layer = list[int]()
         self.slot_size_per_layer = list[int]()  # HD bytes in kv terms
@@ -1372,19 +1384,26 @@ class NixlConnectorWorker:
                 logger.debug(
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
-                kernel_block_size = cache.shape[self.kv_topo.block_size_position]
-                if self.block_size != kernel_block_size:
-                    logger.info_once(
-                        "User-specified logical block size (%s) does not match"
-                        " physical kernel block size (%s). Using the latter. ",
-                        self.block_size,
-                        kernel_block_size,
-                    )
-                    self._physical_blocks_per_logical_kv_block = (
-                        self.block_size // kernel_block_size
-                    )
-                    self.block_size = kernel_block_size
-                    self._block_size[self.engine_id] = kernel_block_size
+                # Skip block_size_position check for non-attention tensors
+                # (e.g. Mamba) where the position is meaningless.
+                is_attn_tensor = (
+                    attn_tensor_ptrs is None or base_addr in attn_tensor_ptrs
+                )
+                if is_attn_tensor:
+                    kernel_block_size = cache.shape[self.kv_topo.block_size_position]
+                    if self.block_size != kernel_block_size:
+                        logger.info_once(
+                            "User-specified logical block size (%s) does not "
+                            "match physical kernel block size (%s). "
+                            "Using the latter. ",
+                            self.block_size,
+                            kernel_block_size,
+                        )
+                        self._physical_blocks_per_logical_kv_block = (
+                            self.block_size // kernel_block_size
+                        )
+                        self.block_size = kernel_block_size
+                        self._block_size[self.engine_id] = kernel_block_size
 
                 seen_base_addresses.append(base_addr)
                 curr_tensor_size_bytes = cache.numel() * cache.element_size()
@@ -1404,11 +1423,6 @@ class NixlConnectorWorker:
                     self.block_len_per_layer[-1] // self.block_size
                 )
 
-                if not self.use_mla:
-                    # Different kv cache shape is not supported by HeteroTP
-                    assert tensor_size_bytes == curr_tensor_size_bytes, (
-                        "All kv cache tensors must have the same size"
-                    )
                 # Need to make sure the device ID is non-negative for NIXL,
                 # Torch uses -1 to indicate CPU tensors.
                 self.device_id = max(cache.get_device(), 0)
