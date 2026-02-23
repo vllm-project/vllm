@@ -299,7 +299,10 @@ def select_mxfp4_moe_backend(
 
     # FIXME(zyongye): manually select default kernels
     # change to automatic after monolithic kernel PR is merged
-    if current_platform.is_device_capability_family(100):
+    if (
+        current_platform.is_device_capability_family(100)
+        and Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16 in AVAILABLE_BACKENDS
+    ):
         if config.dp_size > 1 and config.use_ep:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16
             return _return_or_raise(
@@ -634,14 +637,14 @@ def convert_to_mxfp4_moe_kernel_format(
                 )
                 return w_interleaved
 
-            w31_scales = w13_scale_swapped.to(torch.uint8).view(torch.uint8)
+            w31_scales = w13_scale_swapped.to(torch.uint8)
             w31_scales_interleaved = _interleave_mxfp4_cutlass_sm90(w31_scales)
 
             w2_weight_scale = layer.w2_weight_scale.data
-            w2_scale = w2_weight_scale.to(torch.uint8).view(torch.uint8)
+            w2_scale = w2_weight_scale.to(torch.uint8)
             w2_scale_interleaved = _interleave_mxfp4_cutlass_sm90(w2_scale)
 
-            w13_weight = torch.cat([w3_w, w1_w], dim=1)
+            w13_weight = w13_weight_swapped
             w13_bias = w13_bias_swapped
             w13_weight_scale = w31_scales_interleaved
             w2_weight_scale = w2_scale_interleaved
@@ -684,8 +687,6 @@ def convert_to_mxfp4_moe_kernel_format(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
-        w13_weight = w13_weight
-        w2_weight = w2_weight
         del layer.w13_weight
         del layer.w2_weight
 
