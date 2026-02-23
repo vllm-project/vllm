@@ -18,6 +18,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     fp8_w8a8_moe_quant_config,
     fp8_w8a16_moe_quant_config,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     FlashinferMoeBackend,
     get_flashinfer_moe_backend,
@@ -545,7 +548,7 @@ def make_fp8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     fp8_backend: Fp8MoeBackend,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-    shared_experts: torch.nn.Module | None = None,
+    shared_experts: SharedExperts | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -583,10 +586,8 @@ def make_fp8_moe_kernel(
         experts,
         shared_experts=(
             shared_experts
-            if moe_config.moe_parallel_config.use_deepep_ll_kernels
-            else None
+            if prepare_finalize.supports_async() else None
         ),
-        moe_parallel_config=moe_config.moe_parallel_config,
         inplace=(
             not moe_config.disable_inplace
             and fp8_backend != Fp8MoeBackend.FLASHINFER_CUTLASS
