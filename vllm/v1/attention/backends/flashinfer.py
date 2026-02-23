@@ -1161,6 +1161,15 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
         return attn_metadata
 
+    def reset_for_sleep_mode(self) -> None:
+        self._prefill_wrapper = None
+        self._decode_wrapper = None
+        self._cascade_wrapper = None
+        # Reset cudagraph decode wrappers so they go through full plan()
+        if self.enable_cuda_graph:
+            for wrapper in self._decode_wrappers_cudagraph.values():
+                wrapper.vllm_first_call = True
+
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         if self.kv_cache_spec.dtype != self.vllm_config.model_config.dtype:
             # TODO: The cascade wrapper currently does not support setting
