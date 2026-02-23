@@ -353,6 +353,22 @@ def test_dsl_metrics_delta_and_reset():
     assert proposer.dsl_last_reported_requested == 0
 
 
+def test_draft_model_proposer_greedy_sample_uses_logits_argmax():
+    proposer = DraftModelProposer.__new__(DraftModelProposer)
+    proposer.use_local_argmax_reduction = False
+    proposer.model = mock.MagicMock()
+    proposer.model.compute_logits.return_value = torch.tensor(
+        [[0.1, 0.9, 0.2], [1.2, -0.1, 0.3]],
+        dtype=torch.float32,
+    )
+
+    sample_hidden_states = torch.zeros((2, 4), dtype=torch.float32)
+    token_ids = proposer._greedy_sample(sample_hidden_states)
+
+    proposer.model.compute_logits.assert_called_once_with(sample_hidden_states)
+    assert torch.equal(token_ids, torch.tensor([1, 0]))
+
+
 def test_prepare_inputs_padded():
     """
     Input scenario is 3 requests with num_speculative_tokens == 2 and:

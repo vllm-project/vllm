@@ -108,6 +108,9 @@ class SpecDecodeBaseProposer:
             1 if self.pass_hidden_states_to_model else 0
         )
         self.needs_extra_input_slots = self.net_num_new_slots_per_request > 0
+        self.use_local_argmax_reduction: bool = (
+            self.speculative_config.use_local_argmax_reduction
+        )
 
         self.parallel_drafting_token_id: int = 0
         self.parallel_drafting_hidden_state_tensor: torch.Tensor | None = None
@@ -385,6 +388,12 @@ class SpecDecodeBaseProposer:
             eagle_cudagraph_mode = CUDAGraphMode.NONE
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
+
+    def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Greedy-sample draft tokens from hidden states."""
+        if self.use_local_argmax_reduction:
+            return self.model.get_top_tokens(hidden_states)
+        return self.model.compute_logits(hidden_states).argmax(dim=-1)
 
     def get_dsl_metrics(self) -> dict[str, float]:
         """Get Dynamic Speculative Length (DSL) metrics.
