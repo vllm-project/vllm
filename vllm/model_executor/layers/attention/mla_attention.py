@@ -412,11 +412,22 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 get_current_vllm_config()
             )
         )
-        self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
-            static=True,
-            group_shape=GroupShape.PER_TENSOR,
-            compile_native=True,
-        )
+        self._use_fused_concat_quant = envs.VLLM_MLA_FUSED_CONCAT_QUANT
+        if self._use_fused_concat_quant:
+            vllm_config = get_current_vllm_config()
+            self._decode_concat_quant_fp8_op = FusedConcatQuantFP8(
+                max_batch_size=vllm_config.scheduler_config.max_num_seqs,
+                n_heads=self.num_heads,
+                d_nope=self.kv_lora_rank,
+                d_pe=self.qk_rope_head_dim,
+                device=torch.cuda.current_device(),
+            )
+        else:
+            self._decode_concat_quant_fp8_op = _DecodeConcatQuantFP8(
+                static=True,
+                group_shape=GroupShape.PER_TENSOR,
+                compile_native=True,
+            )
 
     def forward(
         self,
@@ -978,6 +989,106 @@ class _DecodeConcatQuantFP8(QuantFP8):
     forward_native = _make_forward(QuantFP8.forward_native)  # type: ignore[arg-type]
     forward_cuda = _make_forward(QuantFP8.forward_cuda)  # type: ignore[arg-type]
     forward_hip = _make_forward(QuantFP8.forward_hip)  # type: ignore[arg-type]
+
+
+# --- Fused Triton concat+quantize for MLA decode queries ---
+# Enabled via VLLM_MLA_FUSED_CONCAT_QUANT=1.
+# Fuses torch.cat([nope, pe], dim=-1) + scaled_fp8_quant into a single
+# kernel, eliminating the intermediate bf16 tensor. ~3x less memory traffic.
+# Pre-allocates output buffer for CUDA graph compatibility.
+
+import triton
+import triton.language as tl
+
+
+@triton.jit
+def _fused_concat_quant_fp8_kernel(
+        nope_ptr,
+        pe_ptr,
+        out_ptr,
+        scale_ptr,
+        # Strides for dim 0 and dim 1 (dim 2 assumed contiguous = 1)
+        sn0,
+        sn1,
+        sp0,
+        sp1,
+        so0,
+        so1,
+        D_NOPE: tl.constexpr,
+        D_PE: tl.constexpr,
+    ):
+        bid = tl.program_id(0)
+        hid = tl.program_id(1)
+
+        inv_scale = 1.0 / tl.load(scale_ptr)
+
+        # nope portion
+        offs_n = tl.arange(0, D_NOPE)
+        nope = tl.load(nope_ptr + bid * sn0 + hid * sn1 + offs_n)
+        tl.store(
+            out_ptr + bid * so0 + hid * so1 + offs_n,
+            (nope.to(tl.float32) * inv_scale).to(out_ptr.dtype.element_ty),
+        )
+
+        # pe portion
+        offs_p = tl.arange(0, D_PE)
+        pe = tl.load(pe_ptr + bid * sp0 + hid * sp1 + offs_p)
+        tl.store(
+            out_ptr + bid * so0 + hid * so1 + D_NOPE + offs_p,
+            (pe.to(tl.float32) * inv_scale).to(out_ptr.dtype.element_ty),
+        )
+
+
+class FusedConcatQuantFP8:
+    """Fused concat + fp8 quantization for MLA decode queries.
+
+    Zero intermediate allocations - safe for CUDA graph replay.
+    Output buffer is pre-allocated at init with max batch size.
+    """
+
+    def __init__(
+        self,
+        max_batch_size: int,
+        n_heads: int,
+        d_nope: int,
+        d_pe: int,
+        device: torch.device,
+    ):
+        self.d_nope = d_nope
+        self.d_pe = d_pe
+        self.d_total = d_nope + d_pe
+        self.n_heads = n_heads
+        self._out = torch.empty(
+            (max_batch_size, n_heads, d_nope + d_pe),
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+
+    def __call__(
+        self,
+        nope: torch.Tensor,
+        pe: torch.Tensor,
+        scale: torch.Tensor,
+    ) -> torch.Tensor:
+        B, N, _ = nope.shape
+        out = self._out[:B]
+
+        _fused_concat_quant_fp8_kernel[(B, N)](
+            nope,
+            pe,
+            out,
+            scale,
+            nope.stride(0),
+            nope.stride(1),
+            pe.stride(0),
+            pe.stride(1),
+            out.stride(0),
+            out.stride(1),
+            D_NOPE=self.d_nope,
+            D_PE=self.d_pe,
+            num_warps=4,
+        )
+        return out
 
 
 CUDNN_WORKSPACE_SIZE = 12800
