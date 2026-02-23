@@ -53,7 +53,13 @@ class TrtLlmNvFp4ExpertsBase:
         # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
         assert self.quant_config.g1_alphas is not None
         assert self.quant_config.a2_gscale is not None
-        self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
+        if moe_config.is_act_and_mul:
+            self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
+        else:
+            self.g1_scale_c = (
+                torch.ones_like(self.quant_config.a1_scale)
+                * self.quant_config.a2_gscale
+            )
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -236,7 +242,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
         Only DeepSeekV3 routing supports float32 router_logits (which is converted
         internally in the kernel).
         """
-        # TODO: check this
         if router_logits_dtype == torch.float32:
             # Only DeepSeekV3 routing handles float32 logits
             # https://github.com/flashinfer-ai/flashinfer/issues/2469
