@@ -445,7 +445,7 @@ class OAITritonExperts(BaseOAITritonExperts):
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        raise activation == MoEActivation.SWIGLUOAI
+        return activation == MoEActivation.SWIGLUOAI
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
