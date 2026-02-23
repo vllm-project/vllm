@@ -118,9 +118,8 @@ struct CUDATypeConverter<c10::BFloat16> {
 //   Type is the CUDA scalar type (e.g. half, __nv_bfloat16).
 template <class Type, bool use_256b>
 struct alignas(VecTraits<use_256b>::ARCH_MAX_VEC_SIZE) PackedVec {
-  static constexpr int NUM_ELTS =
-      VecTraits<use_256b>::ARCH_MAX_VEC_SIZE /
-      sizeof(typename TypeConverter<Type>::Type);
+  static constexpr int NUM_ELTS = VecTraits<use_256b>::ARCH_MAX_VEC_SIZE /
+                                  sizeof(typename TypeConverter<Type>::Type);
   typename TypeConverter<Type>::Type elts[NUM_ELTS];
 };
 
@@ -132,33 +131,33 @@ struct alignas(VecTraits<use_256b>::ARCH_MAX_VEC_SIZE) PackedVec {
 // SM100+  : PTX v8 instructions (.nc / default hint)
 // Older   : two uint4 loads via __ldg
 __device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
-#if VLLM_256B_PTX_ENABLED
+  #if VLLM_256B_PTX_ENABLED
   asm volatile("ld.global.nc.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];\n"
                : "=r"(val.d[0]), "=r"(val.d[1]), "=r"(val.d[2]), "=r"(val.d[3]),
                  "=r"(val.d[4]), "=r"(val.d[5]), "=r"(val.d[6]), "=r"(val.d[7])
                : "l"(ptr));
-#else
+  #else
   const uint4* src = reinterpret_cast<const uint4*>(ptr);
   uint4* dst = reinterpret_cast<uint4*>(val.d);
   dst[0] = __ldg(&src[0]);
   dst[1] = __ldg(&src[1]);
-#endif
+  #endif
 }
 
 __device__ __forceinline__ void st256(u32x8_t& val, u32x8_t* ptr) {
-#if VLLM_256B_PTX_ENABLED
+  #if VLLM_256B_PTX_ENABLED
   asm volatile("st.global.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};\n"
                :
                : "l"(ptr), "r"(val.d[0]), "r"(val.d[1]), "r"(val.d[2]),
                  "r"(val.d[3]), "r"(val.d[4]), "r"(val.d[5]), "r"(val.d[6]),
                  "r"(val.d[7])
                : "memory");
-#else
+  #else
   uint4* dst = reinterpret_cast<uint4*>(ptr);
   const uint4* src = reinterpret_cast<const uint4*>(val.d);
   dst[0] = src[0];
   dst[1] = src[1];
-#endif
+  #endif
 }
 
 // Generic ld256 / st256 for any 32-byte aligned type (e.g. PackedVec).
@@ -179,8 +178,7 @@ __device__ __forceinline__ void st256(T& val, T* ptr) {
 template <typename T>
 __device__ __forceinline__ void ld128(T& val, const T* ptr) {
   static_assert(sizeof(T) == 16, "ld128 requires a 16-byte type");
-  *reinterpret_cast<int4*>(&val) =
-      __ldg(reinterpret_cast<const int4*>(ptr));
+  *reinterpret_cast<int4*>(&val) = __ldg(reinterpret_cast<const int4*>(ptr));
 }
 
 template <typename T>
@@ -192,20 +190,18 @@ __device__ __forceinline__ void st128(T& val, T* ptr) {
 // 256-bit cache-streaming (.cs) load / store  — SM100+ only.
 __forceinline__ __device__ u32x8_t ld256_cs(const u32x8_t* addr) {
   u32x8_t val;
-  asm volatile(
-      "ld.global.cs.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
-      : "=r"(val.d[0]), "=r"(val.d[1]), "=r"(val.d[2]), "=r"(val.d[3]),
-        "=r"(val.d[4]), "=r"(val.d[5]), "=r"(val.d[6]), "=r"(val.d[7])
-      : "l"(addr));
+  asm volatile("ld.global.cs.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
+               : "=r"(val.d[0]), "=r"(val.d[1]), "=r"(val.d[2]), "=r"(val.d[3]),
+                 "=r"(val.d[4]), "=r"(val.d[5]), "=r"(val.d[6]), "=r"(val.d[7])
+               : "l"(addr));
   return val;
 }
 
 __forceinline__ __device__ void st256_cs(u32x8_t* addr, u32x8_t val) {
   asm volatile(
-      "st.global.cs.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};"
-      ::"l"(addr),
-      "r"(val.d[0]), "r"(val.d[1]), "r"(val.d[2]), "r"(val.d[3]),
-      "r"(val.d[4]), "r"(val.d[5]), "r"(val.d[6]), "r"(val.d[7]));
+      "st.global.cs.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};" ::"l"(addr),
+      "r"(val.d[0]), "r"(val.d[1]), "r"(val.d[2]), "r"(val.d[3]), "r"(val.d[4]),
+      "r"(val.d[5]), "r"(val.d[6]), "r"(val.d[7]));
 }
 
 // 32-bit cache-streaming (.cs) load / store  — SM100+ only.
@@ -222,7 +218,7 @@ __forceinline__ __device__ void st32_cs(int* addr, int val) {
 // Predicated 256-bit / 128-bit cache-global (.cg) loads.
 // Returns zero if pred is false.  SM100+ only.
 __device__ __forceinline__ void ld256_cg_or_zero(u32x8_t& val, const void* ptr,
-                                                  bool pred) {
+                                                 bool pred) {
   asm volatile(
       "{\n"
       "  .reg .pred pr;\n"
@@ -243,7 +239,7 @@ __device__ __forceinline__ void ld256_cg_or_zero(u32x8_t& val, const void* ptr,
 }
 
 __device__ __forceinline__ void ld128_cg_or_zero(uint4& val, const void* ptr,
-                                                  bool pred) {
+                                                 bool pred) {
   uint32_t r0, r1, r2, r3;
 
   asm volatile(
