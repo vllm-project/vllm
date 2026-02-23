@@ -48,16 +48,16 @@ class TrtLlmNvFp4ExpertsBase:
         self.local_num_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
 
-        # g1_alpha_s = a13_scale * w13_scale_2
-        # a2_gscale = (1 / a2_scale)
-        # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
         assert self.quant_config.g1_alphas is not None
         assert self.quant_config.a2_gscale is not None
         if moe_config.is_act_and_mul:
+            # g1_alpha_s = a13_scale * w13_scale_2
+            # a2_gscale = (1 / a2_scale)
+            # g1_scale_c = a13_scale * w13_scale_2 / a2_scale
             self.g1_scale_c = self.quant_config.g1_alphas * self.quant_config.a2_gscale
         else:
             self.g1_scale_c = (
-                torch.ones_like(self.quant_config.a1_scale)
+                torch.ones_like(self.quant_config.a1_gscale)
                 * self.quant_config.a2_gscale
             )
 
