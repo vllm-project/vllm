@@ -39,6 +39,28 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class MultiModalCacheMissError(RuntimeError):
+    """Raised when a multimodal item expected to be in the cache is missing.
+
+    This can happen when P0 (frontend) marks an item as cached (sending
+    ``data=None``) but P1 (engine core) has already evicted it from its
+    LRU receiver cache due to concurrent request pressure.  The error is
+    intentionally non-fatal: the engine core catches it per-request so
+    that only the affected request is aborted rather than crashing the
+    entire ``process_input_sockets`` thread.
+
+    See: https://github.com/vllm-project/vllm/issues/31404
+    """
+
+    def __init__(self, mm_hash: str) -> None:
+        self.mm_hash = mm_hash
+        super().__init__(
+            f"Multimodal cache miss: item with {mm_hash=} was expected "
+            "to be cached but has been evicted. The request will be "
+            "aborted so that the client can retry."
+        )
+
+
 class MultiModalProcessorCacheItem:
     """
     The data to store inside `MultiModalProcessorOnlyCache`.
@@ -357,7 +379,8 @@ class MultiModalProcessorOnlyCache(BaseMultiModalProcessorCache):
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return cached_item.item, cached_item.prompt_updates
 
-        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+        if mm_item is None:
+            raise MultiModalCacheMissError(mm_hash)
 
         self._cache[mm_hash] = MultiModalProcessorCacheItem(*mm_item)
 
@@ -415,7 +438,8 @@ class MultiModalProcessorSenderCache(BaseMultiModalProcessorCache):
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return None, cached_item.prompt_updates
 
-        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+        if mm_item is None:
+            raise MultiModalCacheMissError(mm_hash)
 
         self._cache[mm_hash] = MultiModalProcessorCacheItemMetadata(*mm_item)
 
@@ -498,7 +522,8 @@ class ShmObjectStoreSenderCache(BaseMultiModalProcessorCache):
             prompt_updates = self._p0_cache[mm_hash]
             return self.address_as_item(address, monotonic_id), prompt_updates
 
-        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+        if mm_item is None:
+            raise MultiModalCacheMissError(mm_hash)
         item, prompt_updates = mm_item
 
         self._total += 1
@@ -641,7 +666,8 @@ class MultiModalReceiverCache(BaseMultiModalReceiverCache):
         if (cached_item := self._cache.get(mm_hash)) is not None:
             return cached_item
 
-        assert mm_item is not None, f"Expected a cached item for {mm_hash=}"
+        if mm_item is None:
+            raise MultiModalCacheMissError(mm_hash)
 
         self._cache[mm_hash] = mm_item
         return mm_item
@@ -698,7 +724,8 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
         mm_item: MultiModalKwargsItem | None,
         mm_hash: str,
     ) -> MultiModalKwargsItem:
-        assert mm_item is not None, f"Expected an address item for {mm_hash=}"
+        if mm_item is None:
+            raise MultiModalCacheMissError(mm_hash)
         if "address" in mm_item:
             address = cast(int, mm_item["address"].data)
             monotonic_id = cast(int, mm_item["monotonic_id"].data)
@@ -714,7 +741,8 @@ class ShmObjectStoreReceiverCache(BaseMultiModalReceiverCache):
     ) -> None:
         """Touch the item in shared memory cache to prevent eviction.
         Increments reader_count on receiver side."""
-        assert mm_item is not None
+        if mm_item is None:
+            return
         if "address" in mm_item:
             address = cast(int, mm_item["address"].data)
             monotonic_id = cast(int, mm_item["monotonic_id"].data)

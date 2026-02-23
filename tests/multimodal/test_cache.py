@@ -12,6 +12,7 @@ from vllm.multimodal.cache import (
     BaseMultiModalProcessorCache,
     BaseMultiModalReceiverCache,
     MultiModalCache,
+    MultiModalCacheMissError,
     MultiModalProcessorCacheInItem,
     MultiModalProcessorCacheItem,
     MultiModalProcessorCacheItemMetadata,
@@ -549,3 +550,88 @@ def test_processor_cache_shared_across_loras():
 
     receiver_cache.get_and_update_features([feature_lora_b])
     assert feature_lora_b.data == item_data
+
+
+def test_receiver_cache_miss_raises_error():
+    """Receiver cache raises MultiModalCacheMissError (not AssertionError)
+    when an item expected to be cached has been evicted.
+
+    Reproduces: https://github.com/vllm-project/vllm/issues/31404
+    """
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        mm_processor_cache_gb=1,
+    )
+    receiver_cache = MultiModalReceiverCache(model_config)
+
+    # Simulate P0 marking an item as cached (data=None) but P1 has
+    # evicted it — the item was never inserted in this receiver cache.
+    feature = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="evicted_hash",
+        mm_position=PlaceholderRange(offset=0, length=100),
+        mm_hash="evicted_hash",
+    )
+
+    with pytest.raises(MultiModalCacheMissError, match="evicted_hash"):
+        receiver_cache.get_and_update_features([feature])
+
+
+def test_receiver_cache_cross_request_eviction():
+    """Simulates the cross-request eviction scenario from issue #31404.
+
+    Request A processed on P0: items [X, Y] marked as cached.
+    Request B processed on P0: item Z is new, gets inserted.
+    On P1, Request B arrives first → inserts Z, evicts X.
+    Then Request A arrives → X is gone → MultiModalCacheMissError.
+    """
+    # Use a very small cache (6 bytes capacity = room for ~3 items of 2B)
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        mm_processor_cache_gb=6 / GiB_bytes,
+    )
+    receiver_cache = MultiModalReceiverCache(model_config)
+
+    # Step 1: Insert items X and Y (each 2 bytes) — fills cache to 4/6
+    item_x = MultiModalKwargsItem.dummy(nbytes=2)
+    item_y = MultiModalKwargsItem.dummy(nbytes=2)
+    for item, h in [(item_x, "hash_X"), (item_y, "hash_Y")]:
+        receiver_cache.get_and_update_item(item, h)
+
+    assert "hash_X" in receiver_cache._cache
+    assert "hash_Y" in receiver_cache._cache
+
+    # Step 2: Request B arrives first on P1 — inserts Z (4 bytes).
+    # Cache needs 4 bytes but only has 2 free → evicts X (LRU).
+    item_z = MultiModalKwargsItem.dummy(nbytes=4)
+    receiver_cache.get_and_update_item(item_z, "hash_Z")
+
+    assert "hash_X" not in receiver_cache._cache  # evicted
+    assert "hash_Z" in receiver_cache._cache
+
+    # Step 3: Request A arrives on P1 — expects X to be cached (data=None)
+    feature_x = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="hash_X",
+        mm_position=PlaceholderRange(offset=0, length=100),
+        mm_hash="hash_X",
+    )
+
+    with pytest.raises(MultiModalCacheMissError, match="hash_X"):
+        receiver_cache.get_and_update_features([feature_x])
+
+
+def test_sender_cache_miss_raises_error():
+    """Sender caches raise MultiModalCacheMissError (not AssertionError)
+    when a supposedly-cached item is missing."""
+    model_config = ModelConfig(
+        model="llava-hf/llava-onevision-qwen2-0.5b-ov-hf",
+        mm_processor_cache_gb=1,
+    )
+    sender_cache = MultiModalProcessorSenderCache(model_config)
+
+    # Passing None means "this should be in the cache" but it's not
+    with pytest.raises(MultiModalCacheMissError, match="missing_hash"):
+        sender_cache.get_and_update_item(None, "missing_hash")
