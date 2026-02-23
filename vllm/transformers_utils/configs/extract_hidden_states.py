@@ -1,9 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Config definitions for ExtractHiddenStatesModel, to be used with
+the extract_hidden_states spec decoding method."""
 
 import os
 
 from transformers import PretrainedConfig
+
+from vllm.config import ModelConfig
+from vllm.transformers_utils.config import get_hf_text_config
 
 
 class ExtractHiddenStatesConfig(PretrainedConfig):

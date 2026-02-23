@@ -8,6 +8,7 @@ without performing actual token generation. It's used with the
 extract_hidden_states speculative decoding method.
 """
 
+from collections.abc import Iterable
 from typing import ClassVar
 
 import torch
@@ -91,7 +92,6 @@ def basic_cache(
 ######### CacheOnlyAttentionBackend ########
 
 
-@register_backend(AttentionBackendEnum.CUSTOM)
 class CacheOnlyAttentionBackend(AttentionBackend):
     """Attention backend that only caches KV without computing attention."""
 
@@ -109,7 +109,7 @@ class CacheOnlyAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_name() -> str:
-        return "CUSTOM"
+        return "CACHE_ONLY_ATTN"
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
@@ -390,6 +390,6 @@ class ExtractHiddenStatesModel(nn.Module):
         # Output is ignored - we only care about the KV cache side effects
         _ = self.cache_only_layers[str(self.target_num_hidden_layers)](hidden_states)
 
-    def load_weights(self, weights):
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """No weights to load for this dummy model."""
-        return None
+        return set()
