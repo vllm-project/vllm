@@ -796,13 +796,17 @@ RUN --mount=type=cache,target=/root/.cache/uv \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
         if [ "$CUDA_MAJOR" -ge 13 ]; then \
-            uv pip install --system nixl-cu13; \
+            # Use nixl[cu13] extra to install the correct CUDA 13 bindings
+            sed 's/^nixl\b/nixl[cu13]/' /tmp/kv_connectors.txt > /tmp/kv_connectors_cuda.txt; \
+            KV_REQS=/tmp/kv_connectors_cuda.txt; \
+        else \
+            KV_REQS=/tmp/kv_connectors.txt; \
         fi; \
-        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
+        uv pip install --system -r "$KV_REQS" --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
+            uv pip install --system -r "$KV_REQS" --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \
