@@ -9,6 +9,7 @@ from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
+from enum import IntEnum
 from functools import partial
 from inspect import isclass, signature
 from logging import DEBUG
@@ -767,6 +768,12 @@ class EngineCore:
         raise NotImplementedError
 
 
+class EngineShutdownState(IntEnum):
+    RUNNING = 0
+    REQUESTED = 1
+    SHUTTING_DOWN = 2
+
+
 class EngineCoreProc(EngineCore):
     """ZMQ-wrapper for running EngineCore in background process."""
 
@@ -794,6 +801,7 @@ class EngineCoreProc(EngineCore):
         self.engine_index = engine_index
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
+        self.shutdown_state = EngineShutdownState.RUNNING
 
         with self._perform_handshakes(
             handshake_address,
@@ -1024,19 +1032,14 @@ class EngineCoreProc(EngineCore):
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
-        # Signal handler used for graceful termination.
-        # SystemExit exception is only raised once to allow this and worker
-        # processes to terminate without error
-        shutdown_requested = False
-
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
         def signal_handler(signum, frame):
-            nonlocal shutdown_requested
-            if not shutdown_requested:
-                shutdown_requested = True
-                raise SystemExit()
+            if engine_core is not None:
+                engine_core.shutdown_state = EngineShutdownState.REQUESTED
+            else:
+                raise SystemExit
 
         # Either SIGTERM or SIGINT will terminate the engine_core
         signal.signal(signal.SIGTERM, signal_handler)
@@ -1119,13 +1122,13 @@ class EngineCoreProc(EngineCore):
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
-
-        # Loop until process is sent a SIGINT or SIGTERM
-        while True:
+        while self._handle_shutdown():
             # 1) Poll the input queue until there is work to do.
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+
+        raise SystemExit
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
@@ -1183,6 +1186,42 @@ class EngineCoreProc(EngineCore):
             callback = self._idle_state_callbacks.pop()
             callback(self)
 
+    def _handle_shutdown(self) -> bool:
+        # Check if shutdown was requested and handle it
+        if self.shutdown_state == EngineShutdownState.RUNNING:
+            return True
+
+        if self.shutdown_state == EngineShutdownState.REQUESTED:
+            shutdown_timeout = self.vllm_config.shutdown_timeout
+
+            logger.info("Shutdown initiated (timeout=%d)", shutdown_timeout)
+
+            if shutdown_timeout == 0:
+                num_requests = self.scheduler.get_num_unfinished_requests()
+                if num_requests > 0:
+                    logger.info("Aborting %d requests", num_requests)
+                aborted_reqs = self.scheduler.finish_requests(
+                    None, RequestStatus.FINISHED_ABORTED
+                )
+                self._send_abort_outputs(aborted_reqs)
+            else:
+                num_requests = self.scheduler.get_num_unfinished_requests()
+                if num_requests > 0:
+                    logger.info(
+                        "Draining %d in-flight requests (timeout=%ds)",
+                        num_requests,
+                        shutdown_timeout,
+                    )
+
+            self.shutdown_state = EngineShutdownState.SHUTTING_DOWN
+
+        # Exit when no work remaining
+        if not self.has_work():
+            logger.info("Shutdown complete")
+            return False
+
+        return True
+
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
     ) -> None:
@@ -1190,11 +1229,15 @@ class EngineCoreProc(EngineCore):
 
         if request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
+            if self._reject_add_in_shutdown(req):
+                return
             self.add_request(req, request_wave)
         elif request_type == EngineCoreRequestType.ABORT:
             self.abort_requests(request)
         elif request_type == EngineCoreRequestType.UTILITY:
             client_idx, call_id, method_name, args = request
+            if self._reject_utility_in_shutdown(client_idx, call_id, method_name):
+                return
             output = UtilityOutput(call_id)
             # Lazily look-up utility method so that failure will be handled/returned.
             get_result = lambda: (method := getattr(self, method_name)) and method(
@@ -1210,6 +1253,27 @@ class EngineCoreProc(EngineCore):
             logger.error(
                 "Unrecognized input request type encountered: %s", request_type
             )
+
+    def _reject_add_in_shutdown(self, request: Request) -> bool:
+        if self.shutdown_state == EngineShutdownState.RUNNING:
+            return False
+
+        logger.info("Rejecting request %s (server shutting down)", request.request_id)
+        self._send_request_error_output(request.request_id, request.client_index)
+        return True
+
+    def _reject_utility_in_shutdown(
+        self, client_idx: int, call_id: int, method_name: str
+    ) -> bool:
+        if self.shutdown_state == EngineShutdownState.RUNNING:
+            return False
+
+        logger.warning("Rejecting utility call %s (server shutting down)", method_name)
+        output = UtilityOutput(call_id, failure_message="Server shutting down")
+        self.output_queue.put_nowait(
+            (client_idx, EngineCoreOutputs(utility_output=output))
+        )
+        return True
 
     @staticmethod
     def _invoke_utility_method(
