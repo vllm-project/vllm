@@ -203,13 +203,17 @@ class CudaPlatformBase(Platform):
                 # Default case
                 hf_text_config = model_config.hf_text_config
                 qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
+                # Check if DCP is enabled - FlashInferMLA doesn't support LSE for DCP
+                dcp_enabled = parallel_config.decode_context_parallel_size > 1
                 if (
                     cls.is_device_capability_family(100)
                     and not use_sparse
                     and qk_nope_head_dim == 128
+                    and not dcp_enabled  # FlashInferMLA doesn't return LSE for DCP
                 ):
                     # Blackwell => Force FlashInfer MLA (unless sparse, i.e. DSv3.2)
                     # and only if qk_nope_head_dim == 128 (kernel constraint)
+                    # and DCP is not enabled (FlashInferMLA doesn't support LSE)
                     use_flashinfer_mla = True
                     # Set the backend in AttentionConfig so it's used during
                     # backend selection
@@ -218,7 +222,13 @@ class CudaPlatformBase(Platform):
                     )
                 elif cls.is_device_capability_family(100) and not use_sparse:
                     # Fall back to CUTLASS_MLA as 2nd priority on Blackwell
+                    # Also used when DCP is enabled (CUTLASS_MLA supports LSE)
                     use_cutlass_mla = True
+                    # Set the backend in AttentionConfig so it's used during
+                    # backend selection (same as FlashInferMLA case above)
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.CUTLASS_MLA
+                    )
                 elif is_flashmla_dense_supported()[0]:
                     # Non-Blackwell with FlashMLA support
                     use_flashmla = True
@@ -278,6 +288,78 @@ class CudaPlatformBase(Platform):
                         "Forcing kv cache block size to 64 for FlashInferMLASparse "
                         "backend."
                     )
+
+        # Check for FlashInfer + Helix GQA incompatibility
+        # FlashInfer produces gibberish output with Helix GQA mode (TPA > 1).
+        # Root cause is under investigation. For now, prevent this combination.
+        if (
+            parallel_config.helix_mode
+            and parallel_config.decode_context_parallel_size > 1
+        ):
+            # Check if this is GQA (TPA > 1) by checking if TP/DCP > 1
+            tp_size = parallel_config.tensor_parallel_size
+            dcp_size = parallel_config.decode_context_parallel_size
+            tpa_size = tp_size // dcp_size
+            is_helix_gqa = tpa_size > 1  # GQA has TPA > 1, MLA has TPA = 1
+
+            if is_helix_gqa:
+                helix_backend: AttentionBackendEnum | None = (
+                    vllm_config.attention_config.backend
+                )
+                if helix_backend == AttentionBackendEnum.FLASHINFER:
+                    # User explicitly requested FlashInfer - block it
+                    raise ValueError(
+                        "FlashInfer backend is not supported with Helix GQA mode "
+                        f"(TP={tp_size}, DCP={dcp_size}, TPA={tpa_size}). "
+                        "FlashInfer produces incorrect output in this configuration. "
+                        "Please use FlashAttn instead: --attention-backend FLASH_ATTN"
+                    )
+                elif helix_backend is None:
+                    # Auto-selection: force FlashAttn to avoid FlashInfer
+                    logger.info(
+                        "Helix GQA mode detected (TPA=%d). Forcing FLASH_ATTN backend "
+                        "(FlashInfer produces incorrect output in this configuration).",
+                        tpa_size,
+                    )
+                    vllm_config.attention_config.backend = (
+                        AttentionBackendEnum.FLASH_ATTN
+                    )
+
+        # DCP->PIECEWISE check for CUDA graph compatibility.
+        # DCP is incompatible with FULL CUDA graphs for GQA models because
+        # dcp_context_kv_lens tensor gets captured as static constant during
+        # graph capture, causing gibberish output during decode.
+        #
+        # However, MLA models use persistent buffers (seq_lens, dcp_local_seq_lens,
+        # dcp_tot_seq_lens) that are managed differently - they're slices of
+        # pre-allocated buffers with fixed addresses, making them compatible
+        # with FULL CUDA graphs.
+        from vllm.config import CUDAGraphMode
+
+        compilation_config = vllm_config.compilation_config
+        if compilation_config.cudagraph_mode.has_full_cudagraphs():
+            if parallel_config.decode_context_parallel_size > 1:
+                # MLA models use persistent buffers - FULL graphs should work
+                if model_config is not None and model_config.use_mla:
+                    logger.info(
+                        "DCP with MLA detected. Keeping FULL CUDA graphs "
+                        "(MLA uses persistent buffers compatible with graph capture)."
+                    )
+                else:
+                    # GQA models need PIECEWISE due to dcp_context_kv_lens issue
+                    logger.warning_once(
+                        "Decode context parallel (DCP) is enabled with GQA model, "
+                        "which is incompatible with full CUDA graphs. "
+                        "Overriding cudagraph_mode to PIECEWISE."
+                    )
+                    compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            elif parallel_config.prefill_context_parallel_size > 1:
+                logger.warning_once(
+                    "Prefill context parallel (PCP) is enabled, which is "
+                    "incompatible with full CUDA graphs. "
+                    "Overriding cudagraph_mode to PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing

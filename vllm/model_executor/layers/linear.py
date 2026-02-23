@@ -10,6 +10,8 @@ from torch.nn.parameter import Parameter, UninitializedParameter
 
 from vllm.distributed import (
     divide,
+    get_attention_tp_rank,
+    get_attention_tp_world_size,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
     split_tensor_along_last_dim,
@@ -971,15 +973,26 @@ class QKVParallelLinear(ColumnParallelLinear):
         if total_num_kv_heads is None:
             total_num_kv_heads = total_num_heads
         self.total_num_kv_heads = total_num_kv_heads
-        # Divide the weight matrix along the last dimension.
+
+        # For attention layers, use attention parallel size for head distribution.
+        # - Standard TP: attn_tp_size = tp_size
+        # - Helix GQA: attn_tp_size = TPA (GPUs in same KVP group share weights)
         tp_size = get_tensor_model_parallel_world_size() if not disable_tp else 1
-        self.num_heads = divide(self.total_num_heads, tp_size)
-        if tp_size >= self.total_num_kv_heads:
+        attn_tp_size = get_attention_tp_world_size(disable_tp)
+        attn_tp_rank = get_attention_tp_rank(disable_tp)
+
+        # Calculate heads per attention parallel rank
+        self.num_heads = divide(self.total_num_heads, attn_tp_size)
+        if attn_tp_size >= self.total_num_kv_heads:
             self.num_kv_heads = 1
-            self.num_kv_head_replicas = divide(tp_size, self.total_num_kv_heads)
+            self.num_kv_head_replicas = divide(attn_tp_size, self.total_num_kv_heads)
         else:
-            self.num_kv_heads = divide(self.total_num_kv_heads, tp_size)
+            self.num_kv_heads = divide(self.total_num_kv_heads, attn_tp_size)
             self.num_kv_head_replicas = 1
+
+        # Calculate output_size for tensor creation.
+        # Use TPA-based head counts, but multiply by TP so that when
+        # ColumnParallelLinear divides by TP, we get the correct per-GPU size.
         input_size = self.hidden_size
         output_size = (
             self.num_heads * self.head_size
@@ -991,6 +1004,11 @@ class QKVParallelLinear(ColumnParallelLinear):
             self.num_kv_heads * self.head_size * tp_size,  # k_proj
             self.num_kv_heads * self.v_head_size * tp_size,  # v_proj
         ]
+
+        # Store attention parallel info for weight loading
+        # In Helix GQA: multiple TP ranks share the same attn_tp_rank (same weights)
+        self._qkv_tp_rank = attn_tp_rank
+        self._qkv_tp_size = attn_tp_size
 
         super().__init__(
             input_size=input_size,
@@ -1073,14 +1091,18 @@ class QKVParallelLinear(ColumnParallelLinear):
         loaded_weight: torch.Tensor,
         loaded_shard_id: str | None = None,
     ):
+        # Use _qkv_tp_rank for weight loading (supports Helix GQA where
+        # multiple TP ranks share the same attention weights)
+        qkv_tp_rank = getattr(self, "_qkv_tp_rank", self.tp_rank)
+
         if loaded_shard_id is None:  # special case for certain models
             if isinstance(param, PerTensorScaleParameter):
                 param.load_qkv_weight(
-                    loaded_weight=loaded_weight, shard_id=0, tp_rank=self.tp_rank
+                    loaded_weight=loaded_weight, shard_id=0, tp_rank=qkv_tp_rank
                 )
                 return
             elif type(param) in (RowvLLMParameter, BasevLLMParameter):
-                param.load_qkv_weight(loaded_weight=loaded_weight, tp_rank=self.tp_rank)
+                param.load_qkv_weight(loaded_weight=loaded_weight, tp_rank=qkv_tp_rank)
                 return
             # TODO: @dsikka - move to parameter.py
             self._load_fused_module_from_checkpoint(param, loaded_weight)
@@ -1103,7 +1125,7 @@ class QKVParallelLinear(ColumnParallelLinear):
             shard_id=loaded_shard_id,
             shard_offset=shard_offset,
             shard_size=shard_size,
-            tp_rank=self.tp_rank,
+            tp_rank=qkv_tp_rank,
         )
 
     def weight_loader(
@@ -1127,8 +1149,11 @@ class QKVParallelLinear(ColumnParallelLinear):
 
         if is_gguf_weight:
             output_dim = getattr(param, "output_dim", None)
-            shard_size = loaded_weight.size(output_dim) // self.tp_size
-            start_idx = self.tp_rank * shard_size
+            # Use _qkv_tp_rank/size for Helix GQA support
+            qkv_tp_size = getattr(self, "_qkv_tp_size", self.tp_size)
+            qkv_tp_rank = getattr(self, "_qkv_tp_rank", self.tp_rank)
+            shard_size = loaded_weight.size(output_dim) // qkv_tp_size
+            start_idx = qkv_tp_rank * shard_size
 
             if loaded_shard_id is not None:
                 loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
@@ -1276,10 +1301,13 @@ class QKVParallelLinear(ColumnParallelLinear):
                 )
 
             param_data = param_data.narrow(output_dim, shard_offset, shard_size)
+            # Use _qkv_tp_rank for weight loading (supports Helix GQA where
+            # multiple TP ranks share the same attention weights)
+            qkv_tp_rank = getattr(self, "_qkv_tp_rank", self.tp_rank)
             if loaded_shard_id == "q":
-                shard_rank = self.tp_rank
+                shard_rank = qkv_tp_rank
             else:
-                shard_rank = self.tp_rank // self.num_kv_head_replicas
+                shard_rank = qkv_tp_rank // self.num_kv_head_replicas
             start_idx = shard_rank * shard_size
 
             if not is_sharded_weight:
