@@ -149,9 +149,108 @@ class BlockTables:
         )
         return self.slot_mappings[:, :num_tokens]
 
+    def gather_and_compute_slot_mappings(
+        self,
+        idx_mapping: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        positions: torch.Tensor,
+    ) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
+        """Fused gather_block_tables + compute_slot_mappings in one kernel."""
+        num_reqs = idx_mapping.shape[0]
+        num_tokens = positions.shape[0]
+        num_groups = self.num_kv_cache_groups
+        _fused_gather_and_slot_mappings_kernel[(num_groups, num_reqs + 1)](
+            idx_mapping,
+            self.block_table_ptrs,
+            self.input_block_table_ptrs,
+            self.block_table_strides,
+            self.num_blocks.gpu,
+            self.num_blocks.gpu.stride(0),
+            num_tokens,
+            self.max_num_batched_tokens,
+            query_start_loc,
+            positions,
+            self.block_sizes_tensor,
+            self.slot_mappings,
+            self.slot_mappings.stride(0),
+            PAD_ID=PAD_SLOT_ID,
+            GATHER_BLOCK_SIZE=1024,  # type: ignore
+            SLOT_BLOCK_SIZE=1024,  # type: ignore
+        )
+        block_tables = tuple(bt[:num_reqs] for bt in self.input_block_tables)
+        slot_mappings = self.slot_mappings[:, :num_tokens]
+        return block_tables, slot_mappings
+
     def get_dummy_slot_mappings(self, num_tokens: int) -> torch.Tensor:
         self.slot_mappings.fill_(PAD_SLOT_ID)
         return self.slot_mappings[:, :num_tokens]
+
+
+@triton.jit
+def _fused_gather_and_slot_mappings_kernel(
+    # Gather parameters
+    batch_idx_to_req_idx,  # [batch_size]
+    src_block_table_ptrs,  # [num_kv_cache_groups]
+    dst_block_table_ptrs,  # [num_kv_cache_groups]
+    block_table_strides,  # [num_kv_cache_groups]
+    num_blocks_ptr,  # [num_kv_cache_groups, max_num_reqs]
+    num_blocks_stride,
+    # Slot mapping parameters
+    num_tokens,
+    max_num_tokens,
+    query_start_loc,  # [num_reqs + 1]
+    pos,  # [num_tokens]
+    block_sizes,  # [num_kv_cache_groups]
+    slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
+    slot_mappings_stride,
+    # Constants
+    PAD_ID: tl.constexpr,
+    GATHER_BLOCK_SIZE: tl.constexpr,
+    SLOT_BLOCK_SIZE: tl.constexpr,
+):
+    group_id = tl.program_id(0)
+    batch_idx = tl.program_id(1)
+
+    slot_mapping_ptr = slot_mappings_ptr + group_id * slot_mappings_stride
+
+    # Last program handles padding (same as original _compute_slot_mappings)
+    if batch_idx == tl.num_programs(1) - 1:
+        for i in range(num_tokens, max_num_tokens, SLOT_BLOCK_SIZE):
+            offset = i + tl.arange(0, SLOT_BLOCK_SIZE)
+            tl.store(slot_mapping_ptr + offset, PAD_ID, mask=offset < max_num_tokens)
+        return
+
+    req_idx = tl.load(batch_idx_to_req_idx + batch_idx)
+    stride = tl.load(block_table_strides + group_id)
+    src_block_table_ptr = _load_ptr(src_block_table_ptrs + group_id, tl.int32)
+
+    # --- Phase A: Gather block table row ---
+    group_num_blocks_ptr = num_blocks_ptr + group_id * num_blocks_stride
+    num_blocks = tl.load(group_num_blocks_ptr + req_idx)
+
+    src_row_ptr = src_block_table_ptr + req_idx * stride
+    dst_block_table_ptr = _load_ptr(dst_block_table_ptrs + group_id, tl.int32)
+    dst_row_ptr = dst_block_table_ptr + batch_idx * stride
+
+    for i in tl.range(0, num_blocks, GATHER_BLOCK_SIZE):
+        offset = i + tl.arange(0, GATHER_BLOCK_SIZE)
+        block_ids = tl.load(src_row_ptr + offset, mask=offset < num_blocks)
+        tl.store(dst_row_ptr + offset, block_ids, mask=offset < num_blocks)
+
+    # --- Phase B: Compute slot mappings ---
+    block_size = tl.load(block_sizes + group_id)
+
+    start_idx = tl.load(query_start_loc + batch_idx)
+    end_idx = tl.load(query_start_loc + batch_idx + 1)
+
+    # Read from SOURCE block table directly (avoids dependency on gather)
+    for i in range(start_idx, end_idx, SLOT_BLOCK_SIZE):
+        offset = i + tl.arange(0, SLOT_BLOCK_SIZE)
+        positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
+        block_indices = positions // block_size
+        block_numbers = tl.load(src_block_table_ptr + req_idx * stride + block_indices)
+        slot_ids = block_numbers * block_size + positions % block_size
+        tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)
 
 
 @triton.jit
