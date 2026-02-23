@@ -16,7 +16,7 @@ steps:
   # https://github.com/pytorch/ao/issues/2919, we'll have to skip new torchao tests for now
   # we can only upgrade after this is resolved
   # TODO(jerryzh168): resolve the above comment
-  - uv pip install --system torchao==0.16.0 --index-url https://download.pytorch.org/whl/test/cu130
+  - uv pip install --system torchao==0.17.0.dev20260216 --index-url https://download.pytorch.org/whl/nightly/cu130
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
