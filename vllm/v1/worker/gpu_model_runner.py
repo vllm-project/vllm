@@ -514,6 +514,8 @@ class GPUModelRunner(
             tuple(logits_processors) if logits_processors is not None else ()
         )
         placeholder_block_size = self.cache_config.block_size or 16
+        self._init_block_sizes = [placeholder_block_size]
+        self._init_kernel_block_sizes = [placeholder_block_size]
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             # We need to use the encoder length for encoder-decoer
@@ -5712,8 +5714,10 @@ class GPUModelRunner(
     ) -> None:
         """
         Re-initialize the input batch if the block sizes are different from
-        `[self.cache_config.block_size]`. This usually happens when there
-        are multiple KV cache groups.
+        what it was originally created with. This happens when the final
+        block size (determined after model loading) differs from the
+        placeholder used during __init__, or when there are multiple
+        KV cache groups.
 
         Args:
             kv_cache_config: The KV cache configuration.
@@ -5738,14 +5742,17 @@ class GPUModelRunner(
                 ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
             max_num_blocks.append(max_num_blocks_per_req)
 
-        if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
-            self.cache_config.block_size
-        ]:
+        if (
+            block_sizes != self._init_block_sizes
+            or kernel_block_sizes != self._init_kernel_block_sizes
+        ):
             assert self.cache_config.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
             )
+            self._init_block_sizes = block_sizes
+            self._init_kernel_block_sizes = kernel_block_sizes
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,
@@ -5761,6 +5768,15 @@ class GPUModelRunner(
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
             )
+
+        assert self._init_block_sizes == block_sizes, (
+            f"InputBatch block_sizes {self._init_block_sizes} != "
+            f"kv_cache block_sizes {block_sizes}"
+        )
+        assert self._init_kernel_block_sizes == kernel_block_sizes, (
+            f"InputBatch kernel_block_sizes {self._init_kernel_block_sizes} "
+            f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
+        )
 
     def _allocate_kv_cache_tensors(
         self, kv_cache_config: KVCacheConfig
