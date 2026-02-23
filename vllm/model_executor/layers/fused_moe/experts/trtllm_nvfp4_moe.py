@@ -232,7 +232,7 @@ class TrtLlmNvFp4ExpertsMonolithic(
         routing_method: RoutingMethodType,
     ) -> bool:
         """
-        The FlashInfer TRTLLM NVFp4 kernel expects bfloat16 router_logits by default.
+        The FlashInfer TRTLLM NvFp4 kernel expects bfloat16 router_logits by default.
         Only DeepSeekV3 routing supports float32 router_logits (which is converted
         internally in the kernel).
         """
@@ -264,7 +264,13 @@ class TrtLlmNvFp4ExpertsMonolithic(
         assert a1q_scale is not None
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
-        assert not apply_router_weight_on_input
+        assert (
+            apply_router_weight_on_input
+            and self.routing_method_type == RoutingMethodType.Llama4
+        ) or (
+            not apply_router_weight_on_input
+            and self.routing_method_type != RoutingMethodType.Llama4
+        )
 
         # Prepare routing bias into kernel format.
         routing_bias = e_score_correction_bias
