@@ -13,7 +13,6 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-
 from typing import Generic, Protocol, TypeVar
 
 import torch
@@ -172,8 +171,12 @@ def choose_fp_w8a8_linear_kernel(
     compute_capability: int | None = None,
     force_kernel: type[w8a8.FpKernel] | None = None,
 ) -> type[w8a8.FpKernel]:
-    kernel_classes = [m.FpKernel for m in _POSSIBLE_FP_W8A8_KERNEL_MODULES[current_platform._enum]]
-    return choose_w8a8_linear_kernel(config, kernel_classes, compute_capability, force_kernel)
+    kernel_classes = [
+        m.FpKernel for m in _POSSIBLE_FP_W8A8_KERNEL_MODULES[current_platform._enum]
+    ]
+    return choose_w8a8_linear_kernel(
+        config, kernel_classes, compute_capability, force_kernel
+    )
 
 
 def choose_int_w8a8_linear_kernel(
@@ -181,8 +184,12 @@ def choose_int_w8a8_linear_kernel(
     compute_capability: int | None = None,
     force_kernel: type[w8a8.IntKernel] | None = None,
 ) -> type[w8a8.IntKernel]:
-    kernel_classes = [m.IntKernel for m in _POSSIBLE_INT_W8A8_KERNEL_MODULES[current_platform._enum]]
-    return choose_w8a8_linear_kernel(config, kernel_classes, compute_capability, force_kernel)
+    kernel_classes = [
+        m.IntKernel for m in _POSSIBLE_INT_W8A8_KERNEL_MODULES[current_platform._enum]
+    ]
+    return choose_w8a8_linear_kernel(
+        config, kernel_classes, compute_capability, force_kernel
+    )
 
 
 def create_w8a8_fp_kernel(
@@ -201,9 +208,7 @@ def create_w8a8_fp_kernel(
         out_dtype=out_dtype,
     )
 
-    kernel_type = choose_fp_w8a8_linear_kernel(
-        config, force_kernel=force_kernel
-    )
+    kernel_type = choose_fp_w8a8_linear_kernel(config, force_kernel=force_kernel)
 
     if module_name:
         logger.info_once(
@@ -235,9 +240,7 @@ def create_w8a8_int_kernel(
         input_symmetric=input_symmetric,
     )
 
-    kernel_type = choose_int_w8a8_linear_kernel(
-        config, force_kernel=force_kernel
-    )
+    kernel_type = choose_int_w8a8_linear_kernel(config, force_kernel=force_kernel)
 
     if module_name:
         logger.info_once(
