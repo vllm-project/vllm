@@ -353,6 +353,7 @@ def make_nvfp4_moe_quant_config(
 
     g1_alphas = a13_scale * w13_scale_2
     g2_alphas = a2_scale * w2_scale_2
+    print(f"{backend=}")
     return nvfp4_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,

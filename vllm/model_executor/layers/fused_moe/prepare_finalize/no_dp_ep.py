@@ -24,6 +24,7 @@ def _quantize_input(
     input_sf = (
         quant_config.a1_gscale if quant_config.use_nvfp4_w4a4 else quant_config.a1_scale
     )
+    print(f"{quant_config.is_nvfp4_scale_swizzled=}")
     a1q, a1q_scale = moe_kernel_quantize_input(
         a1,
         input_sf,
