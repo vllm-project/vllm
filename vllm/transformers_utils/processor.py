@@ -28,6 +28,28 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
 
+
+def _transformers_v4_compatibility_from_pretrained() -> Any:
+    """Some remote code processors may define `optional_attributes` in their
+    `ProcessorMixin` subclass, and then pass these arbitrary attributes directly to
+    `ProcessorMixin.__init__`, which is no longer allowed in Transformers v5. For
+    backward compatibility, we intercept these optional attributes and set them on the
+    processor instance before calling the original `ProcessorMixin.__init__`."""
+
+    original_init = ProcessorMixin.__init__
+
+    def __init__(self, *args, **kwargs):
+        for optional_attribute in getattr(self, "optional_attributes", []):
+            if optional_attribute in kwargs:
+                setattr(self, optional_attribute, kwargs.pop(optional_attribute))
+
+        original_init(self, *args, **kwargs)
+
+    ProcessorMixin.__init__ = __init__
+
+
+_transformers_v4_compatibility_from_pretrained()
+
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
