@@ -94,12 +94,6 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
         self.out_dtype = torch.get_default_dtype()
-        self.fp8_linear = init_fp8_linear_kernel(
-            activation_quant_key=kFp8DynamicTokenSym,
-            weight_quant_key=kFp8StaticTokenSym,
-            out_dtype=torch.get_default_dtype(),
-            module_name=self.__class__.__name__,
-        )
 
     def create_weights(
         self,
@@ -150,6 +144,14 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
         )
         layer.input_scale_ub = input_scale_ub
 
+        self.fp8_linear = init_fp8_linear_kernel(
+            activation_quant_key=kFp8DynamicTokenSym,
+            weight_quant_key=kFp8StaticTokenSym,
+            out_dtype=torch.get_default_dtype(),
+            weight_shape=(output_size_per_partition, input_size_per_partition),
+            module_name=self.__class__.__name__,
+        )
+
     def process_weights_after_loading(self, layer: Module) -> None:
         # required by torch.compile
         layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
@@ -170,6 +172,8 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
             prepare_fp8_layer_for_marlin(layer)
             # Activations not quantized for marlin.
             del layer.input_scale_ub
+
+        self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
         self,
