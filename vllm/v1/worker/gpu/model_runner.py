@@ -584,8 +584,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             self.lora_state.add_request(req_id, req_index, new_req_data.lora_request)
 
-            if self.pooling_runner is None:
-                assert new_req_data.sampling_params is not None
+            if new_req_data.sampling_params is not None:
                 self.sampler.add_request(
                     req_index, prompt_len, new_req_data.sampling_params
                 )
