@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.utils.hashing import sha256_cbor, xxhash_cbor
 from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import format_gib
+from vllm.model_executor.models.utils import extract_layer_index
 from vllm.v1.kv_cache_interface import (
     ChunkedLocalAttentionSpec,
     FullAttentionSpec,
@@ -955,7 +956,7 @@ def is_kv_cache_type_attention_free(kv_cache_spec: dict[str, KVCacheSpec]) -> bo
 
 def _get_kv_cache_groups_uniform_page_size(
     kv_cache_spec: dict[str, KVCacheSpec],
-    speculator_layers: set[str] | None = None,
+    drafter_layers: set[str] | None = None,
 ) -> list[KVCacheGroupSpec]:
     """
     Generates the KV cache groups for hybrid models with multiple
@@ -1026,24 +1027,24 @@ def _get_kv_cache_groups_uniform_page_size(
     for layer_name, layer_spec in kv_cache_spec.items():
         same_type_layers[layer_spec].append(layer_name)
 
-    # Separate speculator layers into their own group before the heuristic
+    # Separate drafter layers into their own group before the heuristic
     # below runs, so drafter layers don't get scattered across groups.
-    speculator_group_layers: list[str] = []
-    if speculator_layers:
+    drafter_group_layers: list[str] = []
+    if drafter_layers:
         for spec in list(same_type_layers.keys()):
             layers = same_type_layers[spec]
-            spec_in_group = [n for n in layers if n in speculator_layers]
+            spec_in_group = [n for n in layers if n in drafter_layers]
             if spec_in_group:
-                non_spec = [n for n in layers if n not in speculator_layers]
+                non_spec = [n for n in layers if n not in drafter_layers]
                 if non_spec:
                     same_type_layers[spec] = non_spec
                 else:
                     del same_type_layers[spec]
-                speculator_group_layers.extend(spec_in_group)
-        if speculator_group_layers:
+                drafter_group_layers.extend(spec_in_group)
+        if drafter_group_layers:
             logger.info(
-                "Separated %d speculator layers into dedicated KV cache group",
-                len(speculator_group_layers),
+                "Separated %d drafter layers into dedicated KV cache group",
+                len(drafter_group_layers),
             )
 
     # Split each group into smaller groups, to make the number of layers in each
@@ -1091,9 +1092,9 @@ def _get_kv_cache_groups_uniform_page_size(
         # instead of layers[i * group_size: (i + 1) * group_size]
         for i in range(num_groups):
             grouped_layers.append(layers[i::num_groups])
-    # Prepend speculator layers as their own dedicated group
-    if speculator_group_layers:
-        grouped_layers.insert(0, speculator_group_layers)
+    # Prepend drafter layers as their own dedicated group
+    if drafter_group_layers:
+        grouped_layers.insert(0, drafter_group_layers)
 
     return create_kv_cache_group_specs(kv_cache_spec, grouped_layers)
 
@@ -1239,10 +1240,10 @@ def unify_hybrid_kv_cache_specs(kv_cache_spec: dict[str, KVCacheSpec]):
         )
 
 
-def _identify_speculator_layers(
+def _identify_drafter_layers(
     vllm_config: VllmConfig, all_layer_names: list[str]
 ) -> set[str] | None:
-    """Identify speculator (drafter) attention layers by finding layers
+    """Identify drafter attention layers by finding layers
     whose index exceeds the target model's total layer count.
 
     For EAGLE-style drafters, drafter layers are appended after the target
@@ -1250,7 +1251,6 @@ def _identify_speculator_layers(
     Layer names use global indices even under pipeline parallelism
     (see make_layers() in model_executor/models/utils.py).
     """
-    from vllm.model_executor.models.utils import extract_layer_index
 
     spec_config = vllm_config.speculative_config
     if spec_config is None:
@@ -1259,24 +1259,24 @@ def _identify_speculator_layers(
     # Global count -- layer names use global indices under PP.
     target_num_layers = vllm_config.model_config.get_total_num_hidden_layers()
 
-    speculator_layers: set[str] = set()
+    drafter_layers: set[str] = set()
     for name in all_layer_names:
         try:
             layer_idx = extract_layer_index(name)
             if layer_idx >= target_num_layers:
-                speculator_layers.add(name)
+                drafter_layers.add(name)
         except (AssertionError, ValueError):
             # Fallback for non-standard naming
-            if "drafter" in name.lower() or "eagle" in name.lower():
-                speculator_layers.add(name)
+            if "drafter" in name.lower() or "eagle" in name.lower() or "mtp" in name.lower():
+                drafter_layers.add(name)
 
-    if speculator_layers:
+    if drafter_layers:
         logger.debug(
-            "Identified %d speculator layers for KV cache grouping: %s",
-            len(speculator_layers),
-            sorted(speculator_layers),
+            "Identified %d drafter layers for KV cache grouping: %s",
+            len(drafter_layers),
+            sorted(drafter_layers),
         )
-    return speculator_layers if speculator_layers else None
+    return drafter_layers if drafter_layers else None
 
 
 def get_kv_cache_groups(
@@ -1319,11 +1319,11 @@ def get_kv_cache_groups(
     # have the same physical memory per block per layer. Split the layers
     # into groups with the same number of layers, and thus same total page
     # size.
-    # Identify speculator (drafter) layers so they stay in one KV cache group
-    speculator_layers = _identify_speculator_layers(
+    # Identify drafter layers so they stay in one KV cache group
+    drafter_layers = _identify_drafter_layers(
         vllm_config, list(kv_cache_spec.keys())
     )
-    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec, speculator_layers)
+    return _get_kv_cache_groups_uniform_page_size(kv_cache_spec, drafter_layers)
 
 
 def generate_scheduler_kv_cache_config(
