@@ -349,7 +349,7 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,
@@ -597,7 +597,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
@@ -622,7 +622,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
             x,
@@ -959,7 +959,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.moe_kernel is not None
         return self.moe_kernel.apply_monolithic(
             x,
@@ -983,7 +983,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert not self.is_monolithic
         assert self.moe_kernel is not None
         return self.moe_kernel.apply(
@@ -1123,7 +1123,7 @@ class CompressedTensorsW8A8Int8MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         return fused_experts(
@@ -1607,7 +1607,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         layer: FusedMoE,
         x: torch.Tensor,
         router_logits: torch.Tensor,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.kernel_backend == "Flashinfer"
         return flashinfer_trtllm_mxint4_moe(
             x=x,
@@ -1634,7 +1634,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.kernel_backend == "Marlin"
         return fused_marlin_moe(
             x,
@@ -1883,7 +1883,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe import fused_experts
 
         return fused_experts(
@@ -2500,7 +2500,7 @@ class CompressedTensorsW4A8Fp8MoEMethod(CompressedTensorsMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if layer.enable_eplb:
             raise NotImplementedError(
                 "EPLB not supported for `CompressedTensorsW4A8Fp8MoEMethod` yet."
