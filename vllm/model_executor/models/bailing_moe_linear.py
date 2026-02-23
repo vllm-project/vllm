@@ -873,7 +873,7 @@ class BailingMoeV25DecoderLayer(nn.Module):
                 model_config=model_config,
                 cache_config=cache_config,
             )
-        else:  # Full attention - use vLLM's optimized MLA
+        else:  # Full attention
             self.self_attn = BailingMoeV25MLAAttention(
                 config,
                 quant_config=quant_config,
@@ -1077,11 +1077,7 @@ class BailingMoeV25Model(nn.Module):
 
 
 class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
-    """Bailing MoE v2.5 For Causal LM."""
-
-    has_inner_state: bool = True
-    is_hybrid: bool = True
-    supports_pp: bool = True
+    """Bailing MoE v2.5 For CausalLM."""
 
     packed_modules_mapping = {
         "gate_up_proj": ["gate_proj", "up_proj"],
