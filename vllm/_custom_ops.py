@@ -2789,22 +2789,39 @@ def sm100_cutlass_mla_get_workspace_size(
     )
 
 
-def dsv3_fused_a_gemm(
-    output: torch.Tensor,
-    mat_a: torch.Tensor,
-    mat_b: torch.Tensor,
-) -> None:
-    """DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+if hasattr(torch.ops._C, "dsv3_fused_a_gemm"):
 
-    Computes output = mat_a @ mat_b.T where:
-      mat_a: [num_tokens, 7168] row-major bf16 (hidden states)
-      mat_b: [7168, 2112] column-major bf16 (weight transposed)
-      output: [num_tokens, 2112] row-major bf16
+    def dsv3_fused_a_gemm(
+        output: torch.Tensor,
+        mat_a: torch.Tensor,
+        mat_b: torch.Tensor,
+    ) -> None:
+        """DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
 
-    Optimized for the DeepSeek V2/V3 QKV A-projection at small batch sizes.
-    Requires SM 9.0+ (Hopper).
-    """
-    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
+        Computes output = mat_a @ mat_b.T where:
+          mat_a: [num_tokens, 7168] row-major bf16 (hidden states)
+          mat_b: [7168, 2112] column-major bf16 (weight transposed)
+          output: [num_tokens, 2112] row-major bf16
+
+        Optimized for the DeepSeek V2/V3 QKV A-projection at small batch sizes.
+        Requires SM 9.0+ (Hopper).
+        """
+        torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
+
+else:
+
+    def dsv3_fused_a_gemm(
+        output: torch.Tensor,
+        mat_a: torch.Tensor,
+        mat_b: torch.Tensor,
+    ) -> None:
+        """DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+
+        This kernel is only available for SM 9.0 (Hopper) architectures.
+        """
+        raise RuntimeError(
+            "dsv3_fused_a_gemm is only supported on SM 9.0 (Hopper) architectures"
+        )
 
 
 if hasattr(torch.ops._C, "weight_packed_linear"):

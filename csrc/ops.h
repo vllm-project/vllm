@@ -412,6 +412,8 @@ int64_t qr_max_size();
 #endif
 
 #ifndef USE_ROCM
+#ifdef ENABLE_DSV3_FUSED_A_GEMM
 void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
                        torch::Tensor const& mat_b);
+#endif
 #endif
