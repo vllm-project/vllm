@@ -1534,6 +1534,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         help="Disable SSL certificate verification. Use this option when "
         "connecting to servers with self-signed certificates.",
     )
+    parser.add_argument(
+        "--plot-timeline",
+        action="store_true",
+        help="Generate an HTML timeline plot showing request execution. "
+        "The plot will be saved alongside the results JSON file.",
+    )
 
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
