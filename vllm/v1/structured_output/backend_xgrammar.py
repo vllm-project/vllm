@@ -158,7 +158,11 @@ class XgrammarGrammar(StructuredOutputGrammar):
                 # Under speculative decoding, the draft model may propose tokens
                 # that violate the grammar (e.g., "</think>" after reasoning ends).
                 # This is not fatal: treat as a rejected token sequence.
-                logger.debug("Grammar rejected token req=%s token=%s", request_id, token)
+                logger.debug(
+                    "Grammar rejected token req=%s token=%s",
+                    request_id,
+                    token,
+                )
                 return False
             self.num_processed_tokens += 1
         self._is_terminated = self.matcher.is_terminated()
