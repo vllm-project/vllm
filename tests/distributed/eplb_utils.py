@@ -7,6 +7,9 @@ import random
 import torch
 import torch.multiprocessing as mp
 
+from vllm.distributed.eplb.eplb_utils import (
+    maybe_set_nvshmem_backend_for_eplb_communicator,
+)
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
 )
@@ -37,12 +40,16 @@ def distributed_run(fn, world_size, *args):
         assert p.exitcode == 0
 
 
-def set_env_vars_and_device(env: dict[str, str]) -> None:
+def set_env_vars_and_device(
+    env: dict[str, str], eplb_communicator: str | None = None
+) -> None:
     update_environment_variables(env)
     local_rank = os.environ["LOCAL_RANK"]
     device = torch.device(f"cuda:{local_rank}")
     torch.cuda.set_device(device)
     init_distributed_environment()
+    if eplb_communicator is not None:
+        maybe_set_nvshmem_backend_for_eplb_communicator(eplb_communicator)
 
     # Ensure each worker process has the same random seed
     random.seed(42)

@@ -9,6 +9,40 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
+try:
+    import torch.distributed._symmetric_memory as torch_symm_mem
+
+    _symm_mem_available = True
+except ImportError:
+    _symm_mem_available = False
+
+
+def maybe_set_nvshmem_backend_for_eplb_communicator(communicator: str) -> None:
+    """Set symmetric-memory backend to NVSHMEM for EPLB symm_mem communicator."""
+    if communicator != "symm_mem":
+        return
+    if not _symm_mem_available:
+        logger.warning_once(
+            "EPLB symm_mem communicator requested but torch symmetric memory "
+            "module is unavailable.",
+            scope="global",
+        )
+        return
+    if not torch_symm_mem.is_nvshmem_available():
+        logger.warning_once(
+            "EPLB symm_mem communicator requested but NVSHMEM is unavailable.",
+            scope="global",
+        )
+        return
+    try:
+        torch_symm_mem.set_backend("NVSHMEM")
+    except Exception as exc:
+        logger.warning_once(
+            "Failed to set NVSHMEM backend for EPLB symm_mem communicator: %s",
+            exc,
+            scope="global",
+        )
+
 
 def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     """
@@ -21,6 +55,13 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     is_eplb_enabled = parallel_config.enable_eplb
     async_eplb = parallel_config.eplb_config.use_async
     is_deepep_ll = parallel_config.all2all_backend == "deepep_low_latency"
+    is_nccl_based_eplb_communicator = (
+        parallel_config.eplb_config.communicator == "nccl"
+        or parallel_config.eplb_config.communicator == "pynccl"
+    )
+    is_symm_mem_eplb_communicator = (
+        parallel_config.eplb_config.communicator == "symm_mem"
+    )
 
     # Override NCCL_MAX_CTAS to avoid hangs when using async EPLB with the
     # DeepEP low-latency backend.
@@ -39,7 +80,13 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     # Limiting NCCL occupancy via NCCL_MAX_CTAS leaves space for the DeepEP
     # cooperative kernel to launch and complete, breaking the deadlock.
     # See: https://github.com/deepseek-ai/DeepEP/issues/496
-    if is_data_parallel and is_eplb_enabled and is_deepep_ll and async_eplb:
+    if (
+        is_data_parallel
+        and is_eplb_enabled
+        and is_deepep_ll
+        and async_eplb
+        and is_nccl_based_eplb_communicator
+    ):
         current_value_str = os.getenv("NCCL_MAX_CTAS")
 
         if current_value_str and current_value_str.isdigit():
@@ -49,6 +96,15 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
         os.environ["NCCL_MAX_CTAS"] = str(override_value)
         logger.info_once(
             f"EPLB: Setting NCCL_MAX_CTAS={override_value} "
-            "for expert parallel with EPLB and deepep_low_latency backend",
+            "for expert parallel with EPLB-nccl and deepep_low_latency backend",
+            scope="global",
+        )
+    if is_symm_mem_eplb_communicator:
+        os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+        logger.info_once(
+            "EPLB: Force setting VLLM_ALLREDUCE_USE_SYMM_MEM=0 "
+            "because we use nvshmem-based torch.symmetric memory for "
+            "EPLB communications. This torch.symmetric_memory backend doesn't "
+            "support multicast operations need for allreduce.",
             scope="global",
         )
