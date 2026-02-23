@@ -221,6 +221,7 @@ class FlexibleArgumentParser(ArgumentParser):
             if (
                 len(args) > 1
                 and args[1].startswith("-")
+                and not any(re.match(r"^--config(=.+|$)", arg) for arg in args)
                 and any(
                     re.match(r"^--served[-_]model[-_]name(=.+|$)", arg) for arg in args
                 )
