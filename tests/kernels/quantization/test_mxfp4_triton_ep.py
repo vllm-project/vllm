@@ -110,7 +110,7 @@ class TestTritonMoeForwardExpertMap:
         """Verify that the EP-aware routing path is taken when expert_map
         is present, and the legacy_routing path is taken otherwise."""
 
-        device = "cuda"
+        device = "cuda" if torch.cuda.is_available() else "cpu"
         # This is a structural test: we mock the routing functions to
         # verify the correct path is exercised.
         mock_expert_map = (
