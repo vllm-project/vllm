@@ -309,6 +309,14 @@ def override_forward_context(forward_context: ForwardContext | None):
         _forward_context = prev_context
 
 
+def get_parallel_config(
+    vllm_config: VllmConfig, is_draft_model: bool
+) -> ParallelConfig:
+    if is_draft_model:
+        return vllm_config.speculative_config.draft_parallel_config
+    return vllm_config.parallel_config
+
+
 @contextmanager
 def set_forward_context(
     attn_metadata: Any,
@@ -321,6 +329,7 @@ def set_forward_context(
     ubatch_slices: UBatchSlices | None = None,
     slot_mapping: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None = None,
     skip_compiled: bool = False,
+    is_draft_model: bool = False,
 ):
     """A context manager that stores the current forward context,
     can be attention metadata, etc.
@@ -332,9 +341,10 @@ def set_forward_context(
         forward_start_time = time.perf_counter()
 
     dp_metadata: DPMetadata | None = None
+    parallel_config: ParallelConfig = get_parallel_config(vllm_config, is_draft_model)
     if (
         vllm_config.parallel_config.data_parallel_size > 1
-        and vllm_config.parallel_config.is_moe_model is not False
+        and parallel_config.is_moe_model is not False
         and (attn_metadata is not None or num_tokens is not None)
     ):
         # If num_tokens_across_dp hasn't already been initialized, then
