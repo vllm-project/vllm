@@ -57,6 +57,28 @@ def calc_seq_lens(sizes: list[tuple[int, int]], patch_size: int) -> list[int]:
     return [calc_seq_len(size, patch_size) for size in sizes]
 
 
+def compute_tubelet_imgs_sizes(
+    imgs_sizes: list[tuple[int, int]],
+    num_frames_per_video: list[int],
+    temporal_patch_dim: int,
+) -> list[tuple[int, int]]:
+    """Map per-frame imgs_sizes to per-tubelet imgs_sizes after temporal compression.
+
+    Each video's frames share the same spatial size.  After grouping T
+    consecutive frames into tubelets (padding the last group if needed),
+    every tubelet inherits its frames' spatial size.
+    """
+    T = temporal_patch_dim
+    result: list[tuple[int, int]] = []
+    frame_idx = 0
+    for nf in num_frames_per_video:
+        frame_size = imgs_sizes[frame_idx]
+        num_tubelets = math.ceil(nf / T)
+        result.extend([frame_size] * num_tubelets)
+        frame_idx += nf
+    return result
+
+
 class ClsToken(nn.Module):
     def __init__(
         self,
@@ -123,6 +145,8 @@ class ViTPatchGenerator(nn.Module):
         register_multiple: int | None = None,
         num_registers: int | None = None,
         patch_bias: bool = False,
+        temporal_patch_dim: int = 1,
+        separate_video_embedder: bool = False,
         device=None,
         dtype=None,
     ):
@@ -148,6 +172,8 @@ class ViTPatchGenerator(nn.Module):
         self.patch_size = patch_size
         self.abs_pos = abs_pos
         self.embed_dim = embed_dim
+        self.temporal_patch_dim = temporal_patch_dim
+        self.separate_video_embedder = separate_video_embedder
 
         self.num_rows = max_input_dims[0] // patch_size
         self.num_cols = max_input_dims[1] // patch_size
@@ -156,9 +182,29 @@ class ViTPatchGenerator(nn.Module):
         self.max_input_dims = max_input_dims
 
         self.im_to_patches = Im2Patches(patch_size)
-        self.embedder = ViTPatchLinear(
-            patch_size, embed_dim, bias=patch_bias, **factory
-        )
+        if separate_video_embedder and temporal_patch_dim > 1:
+            self.embedder = ViTPatchLinear(
+                patch_size, embed_dim, bias=patch_bias, **factory
+            )
+            self.video_embedder = ViTPatchLinear(
+                patch_size,
+                embed_dim,
+                bias=patch_bias,
+                temporal_patch_dim=temporal_patch_dim,
+                **factory,
+            )
+        elif temporal_patch_dim > 1:
+            self.embedder = ViTPatchLinear(
+                patch_size,
+                embed_dim,
+                bias=patch_bias,
+                temporal_patch_dim=temporal_patch_dim,
+                **factory,
+            )
+        else:
+            self.embedder = ViTPatchLinear(
+                patch_size, embed_dim, bias=patch_bias, **factory
+            )
 
         if abs_pos:
             scale = embed_dim**-0.5
@@ -179,22 +225,172 @@ class ViTPatchGenerator(nn.Module):
         )
 
     def forward(
-        self, x: torch.Tensor, imgs_sizes: list[tuple[int, int]] | None = None
+        self,
+        x: torch.Tensor,
+        imgs_sizes: list[tuple[int, int]] | None = None,
+        num_frames_per_video: list[int] | None = None,
     ) -> torch.Tensor:
-        if imgs_sizes is not None:
+        T = self.temporal_patch_dim
+
+        video_with_temporal_compression = (
+            T > 1
+            and imgs_sizes is not None
+            and num_frames_per_video is not None
+            and len(imgs_sizes) > 1
+        )
+        if video_with_temporal_compression:
+            # Video with temporal compression
+            # Must pass in `imgs_sizes` whether it's a single video or multiple videos
+            # Each video always uses a fixed HW (but can be different between videos)
+            patches = self._embed_video_dynamic(
+                x, imgs_sizes, num_frames_per_video
+            )
+            tubelet_sizes = compute_tubelet_imgs_sizes(
+                imgs_sizes, num_frames_per_video, T
+            )
+            patches, pos_enc = self.apply_pos_enc_dynamic(
+                patches, imgs_sizes=tubelet_sizes
+            )
+            patches = self.cls_token_dynamic(patches, imgs_sizes=tubelet_sizes)
+        elif imgs_sizes is not None:
+            # Dynamic-resolution images (or video without temporal compression).
             patches = self.embedder(x)
             patches, pos_enc = self.apply_pos_enc_dynamic(
                 patches, imgs_sizes=imgs_sizes
             )
             patches = self.cls_token_dynamic(patches, imgs_sizes=imgs_sizes)
         else:
+            assert T <= 1, (
+                f"Fixed-resolution path not supported for temporal compression "
+                f"(T={T}). imgs_sizes must be provided."
+            )
+            # Fixed-resolution path (T=1 only).
             patches = self.embed_patches(x)
             patches, pos_enc = self.apply_pos_enc(patches, input_size=x.shape[2:])
             patches = self.cls_token(patches)
+
         patches = self.patch_normalizer(patches)
         if self.return_pos_enc:
             return patches, pos_enc
         return patches
+
+    def forward_video(
+        self, x: torch.Tensor, num_frames: int
+    ) -> torch.Tensor:
+        """Process video frames with temporal compression.
+
+        Groups T consecutive frames into tubelets before embedding.
+
+        Args:
+            x: [num_frames, 3, H, W] tensor of video frames
+            num_frames: number of frames (must equal x.shape[0])
+
+        Returns:
+            Embedded patches with temporal compression applied.
+        """
+        T = self.temporal_patch_dim
+        input_size = x.shape[2:]
+
+        patches = self.im_to_patches(x)  # [N, num_patches, 3*P*P]
+        N, num_spatial, feat_dim = patches.shape
+
+        pad_frames = (T - N % T) % T
+        if pad_frames > 0:
+            patches = torch.cat(
+                [patches, patches[-1:].expand(pad_frames, -1, -1)], dim=0
+            )
+
+        # Group T frames per tubelet: for each spatial position, concatenate
+        # features across T consecutive frames (matching Mcore's torch.cat
+        # per spatial position). A plain .view() would incorrectly group
+        # adjacent spatial patches from the same frame.
+        N_padded = patches.shape[0]
+        num_tublets = N_padded // T
+        patches = rearrange(
+            patches,
+            '(tubelets frames) spatial feat -> tubelets spatial (frames feat)',
+            tubelets=num_tublets,
+            frames=T,
+            spatial=num_spatial,
+            feat=feat_dim,
+        )
+
+        if self.separate_video_embedder:
+            patches = self.video_embedder(patches)
+        else:
+            patches = self.embedder(patches)
+
+        patches, pos_enc = self.apply_pos_enc(patches, input_size=input_size)
+
+        patches = self.cls_token(patches)
+
+        patches = self.patch_normalizer(patches)
+        if self.return_pos_enc:
+            return patches, pos_enc
+        return patches
+
+    def _embed_video_dynamic(
+        self,
+        x: torch.Tensor,
+        imgs_sizes: list[tuple[int, int]],
+        num_frames_per_video: list[int],
+    ) -> torch.Tensor:
+        """Temporal compression for dynamic-resolution video patches.
+
+        Args:
+            x: (1, total_patches, 3*P*P) — all frames' patches packed.
+            imgs_sizes: Per-frame pixel sizes [(H, W), ...].
+            num_frames_per_video: Number of frames per video.
+
+        Returns:
+            (1, total_tubelet_patches, hidden_dim) — temporally compressed.
+        """
+        T = self.temporal_patch_dim
+        P = self.patch_size
+
+        frame_token_counts = [(h // P) * (w // P) for h, w in imgs_sizes]
+        all_patches = x.squeeze(0)  # (total_patches, 3*P*P)
+        frame_patches = all_patches.split(frame_token_counts)
+
+        tubelet_parts: list[torch.Tensor] = []
+        frame_idx = 0
+
+        for num_frames in num_frames_per_video:
+            video_frames = list(frame_patches[frame_idx : frame_idx + num_frames])
+            frame_idx += num_frames
+
+            N = len(video_frames)
+            num_spatial = video_frames[0].shape[0]
+
+            pad_frames = (T - N % T) % T
+            if pad_frames > 0:
+                video_frames.extend([video_frames[-1]] * pad_frames)
+
+            # (N_padded, num_spatial, 3*P*P)
+            stacked = torch.stack(video_frames, dim=0)
+            N_padded = stacked.shape[0]
+            num_tubelets = N_padded // T
+            feat_dim = stacked.shape[2]
+
+            # (num_tubelets, num_spatial, T * 3*P*P)
+            stacked = rearrange(
+                stacked,
+                '(tubelets frames) spatial feat -> tubelets spatial (frames feat)',
+                tubelets=num_tubelets,
+                frames=T,
+                spatial=num_spatial,
+                feat=feat_dim,
+            )
+
+            if self.separate_video_embedder:
+                embedded = self.video_embedder(stacked)
+            else:
+                embedded = self.embedder(stacked)
+
+            # (num_tubelets * num_spatial, hidden_dim)
+            tubelet_parts.append(embedded.reshape(-1, embedded.shape[-1]))
+
+        return torch.cat(tubelet_parts, dim=0).unsqueeze(0)
 
     def apply_pos_enc_dynamic(
         self, patches: torch.Tensor, imgs_sizes: list[tuple[int, int]]
@@ -381,6 +577,11 @@ class ViTPatchGenerator(nn.Module):
             return pos_embed
 
         if self.cpe_mode:
+            assert not self.training, (
+                "RADIO CPE position encoding is in training mode during inference. "
+                "This introduces random position augmentation that corrupts embeddings. "
+                "Ensure model.eval() is called before inference."
+            )
             if self.training:
                 min_scale = math.sqrt(0.1)
                 scale = (
@@ -430,7 +631,7 @@ class ViTPatchGenerator(nn.Module):
                 pos_embed = F.interpolate(
                     pos_embed.float(),
                     size=(max_dim, max_dim),
-                    align_corners=True,
+                    align_corners=False,
                     mode="bilinear",
                 ).to(pos_embed.dtype)
 
@@ -440,7 +641,7 @@ class ViTPatchGenerator(nn.Module):
 
         if pos_embed.shape[-2:] != input_dims:
             pos_embed = F.interpolate(
-                pos_embed.float(), size=input_dims, align_corners=True, mode="bilinear"
+                pos_embed.float(), size=input_dims, align_corners=False, mode="bilinear"
             ).to(pos_embed.dtype)
 
         pos_embed = pos_embed.flatten(2).permute(0, 2, 1)
@@ -473,9 +674,19 @@ class Im2Patches(nn.Module):
 
 
 class ViTPatchLinear(nn.Linear):
-    def __init__(self, patch_size: int, embed_dim: int, bias: bool = False, **factory):
-        super().__init__(3 * (patch_size**2), embed_dim, bias=bias, **factory)
+    def __init__(
+        self,
+        patch_size: int,
+        embed_dim: int,
+        bias: bool = False,
+        temporal_patch_dim: int = 1,
+        **factory,
+    ):
+        super().__init__(
+            3 * temporal_patch_dim * (patch_size**2), embed_dim, bias=bias, **factory
+        )
         self.patch_size = patch_size
+        self.temporal_patch_dim = temporal_patch_dim
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -560,6 +771,7 @@ class RadioInternVisionModel(nn.Module):
         max_img_size = int(
             round(config.cpe_max_size / config.patch_size) * config.patch_size
         )
+        self.temporal_patch_dim = getattr(config, "temporal_patch_dim", 1)
         unique_teachers = set(t["name"] for t in config.teachers)
         self.patch_generator = ViTPatchGenerator(
             config.patch_size,
@@ -569,6 +781,8 @@ class RadioInternVisionModel(nn.Module):
             cls_token=True,
             num_cls_tokens=len(unique_teachers) if config.cls_token_per_teacher else 1,
             register_multiple=config.register_multiple,
+            temporal_patch_dim=self.temporal_patch_dim,
+            separate_video_embedder=getattr(config, "separate_video_embedder", False),
         )
 
         self.encoder = RadioVisionEncoder(
@@ -593,33 +807,86 @@ class RadioInternVisionModel(nn.Module):
     def inter_image_mask_metadata(
         self, imgs_sizes: list[tuple[int, int]], device: torch.device
     ) -> MaskMetadata:
+        """Build mask metadata from image pixel sizes. Adds num_skip to each
+        sequence length (cls/register tokens) to match patch generator output."""
         patch_size = self.patch_generator.patch_size
         num_skip = self.patch_generator.num_skip
 
         seq_lens = calc_seq_lens(imgs_sizes, patch_size)
         adjusted = [s + num_skip for s in seq_lens]
+        return self._inter_image_mask_metadata_from_seq_lens(adjusted, device=device)
+
+    def _inter_image_mask_metadata_from_seq_lens(
+        self, seq_lens: list[int], device: torch.device
+    ) -> MaskMetadata:
+        """Build mask metadata from actual sequence lengths (already including
+        cls/register tokens, i.e. patch_count + num_skip per item).
+        Use inter_image_mask_metadata when you only have imgs_sizes."""
+        assert len(seq_lens) > 0
         cu_seqlens = torch.tensor(
-            list(accumulate(adjusted, initial=0)), dtype=torch.int32, device=device
+            list(accumulate(seq_lens, initial=0)), dtype=torch.int32, device=device
         )
         # Keep max_seqlen on CPU to avoid .item() sync
         # See: https://github.com/vllm-project/vllm/blob/20b6b01/vllm/v1/attention/ops/vit_attn_wrappers.py#L48
-        max_seqlen = torch.tensor(max(adjusted), dtype=torch.int32)
+        max_seqlen = torch.tensor(max(seq_lens), dtype=torch.int32)
         return MaskMetadata(cu_seqlens=cu_seqlens, max_seqlen=max_seqlen)
 
     def forward(
         self,
         x: torch.Tensor,
         imgs_sizes: list[tuple[int, int]] | None = None,
+        num_frames: int | None = None,
+        num_frames_per_video: list[int] | None = None,
     ) -> torch.FloatTensor:
-        hidden_states = self.patch_generator(x, imgs_sizes=imgs_sizes)
-        mask_meta = None
-        if imgs_sizes is not None:
-            assert len(imgs_sizes) > 0
-            # Dynamic resolution: process each image as an independent sequence.
-            mask_meta = self.inter_image_mask_metadata(
-                imgs_sizes, device=hidden_states.device
+        T = self.temporal_patch_dim
+
+        if num_frames_per_video is not None and imgs_sizes is not None and T > 1:
+            # Dynamic-resolution video with temporal compression.
+            hidden_states = self.patch_generator(
+                x,
+                imgs_sizes=imgs_sizes,
+                num_frames_per_video=num_frames_per_video,
             )
+            effective_sizes = compute_tubelet_imgs_sizes(
+                imgs_sizes, num_frames_per_video, T
+            )
+        elif num_frames is not None and T > 1:
+            # Fixed-resolution video with temporal compression (legacy).
+            hidden_states = self.patch_generator.forward_video(x, num_frames)
+            effective_sizes = None
+        else:
+            # Images (dynamic or fixed) or video without temporal compression.
+            hidden_states = self.patch_generator(x, imgs_sizes=imgs_sizes)
+            effective_sizes = imgs_sizes
+
+        # Build packed-sequence metadata for MMEncoderAttention when needed.
+        mask_meta = None
+        packed_batch_size = None  # original batch size before packing
+
+        if num_frames is not None and T > 1:
+            # Conv3d video: all tubelets have the same sequence length.
+            # Pack [num_tubelets, seq_per_tubelet, hidden] → [1, total, hidden]
+            packed_batch_size = hidden_states.shape[0]
+            seq_per_tubelet = hidden_states.shape[1]
+            hidden_states = hidden_states.reshape(1, -1, hidden_states.shape[-1])
+            mask_meta = self._inter_image_mask_metadata_from_seq_lens(
+                [seq_per_tubelet] * packed_batch_size, device=hidden_states.device
+            )
+
+        elif effective_sizes is not None and len(effective_sizes) > 1:
+            # Dynamic-res images/tubelets: variable sequence lengths.
+            # hidden_states is already [1, total_seq, hidden] from the
+            # dynamic-res patch generator. Compute cu_seqlens from sizes.
+            mask_meta = self.inter_image_mask_metadata(
+                effective_sizes, device=hidden_states.device
+            )
+
         encoder_outputs = self.encoder(inputs_embeds=hidden_states, mask_meta=mask_meta)
+
+        # Unpack back to original batch shape if we packed for video
+        if packed_batch_size is not None:
+            encoder_outputs = encoder_outputs.reshape(packed_batch_size, seq_per_tubelet, -1)
+
         return encoder_outputs
 
 
@@ -663,13 +930,32 @@ class RadioModel(nn.Module):
         pixel_embeds: torch.Tensor | None = None,
         *,
         imgs_sizes: list[tuple[int, int]] | None = None,
+        num_frames: int | None = None,
+        num_frames_per_video: list[int] | None = None,
     ) -> tuple[torch.FloatTensor, torch.FloatTensor]:
-        y = self.model(pixel_values, imgs_sizes=imgs_sizes)
-        return self._extract_final(y, imgs_sizes=imgs_sizes)
+        T = self.model.temporal_patch_dim
+
+        y = self.model(
+            pixel_values,
+            imgs_sizes=imgs_sizes,
+            num_frames=num_frames,
+            num_frames_per_video=num_frames_per_video,
+        )
+
+        if num_frames_per_video is not None and imgs_sizes is not None and T > 1:
+            effective_sizes = compute_tubelet_imgs_sizes(
+                imgs_sizes, num_frames_per_video, T
+            )
+        else:
+            effective_sizes = imgs_sizes
+
+        return self._extract_final(y, imgs_sizes=effective_sizes)
 
     def load_weights(self, weights) -> set[str]:
         loaded_params: set[str] = set()
         params_dict = dict(self.named_parameters())
+        temporal_patch_dim = self.model.temporal_patch_dim
+        separate_video_embedder = self.model.patch_generator.separate_video_embedder
 
         if isinstance(weights, dict):
             weights_list = list(weights.items())
@@ -713,6 +999,19 @@ class RadioModel(nn.Module):
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, weight)
                 loaded_params.add(vllm_key)
+
+        if (
+            temporal_patch_dim > 1
+            and separate_video_embedder
+            and "model.patch_generator.video_embedder.weight" in params_dict
+            and "model.patch_generator.video_embedder.weight" not in loaded_params
+        ):
+            raise ValueError(
+                "Temporal compression (video_temporal_patch_size > 1) requires "
+                "video_embedder weights in the checkpoint, but "
+                "'model.patch_generator.video_embedder.weight' was not loaded. "
+                "Ensure the checkpoint was trained with temporal compression."
+            )
 
         return loaded_params
 
