@@ -3121,8 +3121,8 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3384,6 +3384,11 @@ class GPUModelRunner(
             max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
             num_tokens_unpadded = scheduler_output.total_num_scheduled_tokens
 
+            if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+                torch.cuda.nvtx.range_push(
+                    f"execute_model: reqs={num_reqs}, tokens={num_tokens_unpadded}"
+                )
+
             logits_indices, spec_decode_metadata = self._prepare_inputs(
                 scheduler_output,
                 num_scheduled_tokens_np,
@@ -3568,10 +3573,14 @@ class GPUModelRunner(
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
+                    if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+                        torch.cuda.nvtx.range_pop()
                     return hidden_states
 
                 if self.is_pooling_model:
                     # Return the pooling output.
+                    if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+                        torch.cuda.nvtx.range_pop()
                     return self._pool(
                         hidden_states,
                         num_scheduled_tokens,
@@ -3624,6 +3633,8 @@ class GPUModelRunner(
             slot_mappings,
         )
         self.kv_connector_output = kv_connector_output
+        if envs.VLLM_CUSTOM_SCOPES_FOR_PROFILING:
+            torch.cuda.nvtx.range_pop()
         return None
 
     @torch.inference_mode
