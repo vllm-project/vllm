@@ -48,7 +48,7 @@ _GOLDEN_POINT_SIGN = {"points": [{"x": 0.2822265625, "y": 0.318359375}]}
 # HF subprocess script: loads model via direct safetensors (bypasses
 # transformers 5.x loading bugs), runs detect/point on the stop_sign
 # image asset, writes results to a temp file.
-_HF_SUBPROCESS_SCRIPT = r'''
+_HF_SUBPROCESS_SCRIPT = r"""
 import json, os, sys, torch, traceback
 from safetensors.torch import load_file
 
@@ -130,14 +130,12 @@ for task, obj in [("detect", "sign"), ("point", "sign")]:
 
 with open(os.environ["RESULT_FILE"], "w") as f:
     json.dump(results, f)
-'''
+"""
 
 
 def _run_hf_detect_point_subprocess(timeout: int = 600):
     """Run HF detect/point in a subprocess, return results or None."""
-    with tempfile.NamedTemporaryFile(
-        suffix=".json", delete=False, mode="w"
-    ) as f:
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False, mode="w") as f:
         result_file = f.name
     try:
         env = os.environ.copy()
@@ -161,6 +159,7 @@ def _run_hf_detect_point_subprocess(timeout: int = 600):
     finally:
         with contextlib.suppress(OSError):
             os.unlink(result_file)
+
 
 # Prompts for each image asset
 HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(

@@ -203,9 +203,7 @@ class Moondream3Processor(ProcessorMixin):
                 tokenizer_kwargs[key] = kwargs[key]
 
         if isinstance(tokenizer, str):
-            tokenizer = AutoTokenizer.from_pretrained(
-                tokenizer, **tokenizer_kwargs
-            )
+            tokenizer = AutoTokenizer.from_pretrained(tokenizer, **tokenizer_kwargs)
 
         if tokenizer is None:
             # Prefer model-local tokenizer files first. If unavailable, fall
