@@ -585,11 +585,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             a2_scale=layer.w2_input_scale,
         )
 
-    @property
-    def is_monolithic(self) -> bool:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.is_monolithic
-
     def apply_monolithic(
         self,
         layer: FusedMoE,
@@ -951,11 +946,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             per_out_ch_quant=is_per_token,
             block_shape=self.weight_block_size,
         )
-
-    @property
-    def is_monolithic(self) -> bool:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.is_monolithic
 
     def apply_monolithic(
         self,

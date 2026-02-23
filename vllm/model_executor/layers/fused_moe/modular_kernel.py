@@ -493,6 +493,10 @@ class FusedMoEExperts(ABC):
         self.max_num_tokens = max_num_tokens
         self.num_dispatchers = num_dispatchers
 
+    @staticmethod
+    def is_monolithic() -> bool:
+        raise NotImplementedError("Implemented by subclasses.")
+
     @property
     def expects_unquantized_inputs(self) -> bool:
         """

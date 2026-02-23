@@ -925,11 +925,6 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def supports_eplb(self) -> bool:
         return True
 
-    @property
-    def is_monolithic(self) -> bool:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.is_monolithic
-
     def apply_monolithic(
         self,
         layer: FusedMoE,

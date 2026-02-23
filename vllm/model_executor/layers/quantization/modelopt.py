@@ -906,11 +906,6 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             a2_scale=a2_scale,
         )
 
-    @property
-    def is_monolithic(self) -> bool:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.is_monolithic
-
     def apply_monolithic(
         self,
         layer: FusedMoE,
@@ -1416,11 +1411,6 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
     @property
     def supports_eplb(self) -> bool:
         return True
-
-    @property
-    def is_monolithic(self) -> bool:
-        assert self.moe_kernel is not None
-        return self.moe_kernel.is_monolithic
 
     def apply_monolithic(
         self,
