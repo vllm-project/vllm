@@ -1776,9 +1776,29 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Merge with benchmark result
     result_json = {**result_json, **benchmark_result}
 
-    # Generate timeline plot if requested (before deleting detailed data)
+    # Compute file_name once before using it for plots or saving results
+    file_name = None
+    if args.plot_timeline or args.save_result or args.append_result:
+        base_model_id = model_id.split("/")[-1]
+        max_concurrency_str = (
+            f"-concurrency{args.max_concurrency}"
+            if args.max_concurrency is not None
+            else ""
+        )
+        label = label or args.backend
+        if args.ramp_up_strategy is not None:
+            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+        else:
+            file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+        if args.result_filename:
+            file_name = args.result_filename
+        if args.result_dir:
+            os.makedirs(args.result_dir, exist_ok=True)
+            file_name = os.path.join(args.result_dir, file_name)
+
+    # Generate timeline plot if requested
     timeline_path = None
-    if args.plot_timeline and (args.save_result or args.append_result):
+    if args.plot_timeline:
         try:
             from pathlib import Path
 
@@ -1807,23 +1827,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                             "output_tokens": output_lens[i],
                         }
                     )
-
-                # Determine output path (will be set after file_name is determined)
-                base_model_id = model_id.split("/")[-1]
-                max_concurrency_str = (
-                    f"-concurrency{args.max_concurrency}"
-                    if args.max_concurrency is not None
-                    else ""
-                )
-                label = label or args.backend
-                if args.ramp_up_strategy is not None:
-                    file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
-                else:
-                    file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
-                if args.result_filename:
-                    file_name = args.result_filename
-                if args.result_dir:
-                    file_name = os.path.join(args.result_dir, file_name)
 
                 timeline_path = Path(file_name).with_suffix(".timeline.html")
                 generate_timeline_plot(per_request_data, timeline_path)
@@ -1856,24 +1859,8 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             if field in benchmark_result:
                 del benchmark_result[field]
 
-        # Save to file
+    # Save to file
     if args.save_result or args.append_result:
-        base_model_id = model_id.split("/")[-1]
-        max_concurrency_str = (
-            f"-concurrency{args.max_concurrency}"
-            if args.max_concurrency is not None
-            else ""
-        )
-        label = label or args.backend
-        if args.ramp_up_strategy is not None:
-            file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
-        else:
-            file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
-        if args.result_filename:
-            file_name = args.result_filename
-        if args.result_dir:
-            os.makedirs(args.result_dir, exist_ok=True)
-            file_name = os.path.join(args.result_dir, file_name)
         with open(
             file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
         ) as outfile:
