@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 This script demonstrates how to extend the context length
-of a Qwen model using the YARN method (rope_scaling)
+of a Qwen model using the YARN method (rope_parameters)
 and run a simple chat example.
 
 Usage:
@@ -19,8 +19,8 @@ def create_llm():
 
     # Use yarn to extend context
     hf_overrides = {
-        "rope_theta": rope_theta,
-        "rope_scaling": {
+        "rope_parameters": {
+            "rope_theta": rope_theta,
             "rope_type": "yarn",
             "factor": factor,
             "original_max_position_embeddings": original_max_position_embeddings,

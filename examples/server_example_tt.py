@@ -21,9 +21,6 @@ def main():
         help="Maximum number of sequences to be processed in a single iteration",
     )
     parser.add_argument(
-        "--num_scheduler_steps", type=int, default=10, help="Number of scheduler steps"
-    )
-    parser.add_argument(
         "--block_size", type=int, default=64, help="KV cache block size"
     )
     args, _ = parser.parse_known_args()
@@ -36,8 +33,6 @@ def main():
             str(args.block_size),
             "--max_num_seqs",
             str(args.max_num_seqs),
-            "--num_scheduler_steps",
-            str(args.num_scheduler_steps),
         ]
     )
     runpy.run_module("vllm.entrypoints.openai.api_server", run_name="__main__")

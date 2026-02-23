@@ -29,7 +29,7 @@ PROXY_PORT=${PROXY_PORT:-30001}
 PREFILL_GPUS=${PREFILL_GPUS:-0}
 DECODE_GPUS=${DECODE_GPUS:-1,2,3}
 PREFILL_PORTS=${PREFILL_PORTS:-20003}
-DECODE_PORTS=${DECODE_PORTS:-20005,20007,20009} 
+DECODE_PORTS=${DECODE_PORTS:-20005,20007,20009}
 
 echo "Warning: P2P NCCL disaggregated prefill XpYd support for vLLM v1 is experimental and subject to change."
 echo ""
@@ -93,6 +93,7 @@ ensure_python_library_installed() {
 cleanup() {
     echo "Stopping everything…"
     trap - INT TERM        # prevent re-entrancy
+    pkill -9 -f "disagg_proxy_p2p_nccl_xpyd.py"
     kill -- -$$            # negative PID  ==  "this whole process-group"
     wait                   # reap children so we don't leave zombies
     exit 0
@@ -163,9 +164,9 @@ main() {
         local gpu_id=${PREFILL_GPU_ARRAY[$i]}
         local port=${PREFILL_PORT_ARRAY[$i]}
         local kv_port=$((21001 + i))
-        
+
         echo "  Prefill server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
-        CUDA_VISIBLE_DEVICES=$gpu_id VLLM_USE_V1=1 vllm serve $MODEL \
+        CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
         --enforce-eager \
         --host 0.0.0.0 \
         --port $port \
@@ -177,7 +178,6 @@ main() {
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.9 \
-        --disable-log-request \
         --kv-transfer-config \
         "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_producer\",\"kv_buffer_size\":\"1e1\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"nccl_num_channels\":\"16\"}}" > prefill$((i+1)).log 2>&1 &
         PIDS+=($!)
@@ -192,9 +192,9 @@ main() {
         local gpu_id=${DECODE_GPU_ARRAY[$i]}
         local port=${DECODE_PORT_ARRAY[$i]}
         local kv_port=$((22001 + i))
-        
+
         echo "  Decode server $((i+1)): GPU $gpu_id, Port $port, KV Port $kv_port"
-        VLLM_USE_V1=1 CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
+        CUDA_VISIBLE_DEVICES=$gpu_id vllm serve $MODEL \
         --enforce-eager \
         --host 0.0.0.0 \
         --port $port \
@@ -206,7 +206,6 @@ main() {
         --max-num-seqs 256 \
         --trust-remote-code \
         --gpu-memory-utilization 0.7 \
-        --disable-log-request \
         --kv-transfer-config \
         "{\"kv_connector\":\"P2pNcclConnector\",\"kv_role\":\"kv_consumer\",\"kv_buffer_size\":\"8e9\",\"kv_port\":\"$kv_port\",\"kv_connector_extra_config\":{\"proxy_ip\":\"0.0.0.0\",\"proxy_port\":\"$PROXY_PORT\",\"http_port\":\"$port\",\"send_type\":\"PUT_ASYNC\",\"nccl_num_channels\":\"16\"}}" > decode$((i+1)).log 2>&1 &
         PIDS+=($!)
@@ -232,7 +231,7 @@ main() {
     # Run Benchmark
     # =============================================================================
     cd ../../../benchmarks/
-    python3 benchmark_serving.py --port 10001 --seed $(date +%s) \
+    vllm bench serve --port 10001 --seed $(date +%s) \
         --model $MODEL \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
         --num-prompts 200 --burstiness 100 --request-rate 2 | tee benchmark.log

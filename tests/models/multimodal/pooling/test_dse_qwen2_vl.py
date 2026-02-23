@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import Callable
+from collections.abc import Callable
 
 import pytest
 import torch
@@ -17,18 +17,21 @@ HF_TEXT_PROMPTS = [
     # T -> X
     (
         "Query: Find me an everyday image that matches the given caption: The label of the object is stop sign",  # noqa: E501,
-        Image.new("RGB", (56, 56))),
+        Image.new("RGB", (56, 56)),
+    ),
     # T -> X
-    ("Query: Retrieve an image of this caption: cherry blossom",
-     Image.new("RGB", (56, 56))),
+    (
+        "Query: Retrieve an image of this caption: cherry blossom",
+        Image.new("RGB", (56, 56)),
+    ),
 ]
 
-HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts({
-    "stop_sign":
-    "What is shown in this image?",
-    "cherry_blossom":
-    "What is shown in this image?"
-})
+HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
+    {
+        "stop_sign": "What is shown in this image?",
+        "cherry_blossom": "What is shown in this image?",
+    }
+)
 
 MODELS = ["MrLight/dse-qwen2-2b-mrl-v1"]
 
@@ -36,34 +39,30 @@ MODELS = ["MrLight/dse-qwen2-2b-mrl-v1"]
 def get_messages(image: Image.Image, text: str, embed_text: bool):
     # assert False, 'remember to use outer [] as required'
     if embed_text:
-        messages = [{
-            "role":
-            "user",
-            "content": [
-                {
-                    "type": "image",
-                    "image": Image.new("RGB", (56, 56)),
-                    "resized_height": 1,
-                    "resized_width": 1
-                },  # need a dummy image here for an easier process.
-                {
-                    "type": "text",
-                    "text": text
-                },
-            ]
-        }]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image",
+                        "image": Image.new("RGB", (56, 56)),
+                        "resized_height": 1,
+                        "resized_width": 1,
+                    },  # need a dummy image here for an easier process.
+                    {"type": "text", "text": text},
+                ],
+            }
+        ]
     else:
-        messages = [{
-            "role":
-            "user",
-            "content": [{
-                "type": "image",
-                "image": image
-            }, {
-                "type": "text",
-                "text": text
-            }]
-        }]
+        messages = [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "image", "image": image},
+                    {"type": "text", "text": text},
+                ],
+            }
+        ]
     return messages
 
 
@@ -71,8 +70,10 @@ def apply_chat_template_and_add_eos(
     messages: list[dict],
     apply_chat_template_fn: Callable,
 ):
-    prompt = apply_chat_template_fn(
-        messages, tokenize=False, add_generation_prompt=True) + "<|endoftext|>"
+    prompt = (
+        apply_chat_template_fn(messages, tokenize=False, add_generation_prompt=True)
+        + "<|endoftext|>"
+    )
     return prompt
 
 
@@ -86,16 +87,14 @@ def _run_test(
     *,
     dtype: str,
 ) -> None:
-    '''SET PYTHONPATH'''
+    """SET PYTHONPATH"""
     # NOTE: take care of the order. run vLLM first, and then run HF.
     # vLLM needs a fresh new process without cuda initialization.
     # if we run HF first, the cuda initialization will be done and it
     # will hurt multiprocessing backend with fork method (the default method).
-    with vllm_runner(model,
-                     task="embed",
-                     dtype=dtype,
-                     enforce_eager=True,
-                     max_model_len=8192) as vllm_model:
+    with vllm_runner(
+        model, runner="pooling", dtype=dtype, enforce_eager=True, max_model_len=8192
+    ) as vllm_model:
         tokenizer = vllm_model.llm.get_tokenizer()
         texts = [
             # this is necessary because vllm_model.embed will not apply any
@@ -105,25 +104,25 @@ def _run_test(
             apply_chat_template_and_add_eos(
                 get_messages(image, text, False),
                 apply_chat_template_fn=tokenizer.apply_chat_template,
-            ) for text, image in zip(input_texts, input_images)
+            )
+            for text, image in zip(input_texts, input_images)
             # vllm will replace the pad token with the actual image,
             # which may be a placeholder image, later.
         ]
         vllm_outputs = vllm_model.embed(texts, images=input_images)
 
     hf_outputs = []
-    with hf_runner(model,
-                   dtype=dtype,
-                   auto_cls=Qwen2VLForConditionalGeneration) as hf_model:
-
+    with hf_runner(
+        model, dtype=dtype, auto_cls=Qwen2VLForConditionalGeneration
+    ) as hf_model:
         prompts = []
-        for text, image, embed_text in zip(input_texts, input_images,
-                                           embed_texts):
+        for text, image, embed_text in zip(input_texts, input_images, embed_texts):
             # dse requires non-standard input processing
             # because it needs an image_pad token
             messages = get_messages(image, text, embed_text)
             prompt = apply_chat_template_and_add_eos(
-                messages, hf_model.processor.apply_chat_template)
+                messages, hf_model.processor.apply_chat_template
+            )
 
             prompts.append(prompt)
 
@@ -145,9 +144,9 @@ def _run_test(
                     return_dict=True,
                     output_hidden_states=True,
                 )
-                pooled_output = F.normalize(outputs.hidden_states[-1][0, -1],
-                                            p=2,
-                                            dim=-1)
+                pooled_output = F.normalize(
+                    outputs.hidden_states[-1][0, -1], p=2, dim=-1
+                )
 
                 all_outputs.append(pooled_output.tolist())
 
@@ -170,8 +169,9 @@ def test_models_text(
     model: str,
     dtype: str,
 ) -> None:
-    input_texts_images = [(text, image_placeholder)
-                          for text, image_placeholder in HF_TEXT_PROMPTS]
+    input_texts_images = [
+        (text, image_placeholder) for text, image_placeholder in HF_TEXT_PROMPTS
+    ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
     embed_texts = [True] * len(input_texts)
@@ -198,8 +198,7 @@ def test_models_image(
     dtype: str,
 ) -> None:
     input_texts_images = [
-        (text, asset.pil_image)
-        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
+        (text, asset.pil_image) for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
     ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]

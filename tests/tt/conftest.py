@@ -53,7 +53,6 @@ def tt_server(tt_server_url):
     """
 
     class ServerWrapper:
-
         def __init__(self, base_url: str):
             self.base_url = base_url.rstrip("/")
 

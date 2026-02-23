@@ -8,7 +8,7 @@ for processing prompts with various sampling parameters.
 import argparse
 
 from vllm import EngineArgs, LLMEngine, RequestOutput, SamplingParams
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def create_test_prompts() -> list[tuple[str, SamplingParams]]:
