@@ -5,6 +5,7 @@ from collections.abc import Callable
 import pytest
 
 from vllm.config import PassConfig
+from vllm.utils.flashinfer import is_flashinfer_fp8_blockscale_gemm_supported
 
 from .common import (
     INDUCTOR_GRAPH_PARTITION,
@@ -50,6 +51,8 @@ def test_tp1_fp8_fusions(
     run_e2e_fusion_test,
     monkeypatch,
 ):
+    if is_flashinfer_fp8_blockscale_gemm_supported():
+        pytest.skip("FlashInfer block FP8 GEMM has internal quantization")
     if use_deepgemm and is_blackwell():
         # TODO(luka) DeepGEMM uses different quants, matching not supported
         #  - on Blackwell, uses a special quant fp8, currently not supported
