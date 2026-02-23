@@ -36,6 +36,7 @@ from typing import Any
 import numpy as np
 import torch
 
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.transformers_utils.config import get_config
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -78,6 +79,7 @@ def calculate_stats(times: list[float]) -> dict[str, float]:
     }
 
 
+@default_vllm_config()
 def benchmark_mrope(
     model_name: str,
     num_tokens: int,
