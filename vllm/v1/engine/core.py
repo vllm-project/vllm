@@ -1428,9 +1428,8 @@ class EngineCoreProc(EngineCore):
         output_queue = self.output_queue
 
         def wait_until_idle(engine: "EngineCore", future: Future[Any] | None) -> bool:
-            if engine.scheduler.has_unfinished_requests() or engine.batch_queue:
-                return False
-            if output_queue.empty():
+            has_unfinished = engine.scheduler.has_unfinished_requests()
+            if has_unfinished or engine.batch_queue or not output_queue.empty():
                 return False
             if clear_cache:
                 engine.reset_prefix_cache(reset_running_requests=True)
