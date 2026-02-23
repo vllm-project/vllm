@@ -15,7 +15,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.core.sched.output import NewRequestData, SchedulerOutput
 
 if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
@@ -49,6 +49,8 @@ class ReqMeta:
     token_ids: torch.Tensor
     # Slot mappings, should have the same length as token_ids
     slot_mapping: torch.Tensor
+    # Whether this request is a new request or partially computed already
+    new_req: bool
 
     @staticmethod
     def make_meta(
@@ -57,6 +59,7 @@ class ReqMeta:
         token_ids: list[int],
         block_ids: list[int],
         block_size: int,
+        new_req: bool,
     ) -> "ReqMeta":
         token_ids_tensor = torch.tensor(token_ids)
         block_ids_tensor = torch.tensor(block_ids)
@@ -72,6 +75,7 @@ class ReqMeta:
             filename=filename,
             token_ids=token_ids_tensor,
             slot_mapping=slot_mapping,
+            new_req=new_req,
         )
 
 
@@ -86,9 +90,12 @@ class ExampleHiddenStatesConnectorMetadata(KVConnectorMetadata):
         token_ids: list[int],
         block_ids: list[int],
         block_size: int,
+        new_req: bool = True,
     ) -> None:
         self.requests.append(
-            ReqMeta.make_meta(req_id, filename, token_ids, block_ids, block_size)
+            ReqMeta.make_meta(
+                req_id, filename, token_ids, block_ids, block_size, new_req
+            )
         )
 
 
@@ -138,6 +145,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         )
 
         self._request_filenames: dict[str, str] = {}
+        self._active_requests: dict[str, NewRequestData] = {}
+        self._req_blocks: dict[str, list[int]] = {}
 
     # ==============================
     # Worker-side methods
@@ -253,7 +262,6 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
         meta = ExampleHiddenStatesConnectorMetadata()
-
         for new_req in scheduler_output.scheduled_new_reqs:
             token_ids = new_req.prompt_token_ids or []
             filename = os.path.join(self._storage_path, f"{new_req.req_id}.safetensors")
@@ -265,6 +273,33 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
                 block_size=self._block_size,
             )
             self._request_filenames[new_req.req_id] = filename
+            self._active_requests[new_req.req_id] = new_req
+            self._req_blocks[new_req.req_id] = list(new_req.block_ids[0])
+
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        for i, req_id in enumerate(cached_reqs.req_ids):
+            if req_id not in self._active_requests:
+                continue
+
+            new_block_ids = cached_reqs.new_block_ids[i]
+
+            cached_req = self._active_requests[req_id]
+            req_block_ids = self._req_blocks[req_id]
+
+            assert new_block_ids is not None
+            block_ids = new_block_ids[0]
+
+            req_block_ids.extend(block_ids)
+            filename = os.path.join(self._storage_path, f"{req_id}.safetensors")
+
+            meta.add_request(
+                req_id=req_id,
+                filename=filename,
+                token_ids=cached_req.prompt_token_ids or [],
+                block_ids=req_block_ids,
+                block_size=self._block_size,
+                new_req=False,
+            )
 
         return meta
 
@@ -289,6 +324,8 @@ class ExampleHiddenStatesConnector(KVConnectorBase_V1):
         """
         req_id = request.request_id
         req_filename = self._request_filenames.pop(req_id, None)
+        _ = self._active_requests.pop(req_id, None)
+        _ = self._req_blocks.pop(req_id, None)
 
         return False, {"hidden_states_path": req_filename}
 
