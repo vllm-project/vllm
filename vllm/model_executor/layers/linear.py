@@ -3,6 +3,7 @@
 
 import itertools
 from abc import abstractmethod
+from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -107,7 +108,7 @@ def adjust_bitsandbytes_4bit_shard(
 
 
 def adjust_scalar_to_fused_array(
-    param_data: Parameter,
+    param_data: torch.Tensor,
     loaded_weight: torch.Tensor,
     shard_id: int | str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -136,8 +137,8 @@ def adjust_scalar_to_fused_array(
 # TODO(Isotr0py): We might need a more flexible structure to handle
 # bitsandbytes shard offsets.
 def left_shift_bitsandbytes_4bit_shard(
-    bnb_weight_attrs: dict[str, torch.Tensor],
-) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    bnb_weight_attrs: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     """
     Separate the BitsAndBytes 4-bit shard.
 
@@ -700,12 +701,21 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None:
             return
         if isinstance(loaded_shard_id, tuple):
-            diff = [b - a for a, b in zip(loaded_shard_id[:-1], loaded_shard_id[1:])]
-            if set(diff) != {1}:
-                raise ValueError(
-                    "Shard id with multiple indices should be consecutive."
-                    f"Got shard id {loaded_shard_id}."
-                )
+            for idx in loaded_shard_id:
+                if not (0 <= idx < len(self.output_sizes)):
+                    raise ValueError(
+                        f"Shard id index {idx} should be between 0 and "
+                        f"{len(self.output_sizes) - 1}. Got shard id {loaded_shard_id}."
+                    )
+            if len(loaded_shard_id) > 1:
+                diff = [
+                    b - a for a, b in zip(loaded_shard_id[:-1], loaded_shard_id[1:])
+                ]
+                if set(diff) != {1}:
+                    raise ValueError(
+                        "Shard id with multiple indices should be consecutive. "
+                        f"Got shard id {loaded_shard_id}."
+                    )
             return
         elif isinstance(loaded_shard_id, int):
             if loaded_shard_id < 0 or loaded_shard_id >= len(self.output_sizes):
