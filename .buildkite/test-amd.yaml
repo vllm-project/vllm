@@ -1682,6 +1682,7 @@ steps:
   # in /vllm/tools/pre_commit/generate_nightly_torch_test.py
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  grade: Blocking
   soft_fail: true
   source_file_dependencies:
   - requirements/nightly_torch_test.txt
@@ -1692,6 +1693,7 @@ steps:
   timeout_in_minutes: 15
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/multimodal
@@ -1759,6 +1761,7 @@ steps:
 - label: Entrypoints Unit Tests # 5min
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  grade: Blocking
   timeout_in_minutes: 10
   working_dir: "/vllm-workspace/tests"
   fast_check: true
@@ -1933,6 +1936,7 @@ steps:
 - label: EPLB Algorithm Test # 5min
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  grade: Blocking
   timeout_in_minutes: 15
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1977,6 +1981,7 @@ steps:
   timeout_in_minutes: 20
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/test_regression
@@ -2018,6 +2023,7 @@ steps:
   timeout_in_minutes: 50
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
@@ -2094,6 +2100,7 @@ steps:
 - label: V1 Test others (CPU) # 5 mins
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi355_1
+  grade: Blocking
   source_file_dependencies:
     - vllm/
     - tests/v1
