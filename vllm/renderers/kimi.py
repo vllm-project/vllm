@@ -2,15 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Renderer for Kimi models using KimiTokenizer."""
 
-from typing import Any
+from typing import Any, cast
 
-from vllm.config import ModelConfig
+from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.kimi import KimiTokenizer
 
 from .hf import HfRenderer
-from .protocol import BaseRenderer
 
 logger = init_logger(__name__)
 
@@ -23,42 +22,34 @@ class KimiRenderer(HfRenderer):
     """
 
     @classmethod
-    def from_config(
+    def from_config(  # type: ignore[override]
         cls,
-        config: ModelConfig,
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
     ) -> "KimiRenderer":
-        return cls(config, tokenizer_kwargs)
+        model_config = config.model_config
+        if model_config.skip_tokenizer_init:
+            tokenizer = None
+        else:
+            tokenizer = cast(
+                KimiTokenizer,
+                cached_get_tokenizer(
+                    tokenizer_cls=KimiTokenizer,
+                    **tokenizer_kwargs,
+                ),
+            )
+
+        return cls(config, tokenizer)
 
     def __init__(
         self,
-        config: ModelConfig,
-        tokenizer_kwargs: dict[str, Any],
+        config: VllmConfig,
+        tokenizer: KimiTokenizer | None,
     ) -> None:
-        BaseRenderer.__init__(self, config)
+        super().__init__(config, tokenizer)
 
-        self.use_unified_vision_chunk = getattr(
-            config.hf_config, "use_unified_vision_chunk", False
-        )
-
-        # Initialize without calling HfRenderer.__init__ to avoid creating
-        # the HF tokenizer. We'll create KimiTokenizer instead.
-
-        if config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = cached_get_tokenizer(
-                tokenizer_cls=KimiTokenizer,
-                **tokenizer_kwargs,
-            )
-
-        self._tokenizer = tokenizer
         self._kimia_prompt_prefix = "<|im_kimia_user_msg_start|>"
         self._kimia_prompt_suffix = "<|im_msg_end|><|im_kimia_assistant_msg_start|>"
-
-    @property
-    def tokenizer(self) -> KimiTokenizer | None:
-        return self._tokenizer
 
     def get_tokenizer(self) -> KimiTokenizer:
         tokenizer = self.tokenizer
