@@ -63,21 +63,29 @@ def compute_awq_padding_for_rocm(
     K = num_groups * group_size
     target_split_k = get_awq_gemv_split_k(K, N)
 
-    # Try the target split-k first, then fall back to lower values
-    split_k_candidates = []
-    for sk in [16, 8, 4, 2]:
-        if sk <= target_split_k:
-            split_k_candidates.append(sk)
+    # Check if already divisible by the target split-k (no padding needed)
+    if num_groups % target_split_k == 0:
+        return False, num_groups
 
-    for split_k in split_k_candidates:
+    # Try padding for the target split-k, then fall back to smaller values.
+    # After padding, the runtime will look up split_k using the padded K,
+    # so we verify the padded dimensions are still compatible.
+    candidates = [target_split_k] + [sk for sk in [16, 8, 4, 2] if sk < target_split_k]
+
+    for split_k in candidates:
         if num_groups % split_k == 0:
-            # Already divisible, no padding needed
             return False, num_groups
 
-        # Calculate padding needed
         padded = ((num_groups + split_k - 1) // split_k) * split_k
         overhead = (padded - num_groups) / num_groups
-        if overhead <= MAX_PADDING_OVERHEAD:
+        if overhead > MAX_PADDING_OVERHEAD:
+            continue
+
+        # Verify: the runtime config lookup with padded K must return
+        # a split_k that still divides the padded groups.
+        padded_K = padded * group_size
+        runtime_sk = get_awq_gemv_split_k(padded_K, N)
+        if padded % runtime_sk == 0:
             return True, padded
 
     return False, num_groups

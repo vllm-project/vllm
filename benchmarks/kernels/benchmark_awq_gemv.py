@@ -164,8 +164,10 @@ def compute_padding(K: int, group_size: int, split_k: int) -> int:
     return padded_groups * group_size
 
 
-# L2 cache size to flush (8 MB should cover RDNA GPUs)
-_L2_FLUSH_SIZE = 8 * 1024 * 1024
+# Cache flush size: 256 MB to match triton.testing.do_bench.
+# Must exceed the Infinity Cache (64 MB on Strix Halo) to get
+# realistic cold-cache latencies.
+_L2_FLUSH_SIZE = 256 * 1024 * 1024
 
 
 def _flush_l2_cache(flush_buf: torch.Tensor) -> None:
