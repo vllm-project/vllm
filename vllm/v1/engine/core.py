@@ -1524,7 +1524,7 @@ class DPEngineCoreProc(EngineCoreProc):
         # Build local dp model input (or None).
         all_local_inputs = self.model_executor.collective_rpc(
             "build_dp_model_input", args=(scheduler_output,)
-        )[0]
+        )[0]  # type: ignore[var-annotated]
         (
             local_input,
             local_max_blocks,
@@ -1563,7 +1563,7 @@ class DPEngineCoreProc(EngineCoreProc):
             any_needs_logprobs = input_info_t[5].item() > 0
 
             # Build tensorized gather input for decode.
-            decode_inputs = self.model_executor.collective_rpc(
+            decode_inputs: dict[str, Any] = self.model_executor.collective_rpc(
                 "build_dp_decode_gather_input",
                 args=(
                     local_input,
@@ -1749,7 +1749,7 @@ class DPEngineCoreProc(EngineCoreProc):
                 and any(x is not None for x in gathered_inputs)
             )
         ):
-            result = self.model_executor.collective_rpc(
+            result: tuple[torch.Tensor, list] = self.model_executor.collective_rpc(
                 "concat_and_execute_dp",
                 args=(
                     gathered_inputs,
@@ -1789,7 +1789,7 @@ class DPEngineCoreProc(EngineCoreProc):
 
         # If rank had scheduled tokens, apply results locally and return output
         if local_has_requests:
-            output = self.model_executor.collective_rpc(
+            output: ModelRunnerOutput = self.model_executor.collective_rpc(
                 "apply_dp_execution_result", args=(my_ids, my_logprobs_val)
             )[0]
             return output

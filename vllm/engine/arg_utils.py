@@ -526,7 +526,7 @@ class EngineArgs:
     scheduling_policy: SchedulerPolicy = SchedulerConfig.policy
     scheduler_cls: str | type[object] | None = SchedulerConfig.scheduler_cls
 
-    override_tt_config: dict[str, Any] | None = ModelConfig.override_tt_config
+    override_tt_config: dict[str, Any] = get_field(ModelConfig, "override_tt_config")
 
     pooler_config: PoolerConfig | None = ModelConfig.pooler_config
     override_pooler_config: dict | PoolerConfig | None = (

@@ -183,6 +183,17 @@ class SchedulerOutput:
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
 
+    # For TT devices, execute_model currently need to perform the sampling
+    # instead of a separate sample_tokens call, so the structured output info
+    # is included in the scheduler output (for AscendScheduler).
+
+    # ids of structured outputs requests included in the bitmask, in the
+    # same order as the corresponding stacked rows of the bitmask.
+    # There may be more than one row per request in the case of speculative decoding.
+    structured_output_request_ids: list[str] | None = None
+    # the bitmask for the whole batch
+    grammar_bitmask: "npt.NDArray[np.int32] | None" = None
+
     # Whether the scheduled requests have all the output tokens they
     # need to perform grammar bitmask computation.
     pending_structured_output_tokens: bool = False

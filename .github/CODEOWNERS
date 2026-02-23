@@ -160,13 +160,9 @@ mkdocs.yaml @hmellor
 /examples/offline_inference_tt.py @skhorasganiTT @ppetrovicTT
 /examples/server_example_tt.py @skhorasganiTT @ppetrovicTT
 /requirements/tt* @skhorasganiTT @ppetrovicTT
-/tt_metal @skhorasganiTT
+/tt_metal @skhorasganiTT @viktorpusTT
 /vllm/platforms/tt.py @skhorasganiTT @tchedaTT @viktorpusTT
 /vllm/model_executor/model_loader/tt_loader.py @skhorasganiTT
-
-# V0
-/vllm/worker/tt_worker.py @skhorasganiTT @sraizada-tt
-/vllm/worker/tt_model_runner.py @skhorasganiTT @sraizada-tt @tchedaTT
 
 # V1
 /vllm/v1/worker/tt_worker.py @skhorasganiTT @tchedaTT @ppetrovicTT
@@ -178,4 +174,4 @@ mkdocs.yaml @hmellor
 /vllm/v1/engine/tt_core_launcher.py @skhorasganiTT
 
 # Tests
-/tests/tt @tchedaTT
+/tests/tt @tchedaTT @skhorasganiTT

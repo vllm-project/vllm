@@ -412,7 +412,7 @@ class ParallelConfig:
         import torch.distributed as dist
         from torch.distributed import DistNetworkError
 
-        from vllm.utils import get_tcp_uri
+        from vllm.utils.network_utils import get_tcp_uri
 
         if dist.is_initialized():
             raise RuntimeError(
