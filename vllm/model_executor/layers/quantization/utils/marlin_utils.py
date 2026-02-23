@@ -45,14 +45,15 @@ def query_marlin_supported_quant_types(
     if current_platform.is_cpu():
         return _query_cpu_marlin_supported_quant_types(has_zp, include_fp_type)
 
-    if device_capability is None:
-        capability_tuple = current_platform.get_device_capability()
-        device_capability = (
-            -1 if capability_tuple is None else capability_tuple.to_int()
-        )
+    if current_platform.is_cuda():
+        if device_capability is None:
+            capability_tuple = current_platform.get_device_capability()
+            device_capability = (
+                -1 if capability_tuple is None else capability_tuple.to_int()
+            )
 
-    if device_capability < 75:
-        return []
+        if device_capability < 75:
+            return []
 
     # - has_zp is True: return quant_types that has zero points
     # - has_zp is False: return quant_types that has not zero points
