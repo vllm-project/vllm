@@ -353,6 +353,8 @@ class KimiAudioASRMultiModalProcessor(
         # audio features at the right positions.
         audio_items = mm_items.get_items("audio", DictEmbeddingItems)
 
+        placeholder_id = self.PLACEHOLDER_TOKEN_ID
+
         def _placeholder_seq(item_idx: int) -> list[int]:
             d = audio_items.get(item_idx)
 
@@ -371,8 +373,6 @@ class KimiAudioASRMultiModalProcessor(
         # Expand the single placeholder token to cover the full audio sequence
         # length, so that vLLM's placeholder-range bookkeeping matches the
         # shapes of our tensors (audio_input_ids / masks / features).
-
-        placeholder_id = self.PLACEHOLDER_TOKEN_ID
 
         seq = _placeholder_seq(0)
 
