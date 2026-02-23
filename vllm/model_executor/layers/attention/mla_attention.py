@@ -827,7 +827,7 @@ def unified_mla_attention(
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    attn_metadata, layer, kv_cache = get_attention_context(layer_name)
+    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
     return output
@@ -861,7 +861,7 @@ def unified_mla_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
-    attn_metadata, layer, kv_cache = get_attention_context(layer_name)
+    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     layer.forward_impl(
         q,
         kv_c_normed,
