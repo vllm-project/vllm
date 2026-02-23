@@ -310,6 +310,7 @@ def select_mxfp4_moe_backend(
             )
         else:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
+            logger.info_once(_make_log_backend(backend))
             return backend, None
     elif current_platform.has_device_capability(90):
         if config.dp_size > 1 and config.use_ep:
@@ -323,6 +324,7 @@ def select_mxfp4_moe_backend(
             )
         else:
             backend = Mxfp4MoeBackend.TRITON_MONOLITHIC
+            logger.info_once(_make_log_backend(backend))
             return backend, None
     elif current_platform.has_device_capability(70):
         backend = (
@@ -339,6 +341,7 @@ def select_mxfp4_moe_backend(
         )
     elif current_platform.is_xpu():
         backend = Mxfp4MoeBackend.XPU
+        logger.info_once(_make_log_backend(backend))
         return backend, None
 
     if current_platform.is_cuda() or current_platform.is_rocm():
@@ -362,8 +365,8 @@ def convert_to_mxfp4_moe_kernel_format(
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor | "PrecisionConfig",
-    torch.Tensor | "PrecisionConfig",
+    Union[type[torch.Tensor], "PrecisionConfig"],
+    Union[type[torch.Tensor], "PrecisionConfig"],
     type[torch.Tensor] | None,
     type[torch.Tensor] | None,
 ]:
