@@ -16,6 +16,9 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEModularKernel,
     FusedMoEPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 
 logger = init_logger(__name__)
 
@@ -44,7 +47,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         moe_layer: torch.nn.Module,
         old_quant_method: FusedMoEMethodBase,
         prepare_finalize: FusedMoEPrepareAndFinalize,
-        shared_experts: torch.nn.Module | None,
+        shared_experts: SharedExperts | None,
         inplace: bool = False,
     ) -> "FusedMoEModularMethod":
         return FusedMoEModularMethod(
@@ -52,8 +55,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             FusedMoEModularKernel(
                 prepare_finalize,
                 old_quant_method.select_gemm_impl(prepare_finalize, moe_layer),
-                shared_experts,
-                moe_parallel_config=moe_layer.moe_parallel_config,
+                shared_experts=shared_experts,
                 inplace=inplace,
             ),
         )
@@ -89,7 +91,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         assert self.moe_mk is not None
         return self.moe_mk(
             hidden_states=x,

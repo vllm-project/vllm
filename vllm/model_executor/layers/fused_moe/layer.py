@@ -42,6 +42,9 @@ from vllm.model_executor.layers.fused_moe.router.router_factory import (
 from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
     DefaultMoERunner,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
@@ -336,7 +339,6 @@ class FusedMoE(CustomOp):
         super().__init__()
 
         self._gate = gate
-        self._shared_experts = shared_experts
         self._routed_input_transform = routed_input_transform
 
         if params_dtype is None:
@@ -561,7 +563,7 @@ class FusedMoE(CustomOp):
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
-            disable_inplace=disable_inplace() or self._shared_experts is not None,
+            disable_inplace=disable_inplace() or self.shared_experts is not None,
         )
         if self.moe_config.use_mori_kernels:
             assert self.rocm_aiter_fmoe_enabled, (
@@ -626,22 +628,30 @@ class FusedMoE(CustomOp):
 
         self.quant_method.create_weights(layer=self, **moe_quant_params)
 
-        # Disable shared expert overlap if:
-        #   - we are using eplb with non-default backend, because of correctness issues
-        #   - we are using flashinfer with DP, since there nothing to gain
-        #   - we are using marlin kernels
-        # backend = self.moe_parallel_config.all2all_backend
-        # self.use_overlapped = (
-        #    not (
-        #        (self.enable_eplb and backend != "allgather_reducescatter")
-        #        or self.moe_parallel_config.use_fi_all2allv_kernels
-        #    )
-        #    and self._shared_experts is not None
-        # )
-
+        self._shared_experts = shared_experts
+        self.shared_experts = self._init_shared_experts()
         self.runner = self._init_runner()
 
-    def _init_runner(self):
+    def _init_shared_experts(self) -> SharedExperts | None:
+        if self._shared_experts is None:
+            return None
+
+        reduce_shared_output = (
+            self.reduce_results
+            # XXXX ordering issue
+            and self.quant_method.moe_mk is not None
+            and self.quant_method.moe_mk.output_is_reduced()
+        )
+
+        return SharedExperts(
+            self._shared_experts,
+            moe_config=self.moe_config,
+            has_separate_shared_experts=not self.quant_method.mk_owns_shared_expert,
+            use_dp_chunking=self.use_dp_chunking,  # XXXXXXXXXXXXXX
+            must_reduce_shared_expert_outputs=reduce_shared_output,
+        )
+
+    def _init_runner(self) -> DefaultMoERunner:
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
@@ -651,7 +661,7 @@ class FusedMoE(CustomOp):
             router=self.router,
             routed_input_transform=self._routed_input_transform,
             gate=self._gate,
-            shared_experts=self._shared_experts,
+            shared_experts=self.shared_experts,
             quant_method=self.quant_method,
             reduce_results=self.reduce_results,
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
@@ -694,26 +704,17 @@ class FusedMoE(CustomOp):
                     self,
                     self.quant_method,
                     prepare_finalize,
-                    self.runner.get_shared_experts(),  # XXXXXXXXXXXXXXXXX
+                    self.runner._get_shared_experts(),  # XXXXXXXXXXXXXXXXX
                     inplace=not self.moe_config.disable_inplace,
                 )
             )
 
-    # @property
-    # def shared_experts(self) -> torch.nn.Module | None:
-    #    return self._shared_experts if self.use_overlapped else None
+    @property
+    def layer_id(self):
+        # Delayed import to avoid circular dependency
+        from vllm.model_executor.models.utils import extract_layer_index
 
-    # TODO(bnell): is this needed?
-    # @property
-    # def layer_id(self):
-    #    # Delayed import to avoid circular dependency
-    #    from vllm.model_executor.models.utils import extract_layer_index
-
-    #    return extract_layer_index(self.layer_name)
-
-    # @property
-    # def gate(self) -> torch.nn.Module | None:
-    #    return self._gate if self.use_overlapped else None
+        return extract_layer_index(self.layer_name)
 
     @property
     def tp_size(self):
