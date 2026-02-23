@@ -347,7 +347,15 @@ run_serving_tests() {
     server_envs=$(echo "$params" | jq -r '.server_environment_variables')
     client_params=$(echo "$params" | jq -r '.client_parameters')
 
-    server_args=$(json2args "$server_params")
+    # vLLM serve CLI: model must be positional (no --model). Convert server_parameters accordingly.
+    server_model=$(echo "$server_params" | jq -r '.model // empty')
+    if [[ -z "$server_model" || "$server_model" == "null" ]]; then
+      echo "Error: serving test '$test_name' is missing server_parameters.model" >&2
+      exit 1
+    fi
+    server_params_no_model=$(echo "$server_params" | jq -c 'del(.model)')
+    server_args=$(json2args "$server_params_no_model")
+
     server_envs=$(json2envs "$server_envs")
     client_args=$(json2args "$client_params")
 
@@ -403,14 +411,13 @@ run_serving_tests() {
     fi
 
     # check if server model and client model is aligned
-    server_model=$(echo "$server_params" | jq -r '.model')
     client_model=$(echo "$client_params" | jq -r '.model')
     if [[ $server_model != "$client_model" ]]; then
       echo "Server model and client model must be the same. Skip testcase $test_name."
       continue
     fi
 
-    server_command="$server_envs vllm serve \
+    server_command="$server_envs vllm serve $server_model \
       $server_args"
 
     # run the server
