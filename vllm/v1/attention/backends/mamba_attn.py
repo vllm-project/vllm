@@ -396,17 +396,19 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 assert block_idx_last_scheduled_token is not None
                 assert block_idx_last_computed_token is not None
                 self.block_idx_last_scheduled_token[: metadata.num_decodes].copy_(
-                    block_idx_last_scheduled_token, non_blocking=True
+                    block_idx_last_scheduled_token[: metadata.num_decodes],
+                    non_blocking=True,
                 )
                 block_idx_last_scheduled_token = self.block_idx_last_scheduled_token[
-                    :padded_bs
+                    : metadata.num_decode_tokens
                 ]
 
                 self.block_idx_last_computed_token[: metadata.num_decodes].copy_(
-                    block_idx_last_computed_token, non_blocking=True
+                    block_idx_last_computed_token[: metadata.num_decodes],
+                    non_blocking=True,
                 )
                 block_idx_last_computed_token = self.block_idx_last_computed_token[
-                    :padded_bs
+                    : metadata.num_decode_tokens
                 ]
 
         return replace(

@@ -106,7 +106,7 @@ def _run_check(
         for image in images
     )
 
-    processed_inputs = processor.apply(
+    processed_inputs = processor(
         prompt,
         mm_items=processor.info.parse_mm_data(mm_data),
         hf_processor_mm_kwargs=mm_processor_kwargs,
