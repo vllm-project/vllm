@@ -2023,13 +2023,13 @@ class EngineArgs:
             CpuArchEnum.RISCV,
         ):
             logger.info(
-                "Chunked prefill is not supported for POWER, "
+                "Chunked prefill is not supported for "
                 "S390X and RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
             logger.info(
-                "Prefix caching is not supported for POWER, "
+                "Prefix caching is not supported for "
                 "S390X and RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
