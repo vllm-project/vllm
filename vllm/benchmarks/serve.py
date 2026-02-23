@@ -1553,6 +1553,13 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "and above second threshold (red). Default: 25 50 (milliseconds).",
     )
 
+    parser.add_argument(
+        "--plot-dataset-stats",
+        action="store_true",
+        help="Generate a matplotlib figure with dataset statistics showing "
+        "prompt tokens, output tokens, and combined token distributions.",
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1857,6 +1864,43 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             )
         except Exception as e:
             print(f"Warning: Failed to generate timeline plot: {e}")
+
+    # Generate dataset statistics plot if requested
+    if args.plot_dataset_stats:
+        try:
+            from pathlib import Path
+
+            from vllm.benchmarks.timeline_plot import generate_dataset_stats_plot
+
+            # Prepare per-request data for dataset stats
+            per_request_data = []
+            input_lens = benchmark_result.get("input_lens", [])
+            output_lens = benchmark_result.get("output_lens", [])
+
+            if input_lens and output_lens:
+                for i in range(len(input_lens)):
+                    per_request_data.append(
+                        {
+                            "prompt_len": input_lens[i],
+                            "output_tokens": output_lens[i],
+                        }
+                    )
+
+                stats_path = Path(file_name).with_suffix(".dataset_stats.png")
+                generate_dataset_stats_plot(per_request_data, stats_path)
+            else:
+                print(
+                    "Warning: Dataset statistics plot requires input and "
+                    "output length data. Ensure the benchmark completed "
+                    "successfully."
+                )
+        except ImportError:
+            print(
+                "Warning: matplotlib is required for dataset statistics "
+                "plotting. Install it with: pip install matplotlib"
+            )
+        except Exception as e:
+            print(f"Warning: Failed to generate dataset statistics plot: {e}")
 
     if not args.save_detailed:
         # Remove fields with too many data points

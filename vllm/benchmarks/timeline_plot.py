@@ -12,6 +12,11 @@ except ImportError:
     px = None
     pio = None
 
+try:
+    import matplotlib.pyplot as plt
+except ImportError:
+    plt = None
+
 
 def generate_timeline_plot(
     results: list[dict[str, Any]],
@@ -219,3 +224,100 @@ def construct_timeline_data(
             prev_time_str = itl_end_str
 
     return timeline_data
+
+
+def generate_dataset_stats_plot(
+    results: list[dict[str, Any]],
+    output_path: Path,
+) -> None:
+    """
+    Generate a matplotlib figure with dataset statistics.
+
+    Creates a figure with 4 subplots:
+    - Top-left: Prompt tokens distribution (histogram)
+    - Top-right: Output tokens distribution (histogram)
+    - Bottom-left: Prompt+output tokens distribution (histogram)
+    - Bottom-right: Stacked bar chart (request_id vs tokens)
+
+    Args:
+        results: List of per-request result dictionaries containing:
+            - prompt_len: Number of prompt tokens
+            - output_tokens: Number of output tokens
+        output_path: Path where the figure will be saved
+    """
+    if plt is None:
+        raise ImportError(
+            "matplotlib is required for dataset statistics plotting. "
+            "Install it with: pip install matplotlib"
+        )
+
+    # Extract data
+    prompt_tokens = []
+    output_tokens = []
+    total_tokens = []
+
+    for request in results:
+        prompt_len = request.get("prompt_len", 0)
+        output_len = request.get("output_tokens", 0)
+
+        prompt_tokens.append(prompt_len)
+        output_tokens.append(output_len)
+        total_tokens.append(prompt_len + output_len)
+
+    if not prompt_tokens:
+        print("No data available for dataset statistics plot")
+        return
+
+    # Create figure with 4 subplots
+    fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(14, 10))
+
+    # Top-left: Prompt tokens distribution
+    ax1.hist(prompt_tokens, bins=30, color="steelblue", edgecolor="black", alpha=0.7)
+    ax1.set_xlabel("Prompt Tokens")
+    ax1.set_ylabel("Frequency")
+    ax1.set_title("Prompt Tokens Distribution")
+    ax1.grid(True, alpha=0.3)
+
+    # Top-right: Output tokens distribution
+    ax2.hist(output_tokens, bins=30, color="coral", edgecolor="black", alpha=0.7)
+    ax2.set_xlabel("Output Tokens")
+    ax2.set_ylabel("Frequency")
+    ax2.set_title("Output Tokens Distribution")
+    ax2.grid(True, alpha=0.3)
+
+    # Bottom-left: Prompt+output tokens distribution
+    ax3.hist(
+        total_tokens, bins=30, color="mediumseagreen", edgecolor="black", alpha=0.7
+    )
+    ax3.set_xlabel("Total Tokens (Prompt + Output)")
+    ax3.set_ylabel("Frequency")
+    ax3.set_title("Total Tokens Distribution")
+    ax3.grid(True, alpha=0.3)
+
+    # Bottom-right: Stacked bar chart
+    request_ids = list(range(len(prompt_tokens)))
+    ax4.bar(
+        request_ids, prompt_tokens, label="Prompt Tokens", color="steelblue", alpha=0.7
+    )
+    ax4.bar(
+        request_ids,
+        output_tokens,
+        bottom=prompt_tokens,
+        label="Output Tokens",
+        color="coral",
+        alpha=0.7,
+    )
+    ax4.set_xlabel("Request ID")
+    ax4.set_ylabel("Tokens")
+    ax4.set_title("Tokens per Request (Stacked)")
+    ax4.legend()
+    ax4.grid(True, alpha=0.3, axis="y")
+
+    # Adjust layout to prevent overlap
+    plt.tight_layout()
+
+    # Save figure
+    plt.savefig(str(output_path), dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    print(f"Dataset statistics plot saved to: {output_path}")
