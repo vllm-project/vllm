@@ -4,7 +4,10 @@ import numpy as np
 import torch
 
 from vllm.sampling_params import SamplingParams
+from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.worker.gpu.buffer_utils import UvaBackedTensor
+from vllm.v1.worker.gpu.sample.gumbel import apply_temperature
+from vllm.v1.worker.gpu.sample.min_p import apply_min_p
 
 NO_LOGPROBS = -1
 _NP_INT64_MIN = np.iinfo(np.int64).min
@@ -58,14 +61,44 @@ class SamplingStates:
         self.min_p.copy_to_uva()
         self.seeds.copy_to_uva()
 
-    def do_min_p(self, idx_mapping_np: np.ndarray) -> bool:
-        return np.any(self.min_p.np[idx_mapping_np] != 0.0)
+    def apply_temperature(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        temp_np = self.temperature.np[idx_mapping_np]
+        if np.all((temp_np == 0.0) | (temp_np == 1.0)):
+            # No request requires temperature. Skip the kernel launch.
+            return
 
-    def do_top_k(self, idx_mapping_np: np.ndarray) -> bool:
-        return np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
+        apply_temperature(logits, idx_mapping, self.temperature.gpu)
 
-    def do_top_p(self, idx_mapping_np: np.ndarray) -> bool:
-        return np.any(self.top_p.np[idx_mapping_np] != 1.0)
+    def apply_min_p(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> None:
+        if np.all(self.min_p.np[idx_mapping_np] == 0.0):
+            # No request uses min_p. Skip the kernel launch.
+            return
+        apply_min_p(logits, idx_mapping, self.min_p.gpu)
+
+    def apply_top_k_top_p(
+        self,
+        logits: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        idx_mapping_np: np.ndarray,
+    ) -> torch.Tensor:
+        do_top_k = np.any(self.top_k.np[idx_mapping_np] != self.vocab_size)
+        do_top_p = np.any(self.top_p.np[idx_mapping_np] != 1.0)
+        if not (do_top_k or do_top_p):
+            return logits
+
+        top_k = self.top_k.gpu[idx_mapping] if do_top_k else None
+        top_p = self.top_p.gpu[idx_mapping] if do_top_p else None
+        return apply_top_k_top_p(logits, top_k, top_p)
 
     def max_num_logprobs(self, idx_mapping_np: np.ndarray) -> int:
         return int(np.max(self.num_logprobs[idx_mapping_np]))

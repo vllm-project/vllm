@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
-from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.observability import ObservabilityConfig
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
@@ -99,27 +98,6 @@ class MultiModalRegistry:
     A registry that dispatches data processing according to the model.
     """
 
-    def _extract_mm_options(
-        self,
-        model_config: "ModelConfig",
-    ) -> Mapping[str, BaseDummyOptions] | None:
-        """
-        Extract multimodal dummy options from model config.
-
-        Returns None if no configurable options are found, otherwise returns
-        a mapping of modality names to their dummy options.
-        """
-        if not model_config.multimodal_config:
-            return None
-
-        mm_options = {
-            m: opt
-            for m in model_config.multimodal_config.limit_per_prompt
-            if (opt := model_config.multimodal_config.get_dummy_options(m)) is not None
-        }
-
-        return mm_options if len(mm_options) > 0 else None
-
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """
         Checks if the model supports multimodal inputs.
@@ -138,6 +116,11 @@ class MultiModalRegistry:
             mm_config.get_limit_per_prompt(modality) == 0
             for modality in info.supported_mm_limits
         ):
+            # If enable_mm_embeds is True, we still need MM infrastructure
+            # to process pre-computed embeddings even though encoder won't run
+            if mm_config.enable_mm_embeds:
+                return True
+
             logger.info_once(
                 "All limits of multimodal modalities supported by the model "
                 "are set to 0, running in text-only mode."
@@ -252,10 +235,11 @@ class MultiModalRegistry:
         if processor is None:
             processor = self.create_processor(model_config, cache=cache)
 
+        mm_config = model_config.get_multimodal_config()
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=seq_len,
             mm_counts=mm_counts,
-            mm_options=self._extract_mm_options(model_config),
+            mm_options=mm_config.limit_per_prompt,
         )
         mm_inputs = processor.apply(
             prompt=processor_inputs.prompt,

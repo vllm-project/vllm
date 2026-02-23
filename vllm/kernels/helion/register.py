@@ -65,7 +65,6 @@ vllm_helion_lib = Library("vllm_helion", "FRAGMENT")  # noqa
 def validate_helion_settings(
     helion_settings: "helion.Settings | None", op_name: str
 ) -> None:
-    """Validate that helion_settings doesn't contain conflicting options."""
     if helion_settings is None:
         return
 
@@ -91,6 +90,26 @@ def validate_helion_settings(
             "and sequence lengths. Consider removing this setting.",
             op_name,
         )
+
+
+def create_helion_decorated_kernel(
+    raw_kernel_func: Callable,
+    helion_settings: "helion.Settings | None" = None,
+    extra_kwargs: dict[str, Any] | None = None,
+) -> Any:
+    kernel_kwargs: dict[str, Any] = {}
+    if helion_settings:
+        kernel_kwargs.update(helion_settings.to_dict())
+
+    # Set static_shapes=False by default if user didn't explicitly set it
+    # This is needed for dynamic batch sizes and sequence lengths in vLLM
+    if kernel_kwargs.get("static_shapes") is not True:
+        kernel_kwargs["static_shapes"] = False
+
+    if extra_kwargs:
+        kernel_kwargs.update(extra_kwargs)
+
+    return helion.kernel(**kernel_kwargs)(raw_kernel_func)
 
 
 class PresetConfigSearch(BaseAutotuner):
@@ -198,26 +217,19 @@ class ConfiguredHelionKernel:
         key_computer = self._create_key_computer()
         config_selector = self._create_config_selector(key_computer)
 
-        kernel_kwargs = {}
-        if self.helion_settings:
-            kernel_kwargs.update(self.helion_settings.to_dict())
-
-        # Set static_shapes=False by default if user didn't explicitly set it to True
-        # This is needed for dynamic batch sizes and sequence lengths in vLLM
-        if kernel_kwargs.get("static_shapes") is not True:
-            kernel_kwargs["static_shapes"] = False
-
-        kernel_kwargs["autotuner_fn"] = lambda _, args: PresetConfigSearch(
-            args, config_selector
-        )
-        kernel_kwargs["key"] = key_computer
+        extra_kwargs = {
+            "autotuner_fn": lambda _, args: PresetConfigSearch(args, config_selector),
+            "key": key_computer,
+        }
 
         logger.debug(
             "Creating decorated kernel %s with custom autotuner on platform %s",
             self.op_name,
             self.platform,
         )
-        return helion.kernel(**kernel_kwargs)(self.raw_kernel_func)
+        return create_helion_decorated_kernel(
+            self.raw_kernel_func, self.helion_settings, extra_kwargs
+        )
 
 
 class HelionKernelWrapper:
@@ -240,6 +252,7 @@ class HelionKernelWrapper:
         self._config_picker: (
             Callable[[tuple[Any, ...], list[str]], str | None] | None
         ) = None
+        self._input_generator: Callable[[], dict[str, tuple[Any, ...]]] | None = None
 
     def __call__(self, *args, **kwargs):
         configured_op = self.get_configured_op()
@@ -250,6 +263,51 @@ class HelionKernelWrapper:
     ) -> Callable[[tuple[Any, ...], list[str]], str | None]:
         self._config_picker = picker_func
         return picker_func
+
+    def register_input_generator(
+        self, generator_func: Callable[[], dict[str, tuple[Any, ...]]]
+    ) -> Callable[[], dict[str, tuple[Any, ...]]]:
+        """
+        Register a function to generate inputs for autotuning and benchmarking.
+
+        Args:
+            generator_func: Function that returns dict[str, tuple] where:
+                - key: Configuration identifier (e.g., "4096", "hidden_4096")
+                - value: Tuple of arguments to pass to the kernel
+
+        Returns:
+            The registered function (for decorator usage)
+
+        Example:
+            @kernel_wrapper.register_input_generator
+            def generate_inputs():
+                return {
+                    "4096": (torch.randn(4096, device="cuda"), 0.5),
+                    "8192": (torch.randn(8192, device="cuda"), 0.5),
+                }
+        """
+        self._input_generator = generator_func
+        return generator_func
+
+    def get_inputs(self) -> dict[str, tuple[Any, ...]]:
+        if self._input_generator is None:
+            raise NotImplementedError(
+                f"No input generator registered for kernel '{self.op_name}'. "
+                f"Use @{self.op_name}.register_input_generator to register one."
+            )
+        return self._input_generator()
+
+    def run_autotune(
+        self,
+        inputs: tuple[Any, ...],
+        autotune_effort: str = "quick",
+    ) -> Config:
+        """Run autotuning for a single input configuration."""
+        extra_kwargs = {"autotune_effort": autotune_effort}
+        autotune_kernel = create_helion_decorated_kernel(
+            self.raw_kernel_func, self.helion_settings, extra_kwargs
+        )
+        return autotune_kernel.autotune(inputs)
 
     def get_configured_op(self) -> Any:
         assert self._config_picker is not None, (

@@ -97,6 +97,7 @@ def create_batched_mm_kwargs(
     processor_inputs = dummy_inputs.get_dummy_processor_inputs(
         seq_len=model_config.max_model_len,
         mm_counts=mm_counts,
+        mm_options={},
     )
     mm_items = processor_inputs.mm_items
     resized_mm_data = {
@@ -160,9 +161,6 @@ def test_model_tensor_schema(model_id: str):
         pytest.skip(
             "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
         )
-    if model_id == "internlm/Intern-S1-Pro":
-        # FIXME(Isotr0py): Fix later.
-        pytest.skip("Intern-S1-Pro has issue to pass the test.")
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_available_online(on_fail="skip")

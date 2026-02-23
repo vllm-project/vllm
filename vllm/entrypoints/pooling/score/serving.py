@@ -33,9 +33,10 @@ from vllm.entrypoints.pooling.score.utils import (
     compress_token_type_ids,
     compute_maxsim_score,
     get_score_prompt,
+    parse_score_data_single,
     validate_score_input,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
@@ -108,29 +109,27 @@ class ServingScores(OpenAIServing):
             *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
-        engine_prompts: list[TokensPrompt] = []
+        engine_prompts: list[ProcessorInputs] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
             text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+                token_inputs(
+                    text_token_prompt["prompt_token_ids"],
+                    prompt=input_text,
+                )
             )
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
-        pooling_params = request.to_pooling_params()
-
-        try:
-            pooling_params.verify("embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        pooling_params = request.to_pooling_params("embed")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -176,6 +175,43 @@ class ServingScores(OpenAIServing):
 
         return final_res_batch
 
+    def _preprocess_late_interaction_item(
+        self,
+        data: ScoreData,
+        role: str,
+        request: RerankRequest | ScoreRequest,
+        tokenizer: TokenizerLike,
+        tokenization_kwargs: dict[str, Any],
+    ) -> tuple[str, TokensPrompt]:
+        """Parse a single ScoreData into a text + optional multimodal
+        TokensPrompt for late-interaction encoding.
+
+        For plain strings, tokenises directly.
+        For multimodal content parts, extracts text and multi_modal_data.
+        """
+        model_config = self.model_config
+
+        if isinstance(data, str):
+            text, mm_data, mm_uuids = data, None, None
+        else:
+            text, mm_data, mm_uuids = parse_score_data_single(data, role, model_config)
+
+        prompt_inputs = tokenizer(text, **tokenization_kwargs)
+        self._validate_input(request, prompt_inputs["input_ids"], text)
+
+        engine_prompt = TokensPrompt(
+            prompt_token_ids=prompt_inputs["input_ids"],
+        )
+
+        if mm_data is not None:
+            engine_prompt["multi_modal_data"] = mm_data
+        if mm_uuids is not None:
+            engine_prompt["multi_modal_uuids"] = mm_uuids
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        return text, engine_prompt
+
     async def _late_interaction_score(
         self,
         data_1: list[ScoreData],
@@ -191,58 +227,48 @@ class ServingScores(OpenAIServing):
         Encodes queries and documents into per-token embeddings, then computes
         MaxSim: sum over query tokens of max similarity to any document token.
         """
-        input_texts: list[str] = []
-        for text in data_1 + data_2:
-            if not isinstance(text, str):
-                raise NotImplementedError(
-                    "Late interaction scores currently do not support multimodal input."
-                )
-            input_texts.append(text)
-
         model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
+        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
 
-        encode_async = make_async(
-            tokenizer.encode,
+        all_data = data_1 + data_2
+        roles = ["query"] * len(data_1) + ["document"] * len(data_2)
+
+        preprocess_async = make_async(
+            self._preprocess_late_interaction_item,
             executor=self._tokenizer_executor,
         )
 
-        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
-        tokenized_prompts = await asyncio.gather(
-            *(encode_async(t, **tokenization_kwargs) for t in input_texts)
+        preprocessed = await asyncio.gather(
+            *(
+                preprocess_async(
+                    data=d,
+                    role=r,
+                    request=request,
+                    tokenizer=tokenizer,
+                    tokenization_kwargs=tokenization_kwargs,
+                )
+                for d, r in zip(all_data, roles)
+            )
         )
 
+        input_texts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
-        for tok_result, input_text in zip(tokenized_prompts, input_texts):
-            text_token_prompt = self._validate_input(request, tok_result, input_text)
-
-            engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
-            )
+        for text, engine_prompt in preprocessed:
+            input_texts.append(text)
+            engine_prompts.append(engine_prompt)
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        # Use token_embed task for late interaction models
-        from vllm import PoolingParams
-
-        pooling_params = PoolingParams(
-            task="token_embed",
-            truncate_prompt_tokens=request.truncate_prompt_tokens,
-            use_activation=request.use_activation,
-        )
-
-        try:
-            pooling_params.verify("token_embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        pooling_params = request.to_pooling_params("token_embed")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -358,12 +384,7 @@ class ServingScores(OpenAIServing):
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
 
-        default_pooling_params = request.to_pooling_params()
-
-        try:
-            default_pooling_params.verify("score", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
+        default_pooling_params = request.to_pooling_params("score")
 
         for i, engine_prompt in enumerate(engine_prompts):
             request_id_item = f"{request_id}-{i}"
@@ -497,8 +518,7 @@ class ServingScores(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def do_rerank(
         self, request: RerankRequest, raw_request: Request | None = None
@@ -542,8 +562,7 @@ class ServingScores(OpenAIServing):
         except asyncio.CancelledError:
             return self.create_error_response("Client disconnected")
         except ValueError as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     def request_output_to_score_response(
         self,
