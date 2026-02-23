@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Generate timeline plots for benchmark results."""
+"""Generate plots for benchmark results."""
 
 from pathlib import Path
 from typing import Any

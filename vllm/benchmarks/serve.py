@@ -1820,7 +1820,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         try:
             from pathlib import Path
 
-            from vllm.benchmarks.timeline_plot import generate_timeline_plot
+            from vllm.benchmarks.plot import generate_timeline_plot
 
             # Prepare per-request data for timeline
             per_request_data = []
@@ -1872,7 +1872,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         try:
             from pathlib import Path
 
-            from vllm.benchmarks.timeline_plot import generate_dataset_stats_plot
+            from vllm.benchmarks.plot import generate_dataset_stats_plot
 
             # Prepare per-request data for dataset stats
             per_request_data = []
