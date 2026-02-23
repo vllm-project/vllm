@@ -271,7 +271,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
             {**dummy_mm_data, "audio": [a.audio_array for a in res.audios]},
         )
 
-        return ProcessorInputs(prompt=dummy_tokens, mm_items=dummy_mm_inputs)
+        return ProcessorInputs(prompt=dummy_tokens, mm_data_items=dummy_mm_inputs)
 
 
 class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo]):

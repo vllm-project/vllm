@@ -296,7 +296,7 @@ class PixtralDummyInputsBuilder(BaseDummyInputsBuilder[PixtralProcessingInfo]):
 
         return ProcessorInputs(
             prompt=dummy_tokens,
-            mm_items=dummy_mm_items,
+            mm_data_items=dummy_mm_items,
             tokenization_kwargs=tokenization_kwargs,
         )
 
