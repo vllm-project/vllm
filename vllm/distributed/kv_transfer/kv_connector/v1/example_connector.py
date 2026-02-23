@@ -17,6 +17,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -125,6 +126,7 @@ class ExampleConnector(KVConnectorBase_V1):
             dst_kv_cache_layer: torch.Tensor,
             src_kv_cache: torch.Tensor,
             slot_mapping: torch.Tensor,
+            backend: AttentionBackendEnum,
         ) -> None:
             """Inject the KV cache into the layer.
 
@@ -138,10 +140,7 @@ class ExampleConnector(KVConnectorBase_V1):
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
-            if isinstance(
-                attn_metadata.get("model.layers.0.self_attn.attn", None),
-                TritonAttentionMetadata,
-            ):
+            if backend == AttentionBackendEnum.TRITON_ATTN:
                 dst_kv_cache_layer = dst_kv_cache_layer.permute(1, 0, 2, 3, 4)
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
@@ -192,7 +191,9 @@ class ExampleConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids, request.mm_hashes
                 )
                 kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
-                inject_kv_into_layer(kv_cache_layer, kv_cache, request.slot_mapping)
+                inject_kv_into_layer(
+                    kv_cache_layer, kv_cache, request.slot_mapping, layer.backend
+                )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
