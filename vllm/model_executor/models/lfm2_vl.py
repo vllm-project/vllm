@@ -42,6 +42,7 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -89,6 +90,9 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
 
     def get_image_processor(self, **kwargs: object) -> Lfm2VlImageProcessorFast:
         return self.get_hf_processor(**kwargs).image_processor
+
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
@@ -339,14 +343,13 @@ class Lfm2VLDummyInputsBuilder(BaseDummyInputsBuilder[Lfm2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

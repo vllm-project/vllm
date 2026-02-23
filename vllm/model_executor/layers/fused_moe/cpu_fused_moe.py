@@ -402,7 +402,7 @@ class CPUFusedMOE:
             input,
             topk_weights,
             topk_ids,
-            activation,
+            activation.value,
             global_num_experts,
             skip_weighted,
         )

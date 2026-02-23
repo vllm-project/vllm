@@ -8,6 +8,7 @@ os.environ["VLLM_USE_DEEP_GEMM"] = "0"
 
 import torch
 
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     W8A8BlockFp8LinearOp,
 )
@@ -40,6 +41,7 @@ DEEPSEEK_V3_SHAPES = [
 ]
 
 
+@default_vllm_config()
 def build_w8a8_block_fp8_runner(M, N, K, block_size, device, use_cutlass):
     """Build runner function for w8a8 block fp8 matmul."""
     factor_for_scale = 1e-2

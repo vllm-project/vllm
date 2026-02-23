@@ -48,7 +48,10 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
+from vllm.logger import init_logger
 from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
 
 REASONING_EFFORT = {
     "high": ReasoningEffort.HIGH,
@@ -62,19 +65,14 @@ _harmony_encoding = None
 # they are available and requested by the user.
 # Tool args are provided by MCP tool descriptions. Output
 # of the tools are stringified.
-MCP_BUILTIN_TOOLS: set[str] = {
-    "web_search_preview",
-    "code_interpreter",
-    "container",
-}
-
-# Mapping from built-in tool recipient names to their MCP server labels.
-# This ensures consistency between streaming and non-streaming responses.
 _BUILTIN_TOOL_TO_MCP_SERVER_LABEL: dict[str, str] = {
     "python": "code_interpreter",
     "browser": "web_search_preview",
     "container": "container",
 }
+
+# Derive MCP_BUILTIN_TOOLS from the canonical mapping
+MCP_BUILTIN_TOOLS: set[str] = set(_BUILTIN_TOOL_TO_MCP_SERVER_LABEL.values())
 
 
 def has_custom_tools(tool_types: set[str]) -> bool:
@@ -116,8 +114,11 @@ def get_system_message(
             REASONING_EFFORT[reasoning_effort]
         )
     if start_date is None:
-        # NOTE(woosuk): This brings non-determinism in vLLM. Be careful.
-        start_date = datetime.datetime.now().strftime("%Y-%m-%d")
+        # NOTE(woosuk): This brings non-determinism in vLLM.
+        # Set VLLM_SYSTEM_START_DATE to pin it.
+        start_date = envs.VLLM_SYSTEM_START_DATE or datetime.datetime.now().strftime(
+            "%Y-%m-%d"
+        )
     sys_msg_content = sys_msg_content.with_conversation_start_date(start_date)
     if browser_description is not None:
         sys_msg_content = sys_msg_content.with_tools(browser_description)
@@ -398,15 +399,60 @@ def parse_chat_input_to_harmony_message(
 
 
 def parse_input_to_harmony_message(chat_msg) -> list[Message]:
-    """
-    Parse a message from request.previous_input_messages in the Responsees API to
-    Harmony messages.
+    """Parse a message from request.previous_input_messages
+    into Harmony messages.
+
+    Supports both OpenAI chat format ({"role": "..."}) and
+    Harmony format ({"author": {"role": "..."}}).
     """
     if not isinstance(chat_msg, dict):
-        # Handle Pydantic models
         chat_msg = chat_msg.model_dump(exclude_none=True)
 
+    if "author" in chat_msg and isinstance(chat_msg.get("author"), dict):
+        return [_parse_harmony_format_message(chat_msg)]
+
+    return _parse_chat_format_message(chat_msg)
+
+
+def _parse_harmony_format_message(chat_msg: dict) -> Message:
+    """Reconstruct a Message from Harmony-format dict,
+    preserving channel, recipient, and content_type."""
+    author_dict = chat_msg["author"]
+    role = author_dict.get("role")
+    name = author_dict.get("name")
+
+    raw_content = chat_msg.get("content", "")
+    if isinstance(raw_content, list):
+        # TODO: Support refusal and non-text content types.
+        contents = [TextContent(text=c.get("text", "")) for c in raw_content]
+    elif isinstance(raw_content, str):
+        contents = [TextContent(text=raw_content)]
+    else:
+        contents = [TextContent(text="")]
+
+    if name:
+        msg = Message.from_author_and_contents(Author.new(Role(role), name), contents)
+    else:
+        msg = Message.from_role_and_contents(Role(role), contents)
+
+    channel = chat_msg.get("channel")
+    if channel:
+        msg = msg.with_channel(channel)
+    recipient = chat_msg.get("recipient")
+    if recipient:
+        msg = msg.with_recipient(recipient)
+    content_type = chat_msg.get("content_type")
+    if content_type:
+        msg = msg.with_content_type(content_type)
+
+    return msg
+
+
+def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
+    """Parse an OpenAI chat-format dict into Harmony messages."""
     role = chat_msg.get("role")
+    if role is None:
+        raise ValueError(f"Message has no 'role' key: {chat_msg}")
 
     # Assistant message with tool calls
     tool_calls = chat_msg.get("tool_calls")
@@ -426,15 +472,21 @@ def parse_input_to_harmony_message(chat_msg) -> list[Message]:
     # Tool role message (tool output)
     if role == "tool":
         name = chat_msg.get("name", "")
+        if name and not name.startswith("functions."):
+            name = f"functions.{name}"
         content = chat_msg.get("content", "") or ""
         content = flatten_chat_text_content(content)
-
-        msg = Message.from_author_and_content(
-            Author.new(Role.TOOL, f"functions.{name}"), content
-        ).with_channel("commentary")
+        # NOTE: .with_recipient("assistant") is required on tool messages
+        # to match parse_chat_input_to_harmony_message behavior and ensure
+        # proper routing in the Harmony protocol.
+        msg = (
+            Message.from_author_and_content(Author.new(Role.TOOL, name), content)
+            .with_channel("commentary")
+            .with_recipient("assistant")
+        )
         return [msg]
 
-    # Default: user/assistant/system messages with content
+    # Default: user/assistant/system messages
     content = chat_msg.get("content", "")
     if isinstance(content, str):
         contents = [TextContent(text=content)]
@@ -497,6 +549,10 @@ def _parse_browser_tool_call(message: Message, recipient: str) -> ResponseOutput
     try:
         browser_call = json.loads(content.text)
     except json.JSONDecodeError:
+        logger.warning(
+            "Invalid JSON in browser tool call, using error placeholder: %s",
+            content.text,
+        )
         json_retry_output_message = (
             f"Invalid JSON args, caught and retried: {content.text}"
         )
@@ -730,22 +786,7 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                 )
             ]
 
-    if parser.current_channel == "commentary":
-        return [
-            ResponseReasoningItem(
-                id=f"rs_{random_uuid()}",
-                summary=[],
-                type="reasoning",
-                content=[
-                    ResponseReasoningTextContent(
-                        text=parser.current_content, type="reasoning_text"
-                    )
-                ],
-                status=None,
-            )
-        ]
-
-    if parser.current_channel == "analysis":
+    if parser.current_channel in ("commentary", "analysis"):
         return [
             ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",

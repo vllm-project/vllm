@@ -14,7 +14,8 @@ struct alignas(32) u32x8_t {
 };
 
 __device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
+    defined(CUDA_VERSION) && CUDA_VERSION >= 12090
   asm volatile("ld.global.nc.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];\n"
                : "=r"(val.u0), "=r"(val.u1), "=r"(val.u2), "=r"(val.u3),
                  "=r"(val.u4), "=r"(val.u5), "=r"(val.u6), "=r"(val.u7)
@@ -35,7 +36,8 @@ __device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
 }
 
 __device__ __forceinline__ void st256(u32x8_t& val, u32x8_t* ptr) {
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
+    defined(CUDA_VERSION) && CUDA_VERSION >= 12090
   asm volatile("st.global.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};\n"
                :
                : "l"(ptr), "r"(val.u0), "r"(val.u1), "r"(val.u2), "r"(val.u3),

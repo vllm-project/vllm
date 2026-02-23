@@ -202,6 +202,7 @@ def solve_sla(
         with path.open("rb") as f:
             past_iter_data = json.load(f)
 
+        sla_data.append(past_iter_data)
         history[past_sla_value] = _compute_margin(sla_comb, past_iter_data)
 
     # NOTE: We don't use equality here to be more robust against noisy results
@@ -264,6 +265,8 @@ def search_sla(
     dry_run: bool,
 ):
     print("[SLA START]")
+    print(f"Serve parameters: {serve_comb.as_text() or '(None)'}")
+    print(f"Bench parameters: {bench_comb.as_text() or '(None)'}")
     print(f"SLA criteria: {sla_comb.as_text()}")
 
     result = solve_sla(

@@ -195,18 +195,15 @@ def test_chat_batch_failure_cleanup(llm_for_failure_test):
     valid_msg = [{"role": "user", "content": "Hello"}]
     long_text = "This is a very long text to test the error " * 50
     invalid_msg = [{"role": "user", "content": long_text}]
-    batch_1 = [
-        valid_msg,
-        valid_msg,
-        invalid_msg,
-    ]
-    batch_2 = [
-        valid_msg,
-        valid_msg,
-    ]
+
+    batch_1 = [valid_msg, valid_msg, invalid_msg]
+    batch_2 = [valid_msg, valid_msg]
     sampling_params = SamplingParams(temperature=0, max_tokens=10)
+
     with pytest.raises(ValueError, match="context length is only"):
         llm.chat(batch_1, sampling_params=sampling_params)
+    assert llm.llm_engine.get_num_unfinished_requests() == 0
+
     outputs_2 = llm.chat(batch_2, sampling_params=sampling_params)
     assert len(outputs_2) == len(batch_2)
     assert llm.llm_engine.get_num_unfinished_requests() == 0

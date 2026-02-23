@@ -7,11 +7,7 @@ from .data import ProcessorInputs, SingletonInputs
 def split_enc_dec_inputs(
     inputs: ProcessorInputs,
 ) -> tuple[SingletonInputs | None, SingletonInputs]:
-    if "encoder" in inputs and "decoder" in inputs:
-        # NOTE: This passes pyright but not mypy
-        return (
-            inputs["encoder"],  # type: ignore[typeddict-item]
-            inputs["decoder"],  # type: ignore[typeddict-item]
-        )
+    if inputs["type"] == "enc_dec":
+        return inputs["encoder_prompt"], inputs["decoder_prompt"]
 
     return None, inputs

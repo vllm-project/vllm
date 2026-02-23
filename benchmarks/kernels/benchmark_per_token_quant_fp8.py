@@ -7,6 +7,7 @@ from unittest.mock import patch
 import pandas as pd
 import torch
 
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import GroupShape
 from vllm.triton_utils import triton
@@ -84,6 +85,7 @@ def calculate_diff(
 configs = []
 
 
+@default_vllm_config()
 def benchmark_quantization(
     batch_size,
     hidden_size,

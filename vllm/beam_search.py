@@ -2,13 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
 
+from vllm.inputs import TokenInputs, token_inputs
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
-
-if TYPE_CHECKING:
-    from vllm.multimodal import MultiModalDataDict
+from vllm.multimodal.inputs import MultiModalInputs, mm_inputs
 
 
 @dataclass
@@ -19,6 +17,8 @@ class BeamSearchSequence:
     about to be returned to the user.
     """
 
+    orig_prompt: TokenInputs | MultiModalInputs
+
     # The tokens include the prompt.
     tokens: list[int]
     logprobs: list[dict[int, Logprob]]
@@ -27,8 +27,28 @@ class BeamSearchSequence:
     text: str | None = None
     finish_reason: str | None = None
     stop_reason: int | str | None = None
-    multi_modal_data: "MultiModalDataDict | None" = None
-    mm_processor_kwargs: dict[str, Any] | None = None
+
+    def get_prompt(self):
+        prompt = self.orig_prompt
+
+        prompt_text = prompt.get("prompt")
+        cache_salt = prompt.get("cache_salt")
+
+        if prompt["type"] == "token":
+            return token_inputs(
+                self.tokens,
+                prompt=prompt_text,
+                cache_salt=cache_salt,
+            )
+
+        return mm_inputs(
+            prompt_token_ids=self.tokens,
+            mm_kwargs=prompt["mm_kwargs"],
+            mm_hashes=prompt["mm_hashes"],
+            mm_placeholders=prompt["mm_placeholders"],
+            prompt=prompt_text,
+            cache_salt=cache_salt,
+        )
 
 
 @dataclass
@@ -44,14 +64,15 @@ class BeamSearchOutput:
 class BeamSearchInstance:
     def __init__(
         self,
-        prompt_tokens: list[int],
+        prompt: TokenInputs | MultiModalInputs,
         lora_request: LoRARequest | None = None,
         logprobs: list[dict[int, Logprob]] | None = None,
         **kwargs,
     ):
         self.beams: list[BeamSearchSequence] = [
             BeamSearchSequence(
-                tokens=prompt_tokens,
+                orig_prompt=prompt,
+                tokens=prompt["prompt_token_ids"],
                 logprobs=[] if logprobs is None else list(logprobs),
                 lora_request=lora_request,
                 **kwargs,

@@ -3,7 +3,7 @@
 """Sampling parameters for text generation."""
 
 import copy
-import json
+import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -16,6 +16,7 @@ from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -731,7 +732,6 @@ class SamplingParams(
         ):
             raise ValueError("structured_outputs.grammar cannot be an empty string")
 
-        from vllm.tokenizers.mistral import MistralTokenizer
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
             validate_guidance_grammar,
@@ -752,7 +752,7 @@ class SamplingParams(
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 raise ValueError(
                     "Mistral tokenizer is not supported for the 'guidance' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
@@ -764,7 +764,7 @@ class SamplingParams(
             validate_structured_output_request_outlines(self)
         elif backend == "lm-format-enforcer":
             # lm format enforcer backend
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 raise ValueError(
                     "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
@@ -791,12 +791,12 @@ class SamplingParams(
                 skip_guidance = False
                 if so_params.json:
                     if isinstance(so_params.json, str):
-                        schema = json.loads(so_params.json)
+                        schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if isinstance(tokenizer, MistralTokenizer) or skip_guidance:
+                if is_mistral_tokenizer(tokenizer) or skip_guidance:
                     # Fall back to outlines if the tokenizer is Mistral
                     # or if schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(self)

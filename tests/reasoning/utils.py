@@ -4,7 +4,7 @@
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParser
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.mistral import is_mistral_tokenizer
 
 
 class StreamingReasoningReconstructor:
@@ -59,7 +59,7 @@ def run_reasoning_extraction_mistral(
     request: ChatCompletionRequest | None = None,
     streaming: bool = False,
 ) -> tuple[str | None, str | None]:
-    assert isinstance(reasoning_parser.model_tokenizer, MistralTokenizer), type(
+    assert is_mistral_tokenizer(reasoning_parser.model_tokenizer), type(
         reasoning_parser.model_tokenizer
     )
     if streaming:
@@ -130,7 +130,7 @@ def run_reasoning_extraction_streaming_mistral(
     model_deltas: list[int],
     request: ChatCompletionRequest | None = None,
 ) -> StreamingReasoningReconstructor:
-    assert isinstance(reasoning_parser.model_tokenizer, MistralTokenizer), type(
+    assert is_mistral_tokenizer(reasoning_parser.model_tokenizer), type(
         reasoning_parser.model_tokenizer
     )
     request = request or ChatCompletionRequest(messages=[], model="test-model")

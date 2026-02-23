@@ -1305,7 +1305,8 @@ void indexer_k_quant_and_cache(
   const at::cuda::OptionalCUDAGuard device_guard(device_of(k));
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
-  DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), "fp8_e4m3",
+  static const std::string kv_cache_dtype = "fp8_e4m3";
+  DISPATCH_BY_KV_CACHE_DTYPE(k.dtype(), kv_cache_dtype,
                              CALL_INDEXER_K_QUANT_AND_CACHE);
 }
 

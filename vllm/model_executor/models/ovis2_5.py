@@ -35,6 +35,7 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.processors.ovis2_5 import Ovis2_5Processor
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -183,6 +184,9 @@ class Ovis2_5ProcessingInfo(BaseProcessingInfo):
             temporal_patch_size=vit_config.temporal_patch_size,
         )
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_image_processor(self) -> BaseImageProcessor:
         return self.get_hf_processor().image_processor  # type: ignore
 
@@ -283,8 +287,7 @@ class Ovis2_5DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2_5ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -294,8 +297,8 @@ class Ovis2_5DummyInputsBuilder(BaseDummyInputsBuilder[Ovis2_5ProcessingInfo]):
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         mm_data = {
             "image": self._get_dummy_images(

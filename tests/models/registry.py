@@ -592,11 +592,23 @@ _EMBEDDING_EXAMPLE_MODELS = {
     ),
     # [Multimodal]
     "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
+    "ColModernVBertForRetrieval": _HfExamplesInfo(
+        "ModernVBERT/colmodernvbert-merged",
+    ),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo(
         "TIGER-Lab/VLM2Vec-Full", trust_remote_code=True
     ),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("MrLight/dse-qwen2-2b-mrl-v1"),
+    "ColQwen3": _HfExamplesInfo(
+        "TomoroAI/tomoro-colqwen3-embed-4b", trust_remote_code=True
+    ),
+    "OpsColQwen3Model": _HfExamplesInfo(
+        "OpenSearch-AI/Ops-Colqwen3-4B", trust_remote_code=True
+    ),
+    "Qwen3VLNemotronEmbedModel": _HfExamplesInfo(
+        "nvidia/nemotron-colembed-vl-4b-v2",
+    ),
     "SiglipModel": _HfExamplesInfo("google/siglip-base-patch16-224"),
     "PrithviGeoSpatialMAE": _HfExamplesInfo(
         "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
@@ -724,7 +736,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     ),
     "FunASRForConditionalGeneration": _HfExamplesInfo(
         "allendou/Fun-ASR-Nano-2512-vllm",
-        is_available_online=False,
     ),
     "FunAudioChatForConditionalGeneration": _HfExamplesInfo(
         "funaudiochat", is_available_online=False
@@ -749,7 +760,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "Glm4vMoeForConditionalGeneration": _HfExamplesInfo("zai-org/GLM-4.5V"),
     "GlmOcrForConditionalGeneration": _HfExamplesInfo(
         "zai-org/GLM-OCR",
-        is_available_online=False,
         min_transformers_version="5.1.0",
     ),
     "H2OVLChatModel": _HfExamplesInfo(
@@ -1017,6 +1027,14 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen3-ASR-1.7B",
         max_model_len=4096,
         min_transformers_version="4.57",
+        is_available_online=False,
+    ),
+    "Qwen3ASRRealtimeGeneration": _HfExamplesInfo(
+        "Qwen/Qwen3-ASR-1.7B",
+        max_model_len=4096,
+        min_transformers_version="4.57",
+        enforce_eager=True,
+        hf_overrides={"architectures": ["Qwen3ASRRealtimeGeneration"]},
         is_available_online=False,
     ),
     "RForConditionalGeneration": _HfExamplesInfo("YannQi/R-4B", trust_remote_code=True),

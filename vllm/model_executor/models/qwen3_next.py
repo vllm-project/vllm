@@ -44,6 +44,7 @@ from vllm.model_executor.layers.layernorm import (
 from vllm.model_executor.layers.layernorm import RMSNormGated
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
+    MergedColumnParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -114,7 +115,6 @@ def fi_chunk_gated_delta_rule(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
 ):
     from flashinfer.gdn_prefill import (
@@ -171,7 +171,6 @@ class ChunkGatedDeltaRule(CustomOp):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fi_chunk_gated_delta_rule(
@@ -183,7 +182,6 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            head_first=head_first,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -197,7 +195,6 @@ class ChunkGatedDeltaRule(CustomOp):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fla_chunk_gated_delta_rule(
@@ -209,7 +206,6 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            head_first=head_first,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -406,19 +402,19 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         self.conv1d.weight.data = self.conv1d.weight.data.unsqueeze(1)
 
         # projection of the input hidden states
-        self.projection_size_qkvz = self.key_dim * 2 + self.value_dim * 2
-        self.projection_size_ba = self.num_v_heads * 2
-        self.in_proj_qkvz = ColumnParallelLinear(
-            input_size=self.hidden_size,
-            output_size=self.projection_size_qkvz,
-            bias=False,
+        # Qwen3-Next and Qwen3.5 has a different qkv_proj layout,
+        # we need to create qkvz_proj adaptively here.
+        self.in_proj_qkvz = self.create_qkvz_proj(
+            hidden_size=self.hidden_size,
+            key_dim=self.key_dim,
+            value_dim=self.value_dim,
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_qkvz",
         )
         # ba_proj doesn't support blockwise fp8 quantization.
-        self.in_proj_ba = ColumnParallelLinear(
+        self.in_proj_ba = MergedColumnParallelLinear(
             input_size=self.hidden_size,
-            output_size=self.projection_size_ba,
+            output_sizes=[self.num_v_heads] * 2,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.in_proj_ba",
@@ -484,10 +480,26 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
+    def create_qkvz_proj(
+        self,
+        hidden_size: int,
+        key_dim: int,
+        value_dim: int,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> MergedColumnParallelLinear:
+        return MergedColumnParallelLinear(
+            input_size=hidden_size,
+            output_sizes=[sum((key_dim, key_dim, value_dim, value_dim))],
+            bias=False,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
     def fix_query_key_value_ordering(
         self,
-        mixed_qkvz,
-        mixed_ba,
+        mixed_qkvz: torch.Tensor,
+        mixed_ba: torch.Tensor,
     ):
         """
         Derives `query`, `key` and `value` tensors from `mixed_qkvzba`.
@@ -773,7 +785,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
-                head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
             # Init cache

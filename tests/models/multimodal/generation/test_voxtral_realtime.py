@@ -10,6 +10,7 @@ from mistral_common.protocol.transcription.request import (
     TranscriptionRequest,
 )
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
+from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
@@ -26,7 +27,7 @@ ENGINE_CONFIG = dict(
     load_format="mistral",
     tokenizer_mode="mistral",
     enforce_eager=True,
-    gpu_memory_utilization=0.4,
+    gpu_memory_utilization=0.9,
 )
 
 
@@ -148,6 +149,9 @@ async def test_voxtral_realtime_generator(audio_assets, tokenizer, async_engine)
 
         output_tokens_list.append(output_tokens)
 
-    texts = [tokenizer.decode(output_tokens) for output_tokens in output_tokens_list]
+    texts = [
+        tokenizer.decode(output_tokens, special_token_policy=SpecialTokenPolicy.IGNORE)
+        for output_tokens in output_tokens_list
+    ]
     texts[1] = texts[1].replace("a base hit", "OBS").replace("oh my", "oh, my")
     assert texts == EXPECTED_TEXT

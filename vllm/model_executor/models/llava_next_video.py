@@ -165,8 +165,7 @@ class LlavaNextVideoDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_videos = mm_counts.get("video", 0)
 
@@ -175,7 +174,7 @@ class LlavaNextVideoDummyInputsBuilder(
             seq_len, mm_counts
         )
 
-        video_overrides = mm_options.get("video") if mm_options else None
+        video_overrides = mm_options.get("video")
 
         return {
             "video": self._get_dummy_videos(

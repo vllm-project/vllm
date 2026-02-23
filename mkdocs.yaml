@@ -105,6 +105,10 @@ plugins:
           - https://numpy.org/doc/stable/objects.inv
           - https://pytorch.org/docs/stable/objects.inv
           - https://psutil.readthedocs.io/en/stable/objects.inv
+  - redirects:
+      redirect_maps:
+        features/spec_decode/README.md: features/speculative_decoding/README.md
+        features/spec_decode/speculators.md: features/speculative_decoding/speculators.md
 
 markdown_extensions:
   - attr_list
