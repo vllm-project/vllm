@@ -13,6 +13,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+    FusedMoEMethodBase,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
     aux_stream,
@@ -41,31 +44,25 @@ class SharedExpertsOrder(IntEnum):
     AFTER_QUANT_METHOD = (4,)
 
 
-# XXXXX add method to prime with shared_experts_input? NO
 class SharedExperts:
     def __init__(
         self,
         shared_experts: torch.nn.Module,
         moe_config: FusedMoEConfig,
-        has_separate_shared_experts: bool,  # better name
-        use_dp_chunking: bool,
-        must_reduce_shared_expert_outputs: bool,  # and reduce_results
+        quant_method: FusedMoEMethodBase,
+        reduce_results: bool,
     ):
         self._output: torch.Tensor | None = None
         self._shared_experts = shared_experts
-        self._moe_config = moe_config  # invariant
-        self._use_dp_chunking = use_dp_chunking  # invariant
-
-        self._has_separate_shared_experts = has_separate_shared_experts  # depends on MK
-        self._must_reduce_shared_expert_outputs = (
-            must_reduce_shared_expert_outputs  # depends on MK
-        )
+        self._moe_config = moe_config
+        self._quant_method = quant_method
+        self._reduce_results = reduce_results
+        self._use_dp_chunking = moe_config.moe_parallel_config.use_dp_chunking
 
         # Allow disabling of the separate shared experts stream for
         # debug purposes.
         # TODO: Remove this after more extensive testings with TP/DP
         # and other execution modes
-        self.use_shared_experts_stream = False
         if envs.VLLM_DISABLE_SHARED_EXPERTS_STREAM:
             logger.debug_once("Disabling MoE shared_experts cuda stream", scope="local")
             self._shared_experts_stream = None
@@ -78,6 +75,7 @@ class SharedExperts:
                     "Enabled separate cuda stream for MoE shared_experts", scope="local"
                 )
 
+    @property
     def _has_external_experts(self) -> bool:
         # Disable shared expert overlap if:
         #   - we are using eplb with non-default backend, because of correctness issues
@@ -91,6 +89,22 @@ class SharedExperts:
             or self._moe_config.moe_parallel_config.use_fi_all2allv_kernels
         )
 
+    # TODO(bnell): better name
+    @property
+    def _has_separate_shared_experts(self) -> bool:
+        return (
+            not self._quant_method.mk_owns_shared_expert
+            and self._shared_experts is not None
+        )
+
+    @property
+    def _must_reduce_shared_expert_outputs(self) -> bool:
+        return (
+            self._reduce_results
+            and self._quant_method.moe_mk is not None
+            and self._quant_method.moe_mk.output_is_reduced()
+        )
+
     def _determine_shared_experts_order(
         self,
         hidden_states: torch.Tensor,
@@ -98,7 +112,7 @@ class SharedExperts:
         if self._shared_experts is None:
             return SharedExpertsOrder.NONE, False
 
-        if self._has_external_experts():
+        if self._has_external_experts:
             return SharedExpertsOrder.EXTERNAL, False
 
         if (
@@ -127,10 +141,10 @@ class SharedExperts:
         else:
             return SharedExpertsOrder.AFTER_QUANT_METHOD, allow_shared_experts_stream
 
-    def _setup_shared_experts_stream(
+    def _call_with_shared_experts_stream(
         self,
         shared_experts_input: torch.Tensor,
-    ):
+    ) -> torch.Tensor:
         assert self._shared_experts_stream is not None
         assert self._moe_config.disable_inplace
 
@@ -144,8 +158,20 @@ class SharedExperts:
         # Mark sync start point for the separate shared experts
         # stream here since we want to run in parallel with the
         # router/gate (next op below)
-        assert self._shared_experts_stream is not None
         self._shared_experts_stream.wait_stream(current_stream())
+
+        # Run shared experts in parallel on a separate stream
+        # NOTE: We start the separate stream here and mark the
+        # sync end point immediately after it is done. This is
+        # important to avoid excessive stream allocations by the cuda
+        # graph replay later.
+        with torch.cuda.stream(self._shared_experts_stream):
+            # Note that hidden_states clone() is necessary here to avoid
+            # conflict with the main stream
+            output = self._shared_experts(shared_experts_input)
+        current_stream().wait_stream(self._shared_experts_stream)
+
+        return output
 
     def _maybe_reduce_shared_out(self, shared_out: torch.Tensor) -> torch.Tensor:
         # Reduce shared expert outputs if necessary, since the MLP
@@ -164,8 +190,6 @@ class SharedExperts:
         self._output = None
         return output
 
-    # add split/join?
-
     def apply(
         self,
         shared_experts_input: torch.Tensor,
@@ -174,25 +198,15 @@ class SharedExperts:
         experts_order, use_shared_experts_stream = self._determine_shared_experts_order(
             shared_experts_input,
         )
+
         if order != experts_order:
             return None
 
         assert self._shared_experts is not None
         assert self._output is None
-        if order == SharedExpertsOrder.AFTER_QUANT_METHOD and use_shared_experts_stream:
-            # TODO: fold this in?
-            self._setup_shared_experts_stream(shared_experts_input)
 
-            # Run shared experts in parallel on a separate stream
-            # NOTE: We start the separate stream here and mark the
-            # sync end point immediately after it is done. This is
-            # important to avoid excessive stream allocations by the cuda
-            # graph replay later.
-            with torch.cuda.stream(self._shared_experts_stream):
-                # Note that hidden_states clone() is necessary here to avoid
-                # conflict with the main stream
-                self._output = self._shared_experts(shared_experts_input)
-            current_stream().wait_stream(self._shared_experts_stream)
+        if order == SharedExpertsOrder.AFTER_QUANT_METHOD and use_shared_experts_stream:
+            self._output = self._call_with_shared_experts_stream(shared_experts_input)
         else:
             self._output = self._shared_experts(shared_experts_input)
 
