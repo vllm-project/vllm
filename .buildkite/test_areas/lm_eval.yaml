@@ -84,8 +84,8 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
-    - pip install gpt-oss
-    - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h200.txt
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
 
 - label: GPQA Eval (GPT-OSS) (B200)
   timeout_in_minutes: 120
@@ -97,5 +97,5 @@ steps:
   - vllm/model_executor/layers/quantization
   - tests/evals/gpt_oss/
   commands:
-    - pip install gpt-oss
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt
