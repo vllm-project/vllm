@@ -210,6 +210,8 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
 
 
 class MistralTokenizer(TokenizerLike):
+    IS_MISTRAL_TOKENIZER = True  # used by vllm.utils.mistral
+
     @classmethod
     def from_pretrained(
         cls,

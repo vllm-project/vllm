@@ -128,6 +128,7 @@ from vllm.utils.async_utils import (
     collect_from_async_generator,
     merge_async_iterators,
 )
+from vllm.utils.mistral import is_mistral_tokenizer
 
 
 class GenerationError(Exception):
@@ -976,15 +977,13 @@ class OpenAIServing:
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
     ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
-        from vllm.tokenizers.mistral import MistralTokenizer
-
         renderer = self.renderer
 
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
-                tokenize=isinstance(renderer.tokenizer, MistralTokenizer),
+                tokenize=is_mistral_tokenizer(renderer.tokenizer),
             ),
         )
 

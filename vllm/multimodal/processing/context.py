@@ -26,6 +26,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 from vllm.utils.jsontree import JSONTree, json_map_leaves
+from vllm.utils.mistral import is_mistral_tokenizer
 
 if TYPE_CHECKING:
     from transformers.configuration_utils import PretrainedConfig
@@ -260,10 +261,8 @@ class InputProcessingContext:
 
             typ = ProcessorMixin
 
-        from vllm.tokenizers.mistral import MistralTokenizer
-
         tokenizer = self.tokenizer
-        if isinstance(tokenizer, MistralTokenizer):
+        if is_mistral_tokenizer(tokenizer):
             tokenizer = tokenizer.transformers_tokenizer
 
         merged_kwargs = self.get_merged_mm_kwargs(kwargs)
