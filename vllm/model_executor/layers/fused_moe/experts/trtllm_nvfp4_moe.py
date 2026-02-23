@@ -287,9 +287,6 @@ class TrtLlmNvFp4ExpertsMonolithic(
             else router_logits
         )
 
-        print(f"{hidden_states.shape=}")
-        print(f"{a1q_scale.dtype=}")
-
         # Invoke kernel.
         return flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
             routing_logits=router_logits,
