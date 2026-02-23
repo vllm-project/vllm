@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    init_fp8_linear_kernel,
+    create_w8a8_fp_kernel,
 )
 from vllm.model_executor.layers.linear import (
     LinearBase,
@@ -94,7 +94,7 @@ class FBGEMMFp8LinearMethod(LinearMethodBase):
     def __init__(self, quant_config: FBGEMMFp8Config):
         self.quant_config = quant_config
         self.out_dtype = torch.get_default_dtype()
-        self.fp8_linear = init_fp8_linear_kernel(
+        self.fp8_linear = create_w8a8_fp_kernel(
             activation_quant_key=kFp8DynamicTokenSym,
             weight_quant_key=kFp8StaticTokenSym,
             out_dtype=torch.get_default_dtype(),

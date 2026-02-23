@@ -10,7 +10,7 @@ from torch.nn import Parameter
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    init_fp8_linear_kernel,
+    create_w8a8_fp_kernel,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
@@ -84,7 +84,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
         else:
             activation_quant_key = activation_quant_key_mapping[is_static_input_scheme]
             weight_quant_key = weight_quant_key_mapping[self.strategy]
-            self.fp8_linear = init_fp8_linear_kernel(
+            self.fp8_linear = create_w8a8_fp_kernel(
                 activation_quant_key=activation_quant_key,
                 weight_quant_key=weight_quant_key,
                 out_dtype=self.out_dtype,

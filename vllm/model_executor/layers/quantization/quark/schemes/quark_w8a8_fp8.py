@@ -9,7 +9,7 @@ from torch.nn import Parameter
 
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    init_fp8_linear_kernel,
+    create_w8a8_fp_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -172,7 +172,7 @@ class QuarkW8A8Fp8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
-        self.fp8_linear = init_fp8_linear_kernel(
+        self.fp8_linear = create_w8a8_fp_kernel(
             activation_quant_key=self.activation_quant_key,
             weight_quant_key=self.weight_quant_key,
             out_dtype=torch.get_default_dtype(),

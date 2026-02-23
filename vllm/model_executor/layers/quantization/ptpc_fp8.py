@@ -9,7 +9,7 @@ from torch.nn.parameter import Parameter
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    init_fp8_linear_kernel,
+    create_w8a8_fp_kernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
@@ -99,7 +99,7 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
         )
         super().__init__(quant_config=quant_config)
         # Force weight quantization
-        self.fp8_linear = init_fp8_linear_kernel(
+        self.fp8_linear = create_w8a8_fp_kernel(
             activation_quant_key=kFp8DynamicTokenSym,
             weight_quant_key=kFp8DynamicTokenSym,
             out_dtype=torch.get_default_dtype(),

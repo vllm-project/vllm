@@ -14,7 +14,7 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
-    init_fp8_linear_kernel,
+    create_w8a8_fp_kernel,
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.batch_invariant import (
@@ -322,7 +322,7 @@ class Fp8LinearMethod(LinearMethodBase):
             else:
                 activation_quant_key = kFp8DynamicTensorSym
 
-            self.fp8_linear = init_fp8_linear_kernel(
+            self.fp8_linear = create_w8a8_fp_kernel(
                 activation_quant_key=activation_quant_key,
                 weight_quant_key=kFp8StaticTensorSym,
                 out_dtype=torch.get_default_dtype(),
