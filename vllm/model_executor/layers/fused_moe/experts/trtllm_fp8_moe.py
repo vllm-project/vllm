@@ -84,7 +84,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
         """Does not support non-gated MoE (i.e. Nanotron-3-Nano)."""
-        return False
+        return True
 
     @staticmethod
     def _supports_quant_scheme(
