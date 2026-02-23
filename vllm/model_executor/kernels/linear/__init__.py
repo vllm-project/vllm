@@ -13,7 +13,6 @@ or kernel implementation, add it to this __init__.py to maintain
 import stability.
 """
 
-import os
 from typing import Generic, Protocol, TypeVar
 
 import torch
