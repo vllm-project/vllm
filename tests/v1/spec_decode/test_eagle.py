@@ -275,6 +275,84 @@ def test_prepare_inputs():
     assert torch.equal(token_indices, expected_token_indices)
 
 
+def _make_dsl_proposer_for_unit_test(
+    *,
+    total: int,
+    exits: int,
+    generated: int,
+    requested: int,
+    threshold: float = 0.0,
+) -> EagleProposer:
+    proposer = EagleProposer.__new__(EagleProposer)
+    proposer.dsl_total_proposals = total
+    proposer.dsl_early_exits = exits
+    proposer.dsl_tokens_generated = generated
+    proposer.dsl_tokens_requested = requested
+    proposer.dsl_last_reported_proposals = 0
+    proposer.dsl_last_reported_exits = 0
+    proposer.dsl_last_reported_generated = 0
+    proposer.dsl_last_reported_requested = 0
+    proposer.spec_confidence_threshold = threshold
+    return proposer
+
+
+def test_dsl_metrics_default_values():
+    proposer = _make_dsl_proposer_for_unit_test(
+        total=0,
+        exits=0,
+        generated=0,
+        requested=0,
+    )
+
+    metrics = proposer.get_dsl_metrics()
+
+    assert metrics["early_exit_rate"] == 0.0
+    assert metrics["avg_tokens_generated"] == 0.0
+    assert metrics["avg_tokens_requested"] == 0.0
+    assert metrics["efficiency"] == 1.0
+
+
+def test_dsl_metrics_delta_and_reset():
+    proposer = _make_dsl_proposer_for_unit_test(
+        total=4,
+        exits=1,
+        generated=10,
+        requested=16,
+    )
+
+    first_delta = proposer.get_dsl_metrics_delta()
+    assert first_delta == (4, 1, 10, 16)
+
+    # No updates since last call => zero delta.
+    second_delta = proposer.get_dsl_metrics_delta()
+    assert second_delta == (0, 0, 0, 0)
+
+    # Add more counters and verify incremental delta.
+    proposer.dsl_total_proposals += 2
+    proposer.dsl_early_exits += 1
+    proposer.dsl_tokens_generated += 3
+    proposer.dsl_tokens_requested += 8
+    third_delta = proposer.get_dsl_metrics_delta()
+    assert third_delta == (2, 1, 3, 8)
+
+    # Verify aggregate metrics before reset.
+    metrics = proposer.get_dsl_metrics()
+    assert pytest.approx(metrics["early_exit_rate"]) == 2 / 6
+    assert pytest.approx(metrics["avg_tokens_generated"]) == 13 / 6
+    assert pytest.approx(metrics["avg_tokens_requested"]) == 24 / 6
+    assert pytest.approx(metrics["efficiency"]) == 13 / 24
+
+    proposer.reset_dsl_metrics()
+    assert proposer.dsl_total_proposals == 0
+    assert proposer.dsl_early_exits == 0
+    assert proposer.dsl_tokens_generated == 0
+    assert proposer.dsl_tokens_requested == 0
+    assert proposer.dsl_last_reported_proposals == 0
+    assert proposer.dsl_last_reported_exits == 0
+    assert proposer.dsl_last_reported_generated == 0
+    assert proposer.dsl_last_reported_requested == 0
+
+
 def test_prepare_inputs_padded():
     """
     Input scenario is 3 requests with num_speculative_tokens == 2 and:
