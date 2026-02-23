@@ -96,6 +96,12 @@ class FrontendArgs:
     """Allowed methods."""
     allowed_headers: list[str] = field(default_factory=lambda: ["*"])
     """Allowed headers."""
+    allowed_hosts: list[str] = field(default_factory=lambda: [])
+    """Allowed hostnames for Host header validation, to protect against DNS
+    rebinding attacks. Specified as a JSON list, e.g.
+    '["localhost", "127.0.0.1"]'. When not set, defaults to localhost aliases
+    when the server binds to a localhost address, or allows all hosts
+    otherwise. Set to '["*"]' to explicitly allow all hosts."""
     api_key: list[str] | None = None
     """If provided, the server will require one of these keys to be presented in
     the header."""
@@ -222,15 +228,17 @@ class FrontendArgs:
 
         frontend_kwargs = get_kwargs(FrontendArgs)
 
-        # Special case: allowed_origins, allowed_methods, allowed_headers all
-        # need json.loads type
+        # Special case: allowed_origins, allowed_methods, allowed_headers,
+        # and allowed_hosts all need the json.loads type.
         # Should also remove nargs
         frontend_kwargs["allowed_origins"]["type"] = json.loads
         frontend_kwargs["allowed_methods"]["type"] = json.loads
         frontend_kwargs["allowed_headers"]["type"] = json.loads
+        frontend_kwargs["allowed_hosts"]["type"] = json.loads
         del frontend_kwargs["allowed_origins"]["nargs"]
         del frontend_kwargs["allowed_methods"]["nargs"]
         del frontend_kwargs["allowed_headers"]["nargs"]
+        del frontend_kwargs["allowed_hosts"]["nargs"]
 
         # Special case: default_chat_template_kwargs needs json.loads type
         frontend_kwargs["default_chat_template_kwargs"]["type"] = json.loads

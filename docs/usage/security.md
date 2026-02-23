@@ -219,6 +219,77 @@ The most effective approach is to deploy vLLM behind a reverse proxy (such as ng
 - Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
 - Implements additional authentication, rate limiting, and logging at the proxy layer
 
+## Host Validation and Cross-Origin Protection
+
+A malicious website visited in a user's browser can attempt to interact with a vLLM instance that the user has network access to — whether it is running on `localhost`, on an internal network, or on any host reachable from the user's machine. There are two distinct attack vectors, and vLLM provides a corresponding defense for each:
+
+| Attack | How it works | `Host` header | Defense |
+|---|---|---|---|
+| **DNS rebinding** | Attacker's domain temporarily resolves to the target IP, bypassing the browser's same-origin policy | Carries the attacker's domain (e.g., `evil.com`) | `--allowed-hosts` rejects the request |
+| **Cross-origin requests (CSRF)** | Attacker's page directly sends requests to the vLLM server; if CORS allows it, the browser lets JavaScript read the response | The server's real hostname (valid) | `--allowed-origins` restricts which origins may make cross-origin requests |
+
+Both defenses are needed. `--allowed-hosts` alone does not block cross-origin requests (the `Host` header is legitimate). `--allowed-origins` alone does not block DNS rebinding (the browser believes the request is same-origin, so CORS is not consulted).
+
+Either attack can allow a malicious website to:
+
+- Enumerate loaded models
+- Issue unauthorized inference requests using your computational resources
+- Access any unauthenticated API endpoint
+
+### `--allowed-hosts`: Host Header Validation
+
+vLLM validates the `Host` header on incoming requests using Starlette's `TrustedHostMiddleware`. Requests whose `Host` header does not match a trusted value are rejected with a `400 Bad Request` response.
+
+**Default behavior** (when `--allowed-hosts` is not explicitly set):
+
+- If the server binds to a **localhost address** (`localhost`, `127.0.0.1`, `::1`, or the default), Host header validation is **enabled automatically**, allowing only `localhost`, `127.0.0.1`, and `::1`.
+- If the server binds to **any other address** (e.g., `0.0.0.0`), Host header validation is **disabled** for backward compatibility.
+
+```bash
+# Default: binding to localhost enables protection automatically
+vllm serve model
+
+# Explicit trusted hosts for a non-localhost deployment
+vllm serve model --host 0.0.0.0 --allowed-hosts '["inference.internal.example.com"]'
+
+# Disable protection explicitly
+vllm serve model --allowed-hosts '["*"]'
+```
+
+The `--allowed-hosts` argument accepts a JSON list of hostnames. Wildcard subdomains (e.g., `*.example.com`) are also supported.
+
+**Note:** If vLLM is deployed behind a reverse proxy (e.g., Envoy, nginx, HAProxy), the proxy's virtual host routing typically enforces `Host` header validation already — requests with an unrecognized `Host` value are rejected before they reach vLLM. In that case, `--allowed-hosts` is not necessary. This option is most valuable when vLLM is exposed directly without a proxy.
+
+### `--allowed-origins`: CORS Restrictions
+
+The `--allowed-origins` option controls which web origins are permitted to make cross-origin requests to the vLLM API. By default, this is set to `["*"]` (all origins allowed), which means any website can make requests to your vLLM instance and read the responses.
+
+To restrict cross-origin access, specify an explicit list of allowed origins:
+
+```bash
+# Only allow requests from a specific frontend
+vllm serve model --allowed-origins '["https://app.example.com"]'
+
+# Allow no cross-origin requests at all
+vllm serve model --allowed-origins '[]'
+```
+
+Related CORS options include `--allowed-methods`, `--allowed-headers`, and `--allow-credentials`, which control HTTP methods, headers, and credentials in cross-origin requests respectively.
+
+### Recommended Configuration
+
+For deployments that do not need to serve browser-based cross-origin clients, combining both options provides defense in depth:
+
+```bash
+# Internal network deployment
+vllm serve model --host 0.0.0.0 \
+    --allowed-hosts '["inference.internal.example.com"]' \
+    --allowed-origins '[]'
+
+# Local use (Host header validation is enabled automatically)
+vllm serve model --allowed-origins '[]'
+```
+
 ## Reporting Security Vulnerabilities
 
 If you believe you have found a security vulnerability in vLLM, please report it following the project's security policy. For more information on how to report security issues and the project's security policy, please see the [vLLM Security Policy](https://github.com/vllm-project/vllm/blob/main/SECURITY.md).

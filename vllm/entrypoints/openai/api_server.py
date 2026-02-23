@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.datastructures import State
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -246,6 +247,24 @@ def build_app(
         allow_methods=args.allowed_methods,
         allow_headers=args.allowed_headers,
     )
+
+    # Determine allowed hosts for Host header validation (DNS rebinding
+    # protection). When --allowed-hosts is not explicitly set, default to
+    # restricting to localhost aliases when binding to a localhost address,
+    # or allow all hosts otherwise for backward compatibility.
+    _LOCALHOST_ADDRESSES = {None, "localhost", "127.0.0.1", "::1"}
+    if args.allowed_hosts:
+        allowed_hosts = args.allowed_hosts
+    elif args.host in _LOCALHOST_ADDRESSES:
+        allowed_hosts = ["localhost", "127.0.0.1", "::1"]
+    else:
+        allowed_hosts = ["*"]
+    if allowed_hosts != ["*"]:
+        app.add_middleware(
+            TrustedHostMiddleware,
+            allowed_hosts=allowed_hosts,
+            www_redirect=False,
+        )
 
     app.exception_handler(HTTPException)(http_exception_handler)
     app.exception_handler(RequestValidationError)(validation_exception_handler)

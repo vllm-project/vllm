@@ -255,6 +255,39 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
         )
 
 
+### Tests for --allowed-hosts parsing
+def test_allowed_hosts_default_empty(serve_parser):
+    """Ensure allowed_hosts defaults to empty list when not specified"""
+    args = serve_parser.parse_args(args=[])
+    assert args.allowed_hosts == []
+
+
+def test_allowed_hosts_single(serve_parser):
+    """Ensure a single trusted host is parsed correctly"""
+    args = serve_parser.parse_args(args=["--allowed-hosts", '["localhost"]'])
+    assert args.allowed_hosts == ["localhost"]
+
+
+def test_allowed_hosts_multiple(serve_parser):
+    """Ensure multiple trusted hosts are parsed correctly"""
+    args = serve_parser.parse_args(
+        args=["--allowed-hosts", '["localhost", "127.0.0.1", "::1"]']
+    )
+    assert args.allowed_hosts == ["localhost", "127.0.0.1", "::1"]
+
+
+def test_allowed_hosts_wildcard(serve_parser):
+    """Ensure wildcard trusted host is parsed correctly"""
+    args = serve_parser.parse_args(args=["--allowed-hosts", '["*"]'])
+    assert args.allowed_hosts == ["*"]
+
+
+def test_allowed_hosts_invalid_json(serve_parser):
+    """Ensure invalid JSON raises an error"""
+    with pytest.raises(SystemExit):
+        serve_parser.parse_args(args=["--allowed-hosts", "not valid json"])
+
+
 @pytest.mark.parametrize(
     "args, raises",
     [
