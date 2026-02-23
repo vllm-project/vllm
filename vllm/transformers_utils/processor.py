@@ -48,7 +48,9 @@ def _transformers_v4_compatibility_from_pretrained() -> Any:
 
         original_init(self, *args, **kwargs)
 
-    ProcessorMixin.__init__ = __init__
+    # Only patch if ProcessorMixin is not mocked (for docs builds)
+    if not hasattr(ProcessorMixin, "_mock_name"):
+        ProcessorMixin.__init__ = __init__
 
 
 _transformers_v4_compatibility_from_pretrained()
