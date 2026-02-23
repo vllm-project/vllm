@@ -93,6 +93,7 @@ class StreamingState:
     current_content_index: int = -1
     current_output_index: int = 0
     current_item_id: str = ""
+    current_call_id: str = ""
     sent_output_item_added: bool = False
     is_first_function_call_delta: bool = False
 
@@ -101,6 +102,7 @@ class StreamingState:
         self.current_output_index += 1
         self.sent_output_item_added = False
         self.is_first_function_call_delta = False
+        self.current_call_id = ""
 
 
 def is_mcp_tool_by_namespace(recipient: str | None) -> bool:
@@ -236,11 +238,12 @@ def emit_function_call_delta_events(
     if state.is_first_function_call_delta is False:
         state.is_first_function_call_delta = True
         state.current_item_id = f"fc_{random_uuid()}"
+        state.current_call_id = f"call_{random_uuid()}"
         tool_call_item = ResponseFunctionToolCall(
             name=function_name,
             type="function_call",
             id=state.current_item_id,
-            call_id=f"call_{random_uuid()}",
+            call_id=state.current_call_id,
             arguments="",
             status="in_progress",
         )
@@ -481,7 +484,7 @@ def emit_function_call_done_events(
         item_id=state.current_item_id,
         output_index=state.current_output_index,
         sequence_number=-1,
-        call_id=f"fc_{random_uuid()}",
+        call_id=state.current_call_id,
         status="completed",
     )
     events.append(
