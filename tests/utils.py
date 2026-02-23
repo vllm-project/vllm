@@ -76,8 +76,11 @@ if current_platform.is_rocm():
         amdsmi_shut_down,
     )
 
-    amdsmi_init()
-    atexit.register(amdsmi_shut_down)
+    try:
+        amdsmi_init()
+        atexit.register(amdsmi_shut_down)
+    except Exception as e:
+        warnings.warn(f"Failed to initialize amdsmi: {e}", stacklevel=2)
 
     @contextmanager
     def _nvml():
