@@ -16,6 +16,7 @@ import psutil
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.platforms.interface import in_wsl
 from vllm.ray.lazy_utils import is_in_ray_actor
 
@@ -111,6 +112,35 @@ def unique_filepath(fn: Callable[[int], Path]) -> Path:
 # Process management utilities
 
 
+def _sync_visible_devices_env_vars():
+    """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent
+    before spawning child processes on ROCm.
+
+    On ROCm, both env vars control GPU visibility and the HIP runtime
+    expects them to match. vLLM manages CUDA_VISIBLE_DEVICES as the
+    source of truth; sync HIP_VISIBLE_DEVICES to match.
+    """
+    if not current_platform.is_rocm():
+        return
+
+    # Treat empty string the same as unset - both mean "not configured".
+    hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
+    cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
+
+    if hip_val is not None and cuda_val is not None:
+        if hip_val != cuda_val:
+            raise ValueError(
+                f"HIP_VISIBLE_DEVICES='{hip_val}' and "
+                f"CUDA_VISIBLE_DEVICES='{cuda_val}' are both set but "
+                f"inconsistent. On ROCm these must match. "
+                f"Please set only one, or ensure they have the same value."
+            )
+    elif cuda_val is not None:
+        os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
+    elif hip_val is not None:
+        os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
+
+
 def _maybe_force_spawn():
     """Check if we need to force the use of the `spawn` multiprocessing start
     method.
@@ -146,6 +176,10 @@ def _maybe_force_spawn():
             "; ".join(reasons),
         )
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+    # (ROCm): Sync GPU visibility env vars so spawned children inherit
+    # consistent values.
+    _sync_visible_devices_env_vars()
 
 
 def get_mp_context():
