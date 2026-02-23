@@ -349,19 +349,14 @@ class MultiModalTimingRegistry:
         with self._lock:
             return self._ctx_by_request_id[request_id]
 
-    def get_all_stats_dict(self) -> dict[str, dict[str, float]]:
+    def stat(self) -> dict[str, dict[str, float]]:
         if not self._enabled:
             return {}
 
         with self._lock:
-            return {
-                rid: ctx.get_stats_dict()
-                for rid, ctx in self._ctx_by_request_id.items()
+            stats = {
+                req_id: ctx.get_stats_dict()
+                for req_id, ctx in self._ctx_by_request_id.items()
             }
-
-    def clear(self) -> None:
-        if not self._enabled:
-            return
-
-        with self._lock:
             self._ctx_by_request_id.clear()
+            return stats

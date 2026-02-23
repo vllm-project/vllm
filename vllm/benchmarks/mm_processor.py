@@ -104,7 +104,7 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
 
     merged_stats = dict[str, dict[str, float]]()
 
-    for request_id, prep_dict in mm_timing_registry.get_all_stats_dict().items():
+    for request_id, prep_dict in mm_timing_registry.stat().items():
         merged_stats[request_id] = dict(prep_dict)
 
     for request_id, enc_dict in encoder_stats.items():
@@ -277,9 +277,8 @@ def benchmark_multimodal_processor(
             use_tqdm=not getattr(args, "disable_tqdm", False),
         )
 
-    renderer = llm.llm_engine.renderer
-    mm_timing_registry = renderer._mm_timing_registry
-    mm_timing_registry.clear()
+    # Clear stats from warmup requests
+    collect_mm_processor_stats(llm.llm_engine)
 
     print(f"Processing {len(prompts)} requests...")
     start_time = time.perf_counter()
