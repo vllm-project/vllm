@@ -67,8 +67,31 @@ logger = init_logger(__name__)
 # system reboots, so users will not complain about annoying lock files
 temp_dir = tempfile.gettempdir()
 
-# Automatically activates `hf-xet` high performance mode
-huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+
+def enable_hf_transfer():
+    """automatically activates hf_transfer"""
+    if "HF_HUB_ENABLE_HF_TRANSFER" not in os.environ:
+        try:
+            # enable hf hub transfer if available
+            import hf_transfer  # type: ignore # noqa
+
+            huggingface_hub.constants.HF_HUB_ENABLE_HF_TRANSFER = True
+        except ImportError:
+            pass
+
+
+def enable_xet_high_performance():
+    """automatically activates xet high performance mode"""
+    if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
+        huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+
+
+if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
+    # Transformers v5
+    enable_xet_high_performance()
+else:
+    # Transformers v4
+    enable_hf_transfer()
 
 
 class DisabledTqdm(tqdm):
