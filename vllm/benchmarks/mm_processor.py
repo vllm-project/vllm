@@ -291,7 +291,7 @@ def benchmark_multimodal_processor(
     end_time = time.perf_counter()
     total_time = end_time - start_time
 
-    mm_stats_by_stage = collect_mm_processor_stats(llm.llm_engine, num_warmups)
+    mm_stats_by_stage = collect_mm_processor_stats(llm.llm_engine)
 
     if not any(mm_stats_by_stage.values()):
         print(
