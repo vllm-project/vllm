@@ -109,9 +109,7 @@ def events_contain_type(events: list, type_substring: str) -> bool:
     return any(type_substring in getattr(e, "type", "") for e in events)
 
 
-def _validate_event_pairing(
-    events: list, pairs_of_event_types: dict[str, str]
-) -> None:
+def _validate_event_pairing(events: list, pairs_of_event_types: dict[str, str]) -> None:
     """Validate that streaming events are properly nested/paired.
 
     Derives push/pop sets from *pairs_of_event_types* so that every
@@ -166,9 +164,7 @@ def _validate_event_ordering(events: list) -> None:
 
     # Exactly one created and one completed
     created_count = sum(1 for e in events if e.type == "response.created")
-    completed_count = sum(
-        1 for e in events if e.type == "response.completed"
-    )
+    completed_count = sum(1 for e in events if e.type == "response.completed")
     assert created_count == 1, (
         f"Expected exactly 1 response.created, got {created_count}"
     )
@@ -213,8 +209,7 @@ def _validate_field_consistency(events: list) -> None:
             # output_index must be non-decreasing across items
             if output_index is not None:
                 assert output_index >= last_output_index, (
-                    f"output_index went backwards: "
-                    f"{output_index} < {last_output_index}"
+                    f"output_index went backwards: {output_index} < {last_output_index}"
                 )
                 last_output_index = output_index
 
@@ -252,16 +247,12 @@ def _validate_field_consistency(events: list) -> None:
             "response.content_part.added",
             "response.reasoning_part.added",
         ):
-            _assert_item_fields(
-                event, etype, active_item_id, active_output_index
-            )
+            _assert_item_fields(event, etype, active_item_id, active_output_index)
             active_content_index = getattr(event, "content_index", None)
             continue
 
         # --- all other item-level events --------------------------
-        _assert_item_fields(
-            event, etype, active_item_id, active_output_index
-        )
+        _assert_item_fields(event, etype, active_item_id, active_output_index)
 
         # content_index (only meaningful on events that carry it)
         content_index = getattr(event, "content_index", None)
@@ -284,8 +275,7 @@ def _assert_item_fields(
 
     if active_item_id is not None and event_item_id is not None:
         assert event_item_id == active_item_id, (
-            f"{etype} item_id mismatch: "
-            f"expected {active_item_id}, got {event_item_id}"
+            f"{etype} item_id mismatch: expected {active_item_id}, got {event_item_id}"
         )
     if active_output_index is not None and output_index is not None:
         assert output_index == active_output_index, (

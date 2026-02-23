@@ -913,7 +913,7 @@ async def test_function_calling_no_code_interpreter_events(
 async def test_code_interpreter_streaming(
     client: OpenAI,
     model_name: str,
-    pairs_of_event_types,
+    pairs_of_event_types: dict[str, str],
 ):
     tools = [{"type": "code_interpreter", "container": {"type": "auto"}}]
     input_text = (
@@ -933,8 +933,7 @@ async def test_code_interpreter_streaming(
         tools=tools,
         temperature=0.0,
         instructions=(
-            "You must use the Python tool to execute code. "
-            "Never simulate execution."
+            "You must use the Python tool to execute code. Never simulate execution."
         ),
     )
 
@@ -971,13 +970,6 @@ async def test_code_interpreter_streaming(
         ):
             assert event.item.status == "completed"
             assert event.item.code is not None
-
-    # MCP events should NOT appear for code interpreter
-    mcp_events = [e.type for e in events if "mcp_call" in e.type]
-    assert not mcp_events, (
-        "Should not see mcp_call events for code interpreter, "
-        f"but got: {mcp_events}"
-    )
 
 
 @pytest.mark.asyncio

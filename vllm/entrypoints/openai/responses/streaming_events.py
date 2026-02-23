@@ -54,7 +54,6 @@ from openai.types.responses.response_output_item import McpCall
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
-
 from openai_harmony import Message as HarmonyMessage
 
 from vllm.entrypoints.mcp.tool_server import ToolServer
@@ -82,7 +81,7 @@ def _resolve_mcp_name_label(recipient: str) -> tuple[str, str]:
       server_label in TOOL_NAME_TO_MCP_SERVER_LABEL.
     """
     if recipient.startswith("mcp."):
-        name = recipient[len("mcp."):]
+        name = recipient[len("mcp.") :]
         return name, name
     return recipient, TOOL_NAME_TO_MCP_SERVER_LABEL.get(recipient, recipient)
 
@@ -570,13 +569,11 @@ def emit_content_delta_events(
     # still be output to commentary.
     elif channel in ("commentary", "analysis") and recipient is not None:
         if recipient.startswith("functions."):
-            function_name = recipient[len("functions."):]
+            function_name = recipient[len("functions.") :]
             return emit_function_call_delta_events(delta, function_name, state)
         elif recipient == "python":
             return emit_code_interpreter_delta_events(delta, state)
-        elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(
-            recipient
-        ):
+        elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(recipient):
             return emit_mcp_delta_events(delta, state, recipient)
 
     return []
@@ -595,20 +592,16 @@ def emit_previous_item_done_events(
     if previous_item.recipient is not None:
         # Deal with tool call
         if previous_item.recipient.startswith("functions."):
-            function_name = previous_item.recipient[len("functions."):]
+            function_name = previous_item.recipient[len("functions.") :]
             return emit_function_call_done_events(function_name, text, state)
         elif previous_item.recipient == "python":
-            return emit_code_interpreter_completion_events(
-                previous_item, state
-            )
+            return emit_code_interpreter_completion_events(previous_item, state)
         elif (
             is_mcp_tool_by_namespace(previous_item.recipient)
             and state.current_item_id is not None
             and state.current_item_id.startswith("mcp_")
         ):
-            return emit_mcp_completion_events(
-                previous_item.recipient, text, state
-            )
+            return emit_mcp_completion_events(previous_item.recipient, text, state)
     elif previous_item.channel == "analysis":
         return emit_reasoning_done_events(text, state)
     elif previous_item.channel == "final":
@@ -787,12 +780,8 @@ def emit_tool_action_events(
     ):
         recipient = previous_item.recipient
         if recipient == "python":
-            events.extend(
-                emit_code_interpreter_completion_events(previous_item, state)
-            )
-        elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(
-            recipient
-        ):
+            events.extend(emit_code_interpreter_completion_events(previous_item, state))
+        elif recipient.startswith("mcp.") or is_mcp_tool_by_namespace(recipient):
             events.extend(
                 emit_mcp_completion_events(
                     recipient, previous_item.content[0].text, state
