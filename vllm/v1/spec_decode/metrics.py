@@ -27,6 +27,11 @@ class SpecDecodingStats:
     num_draft_tokens: int = 0
     num_accepted_tokens: int = 0
     num_accepted_tokens_per_pos: list[int] = field(default_factory=list)
+    # DSL (Dynamic Speculative Length) metrics
+    dsl_total_proposals: int = 0
+    dsl_early_exits: int = 0
+    dsl_tokens_generated: int = 0
+    dsl_tokens_requested: int = 0
 
     @classmethod
     def new(cls, num_spec_tokens: int) -> "SpecDecodingStats":
@@ -196,6 +201,43 @@ class SpecDecodingProm:
             for idx, lv in per_engine_labelvalues.items()
         }
 
+        # DSL (Dynamic Speculative Length) metrics
+        counter_dsl_proposals = self._counter_cls(
+            name="vllm:dsl_total_proposals",
+            documentation="Total number of DSL proposal calls.",
+            labelnames=labelnames,
+        )
+        self.counter_dsl_total_proposals = make_per_engine(
+            counter_dsl_proposals, per_engine_labelvalues
+        )
+
+        counter_dsl_exits = self._counter_cls(
+            name="vllm:dsl_early_exits",
+            documentation="Number of DSL early exits.",
+            labelnames=labelnames,
+        )
+        self.counter_dsl_early_exits = make_per_engine(
+            counter_dsl_exits, per_engine_labelvalues
+        )
+
+        counter_dsl_generated = self._counter_cls(
+            name="vllm:dsl_tokens_generated",
+            documentation="Total draft tokens generated with DSL.",
+            labelnames=labelnames,
+        )
+        self.counter_dsl_tokens_generated = make_per_engine(
+            counter_dsl_generated, per_engine_labelvalues
+        )
+
+        counter_dsl_requested = self._counter_cls(
+            name="vllm:dsl_tokens_requested",
+            documentation="Total draft tokens requested with DSL.",
+            labelnames=labelnames,
+        )
+        self.counter_dsl_tokens_requested = make_per_engine(
+            counter_dsl_requested, per_engine_labelvalues
+        )
+
     def observe(self, spec_decoding_stats: SpecDecodingStats, engine_idx: int = 0):
         if not self.spec_decoding_enabled:
             return
@@ -212,6 +254,21 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_accepted_tokens_per_pos[engine_idx]
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+        
+        # Update DSL metrics
+        if spec_decoding_stats.dsl_total_proposals > 0:
+            self.counter_dsl_total_proposals[engine_idx].inc(
+                spec_decoding_stats.dsl_total_proposals
+            )
+            self.counter_dsl_early_exits[engine_idx].inc(
+                spec_decoding_stats.dsl_early_exits
+            )
+            self.counter_dsl_tokens_generated[engine_idx].inc(
+                spec_decoding_stats.dsl_tokens_generated
+            )
+            self.counter_dsl_tokens_requested[engine_idx].inc(
+                spec_decoding_stats.dsl_tokens_requested
+            )
 
 
 def make_per_engine(

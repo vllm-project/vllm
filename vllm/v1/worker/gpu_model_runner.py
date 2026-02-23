@@ -3818,6 +3818,23 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
 
+        # Collect DSL metrics delta from proposer if available
+        dsl_total_proposals = 0
+        dsl_early_exits = 0
+        dsl_tokens_generated = 0
+        dsl_tokens_requested = 0
+        if (
+            hasattr(self, "drafter")
+            and hasattr(self.drafter, "get_dsl_metrics_delta")
+            and self.drafter.spec_confidence_threshold > 0
+        ):
+            (
+                dsl_total_proposals,
+                dsl_early_exits,
+                dsl_tokens_generated,
+                dsl_tokens_requested,
+            ) = self.drafter.get_dsl_metrics_delta()
+
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             if self.model_config.enable_return_routed_experts:
                 capturer = RoutedExpertsCapturer.get_instance()
@@ -3838,6 +3855,10 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                dsl_total_proposals=dsl_total_proposals,
+                dsl_early_exits=dsl_early_exits,
+                dsl_tokens_generated=dsl_tokens_generated,
+                dsl_tokens_requested=dsl_tokens_requested,
             )
 
         if not self.use_async_scheduling:
