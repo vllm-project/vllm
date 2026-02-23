@@ -80,7 +80,12 @@ def enable_hf_transfer():
             pass
 
 
-enable_hf_transfer()
+if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
+    # Transformers v5
+    huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+else:
+    # Transformers v4
+    enable_hf_transfer()
 
 
 class DisabledTqdm(tqdm):
