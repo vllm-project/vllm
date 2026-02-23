@@ -23,7 +23,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.mistral import is_mistral_tokenizer
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (
@@ -183,7 +183,7 @@ def get_text_token_prompts(
 
     text_prompt: str | None
     token_prompt: list[int]
-    if isinstance(tokenizer, MistralTokenizer):
+    if is_mistral_tokenizer(tokenizer):
         # ChatCompletionRequest only supports ImageChunk natively;
         # for other modalities (e.g. audio), fall back to the model's
         # own dummy inputs builder which knows the right placeholders.
@@ -195,6 +195,7 @@ def get_text_token_prompts(
             inputs = dummy_inputs.get_dummy_processor_inputs(
                 model_config.max_model_len,
                 mm_counts,
+                mm_options={},
             )
             text_prompt = None
             token_prompt = (
@@ -224,6 +225,7 @@ def get_text_token_prompts(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
+            mm_options={},
         )
         assert isinstance(inputs.prompt, str)
 
