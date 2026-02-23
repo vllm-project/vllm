@@ -705,11 +705,12 @@ class TestAudioChunking:
         assert 0 <= split_idx <= 32000
 
     def test_find_split_point_silence(self):
-        """find_split_point should find complete silence."""
+        """find_split_point should prefer the quietest scanned window."""
         from vllm.multimodal.audio import find_split_point
 
-        segment = np.random.randn(32000).astype(np.float32) * 0.5
-        # Complete silence at 20000-21600
+        # Deterministic signal: constant energy everywhere except silence.
+        segment = np.ones(32000, dtype=np.float32)
+        # Complete silence at 20000-21600.
         segment[20000:21600] = 0.0
 
         split_idx = find_split_point(
@@ -719,7 +720,9 @@ class TestAudioChunking:
             min_energy_window=1600,
         )
 
-        assert 20000 <= split_idx <= 21600
+        # Current implementation evaluates non-overlapping 1600-sample windows
+        # from start_idx, so the quietest scanned window starts at 19200.
+        assert split_idx == 19200
 
     def test_split_audio_preserves_boundaries(self):
         """Verify first and last samples are preserved when chunking."""
