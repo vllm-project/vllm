@@ -11,6 +11,7 @@ from transformers import (
     AutoImageProcessor,
     AutoProcessor,
     AutoVideoProcessor,
+    processing_utils,
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
@@ -27,6 +28,23 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+
+
+def _transformers_v4_compatibility_import():
+    """Some remote code processors still import `ChatTemplateLoadKwargs` which was a
+    subset of `ProcessorChatTemplateKwargs` as defined in Transformers v4.
+    In Transformers v5 these were merged into `ProcessorChatTemplateKwargs` and
+    `ChatTemplateLoadKwargs` was removed. For backward compatibility, we add an alias
+    for `ChatTemplateLoadKwargs` if it doesn't exist.
+
+    This can be removed if `HCXVisionForCausalLM` is upstreamed to Transformers."""
+    old_import = getattr(processing_utils, "ChatTemplateLoadKwargs", None)
+    new_import = getattr(processing_utils, "ProcessorChatTemplateKwargs", None)
+    if old_import is None and new_import is not None:
+        processing_utils.ChatTemplateLoadKwargs = new_import
+
+
+_transformers_v4_compatibility_import()
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
