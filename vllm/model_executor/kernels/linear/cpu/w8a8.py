@@ -4,6 +4,7 @@
 
 import torch
 
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8_linear
 from vllm import _custom_ops as ops
 from vllm import envs
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -14,13 +15,8 @@ from vllm.model_executor.layers.utils import check_cpu_sgl_kernel
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 
-from .ScaledMMLinearKernel import (
-    Int8ScaledMMLinearKernel,
-    Int8ScaledMMLinearLayerConfig,
-)
 
-
-class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
+class IntKernel(w8a8_linear.IntKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -30,7 +26,7 @@ class CPUInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.IntKernelConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:

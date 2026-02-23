@@ -9,6 +9,9 @@ from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    create_w8a8_fp_kernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -44,9 +47,6 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
@@ -440,7 +440,7 @@ class ModelOptFp8LinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = init_fp8_linear_kernel(
+        self.fp8_linear = create_w8a8_fp_kernel(
             activation_quant_key=kFp8StaticTensorSym,
             weight_quant_key=kFp8StaticTensorSym,
             out_dtype=torch.get_default_dtype(),
@@ -526,7 +526,7 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
-        self.fp8_linear = init_fp8_linear_kernel(
+        self.fp8_linear = create_w8a8_fp_kernel(
             activation_quant_key=kFp8DynamicTokenSym,
             weight_quant_key=kFp8StaticTokenSym,
             out_dtype=torch.get_default_dtype(),

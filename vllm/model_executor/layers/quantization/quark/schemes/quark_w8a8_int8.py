@@ -6,8 +6,8 @@ from collections.abc import Callable
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_int8_linear_kernel,
+from vllm.model_executor.kernels.linear import (
+    create_w8a8_int_kernel,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import QuarkScheme
 from vllm.model_executor.parameter import (
@@ -47,7 +47,7 @@ class QuarkW8A8Int8(QuarkScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
-        self.kernel = init_int8_linear_kernel(
+        self.kernel = create_w8a8_int_kernel(
             is_channelwise=(self.qscheme == "per_channel"),
             is_static_input_scheme=(self.is_static_input_scheme is True),
             input_symmetric=(self.input_symmetric is True),

@@ -4,6 +4,8 @@
 
 import torch
 
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8_linear
+import vllm.model_executor.kernels.linear.cutlass.w8a8 as w8a8_cutlass_linear
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.compressed_tensors.triton_scaled_mm import (  # noqa: E501
     triton_scaled_mm,
@@ -14,13 +16,8 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 
-from .cutlass import CutlassInt8ScaledMMLinearKernel
-from .ScaledMMLinearKernel import (
-    Int8ScaledMMLinearLayerConfig,
-)
 
-
-class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
+class IntKernel(w8a8_cutlass_linear.IntKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
@@ -30,7 +27,7 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return False, "requires ROCm or CUDA."
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.IntKernelConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
             return False, "supports symmetric input only."
         return True, None
@@ -86,7 +83,9 @@ class TritonInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
             x.contiguous(), i_s, i_zp, symmetric=True
         )
 
-        assert x_zp is None, "Triton kernel only supports symmetric quantization"
+        assert x_zp is None, (
+            f"{IntKernel.get_name()} kernel only supports symmetric quantization"
+        )
 
         return triton_scaled_mm(
             x_q, w_q, scale_a=x_s, scale_b=w_s, out_dtype=x.dtype, bias=bias

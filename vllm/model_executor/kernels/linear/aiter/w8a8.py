@@ -4,21 +4,20 @@
 
 import torch
 
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8_linear
+import vllm.model_executor.kernels.linear.cutlass.w8a8 as w8a8_cutlass_linear
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.platforms import current_platform
 
-from .cutlass import CutlassInt8ScaledMMLinearKernel
-from .ScaledMMLinearKernel import Int8ScaledMMLinearLayerConfig
 
-
-class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
+class IntKernel(w8a8_cutlass_linear.IntKernel):
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_rocm():
-            return False, "Requires ROCm."
+            return False, "requires ROCm."
 
         if compute_capability is not None and compute_capability < 90:
             return False, "requires compute capability 90 and above."
@@ -38,7 +37,7 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+    def can_implement(cls, c: w8a8_linear.IntKernelConfig) -> tuple[bool, str | None]:
         if not c.input_symmetric:
             return False, "supports symmetric quantization only."
         return True, None
@@ -66,12 +65,12 @@ class AiterInt8ScaledMMLinearKernel(CutlassInt8ScaledMMLinearKernel):
         # * static, i_s is scalar and x_s is i_s.
         symmetric = azp_adj is None
         assert symmetric, (
-            "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
+            f"{IntKernel.get_name()} only supports symmetric quantization."
         )
         x_q, x_s, x_zp = ops.scaled_int8_quant(x, i_s, i_zp, symmetric=symmetric)
 
         assert x_zp is None, (
-            "AiterInt8ScaledMMLinearKernel only supports symmetric quantization."
+            f"{IntKernel.get_name()} only supports symmetric quantization."
         )
         out_dtype = x.dtype
 

@@ -7,11 +7,11 @@ import torch
 from compressed_tensors.quantization import QuantizationStrategy
 
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    create_w8a8_int_kernel,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_int8_linear_kernel,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -47,7 +47,7 @@ class CompressedTensorsW8A8Int8(CompressedTensorsScheme):
     ):
         layer.logical_widths = output_partition_sizes
 
-        self.kernel = init_int8_linear_kernel(
+        self.kernel = create_w8a8_int_kernel(
             is_channelwise=(self.strategy == QuantizationStrategy.CHANNEL),
             is_static_input_scheme=self.is_static_input_scheme,
             input_symmetric=self.input_symmetric,
