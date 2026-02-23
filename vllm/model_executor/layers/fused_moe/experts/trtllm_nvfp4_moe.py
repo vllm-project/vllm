@@ -89,7 +89,7 @@ class TrtLlmNvFp4ExpertsBase:
         return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
     @staticmethod
-    def supports_shape(hidden_dim: int) -> bool:
+    def _supports_shape(hidden_dim: int) -> bool:
         """Requires hidden dim to be multiple of 512."""
         return hidden_dim % 512 == 0
 
