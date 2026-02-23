@@ -46,6 +46,7 @@ from vllm.model_executor.models import (
     supports_transcription,
 )
 from vllm.multimodal.audio import split_audio
+from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.tokenizers import get_tokenizer
@@ -323,7 +324,6 @@ class OpenAISpeechToText(OpenAIServing):
             self.asr_config.allow_audio_chunking
             and duration > self.asr_config.max_audio_clip_s
         )
-
 
         if not do_split_audio:
             chunks = [y]
