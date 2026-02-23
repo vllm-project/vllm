@@ -342,7 +342,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 offsets = None
 
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
-            if is_deep_gemm_supported():
+
+            # DeepGEMM is required for the paged MQA logits on CUDA devices,
+            # and cannot be disabled for those environments.
+            if is_deep_gemm_supported(respect_disable=False):
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens, self.kv_cache_spec.block_size, self.num_sms
                 )

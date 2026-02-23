@@ -66,15 +66,23 @@ class DeepGemmQuantScaleFMT(Enum):
 
 
 @functools.cache
-def is_deep_gemm_supported() -> bool:
+def is_deep_gemm_supported(respect_disable: bool = True) -> bool:
     """Return `True` if DeepGEMM is supported on the current platform.
     Currently, only Hopper and Blackwell GPUs are supported.
+
+    Note: On CUDA, DeepGEMM is required for fp8_paged_mqa_logits, and is the only choice
+    on Blackwell. So, we sometimes need to check for DeepGEMM support regardless of the
+    value of VLLM_USE_DEEP_GEMM to check if fp8_paged_mqa_logits will be used.
     """
     is_supported_arch = current_platform.is_cuda() and (
         current_platform.is_device_capability(90)
         or current_platform.is_device_capability_family(100)
     )
-    return envs.VLLM_USE_DEEP_GEMM and has_deep_gemm() and is_supported_arch
+    return (
+        (not respect_disable or envs.VLLM_USE_DEEP_GEMM)
+        and has_deep_gemm()
+        and is_supported_arch
+    )
 
 
 @functools.cache
