@@ -39,6 +39,7 @@ When run, benchmark script generates results under **benchmark/results** folder,
 - `THROUGHPUT_JSON`: JSON file to use for the throughout tests. Default value is empty string (use default file).
 - `REMOTE_HOST`: IP for the remote vLLM service to benchmark. Default value is empty string.
 - `REMOTE_PORT`: Port for the remote vLLM service to benchmark. Default value is empty string.
+- `PROMPTS_PER_CONCURRENCY`: Multiplier to compute `num_prompts` for serving tests (`num_prompts = max_concurrency × value`). Overrides JSON `num_prompts`. Default is NULL.
 
 ### Visualization
 
