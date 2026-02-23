@@ -1618,7 +1618,7 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
 - label: ROCm LM Eval Large Models (8 Card)
-  mirror_hardwares: [amdproduction, amdproduction]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_8
   optional: true
   num_gpus: 8
