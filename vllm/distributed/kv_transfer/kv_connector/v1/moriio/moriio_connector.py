@@ -64,6 +64,9 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
+    from vllm.v1.worker.kv_connector_model_runner_mixin import (
+        CrossLayerGroup,
+    )
 
 logger = init_logger(__name__)
 
@@ -171,7 +174,11 @@ class MoRIIOConnector(KVConnectorBase_V1):
     ############################################################
     # Worker Side Methods
     ############################################################
-    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+    def register_kv_caches(
+        self,
+        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
+        cross_layer_groups: "list[CrossLayerGroup] | None" = None,
+    ):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches)
 
