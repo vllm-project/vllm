@@ -1853,17 +1853,19 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                     per_request_data, timeline_path, itl_thresholds=itl_thresholds_sec
                 )
             else:
-                print(
-                    "Warning: Timeline plot requires detailed metrics. "
-                    "Ensure the benchmark completed successfully."
+                warnings.warn(
+                    "Timeline plot requires detailed metrics. "
+                    "Ensure the benchmark completed successfully.",
+                    stacklevel=2,
                 )
         except ImportError:
-            print(
-                "Warning: plotly is required for timeline plotting. "
-                "Install it with: pip install plotly"
+            warnings.warn(
+                "plotly is required for timeline plotting. "
+                "Install it with: pip install plotly",
+                stacklevel=2,
             )
         except Exception as e:
-            print(f"Warning: Failed to generate timeline plot: {e}")
+            warnings.warn(f"Failed to generate timeline plot: {e}", stacklevel=2)
 
     # Generate dataset statistics plot if requested
     if args.plot_dataset_stats:
@@ -1889,18 +1891,22 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                 stats_path = Path(file_name).with_suffix(".dataset_stats.png")
                 generate_dataset_stats_plot(per_request_data, stats_path)
             else:
-                print(
-                    "Warning: Dataset statistics plot requires input and "
+                warnings.warn(
+                    "Dataset statistics plot requires input and "
                     "output length data. Ensure the benchmark completed "
-                    "successfully."
+                    "successfully.",
+                    stacklevel=2,
                 )
         except ImportError:
-            print(
-                "Warning: matplotlib is required for dataset statistics "
-                "plotting. Install it with: pip install matplotlib"
+            warnings.warn(
+                "matplotlib is required for dataset statistics "
+                "plotting. Install it with: pip install matplotlib",
+                stacklevel=2,
             )
         except Exception as e:
-            print(f"Warning: Failed to generate dataset statistics plot: {e}")
+            warnings.warn(
+                f"Failed to generate dataset statistics plot: {e}", stacklevel=2
+            )
 
     if not args.save_detailed:
         # Remove fields with too many data points
