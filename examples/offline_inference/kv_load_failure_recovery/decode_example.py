@@ -42,6 +42,7 @@ def main():
                 "async_load": args.async_load,
             },
             kv_connector_module_path="load_recovery_example_connector",
+            kv_load_failure_policy="recompute",
         )
         out_file = (
             "async_decode_recovered_output.txt"
