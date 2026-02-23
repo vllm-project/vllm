@@ -3428,6 +3428,13 @@ class GPUModelRunner(
                 num_tokens_across_dp,
             )
 
+            if (envs.VLLM_NVTX_SCOPES_FOR_PROFILING
+                    and self.parallel_config.data_parallel_size > 1):
+                torch.cuda.nvtx.range_push(
+                    f"dp_rank={self.parallel_config.data_parallel_rank}, "
+                    f"dp_seqs={num_reqs}, "
+                    f"dp_tokens={num_tokens_unpadded}")
+
             num_tokens_padded = batch_desc.num_tokens
             num_reqs_padded = (
                 batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
@@ -3573,12 +3580,18 @@ class GPUModelRunner(
                     assert isinstance(hidden_states, IntermediateTensors)
                     hidden_states.kv_connector_output = kv_connector_output
                     self.kv_connector_output = kv_connector_output
+                    if (envs.VLLM_NVTX_SCOPES_FOR_PROFILING
+                            and self.parallel_config.data_parallel_size > 1):
+                        torch.cuda.nvtx.range_pop()
                     if envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
                         torch.cuda.nvtx.range_pop()
                     return hidden_states
 
                 if self.is_pooling_model:
                     # Return the pooling output.
+                    if (envs.VLLM_NVTX_SCOPES_FOR_PROFILING
+                            and self.parallel_config.data_parallel_size > 1):
+                        torch.cuda.nvtx.range_pop()
                     if envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
                         torch.cuda.nvtx.range_pop()
                     return self._pool(
@@ -3633,6 +3646,9 @@ class GPUModelRunner(
             slot_mappings,
         )
         self.kv_connector_output = kv_connector_output
+        if (envs.VLLM_NVTX_SCOPES_FOR_PROFILING
+                and self.parallel_config.data_parallel_size > 1):
+            torch.cuda.nvtx.range_pop()
         if envs.VLLM_NVTX_SCOPES_FOR_PROFILING:
             torch.cuda.nvtx.range_pop()
         return None
