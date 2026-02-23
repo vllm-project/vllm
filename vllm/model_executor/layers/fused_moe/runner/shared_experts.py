@@ -13,8 +13,8 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
+from vllm.model_executor.layers.quantization.base_config import (
+    QuantizeMethodBase,
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import (
@@ -49,9 +49,17 @@ class SharedExperts:
         self,
         shared_experts: torch.nn.Module,
         moe_config: FusedMoEConfig,
-        quant_method: FusedMoEMethodBase,
+        quant_method: QuantizeMethodBase,
         reduce_results: bool,
     ):
+        from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
+            FusedMoEMethodBase,
+        )
+
+        # quant_method must be a FusedMoEMethodBase but we can't use the type
+        # due to circular imports.
+        assert isinstance(quant_method, FusedMoEMethodBase)
+
         self._output: torch.Tensor | None = None
         self._shared_experts = shared_experts
         self._moe_config = moe_config
