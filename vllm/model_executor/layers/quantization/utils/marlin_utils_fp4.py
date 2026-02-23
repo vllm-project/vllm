@@ -365,9 +365,9 @@ def prepare_moe_mxfp4_layer_for_marlin(
 
     group_size = 32
 
-    e = layer.num_experts
-    k = layer.hidden_size
-    n = layer.intermediate_size_per_partition
+    e = layer.moe_config.num_experts
+    k = layer.moe_config.hidden_size
+    n = layer.moe_config.intermediate_size_per_partition
 
     # WORKSPACE
     device = layer.w13_weight.device

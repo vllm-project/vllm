@@ -311,7 +311,7 @@ def select_mxfp4_moe_backend(
         else:
             backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
             return backend, None
-    elif current_platform.is_device_capability(90):
+    elif current_platform.has_device_capability(90):
         if config.dp_size > 1 and config.use_ep:
             backend = Mxfp4MoeBackend.TRITON
             return _return_or_raise(
@@ -362,8 +362,8 @@ def convert_to_mxfp4_moe_kernel_format(
 ) -> tuple[
     torch.Tensor,
     torch.Tensor,
-    torch.Tensor,
-    torch.Tensor,
+    torch.Tensor | "PrecisionConfig",
+    torch.Tensor | "PrecisionConfig",
     type[torch.Tensor] | None,
     type[torch.Tensor] | None,
 ]:
@@ -668,9 +668,6 @@ def convert_to_mxfp4_moe_kernel_format(
         w13_bias = layer.w13_bias.to(torch.float32)
         w2_bias = layer.w2_bias.to(torch.float32)
 
-        layer.w13_bias = Parameter(w13_bias, requires_grad=False)
-        layer.w2_bias = Parameter(w2_bias, requires_grad=False)
-
         w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
             layer.w13_weight,
             layer.w13_weight_scale,
@@ -680,17 +677,24 @@ def convert_to_mxfp4_moe_kernel_format(
             layer.w2_weight_scale,
         )
 
-        layer.w13_precision_config = PrecisionConfig(
+        w13_precision_config = PrecisionConfig(
             weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
         )
-        layer.w2_precision_config = PrecisionConfig(
+        w2_precision_config = PrecisionConfig(
             weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
         )
 
         del layer.w13_weight
         del layer.w2_weight
 
-        return w13_weight, w2_weight, w13_scale, w2_scale, w13_bias, w2_bias
+        return (
+            w13_weight,
+            w2_weight,
+            w13_precision_config,
+            w2_precision_config,
+            w13_bias,
+            w2_bias,
+        )
     else:
         raise ValueError(
             f"Unsupported mxfp4_backend: {mxfp4_backend}: "

@@ -298,10 +298,25 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 _cache_permute_indices=self._cache_permute_indices,
             )
         )
-        replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
+        # For TRITON backends, weights and scales are wrapped tensors from
+        # triton_kernels that don't support .detach(). The weights have already
+        # been deleted and precision_config has been set inside
+        # convert_to_mxfp4_moe_kernel_format, manually assign parameters
+        if self.mxfp4_backend not in (
+            Mxfp4MoeBackend.TRITON,
+            Mxfp4MoeBackend.TRITON_MONOLITHIC,
+            Mxfp4MoeBackend.TRITON_UNFUSED,
+        ):
+            replace_parameter(layer, "w13_weight", w13)
+            replace_parameter(layer, "w2_weight", w2)
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
+        else:
+            layer.w13_weight = w13
+            layer.w2_weight = w2
+            self.w13_precision_config = w13_scale
+            self.w2_precision_config = w2_scale
+
         if w13_bias is not None and w2_bias is not None:
             replace_parameter(layer, "w13_bias", w13_bias)
             replace_parameter(layer, "w2_bias", w2_bias)
