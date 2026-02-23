@@ -49,7 +49,7 @@ The following metrics are exposed:
 
 These metrics are available via `--enable-mfu-metrics`:
 
---8<-- "docs/generated/metrics/perf.md"
+--8<-- "docs/generated/metrics/perf.inc.md"
 
 ## Deprecation Policy
 
