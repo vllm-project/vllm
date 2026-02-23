@@ -569,6 +569,7 @@ main() {
   # postprocess benchmarking results
   pip install tabulate pandas
   python3 $QUICK_BENCHMARK_ROOT/scripts/convert-results-json-to-markdown.py
+  python3 $QUICK_BENCHMARK_ROOT/scripts/compare-json-results.py -f $RESULTS_FOLDER/benchmark_results.json
 
   upload_to_buildkite
 }
