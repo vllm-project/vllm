@@ -333,10 +333,12 @@ def _test_processing_correctness(
 
     rng = np.random.RandomState(0)
 
+    # GLM-ASR requires a minimum audio length of 70ms
+    min_audio_len = 512 if model_config.hf_config.model_type != "glmasr" else 1120
     input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
-        "audio": (np.zeros((1024,)), 16000),
+        "audio": (np.zeros((min_audio_len,)), 16000),
         "vision_chunk": {"type": "image", "image": Image.new("RGB", size=(128, 128))},
     }
     input_factory = {
@@ -344,7 +346,7 @@ def _test_processing_correctness(
         "video": partial(
             random_video, rng, min_frames=2, max_frames=16, min_wh=128, max_wh=256
         ),
-        "audio": partial(random_audio, rng, min_len=1024, max_len=1536, sr=16000),
+        "audio": partial(random_audio, rng, min_len=min_audio_len, max_len=min_audio_len + 512, sr=16000),
         "vision_chunk": partial(
             random_vision_chunk, rng, min_wh=128, max_wh=256, min_frames=1, max_frames=1
         ),
