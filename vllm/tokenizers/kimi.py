@@ -259,11 +259,19 @@ class KimiTokenizer(TokenizerLike):
         """Convert tokens to string."""
         return self._tokenizer.convert_tokens_to_string(tokens)
 
-    def decode(self, ids: list[int] | int, skip_special_tokens: bool = False) -> str:
+    def decode(
+        self,
+        ids: list[int] | int,
+        skip_special_tokens: bool = False,
+    ) -> str:
         """Decode token IDs to text."""
         if isinstance(ids, int):
             ids = [ids]
-        return self._tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+        # TikTokenTokenizer.decode() doesn't support skip_special_tokens
+        # Filter out special tokens manually if requested
+        if skip_special_tokens:
+            ids = [i for i in ids if i not in self.all_special_ids]
+        return self._tokenizer.decode(ids)
 
     def get_stop_token_ids(self) -> list[int]:
         stop_token_ids: list[int] = []
