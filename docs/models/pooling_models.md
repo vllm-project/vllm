@@ -382,6 +382,7 @@ ColQwen3 is based on [ColPali](https://arxiv.org/abs/2407.01449), which extends 
 |---|---|---|
 | `ColQwen3` | Qwen3-VL | `TomoroAI/tomoro-colqwen3-embed-4b`, `TomoroAI/tomoro-colqwen3-embed-8b` |
 | `OpsColQwen3Model` | Qwen3-VL | `OpenSearch-AI/Ops-Colqwen3-4B`, `OpenSearch-AI/Ops-Colqwen3-8B` |
+| `Qwen3VLNemotronEmbedModel` | Qwen3-VL | `nvidia/nemotron-colembed-vl-4b-v2`, `nvidia/nemotron-colembed-vl-8b-v2` |
 
 Start the server:
 
@@ -389,7 +390,9 @@ Start the server:
 vllm serve TomoroAI/tomoro-colqwen3-embed-4b --max-model-len 4096
 ```
 
-Then you can use the rerank endpoint:
+#### Text-only scoring and reranking
+
+Use the `/rerank` endpoint:
 
 ```shell
 curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
@@ -403,7 +406,7 @@ curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
 }'
 ```
 
-Or the score endpoint:
+Or the `/score` endpoint:
 
 ```shell
 curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
@@ -413,7 +416,57 @@ curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
 }'
 ```
 
-You can also get the raw token embeddings using the pooling endpoint with `token_embed` task:
+#### Multi-modal scoring and reranking (text query × image documents)
+
+The `/score` and `/rerank` endpoints also accept multi-modal inputs directly.
+Pass image documents using the `data_1`/`data_2` (for `/score`) or `documents` (for `/rerank`) fields
+with a `content` list containing `image_url` and `text` parts — the same format used by the
+OpenAI chat completion API:
+
+Score a text query against image documents:
+
+```shell
+curl -s http://localhost:8000/score -H "Content-Type: application/json" -d '{
+    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
+    "data_1": "Retrieve the city of Beijing",
+    "data_2": [
+        {
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64>"}},
+                {"type": "text", "text": "Describe the image."}
+            ]
+        }
+    ]
+}'
+```
+
+Rerank image documents by a text query:
+
+```shell
+curl -s http://localhost:8000/rerank -H "Content-Type: application/json" -d '{
+    "model": "TomoroAI/tomoro-colqwen3-embed-4b",
+    "query": "Retrieve the city of Beijing",
+    "documents": [
+        {
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64_1>"}},
+                {"type": "text", "text": "Describe the image."}
+            ]
+        },
+        {
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64_2>"}},
+                {"type": "text", "text": "Describe the image."}
+            ]
+        }
+    ],
+    "top_n": 2
+}'
+```
+
+#### Raw token embeddings
+
+You can also get the raw token embeddings using the `/pooling` endpoint with `token_embed` task:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
@@ -423,7 +476,7 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 }'
 ```
 
-For **image inputs**, use the chat-style `messages` field so that the vLLM multimodal processor handles them correctly:
+For **image inputs** via the pooling endpoint, use the chat-style `messages` field:
 
 ```shell
 curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
@@ -440,10 +493,10 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 }'
 ```
 
-Examples can be found here:
+#### Examples
 
 - Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
-- Reranking: [examples/pooling/score/colqwen3_rerank_online.py](../../examples/pooling/score/colqwen3_rerank_online.py)
+- Reranking (text + multi-modal): [examples/pooling/score/colqwen3_rerank_online.py](../../examples/pooling/score/colqwen3_rerank_online.py)
 
 ### BAAI/bge-m3
 
