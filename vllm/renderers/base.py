@@ -546,7 +546,7 @@ class BaseRenderer(ABC, Generic[_T]):
         mm_data_items = mm_processor.info.parse_mm_data(mm_data)
         mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-        mm_uuids = self._process_mm_uuids(
+        mm_uuid_items = self._process_mm_uuids(
             mm_data, mm_data_items, mm_uuid_items, mm_req_id
         )
 
