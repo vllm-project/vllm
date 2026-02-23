@@ -213,7 +213,7 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             if "mm_token_type_ids" in processed_data
             else "token_type_ids"
         )
-        mm_token_type_ids = processed_data.pop(token_type_key)
+        mm_token_type_ids = processed_data.get(token_type_key)
 
         # We can infer vLLM style placeholder from token type ids, if we split
         # it for each input `mm_data`.
@@ -351,6 +351,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         num_image_patches = kwargs.pop("num_image_patches")
         kwargs.pop("token_type_ids", None)  # used only in `forward`
+        kwargs.pop("mm_token_type_ids", None)  # used only in `model.get_rope_index`
 
         if pixel_values is not None:
             # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
@@ -441,6 +442,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             {
                 "image_grid_thw",
                 "video_grid_thw",
+                "mm_token_type_ids",
                 "second_per_grid_ts",
                 "audio_feature_lengths",
                 "use_audio_in_video",
@@ -449,7 +451,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         if any(
             v
             for k, v in kwargs.items()
-            if k not in {"image_grid_thw", "video_grid_thw"}
+            if k not in {"image_grid_thw", "mm_token_type_ids"}
         ):
             raise NotImplementedError(
                 "Transformers modeling backend only supports images."
@@ -457,6 +459,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
+        mm_token_type_ids = kwargs.get("mm_token_type_ids", [])
 
         image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
             image_grid_thw
@@ -469,6 +472,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
+            mm_token_type_ids=mm_token_type_ids[None, ...],
         )
 
         mrope_positions = mrope_positions[:, 0]
