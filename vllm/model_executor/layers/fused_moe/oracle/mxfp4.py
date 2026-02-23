@@ -57,7 +57,7 @@ class Mxfp4MoeBackend(Enum):
     )
     FLASHINFER_CUTLASS_MXFP4_MXFP8 = "FLASHINFER_MXFP4_MXFP8_CUTLASS"
     FLASHINFER_TRTLLM_MXFP4_BF16 = "FLASHINFER_MXFP4_BF16"
-    FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC = "FLASHINFER_MXFP4_BF16_MONOLOTHIC"
+    FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC = "FLASHINFER_MXFP4_BF16_MONOLITHIC"
     FLASHINFER_CUTLASS_MXFP4_BF16 = "FLASHINFER_MXFP4_BF16"
     BATCHED_MARLIN = "BATCHED_MARLIN"
     MARLIN = "MARLIN"
@@ -71,7 +71,7 @@ def backend_to_kernel_cls(
     backend: Mxfp4MoeBackend,
 ) -> type[mk.FusedMoEPermuteExpertsUnpermute]:
     if backend in (
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
         Mxfp4MoeBackend.TRITON_MONOLITHIC,
         Mxfp4MoeBackend.XPU,
@@ -88,7 +88,7 @@ def backend_to_kernel_cls(
         return TrtLlmGenExperts
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
-        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
+        Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_MXFP8,
     ):
         from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
             FlashInferExperts,
@@ -158,7 +158,7 @@ def select_mxfp4_moe_backend(
     # after monolithic kernel refactor PR is merged
     AVAILABLE_BACKENDS = [
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
@@ -219,7 +219,7 @@ def select_mxfp4_moe_backend(
             AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16)
             AVAILABLE_BACKENDS.remove(Mxfp4MoeBackend.FLASHINFER_CUTLASS_MXFP4_BF16)
             AVAILABLE_BACKENDS.remove(
-                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
+                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC
             )
         else:
             if current_platform.is_device_capability(90):
@@ -244,7 +244,7 @@ def select_mxfp4_moe_backend(
                         activation_format,
                     )
                 else:
-                    backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
+                    backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC
                     return backend, None
 
     # Handle explicit FlashInfer MXFP4 MXFP8 TRTLLM configuration.
@@ -309,7 +309,7 @@ def select_mxfp4_moe_backend(
                 backend, config, kMxfp4Static, None, activation_format
             )
         else:
-            backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
+            backend = Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC
             logger.info_once(_make_log_backend(backend))
             return backend, None
     elif current_platform.has_device_capability(90):
@@ -411,7 +411,7 @@ def convert_to_mxfp4_moe_kernel_format(
     elif mxfp4_backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
     ):
         from flashinfer.fp4_quantization import nvfp4_block_scale_interleave
@@ -726,7 +726,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
         #    n = hidden_size
         #    k = intermediate_size_per_partition_after_pad
         intermediate_size = round_up(intermediate_size, 128)
-        if backend == current_platform.is_xpu():
+        if backend == Mxfp4MoeBackend.XPU:
             hidden_size = round_up(hidden_size, 128)
         else:
             hidden_size = round_up(hidden_size, 256)
@@ -734,7 +734,7 @@ def mxfp4_round_up_hidden_size_and_intermediate_size(
     elif backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
     ):
         # pad the intermediate size to be a multiple of 2 * mxfp4_block
@@ -767,7 +767,7 @@ def make_mxfp4_moe_quant_config(
 ) -> FusedMoEQuantConfig | None:
     if mxfp4_backend in (
         Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
-        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+        Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
     ):
         return None
     if mxfp4_backend in (
@@ -858,7 +858,7 @@ def make_mxfp4_moe_kernel(
             not in (
                 Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16,
                 Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8,
-                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+                Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
                 Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
             )
         ),

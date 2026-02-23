@@ -397,7 +397,7 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
     def is_monolithic(self) -> bool:
         return self.mxfp4_backend in (
             Mxfp4MoeBackend.TRITON_MONOLITHIC,
-            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
         )
 
@@ -469,14 +469,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         ), "MXFP4 are not supported with this configuration."
 
         if self.mxfp4_backend in (
-            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC,
+            Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC,
             Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_MXFP8_MONOLITHIC,
         ):
             from flashinfer import trtllm_fp4_block_scale_moe
 
             if (
                 self.mxfp4_backend
-                == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLOTHIC
+                == Mxfp4MoeBackend.FLASHINFER_TRTLLM_MXFP4_BF16_MONOLITHIC
             ):
                 assert x.dtype == torch.bfloat16
                 x_quant = x
