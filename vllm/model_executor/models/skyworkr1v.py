@@ -472,7 +472,7 @@ class SkyworkR1VProcessor:
 
 class SkyworkR1VProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> SkyworkR1VProcessor:
-        return self.ctx.get_hf_processor(
+        return self.ctx.init_processor(
             SkyworkR1VProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
