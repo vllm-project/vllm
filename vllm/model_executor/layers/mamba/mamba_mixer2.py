@@ -645,6 +645,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
             block_idx_last_computed_token_p = None
             block_idx_last_scheduled_token_p = None
             block_idx_first_scheduled_token_p = None
+            block_idx_last_scheduled_token_d = None
+            block_idx_last_computed_token_d = None
             num_computed_tokens_p = None
 
         preallocated_ssm_out_d, preallocated_ssm_out_p = torch.split(
@@ -837,6 +839,8 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 self.conv1d.bias,
                 self.activation,
                 conv_state_indices=state_indices_tensor_d,
+                block_idx_last_scheduled_token=block_idx_last_scheduled_token_d,
+                initial_state_idx=block_idx_last_computed_token_d,
                 num_accepted_tokens=num_accepted_tokens,
                 query_start_loc=query_start_loc_d,
                 max_query_len=state_indices_tensor_d.size(-1),
