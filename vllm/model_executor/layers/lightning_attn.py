@@ -733,36 +733,3 @@ def linear_decode_forward_triton(
     # Reshape output and return
     output = rearrange(output, "b h n d -> b n (h d)")
     return output.squeeze(1).contiguous()
-
-
-class BailingLinearKernel:
-    """
-    Linear attention kernel implementation for Bailing models.
-    """
-
-    @staticmethod
-    def jit_linear_forward_prefix(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        kv_caches: torch.Tensor,
-        slope_rate: torch.Tensor,
-        block_size: int,
-        layer_idx: int | None = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        slope_rate = slope_rate.to(torch.float32)
-        should_pad_dim = q.dim() == 3
-        if should_pad_dim:
-            q = q.unsqueeze(0)
-            k = k.unsqueeze(0)
-            v = v.unsqueeze(0)
-        b, h, n, d = q.shape
-        e = d
-        kv_history = kv_caches.reshape(1, h, d, e).contiguous()
-        output, kv_history = lightning_attention(
-            q, k, v, slope_rate, block_size=block_size, kv_history=kv_history
-        )
-        kv_caches.copy_(kv_history[:, :, -1, :, :].reshape(h, d, e))
-        assert output.shape[0] == 1, "batch size must be 1"
-        return output.squeeze(0).transpose(0, 1).reshape([n, h * d]).contiguous()
