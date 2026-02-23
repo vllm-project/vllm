@@ -44,15 +44,14 @@ def generate_timeline_plot(
 
     # Set defaults
     if colors is None:
-        colors = ["#109618", "#FF7F0E", "#D62728", "#000000"]
+        colors = ["#109618", "#FF7F0E", "#D62728"]
     if itl_thresholds is None:
-        itl_thresholds = [1.0, 4.0, 6.0]
+        itl_thresholds = [0.025, 0.050]
     if labels is None:
         labels = [
-            f"ITL < {itl_thresholds[0]}s",
-            f"ITL ≥ {itl_thresholds[0]}s",
-            f"ITL ≥ {itl_thresholds[1]}s",
-            f"ITL ≥ {itl_thresholds[2]}s",
+            f"ITL < {itl_thresholds[0] * 1000:.0f}ms",
+            f"{itl_thresholds[0] * 1000:.0f}ms ≤ ITL < {itl_thresholds[1] * 1000:.0f}ms",  # noqa
+            f"ITL ≥ {itl_thresholds[1] * 1000:.0f}ms",
         ]
 
     labels_colors = {"TTFT": "#636EFA", **dict(zip(labels, colors))}
@@ -141,9 +140,8 @@ def construct_timeline_data(
             return labels[0]
         elif itl < itl_thresholds[1]:
             return labels[1]
-        elif itl < itl_thresholds[2]:
+        else:
             return labels[2]
-        return labels[3]
 
     # Find the earliest start time to use as t0
     t0 = None

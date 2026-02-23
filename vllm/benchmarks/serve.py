@@ -1541,6 +1541,18 @@ def add_cli_args(parser: argparse.ArgumentParser):
         "The plot will be saved alongside the results JSON file.",
     )
 
+    parser.add_argument(
+        "--timeline-itl-thresholds",
+        type=float,
+        nargs=2,
+        default=[25.0, 50.0],
+        metavar=("THRESHOLD1", "THRESHOLD2"),
+        help="ITL thresholds in milliseconds for timeline plot coloring. "
+        "Specify two values to categorize inter-token latencies into three groups: "
+        "below first threshold (green), between thresholds (orange), "
+        "and above second threshold (red). Default: 25 50 (milliseconds).",
+    )
+
 
 def main(args: argparse.Namespace) -> dict[str, Any]:
     return asyncio.run(main_async(args))
@@ -1829,7 +1841,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                     )
 
                 timeline_path = Path(file_name).with_suffix(".timeline.html")
-                generate_timeline_plot(per_request_data, timeline_path)
+                # Convert thresholds from milliseconds to seconds
+                itl_thresholds_sec = [t / 1000.0 for t in args.timeline_itl_thresholds]
+                generate_timeline_plot(
+                    per_request_data, timeline_path, itl_thresholds=itl_thresholds_sec
+                )
             else:
                 print(
                     "Warning: Timeline plot requires detailed metrics. "
