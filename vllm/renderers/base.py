@@ -89,12 +89,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
-            with set_default_torch_num_threads():
-                self.mm_processor = mm_registry.create_processor(
-                    config.model_config,
-                    tokenizer=tokenizer,
-                    cache=mm_processor_cache,
-                )
+            self.mm_processor = mm_registry.create_processor(
+                config.model_config,
+                tokenizer=tokenizer,
+                cache=mm_processor_cache,
+            )
 
             if mm_processor_cache:
                 self._mm_cache_stats = MultiModalCacheStats()

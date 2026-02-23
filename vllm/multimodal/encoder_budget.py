@@ -6,7 +6,6 @@ from vllm.config import ModelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.registry import MultiModalRegistry
-from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
 
 logger = init_logger(__name__)
@@ -57,39 +56,38 @@ class MultiModalBudget:
         self.max_model_len = model_config.max_model_len
         self.max_num_reqs = scheduler_config.max_num_seqs
 
-        with set_default_torch_num_threads():  # Avoid hang during startup
-            cache = mm_registry.processor_only_cache_from_config(vllm_config)
-            processor = mm_registry.create_processor(model_config, cache=cache)
+        cache = mm_registry.processor_only_cache_from_config(vllm_config)
+        processor = mm_registry.create_processor(model_config, cache=cache)
 
-            self.cache = cache
-            self.processor = processor
-            mm_config = model_config.get_multimodal_config()
-            enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
+        self.cache = cache
+        self.processor = processor
+        mm_config = model_config.get_multimodal_config()
+        enable_mm_embeds = mm_config is not None and mm_config.enable_mm_embeds
 
-            supported_mm_limits = processor.info.supported_mm_limits
-            self.mm_limits = mm_limits = processor.info.allowed_mm_limits
+        supported_mm_limits = processor.info.supported_mm_limits
+        self.mm_limits = mm_limits = processor.info.allowed_mm_limits
 
-            # Modalities that pass through the MM encoder tower
-            tower_modalities = {
-                modality
-                for modality in supported_mm_limits
-                if mm_limits.get(modality, 0) > 0
-            }
-            # Modalities that bypass the tower (pre-computed embeddings only)
-            embed_only_modalities = {
-                modality
-                for modality in supported_mm_limits
-                if enable_mm_embeds and mm_limits.get(modality, 0) == 0
-            }
+        # Modalities that pass through the MM encoder tower
+        tower_modalities = {
+            modality
+            for modality in supported_mm_limits
+            if mm_limits.get(modality, 0) > 0
+        }
+        # Modalities that bypass the tower (pre-computed embeddings only)
+        embed_only_modalities = {
+            modality
+            for modality in supported_mm_limits
+            if enable_mm_embeds and mm_limits.get(modality, 0) == 0
+        }
 
-            active_modalities = tower_modalities | embed_only_modalities
+        active_modalities = tower_modalities | embed_only_modalities
 
-            all_mm_max_toks_per_item = get_mm_max_toks_per_item(
-                model_config,
-                mm_registry,
-                processor,
-                mm_counts=dict.fromkeys(active_modalities, 1),
-            )
+        all_mm_max_toks_per_item = get_mm_max_toks_per_item(
+            model_config,
+            mm_registry,
+            processor,
+            mm_counts=dict.fromkeys(active_modalities, 1),
+        )
 
         if embed_only_modalities:
             logger.info_once(
