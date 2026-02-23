@@ -77,7 +77,10 @@ class ActiveKVConnector(KVConnector):
                 self.kv_connector.start_load_kv(get_forward_context())
 
     def post_forward(
-        self, scheduler_output: "SchedulerOutput", wait_for_save: bool = True
+        self,
+        scheduler_output: "SchedulerOutput",
+        wait_for_save: bool = True,
+        clear_metadata: bool = True,
     ) -> KVConnectorOutput | None:
         if self._disabled:
             return None
@@ -91,8 +94,14 @@ class ActiveKVConnector(KVConnector):
         output.invalid_block_ids = self.kv_connector.get_block_ids_with_load_errors()
         output.kv_connector_stats = self.kv_connector.get_kv_connector_stats()
         output.kv_cache_events = self.kv_connector.get_kv_connector_kv_cache_events()
-        self.kv_connector.clear_connector_metadata()
+        if clear_metadata:
+            self.kv_connector.clear_connector_metadata()
         return output
+
+    def clear_metadata(self) -> None:
+        """Clear the connector metadata. Call this after draft model runs."""
+        if not self._disabled:
+            self.kv_connector.clear_connector_metadata()
 
     def no_forward(self, scheduler_output: "SchedulerOutput") -> ModelRunnerOutput:
         if self._disabled:
