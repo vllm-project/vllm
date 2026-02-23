@@ -854,7 +854,7 @@ steps:
   - pytest -v -s benchmarks/
 
 
-- label: Quantization Test # 36.1m
+- label: Quantization # 36.1m
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
   agent_pool: mi325_1
@@ -2266,7 +2266,7 @@ steps:
   - pytest -v -s benchmarks/
 
 
-- label: Quantization Test # TBD
+- label: Quantization # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
