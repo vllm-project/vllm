@@ -26,6 +26,8 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.fused_moe import MoEActivation, fused_experts
+from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     QKVParallelLinear,
@@ -822,33 +824,71 @@ class Moondream3TextMoE(nn.Module):
         self.fc2_weight = nn.Parameter(
             torch.empty(self.num_local_experts, hidden_size, expert_inner_dim)
         )
+        self._use_fused_moe = True
+
+        local_expert_start = get_tensor_model_parallel_rank() * self.experts_per_rank
+        expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
+        expert_map[
+            local_expert_start : local_expert_start + self.num_local_experts
+        ] = torch.arange(self.num_local_experts, dtype=torch.int32)
+        self.register_buffer("_expert_map", expert_map, persistent=False)
+
+        # Preserve Moondream3's exact GeGLU variant (gelu(h) * (g + 1)) by
+        # adding +1 bias to the second half of the fused fc1 activations.
+        fused_w1_bias = torch.zeros(
+            self.num_local_experts,
+            expert_inner_dim * 2,
+            dtype=torch.float32,
+        )
+        fused_w1_bias[:, expert_inner_dim:] = 1.0
+        self.register_buffer("_fused_w1_bias", fused_w1_bias, persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass with expert parallelism and custom GeGLU activation."""
 
-        tp_rank = get_tensor_model_parallel_rank()
-
         # Get router logits and compute top-k
         router_logits, _ = self.gate(x)  # [num_tokens, num_experts]
-        topk_logits, topk_idxs = torch.topk(
+        topk_logits, topk_ids = torch.topk(
             router_logits, self.experts_per_token, dim=-1
         )
         # Softmax over selected experts
         topk_weights = F.softmax(topk_logits, dim=-1, dtype=torch.float32).to(x.dtype)
 
+        if self._use_fused_moe and x.is_cuda:
+            try:
+                out = fused_experts(
+                    hidden_states=x.contiguous(),
+                    w1=self.fc1_weight,
+                    w2=self.fc2_weight,
+                    topk_weights=topk_weights.contiguous(),
+                    topk_ids=topk_ids.contiguous(),
+                    activation=MoEActivation.GELU,
+                    global_num_experts=self.num_experts,
+                    expert_map=self._expert_map,
+                    quant_config=biased_moe_quant_config(self._fused_w1_bias, None),
+                )
+                out = tensor_model_parallel_all_reduce(out)
+                return out
+            except (NotImplementedError, RuntimeError) as exc:
+                self._use_fused_moe = False
+                logger.warning_once(
+                    "Disabling fused Moondream3 MoE path and falling back to "
+                    "the Python expert loop: %s",
+                    str(exc),
+                )
+
+        tp_rank = get_tensor_model_parallel_rank()
         # Compute local expert range
         local_expert_start = tp_rank * self.experts_per_rank
 
-        # TODO: Migrate to a fused MoE kernel once it supports Moondream3's
-        # exact GeGLU variant: gelu(h) * (g + 1).
-        # Compute MoE output using loop over local experts
+        # Fallback path for environments where fused kernels are unavailable.
         out = x.new_zeros(x.shape)
 
         for local_expert_idx in range(self.num_local_experts):
             global_expert_id = local_expert_start + local_expert_idx
 
             # Find tokens assigned to this expert
-            token_pos, which_k = (topk_idxs == global_expert_id).nonzero(as_tuple=True)
+            token_pos, which_k = (topk_ids == global_expert_id).nonzero(as_tuple=True)
             if token_pos.numel() == 0:
                 continue
 

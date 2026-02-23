@@ -746,7 +746,7 @@ VLM_TEST_SETTINGS = {
             "hf_tokenizer_name": "moondream/starmie-v1",
             # Skip AutoProcessor (model repo has no processor files);
             # moondream3_patch_hf_runner sets the real processor.
-            "hf_processor": True,
+            "skip_processor_init": True,
         },
         patch_hf_runner=model_utils.moondream3_patch_hf_runner,
         # Single size factor to avoid GPU OOM when running multiple test
