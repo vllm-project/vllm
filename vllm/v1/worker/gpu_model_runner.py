@@ -875,6 +875,17 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
+    def _get_model_hook(self, hook_name: str) -> Any:
+        """Return a callable model hook if available."""
+        hook = getattr(self.get_model(), hook_name, None)
+        return hook if callable(hook) else None
+
+    def _call_model_hook(self, hook_name: str, *args: Any, **kwargs: Any) -> Any:
+        hook = self._get_model_hook(hook_name)
+        if hook is None:
+            return None
+        return hook(*args, **kwargs)
+
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -890,11 +901,11 @@ class GPUModelRunner(
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
 
-        # Clean up detect/point state for finished requests (Moondream3).
-        dp_mgr = getattr(self.model, "detect_point_manager", None)
-        if dp_mgr is not None:
-            for req_id in scheduler_output.finished_req_ids:
-                dp_mgr.remove_request(req_id)
+        # Let models clean up per-request state.
+        self._call_model_hook(
+            "on_requests_finished",
+            scheduler_output.finished_req_ids,
+        )
 
         # Remove the finished requests from the persistent batch.
         # NOTE(woosuk): There could be an edge case where finished_req_ids and
@@ -977,29 +988,12 @@ class GPUModelRunner(
             )
             self.requests[req_id] = req_state
 
-            # Register detect/point requests (Moondream3).
-            # Activation is explicit-only via extra_args.
-            dp_mgr = getattr(self.model, "detect_point_manager", None)
-            if dp_mgr is not None and sampling_params is not None:
-                extra = sampling_params.extra_args or {}
-                dp_task = extra.get("moondream3_task")
-                if dp_task in ("detect", "point"):
-                    raw_max = extra.get("moondream3_max_objects", 150)
-                    try:
-                        max_obj = int(raw_max)
-                    except (TypeError, ValueError):
-                        raise ValueError(
-                            "moondream3_max_objects must be an "
-                            f"integer, got {type(raw_max).__name__}"
-                        ) from None
-                    if max_obj < 1:
-                        raise ValueError(
-                            "moondream3_max_objects must be >= 1, "
-                            f"got {max_obj}"
-                        )
-                    dp_mgr.register_request(
-                        req_id, dp_task, max_obj,
-                    )
+            # Let models register per-request custom decode state.
+            self._call_model_hook(
+                "on_new_request",
+                req_id=req_id,
+                sampling_params=sampling_params,
+            )
 
             if sampling_params and sampling_params.prompt_logprobs is not None:
                 self.num_prompt_logprobs[req_id] = (
@@ -3165,8 +3159,8 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3566,11 +3560,20 @@ class GPUModelRunner(
             self.model_config.is_encoder_decoder and num_encoder_reqs > 0
         )
 
+        step_req_ids = self.input_batch.req_ids[:num_reqs]
+
         # Run the model.
         # Use persistent buffers for CUDA graphs.
         # When spec decode is enabled, delay clearing connector metadata
         # until after draft model runs in sample_tokens.
         clear_kv_metadata = self.speculative_config is None
+        self._call_model_hook(
+            "on_before_model_forward",
+            req_ids=step_req_ids,
+            logits_indices=logits_indices,
+            device=self.device,
+        )
+
         with (
             set_forward_context(
                 attn_metadata,
@@ -3625,18 +3628,10 @@ class GPUModelRunner(
 
                 sample_hidden_states = hidden_states[logits_indices]
 
-                # Set per-row detect/point states before compute_logits
-                # (Moondream3).
-                dp_mgr = getattr(self.model, "detect_point_manager", None)
-                if dp_mgr is not None and dp_mgr.has_active_requests():
-                    dp_row_states = [
-                        dp_mgr.get_state(self.input_batch.req_ids[i])
-                        for i in range(num_reqs)
-                    ]
-                    self.model._dp_row_states = dp_row_states
-                elif dp_mgr is not None:
-                    self.model._dp_row_states = None
-
+                self._call_model_hook(
+                    "on_before_compute_logits",
+                    req_ids=step_req_ids,
+                )
                 logits = self.model.compute_logits(sample_hidden_states)
             else:
                 # Rare case.
@@ -3656,6 +3651,10 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
+                    self._call_model_hook(
+                        "on_before_compute_logits",
+                        req_ids=step_req_ids,
+                    )
                     logits = self.model.compute_logits(sample_hidden_states)
 
                 model_output_broadcast_data: dict[str, Any] = {}
@@ -3731,15 +3730,11 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        # Update detect/point states after sampling (Moondream3).
-        dp_mgr = getattr(self.model, "detect_point_manager", None)
-        if dp_mgr is not None and dp_mgr.has_active_requests():
-            token_ids = sampler_output.sampled_token_ids
-            for i in range(self.input_batch.num_reqs):
-                rid = self.input_batch.req_ids[i]
-                if dp_mgr.get_state(rid) is not None:
-                    tok = int(token_ids[i, 0])
-                    dp_mgr.update_after_sample(rid, tok)
+        self._call_model_hook(
+            "on_after_sample",
+            req_ids=self.input_batch.req_ids[: self.input_batch.num_reqs],
+            sampled_token_ids=sampler_output.sampled_token_ids,
+        )
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output
@@ -3854,22 +3849,10 @@ class GPUModelRunner(
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
 
-            # Collect detect/point results for all active requests
-            # (Moondream3).  Results are always included so that the output
-            # processor can override the text even when the request finishes
-            # due to max_tokens rather than EOS.
-            dp_results: dict[str, str] | None = None
-            dp_mgr = getattr(self.model, "detect_point_manager", None)
-            if (dp_mgr is not None and get_pp_group().is_last_rank
-                    and dp_mgr.has_active_requests()):
-                for rid in req_ids_output_copy:
-                    state = dp_mgr.get_state(rid)
-                    if state is not None:
-                        json_str = dp_mgr.get_json_result(rid)
-                        if json_str is not None:
-                            if dp_results is None:
-                                dp_results = {}
-                            dp_results[rid] = json_str
+            per_request_extra_output = self._call_model_hook(
+                "get_per_request_extra_output",
+                req_ids=req_ids_output_copy,
+            )
 
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -3884,8 +3867,7 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 model_extra_output=(
-                    {"detect_point_results": dp_results}
-                    if dp_results is not None else None
+                    per_request_extra_output if per_request_extra_output else None
                 ),
             )
 
@@ -3914,65 +3896,6 @@ class GPUModelRunner(
             )
 
         return async_output
-
-    def _sync_dp_pending_embeds(
-        self,
-        dp_mgr: object,
-        num_reqs: int,
-        pp: object,
-    ) -> None:
-        """Broadcast detect/point pending embed data across PP ranks.
-
-        After each decode step the last rank updates ``pending_embed_*``
-        fields on ``DetectPointState`` objects inside ``dp_mgr``.  This
-        method broadcasts those values to all other ranks so the first
-        rank can build correct ``_dp_embed_data`` for embedding injection
-        before the next forward pass.
-
-        Tensor layout per request row – [type, val1, val2]:
-        * type 0 = no pending embed
-        * type 1 = coord  → val1 = coordinate value
-        * type 2 = size   → val1 = width, val2 = height
-        """
-        # Allocate a compact sync buffer on the GPU.
-        sync = torch.zeros(
-            num_reqs, 3, device=self.device, dtype=torch.float32,
-        )
-
-        if pp.is_last_rank:
-            for i in range(num_reqs):
-                rid = self.input_batch.req_ids[i]
-                st = dp_mgr.get_state(rid)
-                if st is None or st.pending_embed_type is None:
-                    continue
-                if st.pending_embed_type == "coord":
-                    sync[i, 0] = 1.0
-                    sync[i, 1] = st.pending_embed_coord or 0.0
-                elif st.pending_embed_type == "size":
-                    sync[i, 0] = 2.0
-                    sync[i, 1] = st.pending_embed_w or 0.0
-                    sync[i, 2] = st.pending_embed_h or 0.0
-
-        torch.distributed.broadcast(
-            sync, src=pp.last_rank, group=pp.device_group,
-        )
-
-        if not pp.is_last_rank:
-            for i in range(num_reqs):
-                rid = self.input_batch.req_ids[i]
-                st = dp_mgr.get_state(rid)
-                if st is None:
-                    continue
-                t = int(sync[i, 0].item())
-                if t == 0:
-                    st.pending_embed_type = None
-                elif t == 1:
-                    st.pending_embed_type = "coord"
-                    st.pending_embed_coord = sync[i, 1].item()
-                elif t == 2:
-                    st.pending_embed_type = "size"
-                    st.pending_embed_w = sync[i, 1].item()
-                    st.pending_embed_h = sync[i, 2].item()
 
     def _pp_broadcast_prev_sampled_token_ids(
         self, sampled_token_ids: torch.Tensor

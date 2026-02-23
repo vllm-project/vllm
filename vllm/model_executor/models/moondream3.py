@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from functools import cached_property
 from itertools import islice
-from typing import Literal
+from typing import Any, Literal
 
 import torch
 import torch.nn as nn
@@ -528,9 +528,7 @@ class Moondream3RegionModule(nn.Module):
         # Layer norm
         self.ln = nn.LayerNorm(config.dim)
 
-    def _fourier_features(
-        self, x: torch.Tensor, w: torch.Tensor
-    ) -> torch.Tensor:
+    def _fourier_features(self, x: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
         """Fourier feature mapping: x @ w -> cat(cos, sin)."""
         f = 2 * math.pi * x @ w
         return torch.cat([f.cos(), f.sin()], dim=-1)
@@ -563,9 +561,9 @@ class Moondream3RegionModule(nn.Module):
         """
         return self.coord_decoder(self.ln(hidden_states))
 
-    def encode_size(self, w: float, h: float,
-                    device: torch.device,
-                    dtype: torch.dtype) -> torch.Tensor:
+    def encode_size(
+        self, w: float, h: float, device: torch.device, dtype: torch.dtype
+    ) -> torch.Tensor:
         """Encode width and height into an embedding.
 
         Args:
@@ -581,9 +579,7 @@ class Moondream3RegionModule(nn.Module):
         feat = self._fourier_features(size, self.size_features)
         return self.size_encoder(feat.unsqueeze(0))
 
-    def decode_size(
-        self, hidden_states: torch.Tensor
-    ) -> tuple[float, float]:
+    def decode_size(self, hidden_states: torch.Tensor) -> tuple[float, float]:
         """Decode size (width, height) from hidden states.
 
         Applies ln + size_decoder, argmax on 2x1024 bins, then converts
@@ -621,9 +617,7 @@ class DetectPointState:
     """
 
     mode: Literal["detect", "point"]
-    step: Literal["decode_x_or_stop", "decode_y", "decode_size"] = (
-        "decode_x_or_stop"
-    )
+    step: Literal["decode_x_or_stop", "decode_y", "decode_size"] = "decode_x_or_stop"
 
     # Embedding info for the *next* decode step (set in compute_logits,
     # consumed in forward to replace the token embedding).
@@ -662,9 +656,7 @@ class DetectPointStateManager:
         mode: Literal["detect", "point"],
         max_objects: int = _DEFAULT_MAX_OBJECTS,
     ) -> None:
-        self._states[req_id] = DetectPointState(
-            mode=mode, max_objects=max_objects
-        )
+        self._states[req_id] = DetectPointState(mode=mode, max_objects=max_objects)
 
     def get_state(self, req_id: str) -> DetectPointState | None:
         return self._states.get(req_id)
@@ -684,9 +676,7 @@ class DetectPointStateManager:
             return json.dumps({"objects": state.objects})
         return json.dumps({"points": state.objects})
 
-    def update_after_sample(
-        self, req_id: str, sampled_token_id: int
-    ) -> None:
+    def update_after_sample(self, req_id: str, sampled_token_id: int) -> None:
         """Transition state after a token is sampled."""
         state = self._states.get(req_id)
         if state is None:
@@ -704,9 +694,7 @@ class DetectPointStateManager:
         elif state.step == "decode_y":
             if state.mode == "point":
                 # For point: y was decoded, object is complete.
-                state.objects.append(
-                    {"x": state.current_x, "y": state.current_y}
-                )
+                state.objects.append({"x": state.current_x, "y": state.current_y})
                 state.step = "decode_x_or_stop"
             else:
                 # For detect: y decoded, need size next.
@@ -828,9 +816,9 @@ class Moondream3TextMoE(nn.Module):
 
         local_expert_start = get_tensor_model_parallel_rank() * self.experts_per_rank
         expert_map = torch.full((num_experts,), -1, dtype=torch.int32)
-        expert_map[
-            local_expert_start : local_expert_start + self.num_local_experts
-        ] = torch.arange(self.num_local_experts, dtype=torch.int32)
+        expert_map[local_expert_start : local_expert_start + self.num_local_experts] = (
+            torch.arange(self.num_local_experts, dtype=torch.int32)
+        )
         self.register_buffer("_expert_map", expert_map, persistent=False)
 
         # Preserve Moondream3's exact GeGLU variant (gelu(h) * (g + 1)) by
@@ -1017,7 +1005,7 @@ class Moondream3Attention(nn.Module):
                 dtype=torch.bool,
             )
         )
-        prefill_mask[:, :, :self._prefix_attn_len, :self._prefix_attn_len] = True
+        prefill_mask[:, :, : self._prefix_attn_len, : self._prefix_attn_len] = True
         self.register_buffer("_prefill_mask", prefill_mask, persistent=False)
 
     def forward(
@@ -1061,9 +1049,9 @@ class Moondream3Attention(nn.Module):
             )
             q_full = qkv_full_sharded[:, :, :q_local_dim].reshape(qkv.shape[0], -1)
             k_full = qkv_full_sharded[
-                :, :, q_local_dim:q_local_dim + kv_local_dim
+                :, :, q_local_dim : q_local_dim + kv_local_dim
             ].reshape(qkv.shape[0], -1)
-            v_full = qkv_full_sharded[:, :, q_local_dim + kv_local_dim:].reshape(
+            v_full = qkv_full_sharded[:, :, q_local_dim + kv_local_dim :].reshape(
                 qkv.shape[0], -1
             )
             qkv_full = torch.cat([q_full, k_full, v_full], dim=-1).contiguous()
@@ -1147,12 +1135,16 @@ class Moondream3Attention(nn.Module):
                 bool_mask[:, :, :P, :P] = True
 
             attn_output = F.scaled_dot_product_attention(
-                q_4d, k_4d, v_4d,
+                q_4d,
+                k_4d,
+                v_4d,
                 attn_mask=bool_mask,
                 scale=self.scaling,
             )
             attn_output = (
-                attn_output.squeeze(0).transpose(0, 1).contiguous()
+                attn_output.squeeze(0)
+                .transpose(0, 1)
+                .contiguous()
                 .view(num_tokens, H * D)
             )
 
@@ -1520,10 +1512,8 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self._size_id = getattr(hf_config, "size_token_id", 6)
         self._eos_id = getattr(hf_config, "region_eos_token_id", 0)
 
-        # Detect/point state management.  The model runner sets
-        # ``_dp_row_states`` (list mapping logits row → DetectPointState)
-        # before calling ``compute_logits``, and ``_dp_embed_data``
-        # (dict mapping input position → embed info) before ``forward``.
+        # Detect/point state management and per-step scratch buffers.
+        # These buffers are populated by model hooks invoked by the v1 runner.
         self.detect_point_manager = DetectPointStateManager(
             coord_id=self._coord_id,
             size_id=self._size_id,
@@ -1531,6 +1521,170 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
         self._dp_row_states: list[DetectPointState | None] | None = None
         self._dp_embed_data: dict[int, dict] | None = None
+
+    def on_new_request(
+        self,
+        *,
+        req_id: str,
+        sampling_params: object | None,
+    ) -> None:
+        """Register detect/point requests from per-request extra args."""
+        if sampling_params is None:
+            return
+        extra = getattr(sampling_params, "extra_args", None) or {}
+        dp_task = extra.get("moondream3_task")
+        if dp_task == "detect":
+            mode: Literal["detect", "point"] = "detect"
+        elif dp_task == "point":
+            mode = "point"
+        else:
+            return
+
+        raw_max = extra.get("moondream3_max_objects", _DEFAULT_MAX_OBJECTS)
+        try:
+            max_obj = int(raw_max)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "moondream3_max_objects must be an integer, "
+                f"got {type(raw_max).__name__}"
+            ) from None
+        if max_obj < 1:
+            raise ValueError(f"moondream3_max_objects must be >= 1, got {max_obj}")
+        self.detect_point_manager.register_request(req_id, mode, max_obj)
+
+    def on_requests_finished(self, req_ids: Iterable[str]) -> None:
+        for req_id in req_ids:
+            self.detect_point_manager.remove_request(req_id)
+
+    def on_before_model_forward(
+        self,
+        *,
+        req_ids: list[str],
+        logits_indices: torch.Tensor,
+        device: torch.device,
+    ) -> None:
+        """Prepare pending coordinate/size embed replacements for forward."""
+        dp_mgr = self.detect_point_manager
+        if not dp_mgr.has_active_requests():
+            self._dp_embed_data = None
+            return
+
+        pp = get_pp_group()
+        if pp.world_size > 1:
+            self._sync_dp_pending_embeds(req_ids=req_ids, device=device, pp=pp)
+
+        dp_embed_data: dict[int, dict[str, Any]] = {}
+        for i, rid in enumerate(req_ids):
+            dp_st = dp_mgr.get_state(rid)
+            if dp_st is None or dp_st.pending_embed_type is None:
+                continue
+            pos = int(logits_indices[i].item())
+            if dp_st.pending_embed_type == "coord":
+                dp_embed_data[pos] = {
+                    "type": "coord",
+                    "value": dp_st.pending_embed_coord,
+                }
+            elif dp_st.pending_embed_type == "size":
+                dp_embed_data[pos] = {
+                    "type": "size",
+                    "w": dp_st.pending_embed_w,
+                    "h": dp_st.pending_embed_h,
+                }
+        self._dp_embed_data = dp_embed_data or None
+
+    def on_before_compute_logits(self, *, req_ids: list[str]) -> None:
+        dp_mgr = self.detect_point_manager
+        if not dp_mgr.has_active_requests():
+            self._dp_row_states = None
+            return
+        self._dp_row_states = [dp_mgr.get_state(req_id) for req_id in req_ids]
+
+    def on_after_sample(
+        self,
+        *,
+        req_ids: list[str],
+        sampled_token_ids: torch.Tensor,
+    ) -> None:
+        dp_mgr = self.detect_point_manager
+        if not dp_mgr.has_active_requests():
+            return
+        for i, req_id in enumerate(req_ids):
+            if dp_mgr.get_state(req_id) is None:
+                continue
+            tok = int(sampled_token_ids[i, 0].item())
+            dp_mgr.update_after_sample(req_id, tok)
+
+    def get_per_request_extra_output(
+        self,
+        *,
+        req_ids: list[str],
+    ) -> dict[str, dict[str, Any]] | None:
+        """Return per-request final text overrides for active requests."""
+        dp_mgr = self.detect_point_manager
+        if not get_pp_group().is_last_rank or not dp_mgr.has_active_requests():
+            return None
+
+        per_request_extra: dict[str, dict[str, Any]] = {}
+        for req_id in req_ids:
+            state = dp_mgr.get_state(req_id)
+            if state is None:
+                continue
+            json_str = dp_mgr.get_json_result(req_id)
+            if json_str is not None:
+                per_request_extra[req_id] = {"text_override": json_str}
+        return per_request_extra or None
+
+    def _sync_dp_pending_embeds(
+        self,
+        *,
+        req_ids: list[str],
+        device: torch.device,
+        pp: Any,
+    ) -> None:
+        """Broadcast detect/point pending embed data across PP ranks."""
+        num_reqs = len(req_ids)
+        sync = torch.zeros(
+            num_reqs,
+            3,
+            device=device,
+            dtype=torch.float32,
+        )
+
+        dp_mgr = self.detect_point_manager
+        if pp.is_last_rank:
+            for i, req_id in enumerate(req_ids):
+                st = dp_mgr.get_state(req_id)
+                if st is None or st.pending_embed_type is None:
+                    continue
+                if st.pending_embed_type == "coord":
+                    sync[i, 0] = 1.0
+                    sync[i, 1] = st.pending_embed_coord or 0.0
+                elif st.pending_embed_type == "size":
+                    sync[i, 0] = 2.0
+                    sync[i, 1] = st.pending_embed_w or 0.0
+                    sync[i, 2] = st.pending_embed_h or 0.0
+
+        torch.distributed.broadcast(
+            sync,
+            src=pp.last_rank,
+            group=pp.device_group,
+        )
+
+        if not pp.is_last_rank:
+            for i, req_id in enumerate(req_ids):
+                st = dp_mgr.get_state(req_id)
+                if st is None:
+                    continue
+                state_type = int(sync[i, 0].item())
+                if state_type == 0:
+                    st.pending_embed_type = None
+                elif state_type == 1:
+                    st.pending_embed_type = "coord"
+                    st.pending_embed_coord = sync[i, 1].item()
+                elif state_type == 2:
+                    st.pending_embed_type = "size"
+                    st.pending_embed_w = sync[i, 1].item()
+                    st.pending_embed_h = sync[i, 2].item()
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -1703,10 +1857,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         if not image_inputs:
             return []
 
-        return [
-            self._encode_image_input(image_input)
-            for image_input in image_inputs
-        ]
+        return [self._encode_image_input(image_input) for image_input in image_inputs]
 
     def forward(
         self,
@@ -1755,9 +1906,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         row_states = self._dp_row_states
-        if row_states is None or not any(
-            s is not None for s in row_states
-        ):
+        if row_states is None or not any(s is not None for s in row_states):
             # No detect/point requests — standard path.
             return self.logits_processor(self.lm_head, hidden_states)
 
@@ -1770,7 +1919,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         for i, state in enumerate(row_states):
             if state is None:
                 continue
-            h = hidden_states[i: i + 1]  # [1, dim]
+            h = hidden_states[i : i + 1]  # [1, dim]
 
             if state.step == "decode_x_or_stop":
                 # Check continue/stop via sparse lm_head logits.
@@ -1785,9 +1934,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
                     # Decode x coordinate from the *same* hidden state.
                     coord_logits = self.region.decode_coordinate(h)
                     x_bin = torch.argmax(coord_logits, dim=-1)
-                    x_val = (
-                        x_bin.float().item() / coord_logits.shape[-1]
-                    )
+                    x_val = x_bin.float().item() / coord_logits.shape[-1]
                     state.current_x = x_val
                     state.pending_embed_type = "coord"
                     state.pending_embed_coord = x_val

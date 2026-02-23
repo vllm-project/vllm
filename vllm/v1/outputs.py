@@ -195,9 +195,9 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # Model-specific extra outputs (e.g. detect/point JSON results).
-    # Keyed by model-defined names; forwarded to the output processor.
-    model_extra_output: dict[str, Any] | None = None
+    # Per-request model-specific extra outputs:
+    # req_id -> model-defined metadata forwarded to the output processor.
+    model_extra_output: dict[str, dict[str, Any]] | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.
