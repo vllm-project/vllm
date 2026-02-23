@@ -471,11 +471,8 @@ def main(args: argparse.Namespace) -> None:
         ]
         mm_data = []
         for stage, metrics in result["mm_processor_stats"].items():
-            is_count = stage == "num_encoder_calls"
-            unit = "" if is_count else " (ms)"
-
             row = {
-                "Stage": stage + unit,
+                "Stage": stage,
                 "Mean": f"{metrics['mean']:.2f}",
                 "Median": f"{metrics['median']:.2f}",
                 "Std": f"{metrics['std']:.2f}",
