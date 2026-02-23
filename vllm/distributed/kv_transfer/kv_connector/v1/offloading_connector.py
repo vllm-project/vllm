@@ -312,7 +312,7 @@ class OffloadingConnectorScheduler:
 
         full_block_tokens = self.offloaded_block_size * num_blocks
         if full_block_tokens - num_computed_tokens < self.offloaded_block_size:
-            # we can load less than a block, skip
+            # we can't load less than a block, skip
             return 0, False
 
         start_block_idx = num_computed_tokens // self.offloaded_block_size
@@ -358,12 +358,13 @@ class OffloadingConnectorScheduler:
     def update_state_after_alloc(
         self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
+        # No external tokens to load. This also happens when OffloadingConnector isn't
+        # the connector chosen to load tokens by the MultiConnector.
+        if num_external_tokens == 0:
+            return
         self._requests[request.request_id] = request
         # the block ids are updated in _get_reqs_to_store
         self._request_block_ids[request.request_id] = []
-
-        if num_external_tokens == 0:
-            return
 
         block_groups = blocks.get_block_ids()
         block_ids = block_groups[0]
@@ -405,6 +406,10 @@ class OffloadingConnectorScheduler:
         reqs_to_store: dict[ReqId, TransferSpec] = {}
         # iterate over both new and cached requests
         for req_id, new_block_id_groups, preempted in yield_req_data(scheduler_output):
+            if req_id not in self._requests:
+                # Requests wasn't tracked, meaning we forfeit the possibility of save.
+                # This is useful when another connector is concurrently loading blocks.
+                continue
             if preempted:
                 self._request_block_ids[req_id] = []
 
@@ -695,7 +700,6 @@ class OffloadingConnectorWorker:
             elif pending_req_jobs is not None:
                 finished_sending.add(req_id)
                 del self._store_jobs[req_id]
-
         return finished_sending, finished_recving
 
     def get_kv_connector_stats(self) -> KVConnectorStats | None:
