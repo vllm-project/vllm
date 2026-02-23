@@ -36,7 +36,7 @@ from scipy.io import wavfile
 from transformers.feature_extraction_utils import BatchFeature
 
 from vllm.config import ModelConfig, SpeechToTextConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs.data import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsMultiModal,
@@ -814,14 +814,13 @@ class KimiAudioForConditionalGeneration(
             # placeholder into a placeholder sequence of the same length as
             # audio_input_ids, ensuring vLLM's placeholder-range bookkeeping
             # matches our tensors.
-            #
-            # Return a TextPrompt (not TokensPrompt) so vLLM runs the
-            # multimodal processor on text+mm together, producing mm_kwargs
-            # that are forwarded into EngineCore.
-            prompt: PromptType = {
-                "prompt": "",
-                "multi_modal_data": {"audio": mm_audio},
-            }
+            # Return a TokensPrompt with the placeholder token directly.
+            # This avoids text-based tokenization issues and ensures the
+            # placeholder is correctly recognized by the multimodal processor.
+            prompt: PromptType = TokensPrompt(
+                prompt_token_ids=[KimiAudioASRMultiModalProcessor.PLACEHOLDER_TOKEN_ID],
+                multi_modal_data={"audio": mm_audio},
+            )
 
             return prompt
 
