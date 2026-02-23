@@ -381,6 +381,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     self.num_sms,
                 )
 
+            # Decide which top-k kernel to use based on batch size and sequence length
+            # Decision logic based on micro-benchmark results:
+            # - large_context_topk wins for batch <= 128 and seq_len > 8K
+            # - top_k_per_row_decode wins for batch > 128 or seq_len <= 8K
             _is_large_context = common_attn_metadata.max_seq_len > 8192
             use_large_context_topk = batch_size <= 128 and _is_large_context
 
