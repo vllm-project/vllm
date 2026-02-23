@@ -72,7 +72,7 @@ class TimingContext:
         stats_dict = {
             f"{stage}_secs": time_s for stage, time_s in self.stage_secs.items()
         }
-        stats_dict["total_secs"] = self.total_secs
+        stats_dict["preprocessor_total_secs"] = self.total_secs
 
         return stats_dict
 
