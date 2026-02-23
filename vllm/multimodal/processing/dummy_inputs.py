@@ -62,7 +62,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         """
         Build the multimodal input which, after processing, results in
@@ -82,7 +82,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> ProcessorInputs:
         """
         Build the input which, after processing, results in
