@@ -41,13 +41,13 @@ from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
     NestedTensors,
 )
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.multimodal.processing.processor import (
@@ -218,18 +218,19 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
         target_length = self.info.get_max_audio_array_len()
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
-                length=target_length, num_audios=num_audios, overrides=audio_overrides
+                length=target_length,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
@@ -237,8 +238,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
@@ -363,16 +363,16 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
         self,
         prompt: str | list[int],
         mm_data_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems | None,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
+            mm_uuid_items=mm_uuid_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
 
         # NOTE: The tokens are already inserted by the chat template

@@ -86,17 +86,17 @@ launch_pd() {
       --gpu-memory-utilization 0.5 \
       --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
 
-  echo ${PREFILL_BASE_CMD}
-  echo ${DECODE_BASE_CMD}
+  echo "${PREFILL_BASE_CMD}"
+  echo "${DECODE_BASE_CMD}"
   sleep 2
 
   # execute on hosts
-  ssh -tt ${PREFILL_HOST} "${PREFILL_BASE_CMD}" &
-  ssh -tt ${DECODE_HOST} "${DECODE_BASE_CMD}" &
+  ssh -tt "${PREFILL_HOST}" "${PREFILL_BASE_CMD}" &
+  ssh -tt "${DECODE_HOST}" "${DECODE_BASE_CMD}" &
   sleep 1
-  wait_for_server ${PREFILL_HOST} ${PREFILL_PORT}
+  wait_for_server "${PREFILL_HOST}" "${PREFILL_PORT}"
   sleep 1
-  wait_for_server ${DECODE_HOST} ${DECODE_PORT}
+  wait_for_server "${DECODE_HOST}" "${DECODE_PORT}"
   sleep 1
 }
 
@@ -106,8 +106,8 @@ launch_pd_proxy(){
   --prefiller-host ${PREFILL_HOST} --prefiller-port ${PREFILL_PORT} \
   --decoder-host ${DECODE_HOST} --decoder-port ${DECODE_PORT} \
   --host=${PROXY_HOST} --port ${PROXY_PORT}"
-  echo ${PROXY_BASE_CMD}
-  ssh -tt ${PROXY_HOST} "${PROXY_BASE_CMD}" &
+  echo "${PROXY_BASE_CMD}"
+  ssh -tt "${PROXY_HOST}" "${PROXY_BASE_CMD}" &
 }
 
 
@@ -121,4 +121,4 @@ PREFILL_PORT=${PREFILL_PORT} \
 DECODE_HOST=${DECODE_HOST} \
 DECODE_PORT=${DECODE_PORT} \
 PROXY_HOST=${PROXY_HOST} \
-PROXY_PORT=${PROXY_PORT} python -m pytest -s -v ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_edge_cases.py
+PROXY_PORT=${PROXY_PORT} python -m pytest -s -v "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_edge_cases.py

@@ -30,7 +30,6 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
     mm_inputs,
 )
 from vllm.multimodal.parse import (
@@ -38,6 +37,7 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
@@ -232,14 +232,13 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -773,9 +772,9 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         self,
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        mm_uuid_items: MultiModalUUIDItems | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
         tokenization_kwargs: Mapping[str, object] | None = None,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -789,9 +788,9 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         result = super().apply(
             prompt,
             mm_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
-            mm_uuids=mm_uuids,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         mm_item_counts = mm_items.get_all_counts()

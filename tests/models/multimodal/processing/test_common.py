@@ -195,6 +195,7 @@ def get_text_token_prompts(
             inputs = dummy_inputs.get_dummy_processor_inputs(
                 model_config.max_model_len,
                 mm_counts,
+                mm_options={},
             )
             text_prompt = None
             token_prompt = (
@@ -224,6 +225,7 @@ def get_text_token_prompts(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
+            mm_options={},
         )
         assert isinstance(inputs.prompt, str)
 
@@ -489,8 +491,9 @@ def _assert_inputs_equal(
     if ignore_mm_keys is None:
         ignore_mm_keys = set()
 
-    a_rest = {k: v for k, v in a.items() if k != "mm_kwargs"}
-    b_rest = {k: v for k, v in b.items() if k != "mm_kwargs"}
+    ignore_prompt_keys = ("prompt", "mm_kwargs")
+    a_rest = {k: v for k, v in a.items() if k not in ignore_prompt_keys}
+    b_rest = {k: v for k, v in b.items() if k not in ignore_prompt_keys}
 
     assert a_rest == b_rest, msg
 
