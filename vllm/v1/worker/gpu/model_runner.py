@@ -428,9 +428,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     @torch.inference_mode()
-    def _dummy_pooler_run(self, hidden_states: torch.Tensor):
+    def _dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
         assert self.pooling_runner is not None
-        return self.pooling_runner.dummy_pooler_run(hidden_states)
+        self.pooling_runner.dummy_pooler_run(hidden_states)
 
     @torch.inference_mode()
     def profile_run(self) -> None:

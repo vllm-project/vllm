@@ -7,7 +7,6 @@ import torch.nn.functional as F
 
 from vllm.model_executor.models import VllmModelForPooling, is_pooling_model
 from vllm.tasks import PoolingTask
-from vllm.v1.outputs import PoolerOutput
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
@@ -36,5 +35,5 @@ class PoolingRunner:
         last_hidden_states = F.normalize(last_hidden_states, p=2, dim=-1)
         return list(last_hidden_states.unbind(dim=0))
 
-    def dummy_pooler_run(self, hidden_states: torch.Tensor) -> PoolerOutput:
+    def dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
         return
