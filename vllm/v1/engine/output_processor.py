@@ -661,12 +661,11 @@ class OutputProcessor:
                 if (
                     isinstance(text_override, str)
                     and finish_reason is not None
-                    and hasattr(request_output, "outputs")
+                    and isinstance(request_output, RequestOutput)
                     and request_output.outputs
                 ):
                     for comp_output in request_output.outputs:
-                        if isinstance(comp_output, CompletionOutput):
-                            comp_output.text = text_override
+                        comp_output.text = text_override
 
                 if req_state.streaming_input:
                     request_output.finished = False

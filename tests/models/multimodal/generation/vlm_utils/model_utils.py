@@ -301,6 +301,7 @@ def qwen_prompt_path_encoder(
 def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4."""
     hf_processor = hf_model.processor
+    assert hf_processor is not None
 
     def processor(*args, text="", images=None, **kwargs):
         if isinstance(images, Image):
@@ -320,8 +321,8 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         return BatchFeature(data=inputs, tensor_type="pt")
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language.model.embed_tokens
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language.model.embed_tokens
     )
     return hf_model
 
@@ -329,6 +330,7 @@ def deepseekvl2_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 def gemma3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Gemma 3."""
     hf_processor = hf_model.processor
+    assert hf_processor is not None
 
     def processor(*args, **kwargs):
         return hf_processor(*args, do_pan_and_scan=True, **kwargs)
@@ -408,6 +410,7 @@ def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         hf_model.model.forward = patched_forward
 
     hf_processor = hf_model.processor
+    assert hf_processor is not None
 
     def processor(*args, text="", images=None, **kwargs):
         if images is None:
@@ -433,8 +436,8 @@ def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         )
 
     hf_model.processor = processor
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.transformer.output_layer
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.transformer.output_layer
     )
     return hf_model
 
@@ -442,6 +445,7 @@ def glm4v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 def glm4_1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4.1V."""
     hf_processor = hf_model.processor
+    assert hf_processor is not None
 
     def processor(*args, videos=None, **kwargs):
         if videos is not None and is_list_of(videos, tuple):
@@ -521,8 +525,8 @@ def h2ovl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = H2OVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -555,6 +559,7 @@ def isaac_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     # 1) Patch processor: move BatchFeature input_ids and TensorStream to model device
     # ----------------------------
     original_processor = hf_model.processor
+    assert original_processor is not None
 
     def patched_processor(*args, **kwargs):
         result = original_processor(*args, **kwargs)
@@ -782,8 +787,8 @@ def skyworkr1v_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = SkyworkR1VProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -890,8 +895,8 @@ def internvl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     img_context_token_id = hf_model.tokenizer.convert_tokens_to_ids("<IMG_CONTEXT>")
     hf_model.model.img_context_token_id = img_context_token_id
     hf_model.processor = InternVLProcessor(hf_model)
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.language_model.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.language_model.get_output_embeddings()
     )
     hf_model.model.generate = types.MethodType(_internvl_generate, hf_model.model)
     return hf_model
@@ -1029,6 +1034,7 @@ def minimax_vl_01_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Molmo."""
     hf_processor = hf_model.processor
+    assert hf_processor is not None
 
     def _processor(*args, **kwargs):
         return hf_processor.process(*args, **kwargs)
@@ -1060,8 +1066,8 @@ def molmo_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.llm.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.llm.get_output_embeddings()
     )
 
     def processor(*args, text="", images=None, **kwargs):
@@ -1096,8 +1102,8 @@ def ovis_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
 def ovis2_5_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for Ovis2."""
-    hf_model.model.get_output_embeddings = (
-        lambda: hf_model.model.llm.get_output_embeddings()
+    hf_model.model.get_output_embeddings = lambda: (
+        hf_model.model.llm.get_output_embeddings()
     )
 
     def processor(*args, text="", images=None, videos=None, **kwargs):
@@ -1160,6 +1166,7 @@ def qwen2_5_omni_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 def qwen3_vl_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     """Patches and returns an instance of the HfRunner to use for GLM4.1V."""
     hf_processor = hf_model.processor
+    assert hf_processor is not None
 
     def processor(*args, videos=None, **kwargs):
         if videos is not None and is_list_of(videos, tuple):
@@ -1211,6 +1218,7 @@ def tarsier_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     vision_encoder_info = get_vision_encoder_info(hf_model.config)
 
     hf_processor = hf_model.processor
+    assert hf_processor is not None
     if hf_processor.patch_size is None:
         hf_processor.patch_size = vision_encoder_info.get_patch_size()
 
@@ -1375,18 +1383,17 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
         pv = pv.to(device=device, dtype=dtype)
 
         features = native_model._vis_enc(pv)
-        grid_size = (
-            config.vision.crop_size // config.vision.enc_patch_size
-        )
+        grid_size = config.vision.crop_size // config.vision.enc_patch_size
         global_feat = features[0]
 
         if features.shape[0] > 1 and tilings is not None:
             tiling = _normalize_tiling(tilings)
-            local = features[1:].view(
-                -1, grid_size, grid_size, config.vision.enc_dim
-            )
+            local = features[1:].view(-1, grid_size, grid_size, config.vision.enc_dim)
             reconstructed = reconstruct_from_crops(
-                local, tiling, config.vision.overlap_margin, patch_size=1,
+                local,
+                tiling,
+                config.vision.overlap_margin,
+                patch_size=1,
             )
         else:
             reconstructed = global_feat.view(
@@ -1450,20 +1457,14 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
             # --- Prefill BOS + vision embeddings ---
             bos_emb = F.embedding(
-                torch.tensor(
-                    [[config.tokenizer.bos_id]], device=device
-                ),
+                torch.tensor([[config.tokenizer.bos_id]], device=device),
                 native_model.text.wte,
             )
-            img_input = torch.cat(
-                [bos_emb, img_emb.unsqueeze(0)], dim=1
-            )
+            img_input = torch.cat([bos_emb, img_emb.unsqueeze(0)], dim=1)
             prefix_len = img_input.size(1)  # 730
 
             mask = native_model.attn_mask[:, :, :prefix_len, :]
-            pos_ids = torch.arange(
-                prefix_len, dtype=torch.long, device=device
-            )
+            pos_ids = torch.arange(prefix_len, dtype=torch.long, device=device)
             native_model._prefill(img_input, mask, pos_ids, None)
 
             # --- Extract prompt tokens after BOS + <image> ---
@@ -1479,7 +1480,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     )
                 return sequences
 
-            prompt_tokens = ids[img_start + len(image_placeholder_ids):]
+            prompt_tokens = ids[img_start + len(image_placeholder_ids) :]
 
             # --- Prefill prompt tokens and get first logits ---
             if not prompt_tokens:
@@ -1491,35 +1492,23 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     )
                 return sequences
 
-            prompt_tensor = torch.tensor(
-                [prompt_tokens], device=device
-            )
-            prompt_emb = F.embedding(
-                prompt_tensor, native_model.text.wte
-            )
+            prompt_tensor = torch.tensor([prompt_tokens], device=device)
+            prompt_emb = F.embedding(prompt_tensor, native_model.text.wte)
             prompt_len = prompt_emb.size(1)
 
-            mask = native_model.attn_mask[
-                :, :, prefix_len : prefix_len + prompt_len, :
-            ]
+            mask = native_model.attn_mask[:, :, prefix_len : prefix_len + prompt_len, :]
             pos_ids = torch.arange(
                 prefix_len,
                 prefix_len + prompt_len,
                 dtype=torch.long,
                 device=device,
             )
-            hidden = native_model._prefill(
-                prompt_emb, mask, pos_ids, None
-            )
+            hidden = native_model._prefill(prompt_emb, mask, pos_ids, None)
             pos = prefix_len + prompt_len
 
             # Compute logits from last hidden state
-            hidden_last = native_model.text.post_ln(
-                hidden[:, -1:, :]
-            )
-            logits = native_model.text.lm_head(
-                hidden_last.squeeze(1)
-            )
+            hidden_last = native_model.text.post_ln(hidden[:, -1:, :])
+            logits = native_model.text.lm_head(hidden_last.squeeze(1))
 
             # --- Greedy decode ---
             generated = []
@@ -1544,22 +1533,12 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     torch.tensor([[next_token]], device=device),
                     native_model.text.wte,
                 )
-                mask = native_model.attn_mask[
-                    :, :, pos : pos + 1, :
-                ]
-                pos_ids_step = torch.tensor(
-                    [pos], dtype=torch.long, device=device
-                )
-                hidden = native_model._prefill(
-                    next_emb, mask, pos_ids_step, None
-                )
-                hidden_last = native_model.text.post_ln(
-                    hidden[:, -1:, :]
-                )
+                mask = native_model.attn_mask[:, :, pos : pos + 1, :]
+                pos_ids_step = torch.tensor([pos], dtype=torch.long, device=device)
+                hidden = native_model._prefill(next_emb, mask, pos_ids_step, None)
+                hidden_last = native_model.text.post_ln(hidden[:, -1:, :])
                 prev_hs = hidden_last
-                logits = native_model.text.lm_head(
-                    hidden_last.squeeze(1)
-                )
+                logits = native_model.text.lm_head(hidden_last.squeeze(1))
                 pos += 1
 
             result_ids = ids + generated
@@ -1568,8 +1547,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
             if return_dict:
                 return types.SimpleNamespace(
                     sequences=sequences,
-                    hidden_states=tuple(all_hidden_states)
-                    if output_hs else None,
+                    hidden_states=tuple(all_hidden_states) if output_hs else None,
                 )
             return sequences
 
