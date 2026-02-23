@@ -1776,6 +1776,70 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Merge with benchmark result
     result_json = {**result_json, **benchmark_result}
 
+    # Generate timeline plot if requested (before deleting detailed data)
+    timeline_path = None
+    if args.plot_timeline and (args.save_result or args.append_result):
+        try:
+            from pathlib import Path
+
+            from vllm.benchmarks.timeline_plot import generate_timeline_plot
+
+            # Prepare per-request data for timeline
+            per_request_data = []
+            start_times = benchmark_result.get("start_times", [])
+            ttfts = benchmark_result.get("ttfts", [])
+            itls = benchmark_result.get("itls", [])
+            input_lens = benchmark_result.get("input_lens", [])
+            output_lens = benchmark_result.get("output_lens", [])
+
+            if start_times and ttfts and itls:
+                for i in range(len(start_times)):
+                    # Calculate latency as ttft + sum of all itls
+                    latency = ttfts[i] + sum(itls[i]) if itls[i] else ttfts[i]
+
+                    per_request_data.append(
+                        {
+                            "start_time": start_times[i],
+                            "ttft": ttfts[i],
+                            "itl": itls[i],
+                            "latency": latency,
+                            "prompt_len": input_lens[i],
+                            "output_tokens": output_lens[i],
+                        }
+                    )
+
+                # Determine output path (will be set after file_name is determined)
+                base_model_id = model_id.split("/")[-1]
+                max_concurrency_str = (
+                    f"-concurrency{args.max_concurrency}"
+                    if args.max_concurrency is not None
+                    else ""
+                )
+                label = label or args.backend
+                if args.ramp_up_strategy is not None:
+                    file_name = f"{label}-ramp-up-{args.ramp_up_strategy}-{args.ramp_up_start_rps}qps-{args.ramp_up_end_rps}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+                else:
+                    file_name = f"{label}-{args.request_rate}qps{max_concurrency_str}-{base_model_id}-{current_dt}.json"  # noqa
+                if args.result_filename:
+                    file_name = args.result_filename
+                if args.result_dir:
+                    file_name = os.path.join(args.result_dir, file_name)
+
+                timeline_path = Path(file_name).with_suffix(".timeline.html")
+                generate_timeline_plot(per_request_data, timeline_path)
+            else:
+                print(
+                    "Warning: Timeline plot requires detailed metrics. "
+                    "Ensure the benchmark completed successfully."
+                )
+        except ImportError:
+            print(
+                "Warning: plotly is required for timeline plotting. "
+                "Install it with: pip install plotly"
+            )
+        except Exception as e:
+            print(f"Warning: Failed to generate timeline plot: {e}")
+
     if not args.save_detailed:
         # Remove fields with too many data points
         for field in [
