@@ -28,7 +28,7 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
-from vllm.v1.worker.gpu.async_utils import AsyncOutput
+from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_encoder_only_attn_metadata,
@@ -63,7 +63,7 @@ from vllm.v1.worker.gpu.kv_connector import (
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
-from vllm.v1.worker.gpu.pooling_runner import PoolingRunner
+from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
@@ -217,12 +217,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.pooling_runner = None
         if self.model_config.runner_type == "pooling":
             self.is_pooling_model = True
-            self.pooling_runner = PoolingRunner(
-                vllm_config=self.vllm_config,
-                device=self.device,
-                vocab_size=self.vocab_size,
-                req_states=self.req_states,
-            )
+            self.pooling_runner = PoolingRunner()
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -233,7 +228,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.model_config.runner_type == "generate":
             tasks.append("generate")
         if self.pooling_runner is not None:
-            tasks.extend(self.pooling_runner.get_supported_pooling_tasks(self.model))
+            tasks.extend(self.pooling_runner.get_supported_pooling_tasks())
         return tuple(tasks)
 
     def load_model(self, *args, **kwargs) -> None:
@@ -446,10 +441,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Only run sampler/pooler on last PP rank (non-last ranks return None).
         if self.is_last_pp_rank:
             assert sample_hidden_states is not None
-            if self.pooling_runner is not None:
-                self._dummy_pooler_run(hidden_states)
-            else:
+            if self.pooling_runner is None:
                 self._dummy_sampler_run(sample_hidden_states)
+            else:
+                self._dummy_pooler_run(hidden_states)
 
             if self.speculator is not None:
                 num_tokens_across_dp = make_num_tokens_across_dp(
@@ -597,10 +592,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
                 )
-            else:
-                pooling_params = new_req_data.pooling_params
-                assert pooling_params is not None
-                self.pooling_runner.add_request(req_id, pooling_params)
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -1067,20 +1058,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
 
-        if self.pooling_runner is not None and not dummy_run:
-            self.pooling_runner.update_progress(input_batch)
-            if not self.is_last_pp_rank:
-                # Non-last PP rank: return IntermediateTensors for sending.
-                assert isinstance(hidden_states, IntermediateTensors)
-                hidden_states.kv_connector_output = kv_connector_output
-                return hidden_states
-
-            # Last rank (or no PP): return pooling output directly.
-            assert isinstance(hidden_states, torch.Tensor)
-            return self.pooling_runner.pool(
-                hidden_states, input_batch, kv_connector_output
-            )
-
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert isinstance(hidden_states, IntermediateTensors)
@@ -1102,7 +1079,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
-        assert self.pooling_runner is None, "sample_tokens is not supported for pooling"
         assert self.execute_model_state is not None
         hidden_states, aux_hidden_states, input_batch, kv_connector_output = (
             self.execute_model_state
@@ -1187,3 +1163,30 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.draft_tokens_handler.get_draft_tokens()
+
+    @torch.inference_mode()
+    def pool(self) -> AsyncPoolingOutput | ModelRunnerOutput | None:
+        assert self.pooling_runner is not None
+        hidden_states, _, input_batch, kv_connector_output = self.execute_model_state
+        self.execute_model_state = None  # type: ignore
+
+        if not self.is_last_pp_rank:
+            return None
+
+        pooler_output = self.pooling_runner.pool(hidden_states, input_batch)
+        model_runner_output = ModelRunnerOutput(
+            req_ids=input_batch.req_ids,
+            req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
+            pooler_output=None,
+            kv_connector_output=kv_connector_output,
+        )
+        async_output = AsyncPoolingOutput(
+            model_runner_output=model_runner_output,
+            pooler_output=pooler_output,
+            main_stream=self.main_stream,
+            copy_stream=self.output_copy_stream,
+            copy_event=self.output_copy_event,
+        )
+        if self.use_async_scheduling:
+            return async_output
+        return async_output.get_output()

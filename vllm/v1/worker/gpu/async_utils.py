@@ -70,6 +70,35 @@ class AsyncOutput(AsyncModelRunnerOutput):
         return self.model_runner_output
 
 
+class AsyncPoolingOutput(AsyncModelRunnerOutput):
+    def __init__(
+        self,
+        model_runner_output: ModelRunnerOutput,
+        pooler_output: list[torch.Tensor | None],
+        main_stream: torch.cuda.Stream,
+        copy_stream: torch.cuda.Stream,
+        copy_event: torch.cuda.Event,
+    ):
+        self.model_runner_output = model_runner_output
+        self.pooler_output = pooler_output
+        self.main_stream = main_stream
+        self.copy_stream = copy_stream
+        self.copy_event = copy_event
+
+        with stream(copy_stream, main_stream):
+            copy_stream.wait_stream(main_stream)
+            self.pooler_output_cpu = [
+                x.to("cpu", non_blocking=True) if x is not None else None
+                for x in self.pooler_output
+            ]
+            self.copy_event.record(copy_stream)
+
+    def get_output(self) -> ModelRunnerOutput:
+        self.copy_event.synchronize()
+        self.model_runner_output.pooler_output = self.pooler_output_cpu
+        return self.model_runner_output
+
+
 def async_copy_to_np(x: torch.Tensor) -> np.ndarray:
     return x.to("cpu", non_blocking=True).numpy()
 
