@@ -844,12 +844,6 @@ class NemotronHForCausalLM(
         hf_config = vllm_config.model_config.hf_config
         intermediate_size = hf_config.mamba_num_heads * hf_config.mamba_head_dim
 
-        num_spec = (
-            vllm_config.speculative_config.num_speculative_tokens
-            if vllm_config.speculative_config
-            else 0
-        )
-
         return MambaStateShapeCalculator.mamba2_state_shape(
             intermediate_size=intermediate_size,
             tp_world_size=parallel_config.tensor_parallel_size,
@@ -858,7 +852,7 @@ class NemotronHForCausalLM(
             head_dim=hf_config.mamba_head_dim,
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
-            num_spec=num_spec,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod
