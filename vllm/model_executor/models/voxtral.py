@@ -41,13 +41,13 @@ from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
     NestedTensors,
 )
 from vllm.multimodal.parse import (
     AudioProcessorItems,
     MultiModalDataItems,
     MultiModalDataParser,
+    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs
 from vllm.multimodal.processing.processor import (
@@ -218,18 +218,19 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
 
         target_length = self.info.get_max_audio_array_len()
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
-                length=target_length, num_audios=num_audios, overrides=audio_overrides
+                length=target_length,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 
@@ -237,8 +238,7 @@ class VoxtralDummyInputsBuilder(BaseDummyInputsBuilder[VoxtralProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> ProcessorInputs:
         tokenizer = self.info.get_tokenizer()
 
@@ -291,6 +291,34 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
         # skip validation here
         ...
 
+    def _apply_hf_processor_mm_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+        processor_data, passthrough_data = self._get_hf_mm_data(mm_items)
+        audios = processor_data.get("audios", [])
+        if not isinstance(audios, list):
+            audios = [audios]
+
+        audio_config = processor._audio_processor.audio_config
+        audio_tensors: list[torch.Tensor] = []
+        for audio in audios:
+            audio = np.asarray(audio, dtype=np.float32).ravel()
+            if not audio_config.is_streaming:
+                audio = processor._audio_processor.pad(
+                    audio,
+                    processor.sampling_rate,
+                    audio_config.is_streaming,
+                )
+            audio_tensors.append(torch.tensor(audio))
+
+        result = BatchFeature({"audio_arrays": audio_tensors} if audio_tensors else {})
+        result.update(passthrough_data)
+        return result
+
     def _get_prompt_updates(
         self,
         mm_items: MultiModalDataItems,
@@ -335,16 +363,16 @@ class VoxtralMultiModalProcessor(BaseMultiModalProcessor[VoxtralProcessingInfo])
         self,
         prompt: str | list[int],
         mm_data_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems | None,
         hf_processor_mm_kwargs: Mapping[str, object],
         tokenization_kwargs: Mapping[str, object],
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         prompt_ids, mm_info, _ = super()._cached_apply_hf_processor(
             prompt=prompt,
             mm_data_items=mm_data_items,
+            mm_uuid_items=mm_uuid_items,
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
 
         # NOTE: The tokens are already inserted by the chat template
