@@ -1329,6 +1329,10 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
 
     hf_model.processor = processor
 
+    # HfMoondream doesn't implement get_output_embeddings(); patch it so
+    # conftest._hidden_states_to_seq_logprobs can compute logprobs.
+    hf_model.model.get_output_embeddings = lambda: hf_model.model.model.text.lm_head
+
     # Patch generate to use native Moondream3 vision + text pipeline.
     # The native model uses functional APIs and its own KV cache, so we
     # cannot use HuggingFace's standard generate(). Instead we run the
@@ -1337,6 +1341,7 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
     native_model = hf_model.model.model  # MoondreamModel instance
 
     from torch.nn import functional as F
+
     from vllm.model_executor.models.moondream3 import reconstruct_from_crops
 
     # Derive <image> placeholder token IDs from the tokenizer at runtime
@@ -1418,6 +1423,16 @@ def moondream3_patch_hf_runner(hf_model: HfRunner) -> HfRunner:
                     hidden_states=() if output_hs else None,
                 )
             return sequences
+
+        # Processor may return lists; extract the single element.
+        if isinstance(pixel_values, (list, tuple)):
+            pixel_values = pixel_values[0]
+        if (
+            isinstance(tilings, (list, tuple))
+            and tilings
+            and not isinstance(tilings[0], int)
+        ):
+            tilings = tilings[0]
 
         hf_model.model._setup_caches()
         native_model.use_flex_decoding = False

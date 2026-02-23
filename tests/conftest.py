@@ -371,6 +371,14 @@ class HfRunner:
         model_kwargs = model_kwargs if model_kwargs is not None else {}
         model_kwargs.setdefault("dtype", dtype)
 
+        # Allow overriding the tokenizer/processor source for models whose
+        # repos don't ship standard tokenizer/processor files (e.g.
+        # moondream3 stores its tokenizer in a separate repo). hf_processor
+        # can be either a concrete processor object or a non-None sentinel
+        # when patch_hf_runner will replace it before generation.
+        hf_tokenizer_name = model_kwargs.pop("hf_tokenizer_name", None)
+        hf_processor = model_kwargs.pop("hf_processor", None)
+
         if is_sentence_transformer:
             # Lazy init required for AMD CI
             from sentence_transformers import SentenceTransformer
@@ -418,7 +426,7 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
-                    model_name,
+                    hf_tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
                 )
             )
@@ -427,10 +435,13 @@ class HfRunner:
         # it will call torch.cuda.device_count()
         from transformers import AutoProcessor
 
-        self.processor = AutoProcessor.from_pretrained(
-            model_name,
-            trust_remote_code=trust_remote_code,
-        )
+        if hf_processor is not None:
+            self.processor = hf_processor
+        else:
+            self.processor = AutoProcessor.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code,
+            )
         if skip_tokenizer_init:
             self.tokenizer = self.processor.tokenizer
 

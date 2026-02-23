@@ -58,11 +58,16 @@ def test_processor_apply(
     prompt = "<image> \n\nQuestion: What is this?\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(prompt, mm_data, {})
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
 
     assert "prompt_token_ids" in processed_inputs
-    # Token count should be close to 729 (image) + text tokens
-    assert len(processed_inputs["prompt_token_ids"]) >= EXPECTED_IMAGE_TOKENS
+    image_placeholders = processed_inputs["mm_placeholders"]["image"]
+    assert len(image_placeholders) == 1
+    assert image_placeholders[0].length == EXPECTED_IMAGE_TOKENS
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
@@ -80,7 +85,11 @@ def test_processor_pixel_values(
     prompt = "<image> \n\nQuestion: What is this?\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(prompt, mm_data, {})
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
 
     # Check mm_kwargs contains pixel_values
     mm_kwargs = processed_inputs.get("mm_kwargs")
@@ -107,28 +116,18 @@ def test_processor_image_token_expansion(
         limit_mm_per_prompt={"image": 1},
     )
     processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
-    tokenizer = ctx.tokenizer
-
-    # The placeholder tokens for <image>
-    placeholder_tokens = tokenizer.encode("<image>", add_special_tokens=False)
-    # Should be [48, 4737, 50] = ['<', 'image', '>']
-    assert len(placeholder_tokens) == 3
 
     prompt = "<image> \n\nQuestion: Describe.\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(prompt, mm_data, {})
-    token_ids = processed_inputs["prompt_token_ids"]
-
-    # Count occurrences of the first placeholder token (used as replacement)
-    # The <image> should be expanded to 729 tokens
-    first_placeholder_token = placeholder_tokens[0]  # '<' token
-    count = token_ids.count(first_placeholder_token)
-
-    # Should have 729 image tokens
-    assert count == EXPECTED_IMAGE_TOKENS, (
-        f"Expected {EXPECTED_IMAGE_TOKENS} image tokens, got {count}"
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
     )
+    image_placeholders = processed_inputs["mm_placeholders"]["image"]
+    assert len(image_placeholders) == 1
+    assert image_placeholders[0].length == EXPECTED_IMAGE_TOKENS
 
 
 @pytest.mark.parametrize("model_id", [MOONDREAM3_MODEL_ID])
@@ -225,7 +224,11 @@ def test_chat_template_with_image(
     prompt = "<|endoftext|><image> \n\nQuestion: What is this?\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(prompt, mm_data, {})
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
     token_ids = processed_inputs["prompt_token_ids"]
 
     # BOS token (<|endoftext|>) should be token ID 0
@@ -252,7 +255,11 @@ def test_bos_token_always_first(
     prompt = "<|endoftext|><image> \n\nQuestion: Describe this image.\n\nAnswer:"
     mm_data = {"image": [image_assets[0].pil_image]}
 
-    processed_inputs = processor.apply(prompt, mm_data, {})
+    processed_inputs = processor.apply(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={},
+    )
     token_ids = processed_inputs["prompt_token_ids"]
 
     # Token ID 0 (<|endoftext|>) should be the first token

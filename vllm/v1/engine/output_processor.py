@@ -667,8 +667,8 @@ class OutputProcessor:
                     and request_output.outputs
                 ):
                     for comp_output in request_output.outputs:
-                            if isinstance(comp_output, CompletionOutput):
-                                comp_output.text = dp_text
+                        if isinstance(comp_output, CompletionOutput):
+                            comp_output.text = dp_text
 
                 if req_state.streaming_input:
                     request_output.finished = False

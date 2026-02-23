@@ -23,6 +23,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import (
@@ -62,6 +63,8 @@ from .utils import (
     make_layers,
     maybe_prefix,
 )
+
+logger = init_logger(__name__)
 
 # ============================================================================
 # Configuration
@@ -497,9 +500,9 @@ class Moondream3RegionModule(nn.Module):
     """Region module for coordinate encoding/decoding (point/detect).
 
     This module handles Fourier feature encoding of coordinates and sizes
-    for the point and detect capabilities. The weights are loaded for
-    completeness, but point/detect generation requires a custom decoding
-    loop that is incompatible with vLLM's standard serving pipeline.
+    for the point and detect capabilities. It is used by Moondream3's
+    custom detect/point decode state machine, integrated into vLLM's
+    decode loop via model runner hooks.
 
     The module is small (~14M params) and uses plain nn.Linear layers
     (replicated on all TP ranks, no parallelization needed).
@@ -836,6 +839,8 @@ class Moondream3TextMoE(nn.Module):
         # Compute local expert range
         local_expert_start = tp_rank * self.experts_per_rank
 
+        # TODO: Migrate to a fused MoE kernel once it supports Moondream3's
+        # exact GeGLU variant: gelu(h) * (g + 1).
         # Compute MoE output using loop over local experts
         out = x.new_zeros(x.shape)
 
@@ -956,6 +961,24 @@ class Moondream3Attention(nn.Module):
 
         # Prefix-LM attention length: BOS (1) + vision patches (729) = 730
         self._prefix_attn_len = config.prefix_attn  # 730
+        if self._prefix_attn_len > config.max_context:
+            raise ValueError(
+                "prefix_attn must be <= max_context, "
+                f"got {self._prefix_attn_len} > {config.max_context}."
+            )
+        # Build once and slice per prefill call to avoid allocating an N x N
+        # mask on every forward pass.
+        prefill_mask = torch.tril(
+            torch.ones(
+                1,
+                1,
+                config.max_context,
+                config.max_context,
+                dtype=torch.bool,
+            )
+        )
+        prefill_mask[:, :, :self._prefix_attn_len, :self._prefix_attn_len] = True
+        self.register_buffer("_prefill_mask", prefill_mask, persistent=False)
 
     def forward(
         self,
@@ -987,10 +1010,22 @@ class Moondream3Attention(nn.Module):
         if self.tp_size > 1:
             from vllm.distributed import tensor_model_parallel_all_gather
 
-            # All-gather q, k, v separately and concatenate in correct order
-            q_full = tensor_model_parallel_all_gather(q.contiguous())
-            k_full = tensor_model_parallel_all_gather(k.contiguous())
-            v_full = tensor_model_parallel_all_gather(v.contiguous())
+            # All-gather once, then reconstruct [q_full, k_full, v_full].
+            qkv_full_sharded = tensor_model_parallel_all_gather(qkv.contiguous())
+            q_local_dim = q.shape[-1]
+            kv_local_dim = k.shape[-1]
+            qkv_full_sharded = qkv_full_sharded.view(
+                qkv.shape[0],
+                self.tp_size,
+                q_local_dim + 2 * kv_local_dim,
+            )
+            q_full = qkv_full_sharded[:, :, :q_local_dim].reshape(qkv.shape[0], -1)
+            k_full = qkv_full_sharded[
+                :, :, q_local_dim:q_local_dim + kv_local_dim
+            ].reshape(qkv.shape[0], -1)
+            v_full = qkv_full_sharded[:, :, q_local_dim + kv_local_dim:].reshape(
+                qkv.shape[0], -1
+            )
             qkv_full = torch.cat([q_full, k_full, v_full], dim=-1).contiguous()
         else:
             qkv_full = qkv
@@ -1054,12 +1089,22 @@ class Moondream3Attention(nn.Module):
             k_4d = k.view(num_tokens, Hkv, D).transpose(0, 1).unsqueeze(0)
             v_4d = v.view(num_tokens, Hkv, D).transpose(0, 1).unsqueeze(0)
 
-            # Causal mask with bidirectional prefix region
-            bool_mask = torch.tril(
-                torch.ones(1, 1, num_tokens, num_tokens,
-                           dtype=torch.bool, device=q.device)
-            )
-            bool_mask[:, :, :P, :P] = True  # Positions 0-729 bidir
+            # Causal mask with bidirectional prefix region. Reuse the prebuilt
+            # mask when possible; some profiling paths can exceed max_context.
+            if num_tokens <= self._prefill_mask.shape[-1]:
+                bool_mask = self._prefill_mask[:, :, :num_tokens, :num_tokens]
+            else:
+                bool_mask = torch.tril(
+                    torch.ones(
+                        1,
+                        1,
+                        num_tokens,
+                        num_tokens,
+                        dtype=torch.bool,
+                        device=q.device,
+                    )
+                )
+                bool_mask[:, :, :P, :P] = True
 
             attn_output = F.scaled_dot_product_attention(
                 q_4d, k_4d, v_4d,
@@ -1237,7 +1282,8 @@ class Moondream3ProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
-        # 729 = 27x27 patches from 378x378 crop / 14 patch size
+        # Moondream3 always emits a fixed 27x27 vision grid (729 tokens)
+        # after the projection path, regardless of input crop tiling.
         return 729
 
     def get_image_size_with_most_features(self) -> ImageSize:
@@ -1426,7 +1472,6 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             config=self.config.region,
             prefix=maybe_prefix(prefix, "region"),
         )
-
         self.logits_processor = LogitsProcessor(self.config.text.vocab_size)
         self.make_empty_intermediate_tensors = self.text.make_empty_intermediate_tensors
 
@@ -1590,7 +1635,16 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             reconstructed = global_features.view(grid_size, grid_size, enc_dim)
 
         recon = reconstructed.permute(2, 0, 1).contiguous()
+        # Mirror HF reference behavior: reconstructed local features are pooled
+        # to enc_n_layers x enc_n_layers. For moondream3-preview this is 27x27.
         pooled_size = self.config.vision.enc_n_layers
+        if pooled_size != grid_size:
+            logger.warning_once(
+                "Moondream3 pooled_size (%d) differs from crop grid (%d). "
+                "Using enc_n_layers to match HF reference behavior.",
+                pooled_size,
+                grid_size,
+            )
         recon = F.adaptive_avg_pool2d(recon, output_size=(pooled_size, pooled_size))
         recon = recon.permute(1, 2, 0).contiguous().view(-1, enc_dim)
 
