@@ -4814,6 +4814,13 @@ class GPUModelRunner(
                     for_cudagraph_capture=is_graph_capturing,
                     slot_mappings=slot_mappings_by_group,
                 )
+                # Record the event after CPU→GPU DMA transfers (seq_lens,
+                # query_start_loc, attention metadata) so the next
+                # execute_model()'s synchronize_input_prep() will wait for
+                # these transfers to complete before overwriting the shared
+                # CPU pinned buffers.
+                if self.prepare_inputs_event is not None:
+                    self.prepare_inputs_event.record()
 
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
