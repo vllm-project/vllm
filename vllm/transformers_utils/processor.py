@@ -34,7 +34,10 @@ def _transformers_v4_compatibility_from_pretrained() -> Any:
     `ProcessorMixin` subclass, and then pass these arbitrary attributes directly to
     `ProcessorMixin.__init__`, which is no longer allowed in Transformers v5. For
     backward compatibility, we intercept these optional attributes and set them on the
-    processor instance before calling the original `ProcessorMixin.__init__`."""
+    processor instance before calling the original `ProcessorMixin.__init__`.
+
+    This can be removed if `Molmo2ForConditionalGeneration` is upstreamed to
+    Transformers."""
 
     original_init = ProcessorMixin.__init__
 
