@@ -631,7 +631,7 @@ class Worker(WorkerBase):
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         if self.use_v2_model_runner and self.model_runner.is_pooling_model:
-            return self.model_runner.pool()
+            return self.model_runner.pool()  # type: ignore
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
