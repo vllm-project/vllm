@@ -245,10 +245,8 @@ class Worker(WorkerBase):
 
         # Reset attention metadata builders' cached state
         # (e.g. FlashInfer wrappers that reference kv_cache-tagged memory).
-        if (tags is None or "kv_cache" in tags) and hasattr(
-            self.model_runner, "attn_metadata_builders"
-        ):
-            for builder in self.model_runner.attn_metadata_builders:
+        if tags is None or "kv_cache" in tags:
+            for builder in self._iter_attn_metadata_builders():
                 if hasattr(builder, "reset_for_sleep_mode"):
                     builder.reset_for_sleep_mode()
 
@@ -260,6 +258,17 @@ class Worker(WorkerBase):
 
     def checkpoint_restore(self) -> None:
         checkpoint_restore_distributed_state()
+
+    def _iter_attn_metadata_builders(self):
+        runner = self.model_runner
+        # V2 model runner stores builders in a top-level list.
+        if hasattr(runner, "attn_metadata_builders"):
+            yield from runner.attn_metadata_builders
+        # V1 model runner nests builders inside attn_groups.
+        elif hasattr(runner, "attn_groups"):
+            for group_list in runner.attn_groups:
+                for group in group_list:
+                    yield from group.metadata_builders
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
