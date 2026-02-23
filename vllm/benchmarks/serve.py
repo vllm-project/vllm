@@ -1809,7 +1809,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             file_name = os.path.join(args.result_dir, file_name)
 
     # Generate timeline plot if requested
-    timeline_path = None
     if args.plot_timeline:
         try:
             from pathlib import Path
