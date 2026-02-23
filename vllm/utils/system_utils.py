@@ -177,10 +177,6 @@ def _maybe_force_spawn():
         )
         os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
 
-    # (ROCm): Sync GPU visibility env vars so spawned children inherit
-    # consistent values.
-    _sync_visible_devices_env_vars()
-
 
 def get_mp_context():
     """Get a multiprocessing context with a particular method (spawn or fork).
@@ -190,6 +186,10 @@ def get_mp_context():
     VLLM_WORKER_MULTIPROC_METHOD.
     """
     _maybe_force_spawn()
+    # (ROCm): Sync GPU visibility env vars so spawned children inherit
+    # consistent values. Must run after _maybe_force_spawn and regardless
+    # of whether spawn was already set.
+    _sync_visible_devices_env_vars()
     mp_method = envs.VLLM_WORKER_MULTIPROC_METHOD
     return multiprocessing.get_context(mp_method)
 
