@@ -21,7 +21,7 @@ from vllm.model_executor.layers.fla.ops.layernorm_guard import (
     RMSNormGated,
     layernorm_fn,
 )
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -79,11 +79,6 @@ def is_linear_layer(layer_idx, layer_group_size):
 class BailingMoeV25MLAAttention(nn.Module):
     """
     MLA Attention for BailingMoeV2.5 full attention layers.
-    Uses MultiHeadLatentAttentionWrapper like KimiLinear.
-
-    Note: This layer does NOT inherit from MambaBase because the internal
-    MLAAttention already handles KV cache registration. For hybrid models,
-    the hybrid KV cache manager handles mixed spec types (MambaSpec + MLAAttentionSpec).
     """
 
     def __init__(
@@ -181,9 +176,6 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_a_layernorm = None
             self.q_b_proj = None
 
-        # Create rotary embedding for MLA via vLLM standard helper.
-        # Bailing uses rope_interleave=True, i.e. GPT-J style (is_neox_style=False),
-        # with half-dim rotary.
         rope_theta = getattr(config, "rope_theta", 600000)
         max_position = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
@@ -213,8 +205,6 @@ class BailingMoeV25MLAAttention(nn.Module):
             topk_indices_buffer=None,
         )
 
-        # Use MultiHeadLatentAttentionWrapper (like KimiLinear)
-        # The internal MLAAttention registers itself with prefix=".attn"
         self.mla_attn = MultiHeadLatentAttentionWrapper(
             self.hidden_size,
             self.num_local_heads,
@@ -499,10 +489,7 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         self.kv_size_per_rank = self.head_dim * self.tp_kv_heads
 
         self.use_qk_norm = getattr(config, "use_qk_norm", False)
-        # minimax / seg_la / fla
-        # TODO support fla
-        self.linear_backend = getattr(config, "linear_backend", "minimax")
-        logger.info_once(f"linear_backend in bailing_moe_linear: {self.linear_backend}")
+        self.linear_backend = "minimax"
         self.linear_scale = self.linear_backend == "minimax"
         self.linear_rope = getattr(config, "linear_rope", True)
         if hasattr(config, "use_linear_silu"):
@@ -515,8 +502,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         # Block size for lightning attention
         self.BLOCK = getattr(config, "block", 256)
 
-        # Use QKVParallelLinear for proper Q/K/V weight sharding with TP.
-        # Keep the module name aligned with checkpoint key: attention.query_key_value.
         self.query_key_value = QKVParallelLinear(
             self.hidden_size,
             self.head_dim,
@@ -556,7 +541,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
             "group_norm_size must be divisible by tp_size"
         )
 
-        # Always use BailingGroupRMSNormGate (matching SGLang behavior)
         # When group_norm_size == 1, group_size equals hidden_size // tp_size
         self.g_norm = BailingGroupRMSNormGate(
             hidden_size=self.hidden_inner_size // self.tp_size,
@@ -1170,32 +1154,21 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load checkpoint weights with compact, name-driven mapping."""
-        from vllm.model_executor.layers.fused_moe import FusedMoE
+        """Load checkpoint weights with simplified mapping."""
 
         params_dict = dict(self.named_parameters(remove_duplicate=False))
         loaded_params: set[str] = set()
 
-        stacked_params_mapping = [
+        # Stacked parameter mappings (fused projections)
+        stacked_mappings = [
             (".fused_qkv_a_proj", ".q_a_proj", 0),
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
-            (".fused_qkv_a_proj.weight_scale", ".q_a_proj.weight_scale", 0),
-            (".fused_qkv_a_proj.weight_scale", ".kv_a_proj_with_mqa.weight_scale", 1),
-            (".fused_qkv_a_proj.weight_scale_inv", ".q_a_proj.weight_scale_inv", 0),
-            (
-                ".fused_qkv_a_proj.weight_scale_inv",
-                ".kv_a_proj_with_mqa.weight_scale_inv",
-                1,
-            ),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
-            (".gate_up_proj.weight_scale", ".gate_proj.weight_scale", 0),
-            (".gate_up_proj.weight_scale", ".up_proj.weight_scale", 1),
-            (".gate_up_proj.weight_scale_inv", ".gate_proj.weight_scale_inv", 0),
-            (".gate_up_proj.weight_scale_inv", ".up_proj.weight_scale_inv", 1),
         ]
 
-        expert_params_mapping = list(
+        # Expert parameter mappings from FusedMoE
+        expert_mappings = list(
             FusedMoE.make_expert_params_mapping(
                 self,
                 ckpt_gate_proj_name="gate_proj",
@@ -1205,278 +1178,111 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 num_redundant_experts=0,
             )
         )
-        for expert_id in range(self.config.num_experts):
-            expert_params_mapping.extend(
-                [
-                    (
-                        "mlp.experts.w13_weight_scale",
-                        f"mlp.experts.{expert_id}.gate_proj.weight_scale",
-                        expert_id,
-                        "w1",
-                    ),
-                    (
-                        "mlp.experts.w13_weight_scale",
-                        f"mlp.experts.{expert_id}.up_proj.weight_scale",
-                        expert_id,
-                        "w3",
-                    ),
-                    (
-                        "mlp.experts.w2_weight_scale",
-                        f"mlp.experts.{expert_id}.down_proj.weight_scale",
-                        expert_id,
-                        "w2",
-                    ),
-                ]
-            )
 
-        def _extract_layer_idx(name: str) -> int | None:
-            if "model.layers." not in name:
-                return None
-            try:
-                return int(name.split("model.layers.")[1].split(".")[0])
-            except (IndexError, ValueError):
-                return None
-
-        def _mark_aliases(name: str) -> None:
-            loaded_params.add(name)
-            if "mlp.experts._shared_experts." in name:
-                alt_name = name.replace(
-                    "mlp.experts._shared_experts", "mlp.shared_experts"
-                )
-                if alt_name in params_dict:
-                    loaded_params.add(alt_name)
-            elif "mlp.shared_experts." in name:
-                alt_name = name.replace(
-                    "mlp.shared_experts", "mlp.experts._shared_experts"
-                )
-                if alt_name in params_dict:
-                    loaded_params.add(alt_name)
-
-            if "mlp.gate.expert_bias" in name:
-                for suffix in (
-                    "mlp.experts.e_score_correction_bias",
-                    "mlp.experts.expert_bias",
-                ):
-                    alt_name = name.replace("mlp.gate.expert_bias", suffix)
-                    if alt_name in params_dict:
-                        loaded_params.add(alt_name)
-
-            if "self_attn.kv_b_proj" in name:
-                for alt_name in (
-                    name.replace("self_attn.kv_b_proj", "self_attn.mla_attn.kv_b_proj"),
-                    name.replace(
-                        "self_attn.kv_b_proj", "self_attn.mla_attn.mla_attn.kv_b_proj"
-                    ),
-                ):
-                    if alt_name in params_dict:
-                        loaded_params.add(alt_name)
-            elif "self_attn.fused_qkv_a_proj" in name:
-                alt_name = name.replace(
-                    "self_attn.fused_qkv_a_proj", "self_attn.mla_attn.fused_qkv_a_proj"
-                )
-                if alt_name in params_dict:
-                    loaded_params.add(alt_name)
-            elif "self_attn.kv_a_layernorm" in name:
-                alt_name = name.replace(
-                    "self_attn.kv_a_layernorm", "self_attn.mla_attn.kv_a_layernorm"
-                )
-                if alt_name in params_dict:
-                    loaded_params.add(alt_name)
-            elif "self_attn.o_proj" in name and "self_attn.mla_attn.o_proj" not in name:
-                alt_name = name.replace("self_attn.o_proj", "self_attn.mla_attn.o_proj")
-                if alt_name in params_dict:
-                    loaded_params.add(alt_name)
-            elif "self_attn.q_a_layernorm" in name:
-                alt_name = name.replace(
-                    "self_attn.q_a_layernorm", "self_attn.mla_attn.q_a_layernorm"
-                )
-                if alt_name in params_dict:
-                    loaded_params.add(alt_name)
-            elif "self_attn.q_b_proj" in name:
-                alt_name = name.replace(
-                    "self_attn.q_b_proj", "self_attn.mla_attn.q_b_proj"
-                )
-                if alt_name in params_dict:
-                    loaded_params.add(alt_name)
-
-        def _load_named_param(
-            name: str, tensor: torch.Tensor, shard_id: int | None = None
-        ) -> bool:
+        def load_param(name: str, tensor: torch.Tensor, shard_id=None) -> bool:
+            """Load a single parameter."""
+            if name not in params_dict or is_pp_missing_parameter(name, self):
+                return False
             if name.endswith(".bias") and name not in params_dict:
                 return False
-            if name not in params_dict or is_pp_missing_parameter(name, self):
-                return False
+
             param = params_dict[name]
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
+
             if shard_id is None:
                 weight_loader(param, tensor)
-            else:
+            elif isinstance(shard_id, int):
                 weight_loader(param, tensor, shard_id)
-            _mark_aliases(name)
+            else:
+                # Expert param: (expert_id, shard_id)
+                weight_loader(
+                    param, tensor, name, expert_id=shard_id[0], shard_id=shard_id[1]
+                )
+
+            loaded_params.add(name)
             return True
 
-        def _load_expert_param(
-            name: str,
-            tensor: torch.Tensor,
-            expert_id: int,
-            shard_id: str,
-        ) -> bool:
-            if name not in params_dict or is_pp_missing_parameter(name, self):
-                return False
-            param = params_dict[name]
-            weight_loader = param.weight_loader
-            weight_loader(
-                param,
-                tensor,
-                name,
-                expert_id=expert_id,
-                shard_id=shard_id,
-            )
-            _mark_aliases(name)
-            return True
-
-        def _normalize_general_name(name: str) -> str | None:
-            layer_idx = _extract_layer_idx(name)
+        def normalize_name(name: str) -> str | None:
+            """Normalize checkpoint name to model parameter name."""
+            # Skip special weights
+            if name.startswith("model.mtp"):
+                return None
+            if self.config.tie_word_embeddings and "lm_head" in name:
+                return None
+            # Map attention.dense based on layer type
             if "attention.dense" in name:
-                attn_proj_name = (
+                layer_idx = (
+                    int(name.split("layers.")[1].split(".")[0])
+                    if "layers." in name
+                    else 0
+                )
+                attn_name = (
                     "self_attn.dense"
                     if is_linear_layer(layer_idx, self.config.layer_group_size)
                     else "self_attn.o_proj"
                 )
-                name = name.replace("attention.dense", attn_proj_name)
+                name = name.replace("attention.dense", attn_name)
 
-            if "attention." in name and "self_attn." not in name:
-                name = name.replace("attention.", "self_attn.")
-
+            # Standard mappings
+            name = name.replace("attention.", "self_attn.")
             name = name.replace(
                 "mlp.gate.e_score_correction_bias", "mlp.gate.expert_bias"
             )
 
             if "model.word_embeddings" in name:
-                alt_name = name.replace("model.word_embeddings", "word_embeddings")
-                if alt_name in params_dict:
-                    name = alt_name
+                alt = name.replace("model.word_embeddings", "word_embeddings")
+                if alt in params_dict:
+                    name = alt
             elif "model.norm" in name:
-                alt_name = name.replace("model.norm", "norm")
-                if alt_name in params_dict:
-                    name = alt_name
+                alt = name.replace("model.norm", "norm")
+                if alt in params_dict:
+                    name = alt
 
-            name = maybe_remap_kv_scale_name(name, params_dict)
-            return name
+            return maybe_remap_kv_scale_name(name, params_dict)
 
-        for original_name, loaded_weight in weights:
-            if original_name.startswith("model.mtp"):
-                continue
-            if "inv_freq" in original_name:
-                continue
-            if self.config.tie_word_embeddings and "lm_head" in original_name:
-                continue
-            if (
-                "rotary_emb.cos_cached" in original_name
-                or "rotary_emb.sin_cached" in original_name
-            ):
+        for orig_name, weight in weights:
+            norm_name = normalize_name(orig_name)
+            if norm_name is None:
                 continue
 
-            is_moe = (
-                "mlp.experts" in original_name
-                and "_shared_experts" not in original_name
-            )
-            handled = False
-
-            # 1) stacked mappings (fused projections)
-            for param_suffix, weight_suffix, shard_id in stacked_params_mapping:
-                if weight_suffix not in original_name:
+            # Try stacked mappings
+            loaded = False
+            for param_suf, weight_suf, shard_id in stacked_mappings:
+                if weight_suf not in norm_name:
                     continue
-                mapped_name = original_name.replace(weight_suffix, param_suffix)
-                if "attention." in mapped_name and "self_attn." not in mapped_name:
-                    mapped_name = mapped_name.replace("attention.", "self_attn.")
-
-                candidates = [mapped_name]
-                if "mlp.shared_experts." in mapped_name:
-                    candidates = [
-                        mapped_name.replace(
-                            "mlp.shared_experts", "mlp.experts._shared_experts"
-                        ),
-                        mapped_name,
-                    ]
-                for candidate in candidates:
-                    if _load_named_param(candidate, loaded_weight, shard_id):
-                        handled = True
-                        break
-                if handled:
+                mapped = norm_name.replace(weight_suf, param_suf).replace(
+                    "attention.", "self_attn."
+                )
+                if load_param(mapped, weight, shard_id):
+                    loaded = True
                     break
-            if handled:
+            if loaded:
                 continue
 
-            # 2) shared experts (non-stacked)
-            if "mlp.shared_experts." in original_name:
-                for candidate in (
-                    original_name.replace(
-                        "mlp.shared_experts", "mlp.experts._shared_experts"
-                    ),
-                    original_name,
-                ):
-                    if _load_named_param(candidate, loaded_weight):
-                        handled = True
-                        break
-                if handled:
-                    continue
-
-            # 3) routed experts
-            if is_moe:
+            # Handle expert weights
+            if "mlp.experts" in norm_name:
+                # Expert bias
                 if (
-                    "mlp.experts.e_score_correction_bias" in original_name
-                    or "mlp.experts.expert_bias" in original_name
+                    "mlp.experts.e_score_correction_bias" in norm_name
+                    or "mlp.experts.expert_bias" in norm_name
                 ):
-                    for candidate in (
-                        original_name,
-                        original_name.replace(
-                            "mlp.experts.e_score_correction_bias",
-                            "mlp.gate.expert_bias",
-                        ).replace("mlp.experts.expert_bias", "mlp.gate.expert_bias"),
-                    ):
-                        if _load_named_param(candidate, loaded_weight):
-                            handled = True
-                            break
-                    if handled:
+                    alt = norm_name.replace(
+                        "mlp.experts.e_score_correction_bias", "mlp.gate.expert_bias"
+                    ).replace("mlp.experts.expert_bias", "mlp.gate.expert_bias")
+                    if load_param(alt, weight) or load_param(norm_name, weight):
                         continue
 
-                for (
-                    param_name,
-                    weight_name,
-                    expert_id,
-                    shard_id,
-                ) in expert_params_mapping:
-                    if weight_name not in original_name:
+                # Routed experts
+                for param_name, weight_name, expert_id, shard_id in expert_mappings:
+                    if weight_name not in norm_name:
                         continue
-                    mapped_name = original_name.replace(weight_name, param_name)
-                    if _load_expert_param(
-                        mapped_name, loaded_weight, expert_id, shard_id
-                    ):
-                        handled = True
+                    mapped = norm_name.replace(weight_name, param_name)
+                    if load_param(mapped, weight, (expert_id, shard_id)):
                         break
-                if handled:
-                    continue
                 continue
 
-            # 4) general parameters
-            mapped_name = _normalize_general_name(original_name)
-            if mapped_name is None:
-                continue
-            _load_named_param(mapped_name, loaded_weight)
-
-        unloaded_params = set(params_dict.keys()) - loaded_params
-        if unloaded_params:
-            import logging
-
-            logger = logging.getLogger(__name__)
-            logger.warning(
-                "Unloaded parameters (%d): %s",
-                len(unloaded_params),
-                sorted(unloaded_params)[:20],
-            )
-            if len(unloaded_params) > 20:
-                logger.warning("... and %d more", len(unloaded_params) - 20)
+            # General parameters
+            load_param(norm_name, weight)
 
         return loaded_params
 
