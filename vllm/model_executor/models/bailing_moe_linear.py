@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
-import math
 from collections.abc import Iterable
 
 import torch
@@ -16,7 +15,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
 )
-from vllm.forward_context import ForwardContext, get_forward_context
+from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fla.ops.layernorm_guard import (
     RMSNormGated,
@@ -24,10 +23,6 @@ from vllm.model_executor.layers.fla.ops.layernorm_guard import (
 )
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.lightning_attn import (
-    lightning_attention,
-    linear_decode_forward_triton,
-)
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
@@ -37,6 +32,14 @@ from vllm.model_executor.layers.linear import (
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
+from vllm.model_executor.layers.mamba.linear_attn import (
+    MiniMaxText01LinearAttention,
+    MiniMaxText01LinearKernel,
+    MiniMaxText01RMSNormTP,
+    clear_linear_attention_cache_for_new_sequences,
+    linear_attention_decode,
+    linear_attention_prefill_and_mix,
+)
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
@@ -55,7 +58,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 )
 from vllm.model_executor.models.bailing_moe import BailingMLP
 from vllm.sequence import IntermediateTensors
-from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
@@ -388,41 +390,7 @@ class BailingMoeV25(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
-class BailingRMSNormTP(nn.Module):
-    """RMSNorm with TP support, similar to MiniMaxText01RMSNormTP."""
-
-    def __init__(self, hidden_size: int, eps: float = 1e-6) -> None:
-        super().__init__()
-        self.tp_world = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.weight = nn.Parameter(torch.ones(int(hidden_size / self.tp_world)))
-
-        self.weight.weight_loader = self.weight_loader
-        self.variance_epsilon = eps
-
-    @staticmethod
-    def weight_loader(
-        param: nn.Parameter,
-        loaded_weight: torch.Tensor,
-    ) -> None:
-        tp_world = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-
-        shard_size = loaded_weight.shape[0] // tp_world
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        param.data.copy_(loaded_weight[shard])
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        from vllm.distributed.communication_op import tensor_model_parallel_all_reduce
-
-        orig_dtype = x.dtype
-        x = x.to(torch.float32)
-        variance = x.pow(2).mean(dim=-1, keepdim=True, dtype=torch.float32)
-        if self.tp_world > 1:
-            variance = tensor_model_parallel_all_reduce(variance) / self.tp_world
-        x = x * torch.rsqrt(variance + self.variance_epsilon)
-        x = (x * self.weight).to(orig_dtype)
-        return x
+BailingRMSNormTP = MiniMaxText01RMSNormTP
 
 
 class BailingGroupRMSNormGate(RMSNormGated):
@@ -621,7 +589,9 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
 
         # Build slope tensor for linear attention decay
         num_hidden_layers = config.num_hidden_layers
-        slope_rate = self._build_slope_tensor(self.total_num_heads)
+        slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(
+            self.total_num_heads
+        )
         if num_hidden_layers <= 1:
             self.slope_rate = slope_rate * (1 + 1e-5)
         else:
@@ -637,30 +607,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         if prefix in compilation_config.static_forward_context:
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
-
-    @staticmethod
-    def _build_slope_tensor(n_attention_heads: int):
-        """Build slope tensor for linear attention decay rates."""
-
-        def get_slopes(n):
-            def get_slopes_power_of_2(n):
-                start = 2 ** (-(2 ** -(math.log2(n) - 3)))
-                ratio = start
-                return [start * ratio**i for i in range(n)]
-
-            if math.log2(n).is_integer():
-                return get_slopes_power_of_2(n)
-            else:
-                closest_power_of_2 = 2 ** math.floor(math.log2(n))
-                return (
-                    get_slopes_power_of_2(closest_power_of_2)
-                    + get_slopes(2 * closest_power_of_2)[0::2][: n - closest_power_of_2]
-                )
-
-        slopes = torch.tensor(
-            get_slopes(n_attention_heads), dtype=torch.float32
-        ).reshape(n_attention_heads, 1, 1)
-        return slopes
 
     @staticmethod
     def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
@@ -767,28 +713,9 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         if attn_metadata is not None:
             kv_cache = self.kv_cache[forward_context.virtual_engine][0]
             state_indices_tensor = attn_metadata.state_indices_tensor
-
-            # Clear cache for new sequences
-            num_prefills = getattr(attn_metadata, "num_prefills", 0)
-            if num_prefills > 0:
-                num_decode_tokens = getattr(attn_metadata, "num_decode_tokens", 0)
-                for prefill_idx in range(num_prefills):
-                    q_start = attn_metadata.query_start_loc[
-                        num_decode_tokens + prefill_idx
-                    ]
-                    q_end = attn_metadata.query_start_loc[
-                        num_decode_tokens + prefill_idx + 1
-                    ]
-                    query_len = q_end - q_start
-                    context_len = (
-                        attn_metadata.seq_lens[num_decode_tokens + prefill_idx]
-                        - query_len
-                    )
-                    if context_len == 0:
-                        block_to_clear = state_indices_tensor[
-                            num_decode_tokens + prefill_idx
-                        ]
-                        kv_cache[block_to_clear, ...] = 0
+            clear_linear_attention_cache_for_new_sequences(
+                kv_cache, state_indices_tensor, attn_metadata
+            )
 
         # Compute attention
         decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
@@ -825,92 +752,38 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         self, q, k, v, kv_cache, state_indices_tensor, attn_metadata
     ):
         """Handle prefill (mixed with decode if any)."""
-        hidden = []
-
-        for _prefill_idx in range(getattr(attn_metadata, "num_prefills", 0)):
-            if _prefill_idx >= len(attn_metadata.query_start_loc):
-                break
-            if _prefill_idx >= len(state_indices_tensor):
-                break
-
-            offset = attn_metadata.num_decode_tokens
-            _start = attn_metadata.query_start_loc[offset + _prefill_idx]
-            _end = attn_metadata.query_start_loc[offset + _prefill_idx + 1]
-            slot_id = state_indices_tensor[offset + _prefill_idx]
-
-            # Transpose to [heads, seq_len, head_dim]
-            qs = q[_start:_end].transpose(0, 1).contiguous()
-            ks = k[_start:_end].transpose(0, 1).contiguous()
-            vs = v[_start:_end].transpose(0, 1).contiguous()
-            slice_layer_cache = kv_cache[slot_id, ...]
-
-            # Use lightning attention for prefill
-            out_slice = self._jit_linear_forward_prefix(
-                qs,
-                ks,
-                vs,
-                slice_layer_cache,
-                self.tp_slope,
-                self.BLOCK,
-            )
-            hidden.append(out_slice.contiguous())
-
-        # Handle decode tokens if any
-        if attn_metadata.num_decode_tokens > 0:
-            hidden_decode = self._decode_infer(
-                q, k, v, kv_cache, state_indices_tensor, attn_metadata
-            )
-            hidden.insert(0, hidden_decode)
-
-        if not hidden:
-            return torch.empty((0, q.size(-1)), device=q.device, dtype=q.dtype)
-
-        hidden = torch.concat(hidden, dim=0).contiguous()
-        return hidden
+        return linear_attention_prefill_and_mix(
+            q=q,
+            k=k,
+            v=v,
+            kv_cache=kv_cache,
+            state_indices_tensor=state_indices_tensor,
+            attn_metadata=attn_metadata,
+            slope_rate=self.tp_slope,
+            block_size=self.BLOCK,
+            decode_fn=self._decode_infer,
+            prefix_fn=MiniMaxText01LinearKernel.jit_linear_forward_prefix,
+            layer_idx=self.layer_id,
+        )
 
     def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
         """Handle decode (single token per sequence)."""
         num_prefill_tokens = attn_metadata.num_prefill_tokens
         num_prefills = attn_metadata.num_prefills
-
-        # Get decode portion and add seq_len dimension
-        q = q[num_prefill_tokens:].unsqueeze(2).contiguous()
-        k = k[num_prefill_tokens:].unsqueeze(2).contiguous()
-        v = v[num_prefill_tokens:].unsqueeze(2).contiguous()
-        slot_id = state_indices_tensor[num_prefills:]
-
-        hidden = linear_decode_forward_triton(
-            q, k, v, kv_cache, self.tp_slope, slot_id, 32
+        hidden = linear_attention_decode(
+            q,
+            k,
+            v,
+            kv_cache,
+            self.tp_slope,
+            state_indices_tensor,
+            q_start=num_prefill_tokens,
+            q_end=None,
+            slot_start=num_prefills,
+            slot_end=None,
+            block_size=32,
         )
         return hidden
-
-    @staticmethod
-    def _jit_linear_forward_prefix(
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        kv_caches: torch.Tensor,
-        slope_rate: torch.Tensor,
-        block_size: int,
-    ) -> torch.Tensor:
-        """Lightning attention forward for prefill."""
-        from einops import rearrange
-
-        slope_rate = slope_rate.to(torch.float32)
-        should_pad_dim = q.dim() == 3
-        if should_pad_dim:
-            q = q.unsqueeze(0)
-            k = k.unsqueeze(0)
-            v = v.unsqueeze(0)
-        b, h, n, d = q.shape
-        e = d
-        kv_history = kv_caches.reshape(1, h, d, e).contiguous()
-        output, kv_history = lightning_attention(
-            q, k, v, slope_rate, block_size=block_size, kv_history=kv_history
-        )
-        kv_caches.copy_(kv_history[:, :, -1, :, :].reshape(h, d, e))
-        assert output.shape[0] == 1, "batch size must be 1"
-        return rearrange(output.squeeze(0), "h n d -> n (h d)")
 
 
 class BailingMoeV25Attention(nn.Module):
@@ -1309,7 +1182,11 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             (".fused_qkv_a_proj.weight_scale", ".q_a_proj.weight_scale", 0),
             (".fused_qkv_a_proj.weight_scale", ".kv_a_proj_with_mqa.weight_scale", 1),
             (".fused_qkv_a_proj.weight_scale_inv", ".q_a_proj.weight_scale_inv", 0),
-            (".fused_qkv_a_proj.weight_scale_inv", ".kv_a_proj_with_mqa.weight_scale_inv", 1),
+            (
+                ".fused_qkv_a_proj.weight_scale_inv",
+                ".kv_a_proj_with_mqa.weight_scale_inv",
+                1,
+            ),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
             (".gate_up_proj.weight_scale", ".gate_proj.weight_scale", 0),
@@ -1363,16 +1240,23 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         def _mark_aliases(name: str) -> None:
             loaded_params.add(name)
             if "mlp.experts._shared_experts." in name:
-                alt_name = name.replace("mlp.experts._shared_experts", "mlp.shared_experts")
+                alt_name = name.replace(
+                    "mlp.experts._shared_experts", "mlp.shared_experts"
+                )
                 if alt_name in params_dict:
                     loaded_params.add(alt_name)
             elif "mlp.shared_experts." in name:
-                alt_name = name.replace("mlp.shared_experts", "mlp.experts._shared_experts")
+                alt_name = name.replace(
+                    "mlp.shared_experts", "mlp.experts._shared_experts"
+                )
                 if alt_name in params_dict:
                     loaded_params.add(alt_name)
 
             if "mlp.gate.expert_bias" in name:
-                for suffix in ("mlp.experts.e_score_correction_bias", "mlp.experts.expert_bias"):
+                for suffix in (
+                    "mlp.experts.e_score_correction_bias",
+                    "mlp.experts.expert_bias",
+                ):
                     alt_name = name.replace("mlp.gate.expert_bias", suffix)
                     if alt_name in params_dict:
                         loaded_params.add(alt_name)
@@ -1380,7 +1264,9 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             if "self_attn.kv_b_proj" in name:
                 for alt_name in (
                     name.replace("self_attn.kv_b_proj", "self_attn.mla_attn.kv_b_proj"),
-                    name.replace("self_attn.kv_b_proj", "self_attn.mla_attn.mla_attn.kv_b_proj"),
+                    name.replace(
+                        "self_attn.kv_b_proj", "self_attn.mla_attn.mla_attn.kv_b_proj"
+                    ),
                 ):
                     if alt_name in params_dict:
                         loaded_params.add(alt_name)
@@ -1407,11 +1293,15 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 if alt_name in params_dict:
                     loaded_params.add(alt_name)
             elif "self_attn.q_b_proj" in name:
-                alt_name = name.replace("self_attn.q_b_proj", "self_attn.mla_attn.q_b_proj")
+                alt_name = name.replace(
+                    "self_attn.q_b_proj", "self_attn.mla_attn.q_b_proj"
+                )
                 if alt_name in params_dict:
                     loaded_params.add(alt_name)
 
-        def _load_named_param(name: str, tensor: torch.Tensor, shard_id: int | None = None) -> bool:
+        def _load_named_param(
+            name: str, tensor: torch.Tensor, shard_id: int | None = None
+        ) -> bool:
             if name.endswith(".bias") and name not in params_dict:
                 return False
             if name not in params_dict or is_pp_missing_parameter(name, self):
@@ -1458,7 +1348,9 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             if "attention." in name and "self_attn." not in name:
                 name = name.replace("attention.", "self_attn.")
 
-            name = name.replace("mlp.gate.e_score_correction_bias", "mlp.gate.expert_bias")
+            name = name.replace(
+                "mlp.gate.e_score_correction_bias", "mlp.gate.expert_bias"
+            )
 
             if "model.word_embeddings" in name:
                 alt_name = name.replace("model.word_embeddings", "word_embeddings")
@@ -1479,10 +1371,16 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 continue
             if self.config.tie_word_embeddings and "lm_head" in original_name:
                 continue
-            if "rotary_emb.cos_cached" in original_name or "rotary_emb.sin_cached" in original_name:
+            if (
+                "rotary_emb.cos_cached" in original_name
+                or "rotary_emb.sin_cached" in original_name
+            ):
                 continue
 
-            is_moe = "mlp.experts" in original_name and "_shared_experts" not in original_name
+            is_moe = (
+                "mlp.experts" in original_name
+                and "_shared_experts" not in original_name
+            )
             handled = False
 
             # 1) stacked mappings (fused projections)
@@ -1496,7 +1394,9 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 candidates = [mapped_name]
                 if "mlp.shared_experts." in mapped_name:
                     candidates = [
-                        mapped_name.replace("mlp.shared_experts", "mlp.experts._shared_experts"),
+                        mapped_name.replace(
+                            "mlp.shared_experts", "mlp.experts._shared_experts"
+                        ),
                         mapped_name,
                     ]
                 for candidate in candidates:
@@ -1511,7 +1411,9 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             # 2) shared experts (non-stacked)
             if "mlp.shared_experts." in original_name:
                 for candidate in (
-                    original_name.replace("mlp.shared_experts", "mlp.experts._shared_experts"),
+                    original_name.replace(
+                        "mlp.shared_experts", "mlp.experts._shared_experts"
+                    ),
                     original_name,
                 ):
                     if _load_named_param(candidate, loaded_weight):
@@ -1539,11 +1441,18 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                     if handled:
                         continue
 
-                for param_name, weight_name, expert_id, shard_id in expert_params_mapping:
+                for (
+                    param_name,
+                    weight_name,
+                    expert_id,
+                    shard_id,
+                ) in expert_params_mapping:
                     if weight_name not in original_name:
                         continue
                     mapped_name = original_name.replace(weight_name, param_name)
-                    if _load_expert_param(mapped_name, loaded_weight, expert_id, shard_id):
+                    if _load_expert_param(
+                        mapped_name, loaded_weight, expert_id, shard_id
+                    ):
                         handled = True
                         break
                 if handled:
@@ -1608,31 +1517,3 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
     @classmethod
     def get_mamba_state_copy_func(cls) -> tuple:
         return MambaStateCopyFuncCalculator.linear_attention_state_copy_func()
-
-
-def linear_attention(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    positions: torch.Tensor,
-    layer_name: str,
-) -> None:
-    forward_context: ForwardContext = get_forward_context()
-    self = forward_context.no_compile_layers[layer_name]
-    self._forward(hidden_states=hidden_states, output=output, positions=positions)
-
-
-def linear_attention_fake(
-    hidden_states: torch.Tensor,
-    output: torch.Tensor,
-    positions: torch.Tensor,
-    layer_name: str,
-) -> None:
-    return
-
-
-direct_register_custom_op(
-    op_name="linear_attention",
-    op_func=linear_attention,
-    mutates_args=["output"],
-    fake_impl=linear_attention_fake,
-)
