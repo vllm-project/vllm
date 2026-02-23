@@ -988,7 +988,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_transformers_version="4.57",
         transformers_version_reason={
-            "hf": "Custom processor code is not compatible with Transformers v5."
+            "vllm": "Custom processor code is not compatible with Transformers v5."
         },
     ),
     "Ovis2_6ForCausalLM": _HfExamplesInfo(
@@ -999,7 +999,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_transformers_version="4.57",
         transformers_version_reason={
-            "hf": "Custom processor code is not compatible with Transformers v5."
+            "vllm": "Custom processor code is not compatible with Transformers v5."
         },
     ),
     "PaddleOCRVLForConditionalGeneration": _HfExamplesInfo(
