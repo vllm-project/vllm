@@ -429,10 +429,11 @@ class KimiAudioForConditionalGeneration(
 
     skip_warmup_audio_preprocessing: ClassVar[bool] = True
 
-    # NOTE: Following Whisper's pattern - do NOT set supports_multimodal_raw_input_only.
-    # The multimodal processor handles audio encoding and returns pre-computed
-    # embeddings. This avoids batch packing issues that cause concurrent request
-    # corruption.
+    # NOTE: Kimi-Audio requires raw multimodal inputs because audio processing
+    # uses the model's own VQ-adaptor weights. Unlike Whisper which has a
+    # separate encoder, Kimi-Audio's audio mixing must happen inside the model
+    # using model parameters.
+    supports_multimodal_raw_input_only = True
 
     def __init__(self, *, vllm_config, prefix: str = "", **kwargs):
         super().__init__(vllm_config=vllm_config, prefix=prefix, **kwargs)
@@ -470,77 +471,44 @@ class KimiAudioForConditionalGeneration(
             )
 
     def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: Any | None = None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
-    ) -> torch.Tensor:
-        """Apply token embeddings, merging multimodal embeddings if provided.
+        self, input_ids: torch.Tensor, **kwargs: object
+    ) -> torch.Tensor:  # type: ignore[override]
+        """Process input IDs with audio feature mixing.
 
-        For Kimi-Audio, embed_multimodal() already produces fully mixed embeddings
-        (token + audio + text), so we return them directly when available.
+        This method handles raw multimodal inputs (whisper features, masks, etc.)
+        and mixes them with token embeddings. Called by vLLM during forward pass.
         """
-        # If we have pre-computed multimodal embeddings from embed_multimodal(),
-        # return them directly (they already contain the mixed audio features)
-        if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
-            # embeddings is a tuple of tensors, one per audio item
-            # For single audio item, just return the first (and only) embedding
-            if isinstance(multimodal_embeddings, (list, tuple)):
-                return multimodal_embeddings[0]
-            return multimodal_embeddings
+        # Pop V1-only kwargs we don't use directly.
+        kwargs.pop("multimodal_embeddings", None)
+        whisper_input_features = kwargs.pop("whisper_input_features", None)
+        is_continuous_mask = kwargs.pop("is_continuous_mask", None)
+        text_input_ids = kwargs.pop("text_input_ids", None)
+        audio_input_ids = kwargs.pop("audio_input_ids", None)
 
-        # Fallback: return base token embeddings
-        return self.model.embed_tokens(input_ids)
-
-    # Transcriptions API support
-
-    supported_languages: ClassVar[Mapping[str, str]] = ISO639_1_SUPPORTED_LANGS
-
-    supports_transcription: ClassVar[Literal[True]] = True
-
-    def embed_multimodal(self, **kwargs: object) -> tuple[torch.Tensor, ...]:
-        """Process audio features and return mixed embeddings.
-
-        Following Whisper's pattern, this method is called by vLLM's multimodal
-        pipeline to get pre-computed embeddings. The embeddings are then passed
-        to embed_input_ids() which merges them with text embeddings.
-        """
-        # Extract multimodal tensors from kwargs
-        whisper_input_features = kwargs.get("whisper_input_features")
-        is_continuous_mask = kwargs.get("is_continuous_mask")
-        text_input_ids = kwargs.get("text_input_ids")
-        audio_input_ids = kwargs.get("audio_input_ids")
-
-        if not isinstance(whisper_input_features, torch.Tensor):
-            return ()
-
-        # Flatten inputs (handle batched inputs)
         flat_whisper = _flatten_feature_inputs(whisper_input_features)
         flat_mask = _flatten_seq_inputs(is_continuous_mask)
         flat_text_ids = _flatten_seq_inputs(text_input_ids)
         flat_audio_ids = _flatten_seq_inputs(audio_input_ids)
 
-        # Determine the true input IDs to use (audio stream preferred)
-        if isinstance(flat_audio_ids, torch.Tensor):
+        true_input_ids = input_ids
+        if isinstance(flat_audio_ids, torch.Tensor) and (
+            not isinstance(input_ids, torch.Tensor)
+            or flat_audio_ids.shape[-1] == input_ids.shape[-1]
+        ):
+            # Kimi-Audio uses the audio token stream as the base input ids.
             true_input_ids = flat_audio_ids
-        elif isinstance(flat_text_ids, torch.Tensor):
+        elif isinstance(flat_text_ids, torch.Tensor) and (
+            not isinstance(input_ids, torch.Tensor)
+            or flat_text_ids.shape[-1] == input_ids.shape[-1]
+        ):
+            # Fallback to text token stream if audio ids are unavailable.
             true_input_ids = flat_text_ids
-        else:
-            # Fallback: create dummy input IDs
-            true_input_ids = torch.zeros(
-                flat_whisper.shape[0],
-                dtype=torch.long,
-                device=flat_whisper.device,
-            )
 
-        # Get base token embeddings
+        # Base token embeddings. vLLM uses flattened token tensors, so
+        # embed_tokens returns [S, H] for [S] input ids.
         emb = self.model.embed_tokens(true_input_ids)
         device = emb.device
-        dtype = emb.dtype
 
-        # Process mask
         mask = None
         if isinstance(flat_mask, torch.Tensor):
             mask = flat_mask.to(device)
@@ -549,11 +517,10 @@ class KimiAudioForConditionalGeneration(
             if mask.dim() != 1:
                 mask = mask.reshape(-1)
 
-        # Process whisper features through VQ-adaptor and mix
+        # Add whisper features on masked positions.
         if isinstance(flat_whisper, torch.Tensor):
-            whisper_feats = flat_whisper.to(device=device, dtype=dtype)
+            whisper_feats = flat_whisper.to(device=device, dtype=emb.dtype)
 
-            # Handle shape mismatch
             if whisper_feats.shape[0] != emb.shape[0]:
                 if mask is not None and mask.shape[0] == emb.shape[0]:
                     expanded = emb.new_zeros((emb.shape[0], whisper_feats.shape[-1]))
@@ -572,7 +539,8 @@ class KimiAudioForConditionalGeneration(
                 else:
                     logger.warning(
                         "[Kimi-Audio] whisper_input_features length mismatch: "
-                        "expected %d tokens but got %d features; skipping.",
+                        "expected %d tokens but got %d "
+                        "features; skipping conditioning.",
                         emb.shape[0],
                         whisper_feats.shape[0],
                     )
@@ -585,33 +553,80 @@ class KimiAudioForConditionalGeneration(
                 if whisper_feats.shape[-1] == emb.shape[-1]:
                     whisper_emb = whisper_feats
                 else:
-                    # VQ-adaptor expects [S, B, F]
+                    # vq_adaptor expects [S, B, F]. Convert from [S, F] to [S, 1, F].
                     whisper_sbF = (
                         whisper_feats.unsqueeze(1)
                         if whisper_feats.dim() == 2
                         else whisper_feats
                     )
+                    # Use the model's vq_adaptor to project raw Whisper features.
                     whisper_emb = self.model.vq_adaptor(whisper_sbF).squeeze(1)
 
                 if mask is not None:
                     mask_f = mask[:, None]
                     whisper_emb = whisper_emb * mask_f
 
-                    # Kimi-Audio mixing formula: (emb + whisper) * sqrt(2)
+                    # Use a Python scalar constant to keep CUDA graph capture
+                    # allocation-free.
                     sqrt2 = math.sqrt(2.0)
                     encoder_add = (emb + whisper_emb) * sqrt2
                     emb = emb * (~mask_f) + encoder_add * mask_f
+                else:
+                    logger.warning(
+                        "[Kimi-Audio] Missing is_continuous_mask; "
+                        "skipping conditioning."
+                    )
 
-        # Add text embeddings if present
+        # Add aligned text embeddings (instruction etc.)
         if isinstance(flat_text_ids, torch.Tensor):
             text_ids = flat_text_ids.to(device)
             text_emb = self.model.embed_tokens(text_ids)
+            # Match original model behavior: if any text ids are non-zero,
+            # add the full text embedding stream (including padding tokens).
             has_text = (text_ids != 0).any()
             emb = emb + text_emb * has_text.to(dtype=emb.dtype)
 
-        # Return as tuple (one item per audio input)
-        # Split by batch if needed - for now assume single audio item
-        return (emb,)
+        return emb
+
+    # Transcriptions API support
+
+    supported_languages: ClassVar[Mapping[str, str]] = ISO639_1_SUPPORTED_LANGS
+
+    supports_transcription: ClassVar[Literal[True]] = True
+
+    def embed_multimodal(self, **kwargs: object):
+        # vLLM expects one embedding tensor per multimodal item.
+        # We don't actually *use* mm embeddings for Kimi-Audio ASR (we construct
+        # inputs_embeds inside forward()), but we must return correctly-shaped
+        # placeholders to satisfy vLLM's startup/profile checks.
+
+        feats = kwargs.get("whisper_input_features")
+
+        if not isinstance(feats, torch.Tensor):
+            return []
+
+        # feats: [B, S, F] or [S, F]
+
+        if feats.dim() == 3:
+            s = int(feats.shape[1])
+
+        elif feats.dim() == 2:
+            s = int(feats.shape[0])
+
+        else:
+            s = 1
+
+        hidden = int(
+            getattr(self.config, "hidden_size", self.model.embed_tokens.embedding_dim)
+        )
+
+        dtype = self.model.embed_tokens.weight.dtype
+
+        device = feats.device
+
+        # Return one item (since we limit audio=1).
+
+        return (torch.zeros((max(s, 1), hidden), device=device, dtype=dtype),)
 
     # Text-only logits masking (avoid audio token generation)
 
@@ -853,9 +868,82 @@ class KimiAudioForConditionalGeneration(
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> torch.Tensor | Any:
-        # Forward pass delegates to Qwen2ForCausalLM.
-        # Audio encoding and mixing is now handled by the multimodal processor
-        # (following Whisper's pattern), which returns pre-computed embeddings.
+        # Pull out multimodal tensors added by KimiAudioASRMultiModalProcessor.
+        whisper_input_features = kwargs.pop("whisper_input_features", None)
+        is_continuous_mask = kwargs.pop("is_continuous_mask", None)
+        text_input_ids = kwargs.pop("text_input_ids", None)
+        audio_input_ids = kwargs.pop("audio_input_ids", None)
+
+        # vLLM forward provides input_ids (bookkeeping ids). For Kimi-Audio we
+        # may also receive `audio_input_ids` containing the true ids.
+        true_input_ids = input_ids
+        if isinstance(audio_input_ids, torch.Tensor) and (
+            not isinstance(input_ids, torch.Tensor)
+            or audio_input_ids.shape[-1] == input_ids.shape[-1]
+        ):
+            true_input_ids = audio_input_ids
+        elif isinstance(text_input_ids, torch.Tensor) and (
+            not isinstance(input_ids, torch.Tensor)
+            or text_input_ids.shape[-1] == input_ids.shape[-1]
+        ):
+            true_input_ids = text_input_ids
+
+        if isinstance(true_input_ids, torch.Tensor) and true_input_ids.dim() == 3:
+            true_input_ids = true_input_ids.squeeze(0)
+
+        # Rebuild inputs_embeds using Kimi-Audio mixing if multimodal tensors present.
+        if (
+            isinstance(true_input_ids, torch.Tensor)
+            and whisper_input_features is not None
+        ):
+            mixed_embeds = self.embed_input_ids(
+                true_input_ids,
+                whisper_input_features=whisper_input_features,
+                is_continuous_mask=is_continuous_mask,
+                text_input_ids=text_input_ids,
+                audio_input_ids=audio_input_ids,
+            )
+
+            # Ensure mixed embeddings match expected sequence length.
+            # to avoid rotary embedding mismatches with positions tensor
+            if inputs_embeds is not None:
+                # Assert expected dimensions - mixed_embeds should be 2D for vLLM
+                assert mixed_embeds.dim() in (2, 3), (
+                    f"Expected mixed_embeds dim=2 or 3, got {mixed_embeds.dim()}"
+                )
+
+                # Reshape 3D to 2D if needed (flatten batch and sequence dims)
+                if mixed_embeds.dim() == 3:
+                    mixed_embeds = mixed_embeds.reshape(-1, mixed_embeds.shape[-1])
+
+                expected_seq_len = inputs_embeds.shape[0]
+                actual_seq_len = mixed_embeds.shape[0]
+
+                if expected_seq_len != actual_seq_len:
+                    # Pad or truncate mixed embeddings to match expected length.
+                    if actual_seq_len > expected_seq_len:
+                        # Truncate to expected length
+                        mixed_embeds = mixed_embeds[:expected_seq_len]
+                    elif actual_seq_len > 0:
+                        # Pad to expected length using the last embedding
+                        padding = mixed_embeds[-1:].expand(
+                            expected_seq_len - actual_seq_len, -1
+                        )
+                        mixed_embeds = torch.cat([mixed_embeds, padding], dim=0)
+                    else:
+                        # If no embeddings exist, create zero embeddings
+                        device = mixed_embeds.device
+                        dtype = mixed_embeds.dtype
+                        hidden_size = mixed_embeds.shape[-1]
+                        mixed_embeds = torch.zeros(
+                            expected_seq_len,
+                            hidden_size,
+                            device=device,
+                            dtype=dtype,
+                        )
+
+            inputs_embeds = mixed_embeds
+
         out = super().forward(
             input_ids=input_ids,
             positions=positions,
