@@ -76,7 +76,7 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
         return {}
 
     renderer = llm_engine.renderer
-    mm_timing_registry = renderer._mm_timing_registry
+    mm_processor_stats = renderer._mm_timing_registry.stat()
 
     encoder_stats = dict[str, dict[str, float]]()
     for worker_stats in llm_engine.collective_rpc("get_encoder_timing_stats"):
@@ -104,7 +104,7 @@ def get_timing_stats_from_engine(llm_engine: LLMEngine) -> dict[str, dict[str, f
 
     merged_stats = dict[str, dict[str, float]]()
 
-    for request_id, prep_dict in mm_timing_registry.stat().items():
+    for request_id, prep_dict in mm_processor_stats.items():
         merged_stats[request_id] = dict(prep_dict)
 
     for request_id, enc_dict in encoder_stats.items():
