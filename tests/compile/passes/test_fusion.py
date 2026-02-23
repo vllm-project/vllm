@@ -6,6 +6,11 @@ import pytest
 import torch
 
 import vllm.config
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8
+import vllm.model_executor.kernels.linear.cutlass.w8a8 as cutlass_w8a8
+import vllm.model_executor.kernels.linear.flashinfer.w8a8 as flashinfer_w8a8
+import vllm.model_executor.kernels.linear.hip.w8a8 as hip_w8a8
+import vllm.model_executor.kernels.linear.pytorch.w8a8 as pytorch_w8a8
 import vllm.plugins
 from tests.compile.backend import TestBackend
 from tests.utils import TestBlockFP8Layer, TestFP8Layer
@@ -27,23 +32,6 @@ from vllm.config import (
     VllmConfig,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
-    CutlassFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
-    FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
-    ChannelWiseTorchFP8ScaledMMLinearKernel,
-    PerTensorTorchFP8ScaledMMLinearKernel,
-    RowWiseTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
-    ROCmFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
@@ -65,15 +53,15 @@ RMS_ADD_OP = torch.ops._C.fused_add_rms_norm.default
 # Kernel and group_shape combinations: (kernel, group_shape)
 # CUDA kernels
 CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # FlashInferFP8ScaledMMLinearKernel supports both per-tensor only
-    (FlashInferFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
-    # CutlassFP8ScaledMMLinearKernel supports both per-tensor and per-token
-    (CutlassFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
-    (CutlassFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
-    # PerTensorTorchFP8ScaledMMLinearKernel only supports per-tensor
-    (PerTensorTorchFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
-    # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
-    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # flashinfer_w8a8.FpKernel supports per-tensor only
+    (flashinfer_w8a8.FpKernel, GroupShape.PER_TENSOR),
+    # cutlass_w8a8.FpKernel supports both per-tensor and per-token
+    (cutlass_w8a8.FpKernel, GroupShape.PER_TOKEN),
+    (cutlass_w8a8.FpKernel, GroupShape.PER_TENSOR),
+    # pytorch_w8a8.PerTensorFPKernel only supports per-tensor
+    (pytorch_w8a8.PerTensorFPKernel, GroupShape.PER_TENSOR),
+    # pytorch_w8a8.ChannelWiseFPKernel only supports per-token
+    (pytorch_w8a8.ChannelWiseFPKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes (no kernel abstraction)
     (None, GroupShape(1, 128)),
     (None, GroupShape(1, 64)),
@@ -81,12 +69,12 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
 
 # ROCm kernels
 ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # ROCmFP8ScaledMMLinearKernel supports per-tensor only
-    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR),
-    # RowWiseTorchFP8ScaledMMLinearKernel only supports per-token
-    (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
-    # ChannelWiseTorchFP8ScaledMMLinearKernel only supports per-token
-    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
+    # hip_w8a8.FpKernel supports per-tensor only
+    (hip_w8a8.FpKernel, GroupShape.PER_TENSOR),
+    # pytorch_w8a8.RowWiseFPKernel only supports per-token
+    (pytorch_w8a8.RowWiseFPKernel, GroupShape.PER_TOKEN),
+    # pytorch_w8a8.ChannelWiseFPKernel, only supports per-token
+    (pytorch_w8a8.ChannelWiseFPKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes (no kernel abstraction)
     (None, GroupShape(1, 128)),
     (None, GroupShape(1, 64)),
@@ -100,14 +88,14 @@ KERNEL_GROUPSHAPE_COMBINATIONS = (
 
 # For Aiter tests we toggle use_aiter_quant_op
 AITER_KERNEL_GROUPSHAPE_COMBINATIONS = [
-    # Per-token with ROCmFP8ScaledMMLinearKernel
-    (ROCmFP8ScaledMMLinearKernel, GroupShape.PER_TENSOR, False),
-    # Per-token with RowWiseTorchFP8ScaledMMLinearKernel
-    (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
-    (RowWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
-    # Per-token with ChannelWiseTorchFP8ScaledMMLinearKernel
-    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, True),
-    (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN, False),
+    # Per-token with hip_w8a8.FpKernel
+    (hip_w8a8.FpKernel, GroupShape.PER_TENSOR, False),
+    # Per-token with pytorch_w8a8.RowWiseFPKernel
+    (pytorch_w8a8.RowWiseFPKernel, GroupShape.PER_TOKEN, True),
+    (pytorch_w8a8.RowWiseFPKernel, GroupShape.PER_TOKEN, False),
+    # Per-token with pytorch_w8a8.ChannelWiseFPKernel
+    (pytorch_w8a8.ChannelWiseFPKernel, GroupShape.PER_TOKEN, True),
+    (pytorch_w8a8.ChannelWiseFPKernel, GroupShape.PER_TOKEN, False),
     # Blockwise (no kernel abstraction)
     (None, GroupShape(1, 128), True),
 ]
@@ -118,7 +106,7 @@ class TestModel(torch.nn.Module):
         self,
         hidden_size: int,
         eps: float,
-        force_kernel: FP8ScaledMMLinearKernel | None,
+        force_kernel: type[w8a8.FpKernel] | None,
         group_shape: GroupShape,
         use_aiter_fusion: bool = False,
         use_aiter_quant: bool = False,

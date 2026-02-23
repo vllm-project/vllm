@@ -35,6 +35,7 @@ from openai.types.completion import Completion
 from typing_extensions import ParamSpec
 
 import vllm.envs as envs
+import vllm.model_executor.kernels.linear.base.w8a8 as w8a8_linear
 from tests.models.utils import TextTextLogprobs
 from vllm.distributed import (
     ensure_model_parallel_initialized,
@@ -42,11 +43,8 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -1537,7 +1535,7 @@ class TestFP8Layer(torch.nn.Module):
         weight_quant_key: QuantKey,
         out_dtype: torch.dtype | None = None,
         device: torch.device | None = None,
-        force_kernel: FP8ScaledMMLinearKernel | None = None,
+        force_kernel: type[w8a8_linear.FpKernel] | None = None,
     ):
         super().__init__()
         per_tensor_weights = weight_quant_key.scale.group_shape.is_per_tensor()
