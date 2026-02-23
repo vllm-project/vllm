@@ -1390,7 +1390,33 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         f"for 2 packed modules, got {type(selected_layer_merged).__name__}"
     )
 
-    # Case 5: Plain ColumnParallelLinear (not merged) - common in many models
+    # Case 5: Subclass of MergedColumnParallelLinear with 2 packed modules
+    # (DeepSeek's fused_qkv_a_proj is a real-world example)
+    # -> MergedColumnParallelLinearWithLoRA should still be selected
+    class CustomMergedColumnParallelLinear(MergedColumnParallelLinear):
+        pass
+
+    custom_merged_layer = CustomMergedColumnParallelLinear(
+        4096, [2048, 2048], bias=False, params_dtype=torch.float16
+    )
+    assert MergedColumnParallelLinearWithLoRA.can_replace_layer(
+        source_layer=custom_merged_layer,
+        lora_config=lora_config,
+        packed_modules_list=packed_modules_two,
+    ), "MergedColumnParallelLinearWithLoRA should handle subclasses"
+
+    selected_custom_layer = from_layer(
+        custom_merged_layer,
+        max_loras=8,
+        lora_config=lora_config,
+        packed_modules_list=packed_modules_two,
+    )
+    assert isinstance(selected_custom_layer, MergedColumnParallelLinearWithLoRA), (
+        f"from_layer should select MergedColumnParallelLinearWithLoRA "
+        f"for subclassed merged layers, got {type(selected_custom_layer).__name__}"
+    )
+
+    # Case 6: Plain ColumnParallelLinear (not merged) - common in many models
     # -> ColumnParallelLinearWithLoRA should be selected
     plain_column_parallel = ColumnParallelLinear(
         4096, 4096, bias=False, params_dtype=torch.float16
@@ -1423,7 +1449,7 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         f"for plain ColumnParallelLinear, got {type(selected_plain).__name__}"
     )
 
-    # Case 6: MergedColumnParallelLinear with exactly 2 output sizes
+    # Case 7: MergedColumnParallelLinear with exactly 2 output sizes
     # and empty packed_modules_list
     # -> ColumnParallelLinearWithLoRA should NOT match (packed_modules_list != 1)
     # -> MergedColumnParallelLinearVariableSliceWithLoRA should NOT match (< 3 slices)
@@ -1441,3 +1467,16 @@ def test_variable_slice_lora_class_selection(default_vllm_config, dist_init):
         "MergedColumnParallelLinearVariableSliceWithLoRA "
         "should NOT handle 2 slices even with empty packed_modules_list"
     )
+
+
+def test_get_and_maybe_dequant_weights_accepts_lora_wrappers(dist_init):
+    from vllm.model_executor.layers.quantization.utils.quant_utils import (
+        get_and_maybe_dequant_weights,
+    )
+
+    linear = ColumnParallelLinear(4096, 4096, bias=False, params_dtype=torch.float16)
+    lora_linear = ColumnParallelLinearWithLoRA(linear)
+
+    # Should work with LoRA wrappers and return [out, in] weights.
+    dequant_weight = get_and_maybe_dequant_weights(lora_linear, out_dtype=torch.float16)
+    assert dequant_weight.shape == linear.weight.shape
