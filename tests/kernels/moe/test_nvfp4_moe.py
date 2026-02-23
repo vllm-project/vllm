@@ -221,7 +221,7 @@ def test_cutlass_fp4_moe_swiglustep(
         )
 
         kernel = mk.FusedMoEKernel(
-            make_moe_prepare_and_finalize_no_dp_ep(is_monolithic=True),
+            make_moe_prepare_and_finalize_no_dp_ep(use_monolithic=True),
             CutlassExpertsFp4(
                 moe_config=make_dummy_moe_config(),
                 quant_config=quant_config,
