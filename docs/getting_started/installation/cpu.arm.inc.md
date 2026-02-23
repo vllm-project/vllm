@@ -1,6 +1,6 @@
 # --8<-- [start:installation]
 
-vLLM offers basic model inferencing and serving on Arm CPU platform, with support NEON, data types FP32, FP16 and BF16.
+vLLM offers basic model inferencing and serving on Arm CPU platform, with support for NEON, data types FP32, FP16 and BF16.
 
 # --8<-- [end:installation]
 # --8<-- [start:requirements]
@@ -136,13 +136,29 @@ Testing has been conducted on AWS Graviton3 instances for compatibility.
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
-See [Using Docker](../../deployment/docker.md) for instructions on using the official Docker image.
+To pull the latest image:
 
-Stable vLLM Docker images are being pre-built for Arm from version 0.12.0. Available image tags are here: [https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo).
+```bash
+docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest
+```
+
+To pull an image with a specific vLLM version:
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
 docker pull public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:v${VLLM_VERSION}
+```
+
+All available image tags are here: [https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo](https://gallery.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo).
+
+You can run these images via:
+
+```bash
+docker run \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --env "HF_TOKEN=<secret>" \
+    public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:<tag> <args...>
 ```
 
 You can also access the latest code with Docker images. These are not intended for production use and are meant for CI and testing only. They will expire after several days.
@@ -156,25 +172,78 @@ docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}-arm64-
 
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
+
+## Building for your target ARM CPU
+
 ```bash
 docker build -f docker/Dockerfile.cpu \
-        --tag vllm-cpu-env .
+        --platform=linux/arm64 \
+        --build-arg VLLM_CPU_ARM_BF16=<false (default)|true> \
+        --tag vllm-cpu-env \
+        --target vllm-openai .
+```
 
-# Launching OpenAI server
+!!! note "Auto-detection by default"
+    By default, ARM CPU instruction sets (BF16, NEON, etc.) are automatically detected from the build system's CPU flags. The `VLLM_CPU_ARM_BF16` build argument is used for cross-compilation:
+
+    - `VLLM_CPU_ARM_BF16=true` - Force-enable ARM BF16 support (build with BF16 regardless of build system capabilities)
+    - `VLLM_CPU_ARM_BF16=false` - Rely on auto-detection (default)
+
+### Examples
+
+**Auto-detection build (native ARM)**
+
+```bash
+# Building on ARM64 system - platform auto-detected
+docker build -f docker/Dockerfile.cpu \
+        --tag vllm-cpu-arm64 \
+        --target vllm-openai .
+```
+
+**Cross-compile for ARM with BF16 support**
+
+```bash
+# Building on ARM64 for newer ARM CPUs with BF16
+docker build -f docker/Dockerfile.cpu \
+        --build-arg VLLM_CPU_ARM_BF16=true \
+        --tag vllm-cpu-arm64-bf16 \
+        --target vllm-openai .
+```
+
+**Cross-compile from x86_64 to ARM64 with BF16**
+
+```bash
+# Requires Docker buildx with ARM emulation (QEMU)
+docker buildx build -f docker/Dockerfile.cpu \
+        --platform=linux/arm64 \
+        --build-arg VLLM_CPU_ARM_BF16=true \
+        --build-arg max_jobs=4 \
+        --tag vllm-cpu-arm64-bf16 \
+        --target vllm-openai \
+        --load .
+```
+
+!!! note "ARM BF16 requirements"
+    ARM BF16 support requires ARMv8.6-A or later (FEAT_BF16). Supported on AWS Graviton3/4, AmpereOne, and other recent ARM processors.
+
+## Launching the OpenAI server
+
+```bash
 docker run --rm \
-            --privileged=true \
+            --security-opt seccomp=unconfined \
+            --cap-add SYS_NICE \
             --shm-size=4g \
             -p 8000:8000 \
             -e VLLM_CPU_KVCACHE_SPACE=<KV cache space> \
             -e VLLM_CPU_OMP_THREADS_BIND=<CPU cores for inference> \
-            vllm-cpu-env \
-            --model=meta-llama/Llama-3.2-1B-Instruct \
+            vllm-cpu-arm64 \
+            meta-llama/Llama-3.2-1B-Instruct \
             --dtype=bfloat16 \
             other vLLM OpenAI server arguments
 ```
 
-!!! tip
-    An alternative of `--privileged=true` is `--cap-add SYS_NICE --security-opt seccomp=unconfined`.
+!!! tip "Alternative to --privileged"
+    Instead of `--privileged=true`, use `--cap-add SYS_NICE --security-opt seccomp=unconfined` for better security.
 
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:extra-information]

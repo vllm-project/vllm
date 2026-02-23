@@ -6,7 +6,7 @@ set -e
 
 # Default values
 DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-DEEPGEMM_GIT_REF="594953acce41793ae00a1233eb516044d604bcb6"
+DEEPGEMM_GIT_REF="477618cd51baffca09c4b0b87e97c03fe827ef03"
 WHEEL_DIR=""
 
 # Parse command line arguments
@@ -65,7 +65,7 @@ fi
 
 # Extract major and minor version numbers
 CUDA_MAJOR="${CUDA_VERSION%%.*}"
-CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}"
+CUDA_MINOR="${CUDA_VERSION#"${CUDA_MAJOR}".}"
 CUDA_MINOR="${CUDA_MINOR%%.*}"
 echo "CUDA version: $CUDA_VERSION (major: $CUDA_MAJOR, minor: $CUDA_MINOR)"
 
@@ -92,7 +92,7 @@ git checkout "$DEEPGEMM_GIT_REF"
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
-rm -rf build dist *.egg-info
+rm -rf -- build dist *.egg-info 2>/dev/null || true
 
 # Build wheel
 echo "🏗️  Building DeepGEMM wheel..."

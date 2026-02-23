@@ -86,19 +86,21 @@ class DecodeBenchTestRunner:
         self._block_hasher = get_request_block_hasher(block_size, sha256)
 
         self._dummy_ctx: ForwardContext = ForwardContext(
-            no_compile_layers={}, attn_metadata={}, virtual_engine=0
+            no_compile_layers={}, attn_metadata={}, virtual_engine=0, slot_mapping={}
         )
 
     def new_request(self, token_ids: list[int]) -> Request:
         """Create a new request with given token IDs."""
         self.req_id += 1
 
+        sampling_params = SamplingParams(max_tokens=100)
+        sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+
         req = Request(
             request_id=str(self.req_id),
             prompt_token_ids=token_ids,
-            sampling_params=SamplingParams(max_tokens=100),
+            sampling_params=sampling_params,
             pooling_params=None,
-            eos_token_id=EOS_TOKEN_ID,
             block_hasher=self._block_hasher,
         )
 

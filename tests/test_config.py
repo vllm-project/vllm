@@ -13,8 +13,10 @@ from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
     ModelConfig,
+    ParallelConfig,
     PoolerConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
     update_config,
 )
@@ -40,6 +42,22 @@ def test_compile_config_repr_succeeds():
     assert "inductor_passes" in val
 
 
+def test_async_scheduling_with_pipeline_parallelism_is_allowed():
+    cfg = VllmConfig(
+        scheduler_config=SchedulerConfig(
+            max_model_len=8192,
+            is_encoder_decoder=False,
+            async_scheduling=True,
+        ),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=2,
+            distributed_executor_backend="mp",
+            nnodes=2,
+        ),
+    )
+    assert cfg.scheduler_config.async_scheduling is True
+
+
 @dataclass
 class _TestConfigFields:
     a: int
@@ -48,9 +66,6 @@ class _TestConfigFields:
 
 
 def test_get_field():
-    with pytest.raises(ValueError):
-        get_field(_TestConfigFields, "a")
-
     b = get_field(_TestConfigFields, "b")
     assert isinstance(b, Field)
     assert b.default is MISSING
@@ -160,7 +175,7 @@ def test_get_pooling_config():
     model_config = ModelConfig(model_id)
 
     assert model_config.pooler_config is not None
-    assert model_config.pooler_config.normalize
+    assert model_config.pooler_config.use_activation
     assert model_config.pooler_config.seq_pooling_type == "MEAN"
     assert model_config.pooler_config.tok_pooling_type == "ALL"
 
@@ -170,7 +185,7 @@ def test_get_pooling_config():
 )
 def test_get_pooling_config_from_args():
     model_id = "sentence-transformers/all-MiniLM-L12-v2"
-    pooler_config = PoolerConfig(seq_pooling_type="CLS", normalize=True)
+    pooler_config = PoolerConfig(seq_pooling_type="CLS", use_activation=False)
     model_config = ModelConfig(model_id, pooler_config=pooler_config)
 
     assert asdict(model_config.pooler_config) == asdict(pooler_config)
@@ -987,7 +1002,7 @@ def test_vllm_config_explicit_overrides():
     assert config.compilation_config.pass_config.fuse_attn_quant is True
 
     # Explicit cudagraph mode override on quantized model at O2
-    pass_config = PassConfig(fuse_gemm_comms=True)
+    pass_config = PassConfig(enable_qk_norm_rope_fusion=True)
     compilation_config = CompilationConfig(
         cudagraph_mode=CUDAGraphMode.NONE, pass_config=pass_config
     )
@@ -997,7 +1012,7 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.fuse_gemm_comms is True
+    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is True
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 
@@ -1105,3 +1120,23 @@ def test_needs_dp_coordination(
     vllm_config = VllmConfig(model_config=model_config, parallel_config=parallel_config)
 
     assert vllm_config.needs_dp_coordinator == expected_needs_coordinator
+
+
+def test_eagle_draft_model_config():
+    """Test that EagleDraft model config is correctly set."""
+    target_model_config = ModelConfig(
+        "meta-llama/Meta-Llama-3-8B-Instruct", trust_remote_code=True
+    )
+    speculative_config = SpeculativeConfig(
+        model="yuhuili/EAGLE-LLaMA3-Instruct-8B",
+        num_speculative_tokens=1,
+        target_model_config=target_model_config,
+        target_parallel_config=ParallelConfig(),
+    )
+    draft_model_config = speculative_config.draft_model_config
+    assert draft_model_config.hf_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_text_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.hf_config.model_type == "eagle"
+    assert draft_model_config.hf_text_config.model_type == "eagle"
+    assert draft_model_config.architectures == ["EagleLlamaForCausalLM"]
+    assert draft_model_config.architecture == "EagleLlamaForCausalLM"

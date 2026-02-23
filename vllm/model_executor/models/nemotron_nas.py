@@ -177,10 +177,15 @@ class DeciLMDecoderLayer(nn.Module):
             else:
                 intermediate_size = block_config.ffn.intermediate_size
 
+            if hasattr(block_config.ffn, "hidden_act"):
+                hidden_act = block_config.ffn.hidden_act
+            else:
+                hidden_act = config.hidden_act
+
             self.mlp = LlamaMLP(
                 hidden_size=self.hidden_size,
                 intermediate_size=intermediate_size,
-                hidden_act=config.hidden_act,
+                hidden_act=hidden_act,
                 quant_config=quant_config,
                 bias=getattr(config, "mlp_bias", False),
                 prefix=f"{prefix}.mlp",
@@ -342,7 +347,7 @@ class DeciModel(nn.Module):
                 weight_loader(param, loaded_weight)
                 loaded_params.add(scale_name)
                 continue
-            if "scale" in name:
+            if "scale" in name or "zero_point" in name:
                 # Remapping the name of FP8 kv-scale.
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
@@ -449,7 +454,7 @@ class DeciLMForCausalLM(nn.Module, SupportsLoRA, SupportsPP, HasNoOps):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

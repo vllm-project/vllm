@@ -5,133 +5,18 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 import torch
-from typing_extensions import deprecated
 
-from vllm.attention.layer import Attention
-from vllm.config import CacheConfig, ModelConfig, SchedulerConfig, VllmConfig
+from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings
 from vllm.model_executor.models.utils import extract_layer_index
-from vllm.multimodal.cache import processor_only_cache_from_config
-from vllm.multimodal.registry import MultiModalRegistry
 from vllm.platforms import current_platform
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
-from vllm.v1.attention.backend import AttentionBackend
-from vllm.v1.attention.backends.utils import AttentionMetadataBuilder
-from vllm.v1.core.encoder_cache_manager import compute_mm_encoder_budget
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 
 logger = init_logger(__name__)
-
-
-class MultiModalBudget:
-    """Helper class to calculate budget information for multi-modal models."""
-
-    def __init__(
-        self,
-        model_config: ModelConfig,
-        scheduler_config: SchedulerConfig,
-        mm_registry: MultiModalRegistry,
-    ) -> None:
-        super().__init__()
-
-        self.model_config = model_config
-        self.scheduler_config = scheduler_config
-        self.mm_registry = mm_registry
-        self.cache = cache = processor_only_cache_from_config(model_config, mm_registry)
-
-        self.max_model_len = model_config.max_model_len
-        self.max_num_reqs = scheduler_config.max_num_seqs
-
-        self.mm_limits = mm_registry.get_mm_limits_per_prompt(model_config, cache=cache)
-
-        max_tokens_by_modality = mm_registry.get_max_tokens_per_item_by_modality(
-            model_config,
-            cache=cache,
-            profiler_limits=self.mm_limits,
-        )
-
-        encoder_compute_budget, encoder_cache_size = compute_mm_encoder_budget(
-            scheduler_config,
-            max_tokens_by_modality,
-        )
-
-        self.encoder_compute_budget = encoder_compute_budget
-        self.encoder_cache_size = encoder_cache_size
-
-        max_items_per_prompt_by_modality = dict[str, int]()
-        max_items_per_batch_by_modality = dict[str, int]()
-
-        for modality, max_tokens in max_tokens_by_modality.items():
-            (
-                max_items_per_prompt,
-                max_items_per_batch,
-            ) = self.get_max_items(modality, max_tokens)
-
-            max_items_per_prompt_by_modality[modality] = max_items_per_prompt
-            max_items_per_batch_by_modality[modality] = max_items_per_batch
-
-        self.max_tokens_by_modality = max_tokens_by_modality
-        self.max_items_per_prompt_by_modality = max_items_per_prompt_by_modality
-        self.max_items_per_batch_by_modality = max_items_per_batch_by_modality
-
-    def get_modality_with_max_tokens(self) -> str:
-        max_tokens_by_modality = self.max_tokens_by_modality
-        modality, _ = max(max_tokens_by_modality.items(), key=lambda x: x[1])
-
-        return modality
-
-    def get_encoder_budget(self) -> int:
-        return min(self.encoder_compute_budget, self.encoder_cache_size)
-
-    def get_max_items(
-        self,
-        modality: str,
-        max_tokens_per_item: int,
-    ) -> tuple[int, int]:
-        if max_tokens_per_item == 0:
-            return 0, 0
-
-        # Check how many items of this modality can be supported by
-        # the encoder budget.
-        encoder_budget = self.get_encoder_budget()
-
-        # TODO: handle encoder-decoder models once we support them.
-        if encoder_budget == 0:
-            return 0, 0
-
-        max_encoder_items_per_batch = encoder_budget // max_tokens_per_item
-
-        # Check how many items of this modality can be supported by
-        # the decoder budget.
-        mm_limit = self.mm_limits[modality]
-
-        max_items_per_prompt = max(
-            1,
-            min(mm_limit, self.max_model_len // max_tokens_per_item),
-        )
-
-        scheduler_config = self.scheduler_config
-        max_num_reqs = self.max_num_reqs
-
-        if not scheduler_config.enable_chunked_prefill:
-            max_num_reqs = min(
-                max_num_reqs,
-                scheduler_config.max_num_batched_tokens // max_tokens_per_item,
-            )
-
-        max_decoder_items_per_batch = max_num_reqs * max_items_per_prompt
-
-        max_items_per_batch = max(
-            1,
-            min(max_encoder_items_per_batch, max_decoder_items_per_batch),
-        )
-
-        return max_items_per_prompt, max_items_per_batch
-
-    def reset_cache(self) -> None:
-        if self.cache is not None:
-            self.cache.clear_cache()
 
 
 @dataclass
@@ -202,52 +87,6 @@ def sanity_check_mm_encoder_outputs(
         "instead. This is most likely due to incorrect implementation "
         "of the model's `embed_multimodal` method."
     )
-
-
-@deprecated("`scatter_mm_placeholders` is deprecated and will be removed in v0.15.0.")
-def scatter_mm_placeholders(
-    embeds: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Scatter the multimodal embeddings into a contiguous tensor that represents
-    the placeholder tokens.
-
-    [`vllm.multimodal.processing.PromptUpdateDetails.is_embed`][].
-
-    Args:
-        embeds: The multimodal embeddings.
-            Shape: `(num_embeds, embed_dim)`
-        is_embed: A boolean mask indicating which positions in the placeholder
-            tokens need to be filled with multimodal embeddings.
-            Shape: `(num_placeholders, num_embeds)`
-    """
-    if is_embed is None:
-        return embeds
-
-    placeholders = embeds.new_full(
-        (is_embed.shape[0], embeds.shape[-1]),
-        fill_value=torch.nan,
-    )
-    placeholders[is_embed] = embeds
-    return placeholders
-
-
-@deprecated("`gather_mm_placeholders` is deprecated and will be removed in v0.15.0.")
-def gather_mm_placeholders(
-    placeholders: torch.Tensor,
-    is_embed: torch.Tensor | None,
-) -> torch.Tensor:
-    """
-    Reconstructs the embeddings from the placeholder tokens.
-
-    This is the operation of [`scatter_mm_placeholders`]
-    [vllm.v1.worker.utils.scatter_mm_placeholders].
-    """
-    if is_embed is None:
-        return placeholders
-
-    return placeholders[is_embed]
 
 
 def request_memory(init_snapshot: MemorySnapshot, cache_config: CacheConfig) -> int:
@@ -355,8 +194,8 @@ def bind_kv_cache(
                 pass
             else:
                 raise NotImplementedError
-        layer_name = layer_names[0]
-        runner_kv_caches.append(kv_caches[layer_name])
+        for layer_name in layer_names:
+            runner_kv_caches.append(kv_caches[layer_name])
 
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():

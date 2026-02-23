@@ -82,7 +82,7 @@ vllm bench sweep serve \
     You can use `--dry-run` to preview the commands to be run.
 
     We only start the server once for each `--serve-params`, and keep it running for multiple `--bench-params`.
-    Between each benchmark run, we call the `/reset_prefix_cache` and `/reset_mm_cache` endpoints to get a clean slate for the next run.
+    Between each benchmark run, we call all `/reset_*_cache` endpoints to get a clean slate for the next run.
     In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
 
 !!! note
@@ -138,6 +138,63 @@ The algorithm for adjusting the SLA variable is as follows:
     SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
 
     For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
+
+### Startup
+
+`vllm bench sweep startup` runs `vllm bench startup` across parameter combinations to compare cold/warm startup time for different engine settings.
+
+Follow these steps to run the script:
+
+1. (Optional) Construct the base command to `vllm bench startup`, and pass it to `--startup-cmd` (default: `vllm bench startup`).
+2. (Optional) Reuse a `--serve-params` JSON from `vllm bench sweep serve` to vary engine settings. Only parameters supported by `vllm bench startup` are applied.
+3. (Optional) Create a `--startup-params` JSON to vary startup-specific options like iteration counts.
+4. Determine where you want to save the results, and pass that to `--output-dir`.
+
+Example `--serve-params`:
+
+```json
+[
+    {
+        "_benchmark_name": "tp1",
+        "model": "Qwen/Qwen3-0.6B",
+        "tensor_parallel_size": 1,
+        "gpu_memory_utilization": 0.9
+    },
+    {
+        "_benchmark_name": "tp2",
+        "model": "Qwen/Qwen3-0.6B",
+        "tensor_parallel_size": 2,
+        "gpu_memory_utilization": 0.9
+    }
+]
+```
+
+Example `--startup-params`:
+
+```json
+[
+    {
+        "_benchmark_name": "qwen3-0.6",
+        "num_iters_cold": 2,
+        "num_iters_warmup": 1,
+        "num_iters_warm": 2
+    }
+]
+```
+
+Example command:
+
+```bash
+vllm bench sweep startup \
+    --startup-cmd 'vllm bench startup --model Qwen/Qwen3-0.6B' \
+    --serve-params benchmarks/serve_hparams.json \
+    --startup-params benchmarks/startup_hparams.json \
+    -o benchmarks/results
+```
+
+!!! important
+    By default, unsupported parameters in `--serve-params` or `--startup-params` are ignored with a warning.
+    Use `--strict-params` to fail fast on unknown keys.
 
 ## Visualization
 

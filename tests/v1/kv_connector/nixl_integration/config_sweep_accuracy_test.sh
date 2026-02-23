@@ -14,8 +14,8 @@ tp_configs=(
   "GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=1 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny"
 )
 dp_ep_configs=(
-"DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP1, D-DPEP=2 (TP=1) 
-"DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP2, D-DPEP=2 (TP=1) 
+"DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP1, D-DPEP=2 (TP=1)
+"DP_EP=1 GPU_MEMORY_UTILIZATION=0.8 PREFILLER_TP_SIZE=2 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA+P-TP2, D-DPEP=2 (TP=1)
 )
 
 # Select config array based on DP_EP env var
@@ -32,9 +32,14 @@ run_tests() {
 
   echo "=== Running tests (${label}) ==="
   for cfg in "${configs[@]}"; do
+    local -a cfg_parts extra_args_parts
+    read -r -a cfg_parts <<< "$cfg"
+    read -r -a extra_args_parts <<< "$extra_args"
+
     echo "-> Running with ${cfg} ${extra_args:+and ${extra_args}}"
     # Use 'env' to safely set variables without eval
-    if ! env ${cfg} bash "${SCRIPT}" ${extra_args}; then
+    # keep argv splitting safe and SC2086-clean via arrays.
+    if ! env "${cfg_parts[@]}" bash "${SCRIPT}" "${extra_args_parts[@]}"; then
       echo "❌ Test failed for config: ${cfg} ${extra_args:+(${extra_args})}"
       exit 1
     fi
@@ -43,7 +48,12 @@ run_tests() {
 }
 
 # Run tests
-run_tests "default backend" ""
+if [[ -n "${ROCM_ATTN:-}" ]]; then
+  echo "ROCM_ATTN is set, running with --attention-backend ROCM_ATTN"
+  run_tests "ROCM_ATTN backend" "--attention-backend ROCM_ATTN"
+else
+  run_tests "default backend" ""
+fi
 
 # Check if FLASHINFER is set (non-empty)
 if [[ -n "${FLASHINFER:-}" ]]; then
@@ -51,4 +61,10 @@ if [[ -n "${FLASHINFER:-}" ]]; then
   run_tests "FLASHINFER backend" "--attention-backend FLASHINFER"
 else
   echo "FLASHINFER not set, skipping FLASHINFER runs."
+fi
+
+# Check if cross-layers is enabled (non-empty)
+if [[ -n "${CROSS_LAYERS_BLOCKS:-}" ]]; then
+  echo "CROSS_LAYERS_BLOCKS is set, rerunning with --enable-cross-layers"
+  run_tests "default backend" "--enable-cross-layers"
 fi

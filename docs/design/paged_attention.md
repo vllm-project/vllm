@@ -139,18 +139,14 @@ token data.
 const scalar_t* q_ptr = q + seq_idx * q_stride + head_idx * HEAD_SIZE;
 ```
 
-<p align="center">
-  <img src="../assets/design/paged_attention/query.png" alt="query" width="70%" />
-</p>
+![query](../assets/design/paged_attention/query.png)
 
 Each thread defines its own `q_ptr` which points to the assigned
 query token data on global memory. For example, if `VEC_SIZE` is 4
 and `HEAD_SIZE` is 128, the `q_ptr` points to data that contains
 total of 128 elements divided into 128 / 4 = 32 vecs.
 
-<p align="center">
-  <img src="../assets/design/paged_attention/q_vecs.png" alt="q_vecs" width="70%" />
-</p>
+![q_vecs](../assets/design/paged_attention/q_vecs.png)
 
 ```cpp
 __shared__ Q_vec q_vecs[THREAD_GROUP_SIZE][NUM_VECS_PER_THREAD];
@@ -187,9 +183,7 @@ key token at different iterations. As shown above, that `k_ptr`
 points to key token data based on `k_cache` at assigned block,
 assigned head and assigned token.
 
-<p align="center">
-  <img src="../assets/design/paged_attention/key.png" alt="key" width="70%" />
-</p>
+![key](../assets/design/paged_attention/key.png)
 
 The diagram above illustrates the memory layout for key data. It
 assumes that the `BLOCK_SIZE` is 16, `HEAD_SIZE` is 128, `x` is
@@ -202,9 +196,7 @@ iterations. Inside each rectangle, there are a total 32 vecs (128
 elements for one token) that will be processed by 2 threads (one
 thread group) separately.
 
-<p align="center">
-  <img src="../assets/design/paged_attention/k_vecs.png" alt="k_vecs" width="70%" />
-</p>
+![k_vecs](../assets/design/paged_attention/k_vecs.png)
 
 ```cpp
 K_vec k_vecs[NUM_VECS_PER_THREAD]
@@ -361,17 +353,11 @@ later steps. Now, it should store the normalized softmax result of
 
 ## Value
 
-<p align="center">
-  <img src="../assets/design/paged_attention/value.png" alt="value" width="70%" />
-</p>
+![value](../assets/design/paged_attention/value.png)
 
-<p align="center">
-  <img src="../assets/design/paged_attention/logits_vec.png" alt="logits_vec" width="50%" />
-</p>
+![logits_vec](../assets/design/paged_attention/logits_vec.png)
 
-<p align="center">
-  <img src="../assets/design/paged_attention/v_vec.png" alt="v_vec" width="70%" />
-</p>
+![v_vec](../assets/design/paged_attention/v_vec.png)
 
 Now we need to retrieve the value data and perform dot multiplication
 with `logits`. Unlike query and key, there is no thread group

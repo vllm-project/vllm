@@ -6,7 +6,6 @@ from dataclasses import field
 from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, SkipValidation, field_validator
-from pydantic.dataclasses import dataclass
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -31,16 +30,16 @@ CacheDType = Literal[
     "fp8_ds_mla",
 ]
 MambaDType = Literal["auto", "float32", "float16"]
+MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
 
 @config
-@dataclass
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[BlockSize] = None  # type: ignore
+    block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens. On CUDA devices,
     only block sizes up to 32 are supported.
 
@@ -102,6 +101,17 @@ class CacheConfig:
     Note that this requires fast CPU-GPU interconnect, as part of the model is
     loaded from CPU memory to GPU memory on the fly in each model forward pass.
     """
+    cpu_offload_params: set[str] = Field(default_factory=set)
+    """ The set of parameter name segments to target for CPU offloading.
+    Unmatched parameters are not offloaded. If this set is empty, parameters
+    are offloaded non-selectively until the memory limit defined by
+    `cpu_offload_gb` is reached.
+    Examples:
+        - For parameter name "mlp.experts.w2_weight":
+            - "experts" or "experts.w2_weight" will match.
+            - "expert" or "w2" will NOT match (must be exact segments).
+    This allows distinguishing parameters like "w2_weight" and "w2_weight_scale".
+    """
     calculate_kv_scales: bool = False
     """This enables dynamic calculation of `k_scale` and `v_scale` when
     kv_cache_dtype is fp8. If `False`, the scales will be loaded from the model
@@ -123,6 +133,15 @@ class CacheConfig:
     """The data type to use for the Mamba cache (ssm state only, conv state will
     still be controlled by mamba_cache_dtype). If set to 'auto', the data type
     for the ssm state will be determined by mamba_cache_dtype."""
+    mamba_cache_mode: MambaCacheMode = "none"
+    """The cache strategy for Mamba layers.
+    - "none": set when prefix caching is disabled.
+    - "all": cache the mamba state of all tokens at position i * block_size. This is 
+           the default behavior (for models that support it) when prefix caching is
+           enabled.
+    - "align": only cache the mamba state of the last token of each scheduler step and
+           when the token is at position i * block_size.
+    """
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)
@@ -152,13 +171,13 @@ class CacheConfig:
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
     the total buffer size summed across all TP ranks. By default, this is set
-    to None, which means no KV offloading is enabled. When set with
-    kv_offloading_backend, vLLM will enable KV cache offloading to CPU"""
+    to None, which means no KV offloading is enabled. When set, vLLM will
+    enable KV cache offloading to CPU using the kv_offloading_backend."""
 
-    kv_offloading_backend: KVOffloadingBackend | None = None
+    kv_offloading_backend: KVOffloadingBackend = "native"
     """The backend to use for KV cache offloading. Supported backends include
-    'native' (vLLM native CPU offloading), 'lmcache' This option must be used
-    together with kv_offloading_size."""
+    'native' (vLLM native CPU offloading), 'lmcache'.
+    KV offloading is only activated when kv_offloading_size is set."""
 
     def compute_hash(self) -> str:
         """

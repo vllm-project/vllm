@@ -13,6 +13,8 @@ from vllm.platforms import current_platform
 
 MODEL_NAME = "BAAI/bge-reranker-base"
 DTYPE = "bfloat16"
+input_text = "This product was excellent and exceeded my expectations"
+input_tokens = [0, 3293, 12996, 509, 40881, 136, 204839, 297, 759, 202702, 2]
 
 
 @pytest.fixture(scope="module")
@@ -25,6 +27,21 @@ def server():
 
     with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
+
+
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+def test_basic(server: RemoteOpenAIServer, model_name: str):
+    # test /v1/models
+    response = requests.get(server.url_for("/v1/models"))
+    served_model = response.json()["data"][0]["id"]
+    assert served_model == MODEL_NAME
+
+    # test /tokenize
+    response = requests.post(
+        server.url_for("/tokenize"),
+        json={"model": model_name, "prompt": input_text},
+    )
+    assert response.json()["tokens"] == input_tokens
 
 
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
@@ -170,7 +187,6 @@ async def test_use_activation(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
-    input_text = "This product was excellent and exceeded my expectations"
     response = requests.post(
         server.url_for("pooling"),
         json={
@@ -188,8 +204,6 @@ async def test_pooling_classify(server: RemoteOpenAIServer, model_name: str):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: str):
-    input_text = ["The chef prepared a delicious meal."]
-
     response = requests.post(
         server.url_for("pooling"),
         json={"model": model_name, "input": input_text, "encoding_format": "float"},
@@ -198,7 +212,7 @@ async def test_pooling_token_classify(server: RemoteOpenAIServer, model_name: st
     poolings = PoolingResponse.model_validate(response.json())
 
     assert len(poolings.data) == 1
-    assert len(poolings.data[0].data) == 11
+    assert len(poolings.data[0].data) == len(input_tokens)
     assert len(poolings.data[0].data[0]) == 1
 
 
@@ -212,12 +226,10 @@ async def test_pooling_not_supported(
         server.url_for("pooling"),
         json={
             "model": model_name,
-            "input": "test",
+            "input": input_text,
             "encoding_format": "float",
             "task": task,
         },
     )
     assert response.json()["error"]["type"] == "BadRequestError"
-    assert response.json()["error"]["message"].startswith(
-        f"Task {task} is not supported"
-    )
+    assert response.json()["error"]["message"].startswith(f"Unsupported task: {task!r}")

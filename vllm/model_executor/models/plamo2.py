@@ -9,14 +9,14 @@ import torch
 from torch import nn
 from transformers import PretrainedConfig
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import ForwardContext, get_forward_context
-from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -27,6 +27,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -63,6 +65,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
@@ -104,8 +107,8 @@ def is_mamba(config: Plamo2Config, i: int) -> bool:
 # vllm.model_executor.layers.mamba.mamba_mixer2.MambaMixer2
 # transformers.models.mamba.modeling_mamba.MambaMixer
 # --8<-- [start:plamo2_mamba_mixer]
-@CustomOp.register("plamo2_mamba_mixer")
-class Plamo2MambaMixer(MambaBase, CustomOp):
+@PluggableLayer.register("plamo2_mamba_mixer")
+class Plamo2MambaMixer(MambaBase, PluggableLayer):
     # --8<-- [end:plamo2_mamba_mixer]
 
     def __init__(self, vllm_config: VllmConfig, *, prefix: str = "", **kwargs) -> None:
@@ -230,14 +233,6 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
         dt = self.dt_proj(time_step)
         return B, C, dt
 
-    def forward_native(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        **kwargs,
-    ):
-        pass
-
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -250,7 +245,7 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
             self.prefix,
         )
 
-    def forward_cuda(
+    def forward_impl(
         self,
         hidden_states: torch.Tensor,
         output: torch.Tensor,
@@ -414,6 +409,13 @@ class Plamo2MambaMixer(MambaBase, CustomOp):
                 conv_state_indices=state_indices_tensor_d,
             )
 
+            # ROCm: Ensure contiguous tensor for bcdt_proj linear layer.
+            # causal_conv1d_update returns a non-contiguous view (stride 8192
+            # instead of 4096 for shape [batch, 4096]), causing incorrect GEMM
+            # results when batch > 1 on ROCm.
+            if current_platform.is_rocm():
+                hidden_states_d = hidden_states_d.contiguous()
+
             B, C, dt = self._project_ssm_parameters(hidden_states_d)
 
             # 3. State Space Model sequence transformation
@@ -484,7 +486,7 @@ def plamo2_mamba_mixer(
 ) -> None:
     forward_context: ForwardContext = get_forward_context()
     self = forward_context.no_compile_layers[layer_name]
-    self.forward_cuda(hidden_states=hidden_states, output=output)
+    self.forward_impl(hidden_states=hidden_states, output=output)
 
 
 def plamo2_mamba_mixer_fake(
@@ -765,7 +767,7 @@ class Plamo2Model(torch.nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -842,7 +844,7 @@ class Plamo2ForCausalLM(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
@@ -890,6 +892,10 @@ class Plamo2ForCausalLM(
             state_size=hf_config.mamba_d_state,
             conv_kernel=hf_config.mamba_d_conv,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.mamba2_state_copy_func()
 
     def compute_logits(
         self,

@@ -234,7 +234,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
                 lora_id=e.lora_id,
                 block_size=e.block_size,
                 medium=e.medium,
-                lora_name=e.lora_name,
+                lora_name=getattr(e, "lora_name", None),
             )
             for e in events
         ]

@@ -24,7 +24,7 @@ class LRUOffloadingManager(OffloadingManager):
         self.blocks: OrderedDict[BlockHash, BlockStatus] = OrderedDict()
         self.events: list[OffloadingEvent] | None = [] if enable_events else None
 
-    def lookup(self, block_hashes: Iterable[BlockHash]) -> int:
+    def lookup(self, block_hashes: Iterable[BlockHash]) -> int | None:
         hit_count = 0
         for block_hash in block_hashes:
             block = self.blocks.get(block_hash)
