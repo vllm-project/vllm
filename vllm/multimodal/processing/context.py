@@ -43,6 +43,8 @@ logger = init_logger(__name__)
 
 @dataclass
 class TimingContext:
+    """Helper class to record execution times during multi-modal processing."""
+
     enabled: bool = True
     """If disabled, `TimingContext.record` becomes a no-op."""
 
