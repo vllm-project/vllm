@@ -222,6 +222,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
 
+        # Pre-allocated buffers for the flattening path (max_decode_len > 2).
+        self.expanded_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self._expanded_block_table_buffer: torch.Tensor | None = None
+
         # See: DeepGMM/csrc/apis/attention.hpp
         self.scheduler_metadata_buffer = torch.empty(
             (self.num_sms + 1, 2), dtype=torch.int32, device=self.device
@@ -324,6 +332,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
+            # Padded CUDA graph requests have block_table entries of -1.
+            # Clamp to 0 to prevent OOB access in the DeepGEMM kernel.
+            # This is safe because padded requests have seq_lens=0, so the
+            # kernel produces no meaningful output for those rows.
+            block_table.clamp_(min=0)
+
             max_decode_len = int(decode_lens_cpu.max().item())
             if max_decode_len > 2:
                 # fp8_paged_mqa_logits does not support next_n > 2.
@@ -333,6 +347,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 #
                 # For request i with seq_len=S, decode_len=L, create L
                 # entries with seqlens [S-L+1, S-L+2, ..., S].
+                actual_expanded = int(decode_lens_cpu.sum().item())
                 expanded_base = torch.repeat_interleave(
                     seq_lens - decode_lens, decode_lens
                 )
@@ -342,15 +357,40 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 expanded_starts = torch.repeat_interleave(starts, decode_lens)
                 positions_within = (
                     torch.arange(
-                        num_decode_tokens,
+                        actual_expanded,
                         device=self.device,
                         dtype=torch.int32,
                     )
                     - expanded_starts
                 )
-                seq_lens = expanded_base + positions_within + 1
 
-                block_table = torch.repeat_interleave(block_table, decode_lens, dim=0)
+                self.expanded_seq_lens_buffer[:actual_expanded] = (
+                    expanded_base + positions_within + 1
+                )
+                self.expanded_seq_lens_buffer[:actual_expanded].clamp_(min=0)
+                self.expanded_seq_lens_buffer[actual_expanded:] = 0
+                seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
+
+                expanded_bt = torch.repeat_interleave(block_table, decode_lens, dim=0)
+                if (
+                    self._expanded_block_table_buffer is None
+                    or self._expanded_block_table_buffer.shape[1]
+                    != block_table.shape[1]
+                ):
+                    self._expanded_block_table_buffer = torch.zeros(
+                        (
+                            self.expanded_seq_lens_buffer.shape[0],
+                            block_table.shape[1],
+                        ),
+                        dtype=block_table.dtype,
+                        device=self.device,
+                    )
+                self._expanded_block_table_buffer[:actual_expanded] = expanded_bt
+                if actual_expanded < num_decode_tokens:
+                    self._expanded_block_table_buffer[
+                        actual_expanded:num_decode_tokens
+                    ] = 0
+                block_table = self._expanded_block_table_buffer[:num_decode_tokens]
 
                 self.decode_lens_buffer[:num_decode_tokens] = 1
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
@@ -381,11 +421,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             _is_large_context = common_attn_metadata.max_seq_len > 8192
             use_large_context_topk = batch_size <= 128 and _is_large_context
 
-            # Padded CUDA graph requests have block_table entries of -1.
-            # Clamp to 0 to prevent OOB access in the DeepGEMM kernel.
-            # This is safe because padded requests have seq_lens=0, so the
-            # kernel produces no meaningful output for those rows.
-            block_table.clamp_(min=0)
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
                 block_table=block_table,
                 seq_lens=seq_lens,
