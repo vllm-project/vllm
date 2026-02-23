@@ -346,7 +346,13 @@ def _test_processing_correctness(
         "video": partial(
             random_video, rng, min_frames=2, max_frames=16, min_wh=128, max_wh=256
         ),
-        "audio": partial(random_audio, rng, min_len=min_audio_len, max_len=min_audio_len + 512, sr=16000),
+        "audio": partial(
+            random_audio,
+            rng,
+            min_len=min_audio_len,
+            max_len=min_audio_len + 512,
+            sr=16000,
+        ),
         "vision_chunk": partial(
             random_vision_chunk, rng, min_wh=128, max_wh=256, min_frames=1, max_frames=1
         ),
