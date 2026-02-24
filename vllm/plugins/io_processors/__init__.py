@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import inspect
 import logging
 
 from vllm.config import VllmConfig
@@ -68,4 +69,7 @@ def get_io_processor(
 
     activated_plugin_cls = loadable_plugins[model_plugin]
 
+    # for backward compatibility, the plugin does not have a renderer argument
+    if "renderer" not in inspect.signature(activated_plugin_cls.__init__).parameters:
+        return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config)
     return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config, renderer)

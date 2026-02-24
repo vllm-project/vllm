@@ -30,11 +30,11 @@ logger = init_logger(__name__)
 class BgeM3SparseEmbeddingsProcessor(
     IOProcessor[SparseEmbeddingCompletionRequestMixin, SparseEmbeddingResponse]
 ):
-    def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer | None = None):
-        super().__init__(vllm_config)
+    def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer):
+        super().__init__(vllm_config, renderer)
         self.offline_requests: list[SparseEmbeddingCompletionRequestMixin] = []
         self.online_requests: dict[str, SparseEmbeddingCompletionRequestMixin] = {}
-        self.renderer: BaseRenderer | None = renderer
+        self.renderer: BaseRenderer = renderer
 
     def merge_pooling_params(
         self,
