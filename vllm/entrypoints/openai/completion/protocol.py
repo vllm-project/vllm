@@ -42,7 +42,13 @@ class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
-    prompt: list[int] | list[list[int]] | str | list[str] | None = None
+    prompt: (
+        list[Annotated[int, Field(ge=0)]]
+        | list[list[Annotated[int, Field(ge=0)]]]
+        | str
+        | list[str]
+        | None
+    ) = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -378,32 +384,6 @@ class CompletionRequest(OpenAIBaseModel):
                 "Either prompt or prompt_embeds must be provided and non-empty."
             )
 
-        return data
-
-    @model_validator(mode="before")
-    @classmethod
-    def validate_prompt_token_ids(cls, data):
-        prompt = data.get("prompt")
-        if prompt is None or isinstance(prompt, str):
-            return data
-
-        if isinstance(prompt, list):
-            for item in prompt:
-                if isinstance(item, str):
-                    continue
-                if isinstance(item, int):
-                    if item < 0:
-                        raise VLLMValidationError(
-                            "Token IDs in `prompt` must be non-negative.",
-                            parameter="prompt",
-                        )
-                elif isinstance(item, list):
-                    for token_id in item:
-                        if isinstance(token_id, int) and token_id < 0:
-                            raise VLLMValidationError(
-                                "Token IDs in `prompt` must be non-negative.",
-                                parameter="prompt",
-                            )
         return data
 
     @model_validator(mode="before")

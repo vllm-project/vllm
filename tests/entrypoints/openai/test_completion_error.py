@@ -223,7 +223,7 @@ async def test_completion_error_stream():
 
 def test_negative_prompt_token_ids_nested():
     """Negative token IDs in prompt (nested list) should raise validation error."""
-    with pytest.raises(Exception, match="non-negative"):
+    with pytest.raises(Exception, match="greater than or equal to 0"):
         CompletionRequest(
             model=MODEL_NAME,
             prompt=[[-1]],
@@ -233,7 +233,7 @@ def test_negative_prompt_token_ids_nested():
 
 def test_negative_prompt_token_ids_flat():
     """Negative token IDs in prompt (flat list) should raise validation error."""
-    with pytest.raises(Exception, match="non-negative"):
+    with pytest.raises(Exception, match="greater than or equal to 0"):
         CompletionRequest(
             model=MODEL_NAME,
             prompt=[-1],
