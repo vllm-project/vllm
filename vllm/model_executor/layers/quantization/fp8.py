@@ -1089,28 +1089,6 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod, MoeOnlineQuantizer):
     ) -> tuple[torch.nn.Parameter, torch.nn.Parameter]:
         layer.weight_block_size = None
 
-        # BIASES (for models like GPT-OSS that have biased MoE)
-        if self.moe.has_bias:
-            # Use the original weight_loader (not patched) for biases
-            orig_extra_weight_attrs = dict(extra_weight_attrs)
-            orig_extra_weight_attrs["weight_loader"] = weight_loader
-            w13_bias = torch.nn.Parameter(
-                torch.zeros(
-                    num_experts,
-                    2 * intermediate_size_per_partition,
-                    dtype=layer.orig_dtype,
-                ),
-                requires_grad=False,
-            )
-            layer.register_parameter("w13_bias", w13_bias)
-            set_weight_attrs(w13_bias, orig_extra_weight_attrs)
-            w2_bias = torch.nn.Parameter(
-                torch.zeros(num_experts, hidden_size, dtype=layer.orig_dtype),
-                requires_grad=False,
-            )
-            layer.register_parameter("w2_bias", w2_bias)
-            set_weight_attrs(w2_bias, orig_extra_weight_attrs)
-
         # WEIGHT_SCALES (per-expert for FP8)
         # Allocate 2 scales for w1 and w3 respectively.
         # They will be combined to a single scale after weight loading.

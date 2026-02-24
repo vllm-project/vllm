@@ -126,8 +126,54 @@ class MoeOnlineWeightQuantizer:
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
+        self._create_moe_bias_params(
+            layer,
+            num_experts,
+            intermediate_size_per_partition,
+            hidden_size,
+            params_dtype,
+            weight_loader,
+        )
+
         layer.w13_input_scale = None
         layer.w2_input_scale = None
+
+    def _create_moe_bias_params(
+        self,
+        layer: Module,
+        num_experts: int,
+        intermediate_size_per_partition: int,
+        hidden_size: int,
+        params_dtype: torch.dtype,
+        weight_loader: Callable,
+    ) -> None:
+        """Create bias parameters for models with biased MoE (e.g. GPT-OSS).
+
+        Uses the original (non-patched) weight_loader since biases are regular
+        parameters that don't need JIT materialization or numel tracking.
+        """
+        moe_config = getattr(self.moe_quant_callbacks, "moe", None)
+        if moe_config is None or not moe_config.has_bias:
+            return
+
+        bias_attrs = {"weight_loader": weight_loader}
+        w13_bias = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                dtype=params_dtype,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_bias", w13_bias)
+        set_weight_attrs(w13_bias, bias_attrs)
+
+        w2_bias = torch.nn.Parameter(
+            torch.zeros(num_experts, hidden_size, dtype=params_dtype),
+            requires_grad=False,
+        )
+        layer.register_parameter("w2_bias", w2_bias)
+        set_weight_attrs(w2_bias, bias_attrs)
 
     def _create_moe_weight_loader(
         self,
