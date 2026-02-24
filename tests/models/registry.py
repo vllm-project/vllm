@@ -806,7 +806,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         trust_remote_code=True,
         max_transformers_version="4.57",
         transformers_version_reason={
-            "hf": "Custom tokenizer code is not compatible with Transformers v5."
+            "vllm": "Custom tokenizer code is not compatible with Transformers v5."
         },
     ),
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
