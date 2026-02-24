@@ -24,6 +24,13 @@ MOE_LAYER_ROUTER_GATE_SUFFIXES = {
     "expert_gate",
 }
 
+_fast_skinny_gemm: bool = False
+
+
+def set_fast_skinny_gemm(enabled: bool):
+    global _fast_skinny_gemm
+    _fast_skinny_gemm = enabled
+
 
 def is_layer_moe_router_gate(prefix: str) -> bool:
     if not prefix:
@@ -178,7 +185,9 @@ def rocm_unquantized_gemm_impl(
         )
     )
     if use_skinny_reduce_counting:
-        return ops.wvSplitKrc(x, weight, cu_count, bias)
+        return ops.wvSplitKrc(
+            x, weight, cu_count, bias, fast_skinny_gemm=_fast_skinny_gemm
+        )
 
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16

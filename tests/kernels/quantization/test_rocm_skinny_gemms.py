@@ -278,3 +278,49 @@ def test_rocm_wvsplitk_fp8_kernel(
         torch.testing.assert_close(out, ref_out, atol=0.07, rtol=5e-2)
     else:
         torch.testing.assert_close(out, ref_out, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("fast_skinny_gemm", [False, True])
+@pytest.mark.parametrize("n", N_FACTORS_WVSPLITKRC)
+@pytest.mark.parametrize("k", K_FACTORS_WVSPLITKRC)
+@pytest.mark.parametrize("m", M_FACTORS_WVSPLITKRC)
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("bias_mode", BIAS_MODES)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+def test_rocm_wvsplitkrc_determinism(fast_skinny_gemm, n, k, m, dtype, bias_mode):
+    torch.manual_seed(0)
+    cu_count = get_cu_count()
+
+    N_p2 = 1 << (n - 1).bit_length()
+    rndup_cus = ((m + 64 - 1) // 64) * ((k + 512 - 1) // 512)
+    GrpsShrB = min(N_p2 // 16, 4)
+    CuNeeded = rndup_cus * GrpsShrB
+    if CuNeeded > cu_count:
+        pytest.skip("Too large for wvSplitKrc")
+
+    xavier = math.sqrt(2 / k)
+    A = (torch.rand(n, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+    B = (torch.rand(m, k, dtype=dtype, device="cuda") * 2 - 1) * xavier
+
+    BIAS = None
+    if bias_mode == 1:
+        BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
+    elif bias_mode == 2:
+        BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
+
+    # Correctness check against reference
+    ref_out = torch.nn.functional.linear(A, B, BIAS)
+    out = ops.wvSplitKrc(A, B, cu_count, BIAS, fast_skinny_gemm=fast_skinny_gemm)
+    torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
+
+    # Determinism check: run multiple times, expect bitwise identical
+    if not fast_skinny_gemm:
+        results = [
+            ops.wvSplitKrc(A, B, cu_count, BIAS, fast_skinny_gemm=False)
+            for _ in range(5)
+        ]
+        for i, r in enumerate(results[1:], 1):
+            assert torch.equal(results[0], r), (
+                f"Deterministic kernel produced different results on run 0 vs run {i}"
+            )
