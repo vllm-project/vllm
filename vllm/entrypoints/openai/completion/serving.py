@@ -257,8 +257,7 @@ class OpenAIServingCompletion(OpenAIServing):
                 # We did not pass it into vLLM engine to avoid being redundant
                 # with the inputs token IDs
                 if final_res.prompt is None:
-                    engine_inputs = engine_inputs[i]
-                    final_res.prompt = self._extract_prompt_text(engine_inputs)
+                    final_res.prompt = self._extract_prompt_text(engine_inputs[i])
 
             final_res_batch_checked = cast(list[RequestOutput], final_res_batch)
 

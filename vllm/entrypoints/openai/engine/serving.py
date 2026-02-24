@@ -1025,7 +1025,7 @@ class OpenAIServing:
     def _extract_prompt_components(self, prompt: PromptType | EngineInput):
         return extract_prompt_components(self.model_config, prompt)
 
-    def _extract_prompt_text(self, prompt: EngineInput):
+    def _extract_prompt_text(self, prompt: PromptType | EngineInput):
         return self._extract_prompt_components(prompt).text
 
     def _extract_prompt_len(self, prompt: EngineInput):
