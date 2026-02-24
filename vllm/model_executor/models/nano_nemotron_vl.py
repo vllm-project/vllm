@@ -1388,8 +1388,7 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         processor = self.info.get_hf_processor()
@@ -1404,7 +1403,7 @@ class NanoNemotronVLDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
                 max_num_tiles
             )
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -1461,12 +1460,9 @@ class NanoNemotronVLDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
-        dummy_image = super().get_dummy_mm_data(
-            seq_len=seq_len, mm_counts=mm_counts, mm_options=mm_options
-        )
+        dummy_image = super().get_dummy_mm_data(seq_len, mm_counts, mm_options)
         if self.info.supports_video:
             config = self.info.get_hf_config()
             image_size: int = config.force_image_size
@@ -1474,7 +1470,7 @@ class NanoNemotronVLDummyInputsBuilder(
                 seq_len, mm_counts
             )
             num_videos = mm_counts.get("video", 0)
-            video_overrides = mm_options.get("video") if mm_options else None
+            video_overrides = mm_options.get("video")
             dummy_video = {
                 "video": self._get_dummy_videos(
                     width=image_size,
