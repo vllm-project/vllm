@@ -423,6 +423,7 @@ _MULTIMODAL_MODELS = {
         "openpangu_vl",
         "OpenPanguVLForConditionalGeneration",
     ),
+    "OpenVLAForActionPrediction": ("openvla", "OpenVLAForActionPrediction"),
     "Ovis": ("ovis", "Ovis"),
     "Ovis2_5": ("ovis2_5", "Ovis2_5"),
     "PaddleOCRVLForConditionalGeneration": (
