@@ -380,7 +380,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # processing here, which could use additional memory.
         sampling_params = SamplingParams.for_sampler_warmup()
         for req_idx in range(num_reqs):
-            self.sampler.add_request(0, self.max_model_len // 2, sampling_params)
+            self.sampler.add_request(req_idx, self.max_model_len // 2, sampling_params)
         self.sampler.apply_staged_writes()
         self.sampler(
             logits,

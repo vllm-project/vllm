@@ -853,7 +853,7 @@ class SamplingParams(
             repetition_penalty=1.2,
             min_tokens=2,
             logit_bias={0: -1.0, 1: 0.5},
-            bad_words=[[0], [1, 2]],
+            _bad_words_token_ids=[[0], [1, 2]],
             logprobs=5,
             prompt_logprobs=1,
         )
