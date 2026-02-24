@@ -5,7 +5,6 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import torchaudio.compliance.kaldi as kaldi
 from torch.nn.utils.rnn import pad_sequence
 from transformers import (
     AutoFeatureExtractor,
@@ -17,6 +16,9 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.utils import TensorType
 
 from vllm.logger import init_logger
+from vllm.utils.import_utils import LazyLoader
+
+kaldi = LazyLoader("kaldi", globals(), "torchaudio.compliance.kaldi")
 
 logger = init_logger(__name__)
 
