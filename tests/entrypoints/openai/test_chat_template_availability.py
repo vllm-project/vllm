@@ -111,6 +111,21 @@ def test_check_chat_template_handles_errors(base_model_engine):
     assert result is False
 
 
+def test_check_chat_template_tokenizer_not_initialized(base_model_engine):
+    """Test that skip_tokenizer_init=True disables chat endpoint."""
+    base_model_engine.renderer.tokenizer = None  # Simulate skip_tokenizer_init=True
+
+    # Should return False even with user-provided template
+    # because tokenizer is needed to convert formatted text to token IDs
+    result = _check_chat_template_available(base_model_engine, None)
+    assert result is False
+
+    # Even with user template, still need tokenizer for tokenization
+    user_template = "{% for message in messages %}{{ message.content }}{% endfor %}"
+    result = _check_chat_template_available(base_model_engine, user_template)
+    assert result is False
+
+
 @pytest.mark.parametrize(
     "model_name,has_template,user_template,expected",
     [
