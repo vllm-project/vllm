@@ -77,6 +77,9 @@ def _resolve_layer_name(layer_name: str | ModuleName) -> str:
     return layer_name.value if isinstance(layer_name, ModuleName) else layer_name
 
 
+# Note: _moe_forward and _moe_forward_shared should not contain any
+# implementation details, They should merely pass along control to
+# the runner's 'forward_dispatch' method.
 def _moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
