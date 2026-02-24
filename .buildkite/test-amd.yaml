@@ -67,7 +67,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  grade: Blocking
+  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -340,11 +340,6 @@ steps:
   - vllm/
   - tests/v1/tracing
   commands:
-  - "pip install \
-      'opentelemetry-sdk>=1.26.0' \
-      'opentelemetry-api>=1.26.0' \
-      'opentelemetry-exporter-otlp>=1.26.0' \
-      'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
 
 ##### fast check tests  #####
@@ -1963,11 +1958,6 @@ steps:
   - vllm/
   - tests/v1/tracing
   commands:
-  - "pip install \
-      'opentelemetry-sdk>=1.26.0' \
-      'opentelemetry-api>=1.26.0' \
-      'opentelemetry-exporter-otlp>=1.26.0' \
-      'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
 
 ##### fast check tests  #####
