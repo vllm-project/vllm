@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
-from typing import Any
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
@@ -39,7 +38,7 @@ class BgeM3SparseEmbeddingsProcessor(
     def merge_pooling_params(
         self,
         params: PoolingParams | None = None,
-        request: Any = None,
+        request: object = None,
     ) -> PoolingParams:
         if params is None:
             params = PoolingParams()
@@ -51,7 +50,9 @@ class BgeM3SparseEmbeddingsProcessor(
                 params.truncate_prompt_tokens = request.truncate_prompt_tokens
         return params
 
-    def parse_request(self, request_data: Any) -> SparseEmbeddingCompletionRequestMixin:
+    def parse_request(
+        self, request_data: object
+    ) -> SparseEmbeddingCompletionRequestMixin:
         # for vllm.entrypoints.llm.LLM, offline mode, calls `encode` directly.
         if isinstance(request_data, dict):
             return SparseEmbeddingCompletionRequestMixin(**request_data)

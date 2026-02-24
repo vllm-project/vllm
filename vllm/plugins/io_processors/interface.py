@@ -3,7 +3,7 @@
 import warnings
 from abc import ABC, abstractmethod
 from collections.abc import AsyncGenerator, Sequence
-from typing import Any, Generic, TypeVar
+from typing import Generic, TypeVar
 
 from vllm.config import VllmConfig
 from vllm.inputs.data import PromptType
@@ -63,7 +63,7 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     def merge_pooling_params(
         self,
         params: PoolingParams | None = None,
-        request: Any = None,
+        request: object = None,
     ) -> PoolingParams:
         if callable(
             validate_or_generate_params := getattr(

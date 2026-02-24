@@ -15,8 +15,8 @@ logger = logging.getLogger(__name__)
 
 def get_io_processor(
     vllm_config: VllmConfig,
+    renderer: BaseRenderer,
     plugin_from_init: str | None = None,
-    renderer: BaseRenderer | None = None,
 ) -> IOProcessor | None:
     # Input.Output processors are loaded as plugins under the
     # 'vllm.io_processor_plugins' group. Similar to platform
@@ -71,5 +71,10 @@ def get_io_processor(
 
     # for backward compatibility, the plugin does not have a renderer argument
     if "renderer" not in inspect.signature(activated_plugin_cls.__init__).parameters:
+        logger.warning(
+            "The renderer argument will be required in v0.18, "
+            "please update your IOProcessor plugin: %s",
+            activated_plugin_cls,
+        )
         return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config)
     return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config, renderer)
