@@ -451,7 +451,6 @@ class Grok1Model(nn.Module):
 
         self.config = config
         self.quant_config = quant_config
-        self.padding_idx = config.pad_token_id
 
         # Store expert naming for weight loading
         self.ckpt_gate_proj_name = ckpt_gate_proj_name

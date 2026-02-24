@@ -12,13 +12,15 @@ MODEL_NAME = "Qwen/Qwen3-8B"
 
 @pytest.fixture(scope="module")
 def server():
-    args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
-    env_dict = dict(
-        VLLM_ENABLE_RESPONSES_API_STORE="1",
-        # uncomment for tool calling
-        # PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
-    )
+    from .conftest import BASE_TEST_ENV
 
+    args = ["--reasoning-parser", "qwen3", "--max_model_len", "5000"]
+    env_dict = {
+        **BASE_TEST_ENV,
+        "VLLM_ENABLE_RESPONSES_API_STORE": "1",
+        # uncomment for tool calling
+        # PYTHON_EXECUTION_BACKEND: "dangerously_use_uv",
+    }
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
