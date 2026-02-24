@@ -62,11 +62,6 @@ logger = init_logger(__name__)
 class FlashAttentionBackend(AttentionBackend):
     accept_output_buffer: bool = True
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
-        "auto",
-        "float16",
-        "bfloat16",
-    ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -136,12 +131,20 @@ class FlashAttentionBackend(AttentionBackend):
         # `stride_order` indicates the permutation that gets
         # us from `get_kv_cache_shape` to the actual memory layout we want.
         cache_layout = get_kv_cache_layout()
-        if cache_layout == "NHD" and include_num_layers_dimension:
+        if (
+            cache_layout == "NHD"
+            and include_num_layers_dimension
+            and not current_platform.is_xpu()
+        ):
             # (num_blocks, num_layers, 2, block_size, num_kv_heads, head_size)
             return (2, 0, 1, 3, 4, 5)
         elif cache_layout == "NHD":
             stride_order = (0, 1, 2, 3, 4)
-        elif cache_layout == "HND" and include_num_layers_dimension:
+        elif (
+            cache_layout == "HND"
+            and include_num_layers_dimension
+            and not current_platform.is_xpu()
+        ):
             # (num_blocks, num_kv_heads, num_layers, 2, block_size, head_size)
             return (2, 4, 0, 1, 3, 5)
         elif cache_layout == "HND":
@@ -167,7 +170,7 @@ class FlashAttentionBackend(AttentionBackend):
             return True
         if kv_cache_dtype.startswith("fp8"):
             return flash_attn_supports_fp8()
-        return kv_cache_dtype in ["auto", "float16", "bfloat16"]
+        return kv_cache_dtype in ["auto", "bfloat16"]
 
     @classmethod
     def supports_sink(cls) -> bool:
@@ -400,7 +403,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             # we only set num_splits when using cuda graphs.
             max_num_splits = self.max_num_splits
 
-        if envs.VLLM_BATCH_INVARIANT:
+        if vllm_is_batch_invariant():
             max_num_splits = 1
 
         def schedule(
@@ -599,7 +602,7 @@ class FlashAttentionImpl(AttentionImpl):
             scope="local",
         )
         # Cache the batch invariant result for use in forward passes
-        self.batch_invariant_enabled = envs.VLLM_BATCH_INVARIANT
+        self.batch_invariant_enabled = vllm_is_batch_invariant()
 
         if is_quantized_kv_cache(self.kv_cache_dtype) and not flash_attn_supports_fp8():
             raise NotImplementedError(
@@ -1122,7 +1125,7 @@ def cascade_attention(
         # s_aux is incorporated into prefix_lse inside the GPU kernel,
         # enabling its effect during the final attention merge.
         s_aux=s_aux,
-        num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
+        num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
 
     descale_shape = (cu_query_lens.shape[0] - 1, key_cache.shape[-2])
@@ -1147,7 +1150,7 @@ def cascade_attention(
         q_descale=q_descale.expand(descale_shape) if q_descale is not None else None,
         k_descale=k_descale.expand(descale_shape) if k_descale is not None else None,
         v_descale=v_descale.expand(descale_shape) if v_descale is not None else None,
-        num_splits=1 if envs.VLLM_BATCH_INVARIANT else max_num_splits,
+        num_splits=1 if vllm_is_batch_invariant() else max_num_splits,
     )
 
     # Merge prefix and suffix outputs, and store the result in output.
