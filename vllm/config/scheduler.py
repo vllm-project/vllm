@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
 from collections.abc import Callable
 from dataclasses import InitVar
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, cast
@@ -67,7 +66,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_waiting_queue_length: int = Field(default=sys.maxsize, ge=1)
+    max_waiting_queue_length: int = Field(default=4096, ge=1)
     """
     The maximum number of requests allowed in the waiting queue.
     If the waiting queue is full, new incoming requests will be rejected.
