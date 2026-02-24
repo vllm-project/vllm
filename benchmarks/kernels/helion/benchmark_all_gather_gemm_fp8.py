@@ -249,66 +249,68 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
         #adding clamping to avoid nan, inf (overflow)
         min_val=1e-3 
         max_val = 0.02 * (1024 / max(K, N))
+        candidate_splits = [1, 2, 4]  
 
         scale_a = scale_a.clamp(min=min_val, max=max_val)
         scale_b = scale_b.clamp(min=min_val, max=max_val)
-
-
-        helion_kernel = lambda: torch.ops.vllm.helion_all_gather_fp8_gemm(
-            a_shared,
-            b,
-            scale_a,
-            scale_b,
-            world_size,
-            group_name,
-        )
-        baseline_kernel = lambda: torch.ops.symm_mem.fused_all_gather_scaled_matmul(
-            a_shared,
-            [b],
-            scale_a,
-            [scale_b],
-            gather_dim=0,
-            biases=[None],
-            result_scales=[None],
-            out_dtypes=[torch.bfloat16],
-            use_fast_accum=[False],
-            group_name=group_name,
-        )
-
-        # benchmark Helion kernel
-        torch.cuda.reset_peak_memory_stats(device)
-        if rank == 0:
-            print(f"Benchmarking Helion M={M},N={N},K={K} on rank {rank}...")
-        helion_latency = do_bench_distributed(helion_kernel, repeat=repeat, return_mode='mean', device=device, dist_group=dist_group)
-        helion_peak_mem = torch.cuda.max_memory_allocated(device) / MB
-
-        # benchmark baseline kernel
-        torch.cuda.reset_peak_memory_stats(device)
-        if rank == 0:
-            print(f"Benchmarking baseline M={M},N={N},K={K} on rank {rank}...")
-        baseline_latency = do_bench_distributed(baseline_kernel, repeat=repeat, return_mode='mean', device=device, dist_group=dist_group)
-        baseline_peak_mem = torch.cuda.max_memory_allocated(device) / MB
-
-        # compute speedup and memory improvement (guard against zero)
-        speedup_x = baseline_latency / helion_latency if helion_latency > 0 else float("inf")
-        mem_improve_x = baseline_peak_mem / helion_peak_mem if helion_peak_mem > 0 else float("inf")
-
-        if rank == 0:
-            print(f"Finished shape M={M},N={N},K={K} -> helion {helion_latency:.3f} ms, helion peak {helion_peak_mem:.2f} MB")
-
-        rows.append(
-            Row(
-                shape=f"M={M},N={N},K={K}",
-                baseline_ms=baseline_latency,
-                kernel_ms=helion_latency,
-                speedup_x=speedup_x,
-                baseline_peak_mb=baseline_peak_mem,
-                kernel_peak_mb=helion_peak_mem,
-                mem_improve_x=mem_improve_x,
+        for sp in candidate_splits:
+            if M_per_rank % sp != 0:
+                continue  # skip invalid splits
+            helion_kernel = lambda: torch.ops.vllm.helion_all_gather_fp8_gemm(
+                a_shared,
+                b,
+                scale_a,
+                scale_b,
+                world_size,
+                group_name,
+                SPLITS_PER_RANK=sp,
             )
-        )
+            baseline_kernel = lambda: torch.ops.symm_mem.fused_all_gather_scaled_matmul(
+                a_shared,
+                [b],
+                scale_a,
+                [scale_b],
+                gather_dim=0,
+                biases=[None],
+                result_scales=[None],
+                out_dtypes=[torch.bfloat16],
+                use_fast_accum=[False],
+                group_name=group_name,
+            )
+
+            # benchmark Helion kernel
+            torch.cuda.reset_peak_memory_stats(device)
+            if rank == 0:
+                print(f"Benchmarking Helion M={M},N={N},K={K} on rank {rank}...")
+            helion_latency = do_bench_distributed(helion_kernel, repeat=repeat, return_mode='mean', device=device, dist_group=dist_group)
+            helion_peak_mem = torch.cuda.max_memory_allocated(device) / MB
+
+            # benchmark baseline kernel
+            torch.cuda.reset_peak_memory_stats(device)
+            if rank == 0:
+                print(f"Benchmarking baseline M={M},N={N},K={K} on rank {rank}...")
+            baseline_latency = do_bench_distributed(baseline_kernel, repeat=repeat, return_mode='mean', device=device, dist_group=dist_group)
+            baseline_peak_mem = torch.cuda.max_memory_allocated(device) / MB
+
+            # compute speedup and memory improvement (guard against zero)
+            speedup_x = baseline_latency / helion_latency if helion_latency > 0 else float("inf")
+            mem_improve_x = baseline_peak_mem / helion_peak_mem if helion_peak_mem > 0 else float("inf")
+
+            if rank == 0:
+                print(f"Finished shape M={M},N={N},K={K} -> helion {helion_latency:.3f} ms, helion peak {helion_peak_mem:.2f} MB")
+
+            rows.append(
+                Row(
+                    shape=f"M={M},N={N},K={K}splits={sp}",
+                    baseline_ms=baseline_latency,
+                    kernel_ms=helion_latency,
+                    speedup_x=speedup_x,
+                    baseline_peak_mb=baseline_peak_mem,
+                    kernel_peak_mb=helion_peak_mem,
+                    mem_improve_x=mem_improve_x,
+                )
+            )
     save_rows_json(rows, rank=rank)
- 
     if rank == 0:
         print("\n=== Benchmark Results ===")
         print_table(rows)
@@ -319,19 +321,20 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
 if __name__ == "__main__":
     """
     example how to run it:
-        VLLM_USE_HELION_BACKEND=1  torchrun --nproc_per_node=2   benchmarks/kernels/helion/benchmark_all_gather_gemm_fp8.py
+        VLLM_USE_HELION_BACKEND=1  torchrun --nproc_per_node=4   benchmarks/kernels/helion/benchmark_all_gather_gemm_fp8.py
     """
     # list of shapes to benchmark
     TEST_SHAPES = [
-        (128, 32, 64),
-        (256, 1024, 1024),
+        #(128, 32, 64),
+        #(128, 128, 128),
+        #(256, 1024, 1024),
         #medium shapes
         (2048, 1024, 2048),
         (2048, 4096, 4096),
         (4096, 2048, 4096),
         #large shapes
         (4096, 5120, 5120),
-        (8192, 8192, 8192),
+        #(8192, 8192, 8192),
     ]
     rank, local_rank, world_size, device, dist_group, world_group = setup_distributed()
     try:

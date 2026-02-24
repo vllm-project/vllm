@@ -97,36 +97,41 @@ def run_shape_test(M, K, N, rank, world_size, device, dist_group, world_group):
     scale_a = scale_a.clamp(min=min_val, max=max_val)
     scale_b = scale_b.clamp(min=min_val, max=max_val)
     # call the HelionOp
+    candidate_splits = [1, 2, 4]
+    for sp in candidate_splits:
+        if M_per_rank % sp != 0:
+            continue  # skip invalid splits
+        print(f"Testing shape ({M}, {K}, {N}) with split {sp} (tokens per rank: {M_per_rank})")
+        a_out, c = torch.ops.vllm.helion_all_gather_fp8_gemm(
+            a_shared,
+            b,
+            scale_a,
+            scale_b,
+            world_size,
+            dist_group.group_name,
+            SPLITS_PER_RANK=sp,
+        )
 
-    a_out, c = torch.ops.vllm.helion_all_gather_fp8_gemm(
-        a_shared,
-        b,
-        scale_a,
-        scale_b,
-        world_size,
-        dist_group.group_name,
-    )
-
-    # Compute golden reference
-    ag_golden, mm_golden = torch.ops.symm_mem.fused_all_gather_scaled_matmul(
-        a_shared,
-        [b],
-        scale_a,
-        [scale_b],
-        gather_dim=0,
-        biases=[None],
-        result_scales=[None],
-        out_dtypes=[torch.bfloat16],
-        use_fast_accum=[False],
-        group_name=dist_group.group_name,
-    )
-    # Compare results
-    torch.testing.assert_close(a_out, ag_golden)
-    torch.testing.assert_close(
-        c, mm_golden[0].to(torch.bfloat16), 
-        rtol=1e-1, 
-        atol=1e-1
-    )
+        # Compute golden reference
+        ag_golden, mm_golden = torch.ops.symm_mem.fused_all_gather_scaled_matmul(
+            a_shared,
+            [b],
+            scale_a,
+            [scale_b],
+            gather_dim=0,
+            biases=[None],
+            result_scales=[None],
+            out_dtypes=[torch.bfloat16],
+            use_fast_accum=[False],
+            group_name=dist_group.group_name,
+        )
+        # Compare results
+        torch.testing.assert_close(a_out, ag_golden)
+        torch.testing.assert_close(
+            c, mm_golden[0].to(torch.bfloat16), 
+            rtol=1e-1, 
+            atol=1e-1
+        )
 
 #TODO: if we run this test with one shape it will pass, if. we run multiple it will fail to intalize with nccl.
 @pytest.mark.parametrize("M,K,N", [
@@ -138,8 +143,8 @@ def run_shape_test(M, K, N, rank, world_size, device, dist_group, world_group):
     #(2048, 4096, 4096),
     #(4096, 2048, 4096),
     #large shapes
-    #(4096, 5120, 5120),
-    (8192, 8192, 8192),
+    (4096, 5120, 5120),
+    #(8192, 8192, 8192),
 ])
 def test_helion_fp8_all_gather_matmul(M, K, N):
     rank, local_rank, world_size, device, dist_group, world_group = init_distributed()

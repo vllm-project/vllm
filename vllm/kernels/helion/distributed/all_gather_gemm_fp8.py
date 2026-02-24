@@ -40,6 +40,7 @@ def helion_matmul_w_progress_fp8(
 
     for tile_m, tile_n in hl.tile([M, N]):
         acc = hl.zeros([tile_m, tile_n], dtype=torch.float32)  # Initialize accumulator in FP32.
+        # Once the progress is filled, we can start doing gemm
         hl.wait(
             progress,
             [tile_m.begin // (M_per_rank // SPLITS_PER_RANK)],  # Wait for certain progress signals.
@@ -92,7 +93,10 @@ def pick_helion_matmul_w_progress_fp8_config(
     M, _= a.shape
 
     # Exact match key
-    target_key = f"mperrank_{M_per_rank}_n_{N}_k_{K}_splits_{splits_per_rank}"
+    target_key = (
+        f"rank_{rank}_mperrank_{M_per_rank}"
+        f"_n_{N}_k_{K}_splits_{splits_per_rank}"
+    )
     if target_key in config_keys:
         logger.debug("Found exact config: %s", target_key)
         return target_key
@@ -102,10 +106,11 @@ def pick_helion_matmul_w_progress_fp8_config(
     for key in config_keys:
         try:
             parts = key.split("_")
-            candidate_mpr = int(parts[1])
-            candidate_N = int(parts[3])
-            candidate_K = int(parts[5])
-            candidate_splits = int(parts[7])
+            candidate_rank = int(parts[1])
+            candidate_mpr = int(parts[3])
+            candidate_N = int(parts[5])
+            candidate_K = int(parts[7])
+            candidate_splits = int(parts[9])
         except (ValueError, IndexError):
             continue
 
@@ -123,8 +128,8 @@ def pick_helion_matmul_w_progress_fp8_config(
     if candidates:
         _, best_key = min(candidates)
         logger.debug(
-            "No exact config found. Using closest match: %s for M=%d, N=%d, K=%d, splits=%d",
-            best_key, M, N, K, splits_per_rank
+            "No exact config found. Using closest match: %s for rank=%d, M=%d, N=%d, K=%d, splits=%d",
+            best_key, rank, M, N, K, splits_per_rank
         )
         return best_key
 
@@ -136,6 +141,7 @@ def pick_helion_matmul_w_progress_fp8_config(
     logger.warning("No suitable config found and no default available")
     return None
 
+
 def copy_engine_all_gather_w_progress(
     output: torch.Tensor,
     inp: torch.Tensor,  # Must be symmetric tensor
@@ -146,6 +152,36 @@ def copy_engine_all_gather_w_progress(
 ) -> torch.cuda.Stream:
     """
     Performs an all-gather operation with progress tracking using symmetric memory.
+
+    - Each rank builds its full output tensor by copying data from all other ranks.
+    - Data can be split into smaller chunks (splits_per_rank) for finer-grained progress.
+    - The 'progress' 1D tensor signals which splits are ready (1 = ready).
+    - GEMM can start operating on a split immediately once its progress flag is set,
+
+    Example (world_size=4, splits_per_rank=2):
+
+        Rank 0: inp0 (8 rows)
+        Rank 1: inp1 (8 rows)
+        Rank 2: inp2 (8 rows)
+        Rank 3: inp3 (8 rows)
+
+        Splits per rank: [A0 A1 | A2 A3], etc.
+
+        Copy order (round-robin) for rank 0:
+            Step 0: Copy all splits from rank 1 → output positions [B0 B1 | B2 B3]
+            Step 1: Copy all splits from rank 2 → output positions [C0 C1 | C2 C3]
+            Step 2: Copy all splits from rank 3 → output positions [D0 D1 | D2 D3]
+            Step 3: Copy all splits from rank 0 → output positions [A0 A1 | A2 A3]
+
+        After these steps, rank 0 has the full gathered tensor:
+            [A0 A1 | A2 A3 | B0 B1 | B2 B3 | C0 C1 | C2 C3 | D0 D1 | D2 D3]
+
+    Note:
+    - This is a partial pipeline: GEMM starts per split as soon as it’s ready.
+    - Full pipelined GEMM (all-gather + GEMM fused in Helion kernel) is future work
+        (see https://github.com/pytorch/helion/pull/1532), which would eliminate extra
+        copies, reduce kernel launch overhead, and maximize overlap of communication
+        and computation.
     """
     backend_stream = dist._symmetric_memory._get_backend_stream(priority=-1)
     assert inp.is_contiguous(), "Input tensor 'inp' must be contiguous"
@@ -197,12 +233,13 @@ def _helion_all_gather_fp8_gemm_runtime(
     group_name: ProcessGroup,
     a_out: torch.Tensor | None = None,
     progress: torch.Tensor | None = None,
+    SPLITS_PER_RANK: int = 1, 
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Performs an all-gather on a_shared and matrix multiplication using the Helion library.
     """
     configs = {
-        "SPLITS_PER_RANK":1,
+        "SPLITS_PER_RANK":SPLITS_PER_RANK,
     }
 
     a_shared_symm = dist._symmetric_memory.empty(
@@ -236,6 +273,7 @@ def _helion_all_gather_fp8_gemm_runtime(
     backend_stream = copy_engine_all_gather_w_progress(
         a_out, a_shared_symm, progress, group_name, configs["SPLITS_PER_RANK"]
     )
+    
     c = helion_matmul_w_progress_fp8(
         a_out,
         a_shared_symm,
@@ -260,6 +298,7 @@ def helion_all_gather_fp8_gemm_fake(
     group_name: ProcessGroup,
     a_out: torch.Tensor | None = None,
     progress: torch.Tensor | None = None,
+    SPLITS_PER_RANK: int = 1,      
 ) -> tuple[torch.Tensor, torch.Tensor]:
 
     if world_size is None:
@@ -282,6 +321,7 @@ def helion_all_gather_fp8_gemm(
     group_name: str,
     a_out: torch.Tensor | None = None,
     progress: torch.Tensor | None = None,
+    SPLITS_PER_RANK: int = 1,      
 ) -> tuple[torch.Tensor, torch.Tensor]:
     from vllm.distributed.parallel_state import _groups
     
@@ -292,7 +332,7 @@ def helion_all_gather_fp8_gemm(
 
     # Call the actual runtime with the group object
     return group._helion_all_gather_fp8_gemm(
-        a_shared, b, scale_a, scale_b, a_out, progress
+        a_shared, b, scale_a, scale_b, a_out, progress, SPLITS_PER_RANK
     )
 
 from vllm.utils.torch_utils import (
