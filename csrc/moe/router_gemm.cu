@@ -46,7 +46,7 @@ torch::Tensor router_gemm_bf16_fp32(torch::Tensor const& input,
       static_cast<int>(M), static_cast<int>(K), &alpha, weight.data_ptr(),
       CUDA_R_16BF, static_cast<int>(K), input.data_ptr(), CUDA_R_16BF,
       static_cast<int>(K), &beta, out.data_ptr(), CUDA_R_32F,
-      static_cast<int>(N), CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT_TENSOR_OP));
+      static_cast<int>(N), CUBLAS_COMPUTE_32F, CUBLAS_GEMM_DEFAULT));
 
   return out;
 }
