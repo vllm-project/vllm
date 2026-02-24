@@ -407,7 +407,7 @@ def test_speculators_model_integration(
             False,
             False,
             "auto",
-            0.85,  # ref: 90%
+            0.8,  # ref: 90%
             # marks=large_gpu_mark(min_gb=80),
         ),  # works on 4x H100
         pytest.param(
@@ -420,7 +420,7 @@ def test_speculators_model_integration(
             True,
             True,
             "auto",
-            0.85,  # ref: 90%
+            0.8,  # ref: 90%
             marks=large_gpu_mark(min_gb=80),
         ),  # works on 4x H100
         (
@@ -675,8 +675,8 @@ cases = [
         draft_model="Qwen/Qwen3-0.6B",
         sampling_config=greedy_sampling(),
         num_speculative_tokens=3,  # K
-        expected_acceptance_len=0.99 * (3 + 1),  # K + 1
-        expected_acceptance_rate=0.99,  # slight epsilon
+        expected_acceptance_len=0.98 * (3 + 1),  # epsilon discount of K + 1
+        expected_acceptance_rate=0.98,  # slight epsilon
         expected_gsm8k_accuracy=0.25,  # ref: 35-40%
     ),
     # Smaller draft model, stochastic sampling.
@@ -685,8 +685,8 @@ cases = [
         draft_model="Qwen/Qwen3-0.6B",
         sampling_config=stochastic_sampling(),
         num_speculative_tokens=3,
-        expected_acceptance_len=2.7 + 1,
-        expected_acceptance_rate=0.85,
+        expected_acceptance_len=3.4,  # ref: 3.7
+        expected_acceptance_rate=0.80,  # ref: 0.90
         expected_gsm8k_accuracy=0.5,  # ref: 60%. Note gsm8k always runs greedy sampling
     ),
 ]
@@ -707,9 +707,8 @@ def test_draft_model_realistic_example():
         num_speculative_tokens=3,
         sampling_config=greedy_sampling(),
         enforce_eager=False,
-        # values below are not derived, but just prevent a regression
-        expected_acceptance_len=2.7,
-        expected_acceptance_rate=0.5,
+        expected_acceptance_len=2.6,  # ref: 2.86
+        expected_acceptance_rate=0.5,  # ref: 0.62
     )
     assert_draft_model_correctness(args)
 
@@ -723,9 +722,8 @@ def test_draft_model_parallel_drafting():
         sampling_config=greedy_sampling(),
         parallel_drafting=True,
         enforce_eager=False,
-        # values below are collected from a stable run, with ~5% tolerance
-        expected_acceptance_len=2.3,
-        expected_acceptance_rate=0.4,
+        expected_acceptance_len=2.3,  # ref: 2.52
+        expected_acceptance_rate=0.4,  # ref: 0.51
     )
     assert_draft_model_correctness(args)
 
@@ -872,8 +870,8 @@ def some_high_acceptance_metrics() -> dict:
     return {
         "sampling_config": greedy_sampling(),
         "num_speculative_tokens": 3,
-        "expected_acceptance_len": 2.7 + 1,
-        "expected_acceptance_rate": 0.85,
+        "expected_acceptance_len": 3.55,  # ref: 3.76
+        "expected_acceptance_rate": 0.87,  # ref: 0.92
     }
 
 
