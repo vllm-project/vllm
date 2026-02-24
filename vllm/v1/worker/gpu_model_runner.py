@@ -5247,48 +5247,6 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
-    def _get_decode_cudagraph_batch_sizes(self) -> list[int]:
-        max_num_tokens = (
-            self.scheduler_config.max_num_seqs * self.uniform_decode_query_len
-        )
-        return [
-            x
-            for x in self.cudagraph_batch_sizes
-            if max_num_tokens >= x >= self.uniform_decode_query_len
-        ]
-
-    def _get_cudagraph_profiling_info(
-        self,
-    ) -> tuple[tuple[int, int] | None, int, tuple[int, int] | None, int]:
-        cudagraph_mode = self.compilation_config.cudagraph_mode
-
-        if cudagraph_mode == CUDAGraphMode.NONE or not self.cudagraph_batch_sizes:
-            return None, 0, None, 0
-
-        lora_cases = (
-            2
-            if self.lora_config and self.compilation_config.cudagraph_specialize_lora
-            else 1
-        )
-
-        batch_sizes: dict[CUDAGraphMode, list[int]] = defaultdict(list)
-        batch_sizes[cudagraph_mode.mixed_mode()].extend(self.cudagraph_batch_sizes)
-        if cudagraph_mode.separate_routine():
-            batch_sizes[cudagraph_mode.decode_mode()].extend(
-                self._get_decode_cudagraph_batch_sizes()
-            )
-
-        def get_largest_and_count(mode: CUDAGraphMode):
-            sizes = batch_sizes.get(mode, [])
-            desc = sorted(set(sizes), reverse=True)
-            if len(desc) < 2:
-                return None, 0
-            return (desc[0], desc[1]), len(sizes) * lora_cases
-
-        full_largest_two, full_count = get_largest_and_count(CUDAGraphMode.FULL)
-        pw_largest_two, pw_count = get_largest_and_count(CUDAGraphMode.PIECEWISE)
-        return full_largest_two, full_count, pw_largest_two, pw_count
-
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         from vllm.v1.core.kv_cache_utils import (
             get_kv_cache_config_from_groups,
@@ -5359,12 +5317,18 @@ class GPUModelRunner(
 
         saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
 
-        (
-            full_largest_two,
-            full_count,
-            piecewise_largest_two,
-            piecewise_count,
-        ) = self._get_cudagraph_profiling_info()
+        capture_descs = self.cudagraph_dispatcher.get_capture_descs()
+
+        full_descs: list[BatchDescriptor] = []
+        piecewise_descs: list[BatchDescriptor] = []
+        for mode, descs in capture_descs:
+            if mode == CUDAGraphMode.FULL:
+                full_descs = descs
+            elif mode == CUDAGraphMode.PIECEWISE:
+                piecewise_descs = descs
+
+        full_count = len(full_descs)
+        piecewise_count = len(piecewise_descs)
 
         if full_count == 0 and piecewise_count == 0:
             logger.debug("No CUDA graphs will be captured, skipping profiling")
@@ -5375,9 +5339,9 @@ class GPUModelRunner(
             "Profiling CUDA graph memory: FULL graphs=%d (largest=%s), "
             "PIECEWISE graphs=%d (largest=%s)",
             full_count,
-            full_largest_two,
+            full_descs[0].num_tokens if full_descs else None,
             piecewise_count,
-            piecewise_largest_two,
+            piecewise_descs[0].num_tokens if piecewise_descs else None,
         )
         profiling_pool = current_platform.graph_pool_handle()
 
@@ -5391,7 +5355,8 @@ class GPUModelRunner(
                 self.model.cudagraph_wrapper.graph_pool = profiling_pool
 
         def profile_graph_mode(
-            largest_two_sizes: tuple[int, int],
+            first_desc: BatchDescriptor,
+            second_desc: BatchDescriptor | None,
             cudagraph_runtime_mode: CUDAGraphMode,
             uniform_decode: bool,
             measure_first_capture: bool,
@@ -5399,12 +5364,17 @@ class GPUModelRunner(
         ) -> tuple[int, int]:
             """Profile memory for a single CUDA graph mode.
 
+            Captures the first graph to measure fixed first-capture
+            overhead. If second_desc is provided, captures a second
+            graph to measure the per-graph memory delta.
+
             Returns (first_capture_memory, per_graph_memory).
             """
             before_first_capture = self._warmup_and_capture(
-                largest_two_sizes[0],
+                first_desc.num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 uniform_decode=uniform_decode,
+                num_active_loras=first_desc.num_active_loras,
                 profile_seq_lens=profile_seq_lens,
                 sync_and_empty_cache_before_capture=measure_first_capture,
             )
@@ -5414,11 +5384,14 @@ class GPUModelRunner(
                 if measure_first_capture
                 else 0
             )
+            if second_desc is None:
+                return first_capture_memory, 0
             current_platform.synchronize()
             before = self._warmup_and_capture(
-                largest_two_sizes[1],
+                second_desc.num_tokens,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 uniform_decode=uniform_decode,
+                num_active_loras=second_desc.num_active_loras,
                 num_warmups=0,
             )
             current_platform.synchronize()
@@ -5431,24 +5404,26 @@ class GPUModelRunner(
             full_per_graph = 0
             piecewise_per_graph = 0
 
-            if full_largest_two is not None:
+            if full_count > 0:
                 cudagraph_mode = self.compilation_config.cudagraph_mode
                 uniform_decode = cudagraph_mode.separate_routine()
                 full_first_capture_memory, full_per_graph = profile_graph_mode(
-                    largest_two_sizes=full_largest_two,
+                    first_desc=full_descs[0],
+                    second_desc=full_descs[1] if full_count >= 2 else None,
                     cudagraph_runtime_mode=CUDAGraphMode.FULL,
                     uniform_decode=uniform_decode,
                     measure_first_capture=True,
                     profile_seq_lens=min(
                         self.max_model_len,
-                        self.max_num_tokens // full_largest_two[0],
+                        self.max_num_tokens // full_descs[0].num_tokens,
                     ),
                 )
 
             counter_before_piecewise = compilation_counter.num_cudagraph_captured
-            if piecewise_largest_two is not None:
+            if piecewise_count > 0:
                 _, piecewise_per_graph = profile_graph_mode(
-                    largest_two_sizes=piecewise_largest_two,
+                    first_desc=piecewise_descs[0],
+                    second_desc=(piecewise_descs[1] if piecewise_count >= 2 else None),
                     cudagraph_runtime_mode=CUDAGraphMode.PIECEWISE,
                     uniform_decode=False,
                     measure_first_capture=False,
