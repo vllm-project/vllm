@@ -175,7 +175,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             topk_ids=packed_tensor,
             routing_bias=None,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).flatten(),
+            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
+                *hidden_states.shape[:-1], -1
+            ),
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
@@ -292,7 +294,9 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_logits=router_logits,
             routing_bias=routing_bias,
             hidden_states=hidden_states,
-            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).flatten(),
+            hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
+                *hidden_states.shape[:-1], -1
+            ),
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
