@@ -748,7 +748,6 @@ class Plamo2Model(torch.nn.Module):
         config = vllm_config.model_config.hf_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(

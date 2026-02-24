@@ -495,7 +495,6 @@ class MiniMaxText01Model(nn.Module):
         cache_config = vllm_config.cache_config
         scheduler_config = vllm_config.scheduler_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.decoder_attention_types = getattr(
