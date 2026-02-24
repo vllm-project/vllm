@@ -141,7 +141,10 @@ class ExampleConnector(KVConnectorBase_V1):
                     [num_tokens].
             """
             if backend == AttentionBackendEnum.TRITON_ATTN:
-                dst_kv_cache_layer = dst_kv_cache_layer.permute(1, 0, 2, 3, 4)
+                block_idxs = slot_mapping // self._block_size
+                offsets = slot_mapping % self._block_size
+                dst_kv_cache_layer[block_idxs, :, offsets] = src_kv_cache
+                return
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages = dst_kv_cache_layer_shape[0]
@@ -237,7 +240,9 @@ class ExampleConnector(KVConnectorBase_V1):
                 num_pages, page_size = layer.shape[0], layer.shape[1]
                 return layer.reshape(num_pages * page_size, -1)[slot_mapping, ...]
             elif isinstance(attn_metadata, TritonAttentionMetadata):
-                layer = layer.permute(1, 0, 2, 3, 4)
+                block_idxs = slot_mapping // self._block_size
+                offsets = slot_mapping % self._block_size
+                return layer[block_idxs, :, offsets]
             num_pages, page_size = layer.shape[1], layer.shape[2]
             return layer.reshape(2, num_pages * page_size, -1)[:, slot_mapping, ...]
 
