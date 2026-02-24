@@ -492,32 +492,41 @@ class CpuPlatform(Platform):
         import torch
 
         extension_loaded = False
-        if torch.cpu._is_avx512_supported():  # noqa: SIM108
+
+        import_rules = {
+            # this is a mapping for ISA support to vllm C extension name
+            # NOTE: we should order this so that the highest performing
+            # libraries are always imported first
+            # e.g. if amx avx512_bf16 before avx_512, avx512 before avx2...
+            torch.cpu._is_avx512_bf16_supported: "vllm._C_avx512_bf16",
+            torch.cpu._is_vnni_supported: "vllm._C_avx512_vnni",
+            torch.cpu._is_amx_tile_supported: "vllm._C_amx",
+            torch.cpu._is_avx512_supported: "vllm._C_avx512",
+            torch.cpu._is_avx2_supported: "vllm._C",
+        }
+
+        for check_extension_support, extension_module in import_rules.items():
+            if not (supported := check_extension_support()):
+                logger.debug(
+                    "%s()=%s",
+                    check_extension_support.__name__,
+                    supported,
+                )
+                continue
+
             try:
-                importlib.import_module("vllm._C_avx512")
+                importlib.import_module(extension_module)
             except ImportError as exc:
                 logger.warning_once(
-                    "Failed to import CPU AVX512 extension (%s), "
+                    "Failed to import CPU %s extension (%s), "
                     "this will impact performance.",
+                    extension_module,
                     exc,
                 )
             else:
-                logger.info("Loaded AVX512 CPU extension")
+                logger.info("Loaded %s CPU extension", extension_module)
                 extension_loaded = True
-
-        if not extension_loaded and torch.cpu._is_avx2_supported():
-            try:
-                importlib.import_module("vllm._C")
-            except ImportError as exc:
-                logger.warning_once(
-                    "Failed to import CPU AVX2 extension (%s)",
-                    exc,
-                )
-            else:
-                logger.info("Loaded AVX2 CPU extension")
-                extension_loaded = True
-
-        # FIXME: handle dispatch on other SIMD instructions (AMX/...)
+                break
 
         if not extension_loaded:
             raise RuntimeError("No CPU extension could be loaded")
