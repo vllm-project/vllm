@@ -28,7 +28,7 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
+from vllm.inputs import EngineInput, TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
@@ -255,7 +255,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             chunk_request_id = f"{ctx.request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
 
             # Create engine prompt for this chunk
-            chunk_engine_prompt = token_inputs(chunk_tokens)
+            chunk_engine_prompt = tokens_input(chunk_tokens)
 
             # Log the chunk
             self._log_inputs(
@@ -357,7 +357,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: ProcessorInputs,
+        engine_prompt: EngineInput,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,

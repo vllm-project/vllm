@@ -9,12 +9,11 @@ from transformers import BatchFeature, PaliGemmaConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict, MultiModalInput
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
 )
 from vllm.multimodal.parse import (
@@ -231,7 +230,7 @@ class PaliGemmaMultiModalProcessor(BaseMultiModalProcessor[PaliGemmaProcessingIn
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         mm_inputs = super().apply(inputs, timing_ctx)
         prompt_token_ids = mm_inputs["prompt_token_ids"]
 

@@ -9,8 +9,8 @@ from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
 
 from vllm.inputs import (
     EmbedsPrompt,
+    EngineInput,
     ExplicitEncoderDecoderPrompt,
-    ProcessorInputs,
     PromptType,
     SingletonPrompt,
     TextPrompt,
@@ -70,28 +70,28 @@ def conversation_to_seq(
 
 DecoderOnlyDictPrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
 """
-A [`DecoderOnlyPrompt`][vllm.inputs.data.DecoderOnlyPrompt]
+A [`DecoderOnlyPrompt`][vllm.inputs.api.DecoderOnlyPrompt]
 that has been standardized into a dictionary.
 """
 
 
 EncoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
 """
-A [`EncoderPrompt`][vllm.inputs.data.EncoderPrompt]
+A [`EncoderPrompt`][vllm.inputs.api.EncoderPrompt]
 that has been standardized into a dictionary.
 """
 
 
 DecoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
 """
-A [`DecoderPrompt`][vllm.inputs.data.DecoderPrompt]
+A [`DecoderPrompt`][vllm.inputs.api.DecoderPrompt]
 that has been standardized into a dictionary.
 """
 
 
 class EncoderDecoderDictPrompt(TypedDict):
     """
-    A [`EncoderDecoderPrompt`][vllm.inputs.data.EncoderDecoderPrompt]
+    A [`EncoderDecoderPrompt`][vllm.inputs.api.EncoderDecoderPrompt]
     that has been standardized into a dictionary.
     """
 
@@ -104,14 +104,14 @@ SingletonDictPrompt: TypeAlias = (
     DecoderOnlyDictPrompt | EncoderDictPrompt | DecoderDictPrompt
 )
 """
-A [`SingletonPrompt`][vllm.inputs.data.SingletonPrompt]
+A [`SingletonPrompt`][vllm.inputs.api.SingletonPrompt]
 that has been standardized into a dictionary.
 """
 
 
 DictPrompt: TypeAlias = DecoderOnlyDictPrompt | EncoderDecoderDictPrompt
 """
-A [`PromptType`][vllm.inputs.data.PromptType]
+A [`PromptType`][vllm.inputs.api.PromptType]
 that has been standardized into a dictionary.
 """
 
@@ -236,7 +236,7 @@ def extract_target_prompt(model_config: "ModelConfig", prompt: object):
 
 def extract_prompt_components(
     model_config: "ModelConfig",
-    prompt: PromptType | ProcessorInputs,
+    prompt: PromptType | EngineInput,
 ) -> PromptComponents:
     target_prompt = extract_target_prompt(model_config, prompt)
 
@@ -248,7 +248,8 @@ def extract_prompt_components(
 
 
 def extract_prompt_len(
-    model_config: "ModelConfig", prompt: PromptType | ProcessorInputs
+    model_config: "ModelConfig",
+    prompt: PromptType | EngineInput,
 ):
     target_prompt = extract_target_prompt(model_config, prompt)
 

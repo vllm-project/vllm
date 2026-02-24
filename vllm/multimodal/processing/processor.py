@@ -6,34 +6,29 @@ from collections.abc import Callable, Generator, ItemsView, Iterable, Mapping, S
 from dataclasses import dataclass, field, replace
 from enum import Enum
 from functools import lru_cache
-from typing import (
-    TYPE_CHECKING,
-    Generic,
-    NamedTuple,
-    Protocol,
-    TypeAlias,
-    cast,
-)
+from typing import TYPE_CHECKING, Generic, NamedTuple, Protocol, TypeAlias, cast
 
 import regex as re
 import torch
 from typing_extensions import TypeVar, assert_never, deprecated
 
+from vllm.inputs import (
+    MultiModalEncDecInput,
+    MultiModalHashes,
+    MultiModalInput,
+    mm_enc_dec_input,
+    mm_input,
+)
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import flatten_2d_lists, full_groupby
 
 from ..inputs import (
-    MultiModalEncDecInputs,
     MultiModalFieldConfig,
-    MultiModalHashes,
-    MultiModalInputs,
     MultiModalKwargsItem,
     MultiModalKwargsItems,
     MultiModalKwargsOptionalItems,
     PlaceholderRange,
-    mm_enc_dec_inputs,
-    mm_inputs,
 )
 from ..parse import (
     DictEmbeddingItems,
@@ -1012,7 +1007,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         mm_items: MultiModalDataItems,
         mm_uuid_items: MultiModalUUIDItems | None = None,
         hf_processor_mm_kwargs: Mapping[str, object] | None = None,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         processor_inputs = ProcessorInputs(
             prompt,
             mm_items,
@@ -1671,7 +1666,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         """
         Process multi-modal inputs to be used in vLLM.
 
@@ -1706,7 +1701,7 @@ class BaseMultiModalProcessor(ABC, Generic[_I]):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return mm_inputs(
+        return mm_input(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_info.kwargs,
             mm_hashes=mm_info.hashes,
@@ -1739,7 +1734,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         prompt: str | list[int],
         mm_items: MultiModalDataItems,
-        encoder_inputs: MultiModalInputs,
+        encoder_inputs: MultiModalInput,
     ):
         tokenizer = self.info.get_tokenizer()
         decoder_prompt_raw = self.create_decoder_prompt(prompt, mm_items)
@@ -1752,7 +1747,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
             decoder_prompt_text = None
             decoder_prompt_ids = decoder_prompt_raw
 
-        return mm_enc_dec_inputs(
+        return mm_enc_dec_input(
             encoder_inputs,
             decoder_prompt_ids,
             decoder_prompt=decoder_prompt_text,
@@ -1762,7 +1757,7 @@ class EncDecMultiModalProcessor(BaseMultiModalProcessor[_I]):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalEncDecInputs:
+    ) -> MultiModalEncDecInput:
         """
         Process multi-modal inputs to be used in vLLM.
         The main processing steps are modified to fit encoder-decoder model:

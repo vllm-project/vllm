@@ -39,9 +39,10 @@ from typing_extensions import Required, TypedDict
 
 from vllm import envs
 from vllm.config import ModelConfig
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 from vllm.model_executor.models import SupportsMultiModal
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict, MultiModalUUIDDict
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
     MultiModalFlatField,

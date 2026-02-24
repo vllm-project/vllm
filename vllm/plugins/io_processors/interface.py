@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator, Sequence
 from typing import Generic, TypeVar
 
 from vllm.config import VllmConfig
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType
 from vllm.outputs import PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams

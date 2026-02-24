@@ -38,7 +38,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import (
@@ -297,7 +297,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[ProcessorInputs], float]:
+    ) -> tuple[list[EngineInput], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.

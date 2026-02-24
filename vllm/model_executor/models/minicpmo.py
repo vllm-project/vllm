@@ -41,9 +41,9 @@ from transformers.models.whisper.modeling_whisper import (
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalKwargsItems
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     NestedTensors,
 )
@@ -51,7 +51,6 @@ from vllm.multimodal.parse import (
     AudioItem,
     AudioProcessorItems,
     DictEmbeddingItems,
-    ModalityData,
     ModalityDataItems,
     MultiModalDataItems,
 )

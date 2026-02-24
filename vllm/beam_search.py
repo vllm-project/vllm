@@ -3,10 +3,9 @@
 
 from dataclasses import dataclass
 
-from vllm.inputs import TokenInputs, token_inputs
+from vllm.inputs import MultiModalInput, TokensInput, mm_input, tokens_input
 from vllm.logprobs import Logprob
 from vllm.lora.request import LoRARequest
-from vllm.multimodal.inputs import MultiModalInputs, mm_inputs
 
 
 @dataclass
@@ -17,7 +16,7 @@ class BeamSearchSequence:
     about to be returned to the user.
     """
 
-    orig_prompt: TokenInputs | MultiModalInputs
+    orig_prompt: TokensInput | MultiModalInput
 
     # The tokens include the prompt.
     tokens: list[int]
@@ -35,13 +34,13 @@ class BeamSearchSequence:
         cache_salt = prompt.get("cache_salt")
 
         if prompt["type"] == "token":
-            return token_inputs(
+            return tokens_input(
                 self.tokens,
                 prompt=prompt_text,
                 cache_salt=cache_salt,
             )
 
-        return mm_inputs(
+        return mm_input(
             prompt_token_ids=self.tokens,
             mm_kwargs=prompt["mm_kwargs"],
             mm_hashes=prompt["mm_hashes"],
@@ -64,7 +63,7 @@ class BeamSearchOutput:
 class BeamSearchInstance:
     def __init__(
         self,
-        prompt: TokenInputs | MultiModalInputs,
+        prompt: TokensInput | MultiModalInput,
         lora_request: LoRARequest | None = None,
         logprobs: list[dict[int, Logprob]] | None = None,
         **kwargs,

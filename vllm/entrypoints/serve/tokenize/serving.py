@@ -20,7 +20,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
     TokenizerInfoResponse,
 )
-from vllm.inputs import TokensPrompt, token_inputs
+from vllm.inputs import TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
 
@@ -135,7 +135,7 @@ class OpenAIServingTokenization(OpenAIServing):
 
         self._log_inputs(
             request_id,
-            token_inputs(request.tokens),
+            tokens_input(request.tokens),
             params=None,
             lora_request=lora_request,
         )

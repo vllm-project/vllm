@@ -36,7 +36,7 @@ from vllm.entrypoints.pooling.score.utils import (
     parse_score_data_single,
     validate_score_input,
 )
-from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
+from vllm.inputs import EngineInput, TokensPrompt, tokens_input
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
@@ -109,12 +109,12 @@ class ServingScores(OpenAIServing):
             *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
-        engine_prompts: list[ProcessorInputs] = []
+        engine_prompts: list[EngineInput] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
             text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
-                token_inputs(
+                tokens_input(
                     text_token_prompt["prompt_token_ids"],
                     prompt=input_text,
                 )

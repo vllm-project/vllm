@@ -28,6 +28,7 @@ from transformers import (
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.lora import LoRAConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
@@ -46,7 +47,6 @@ from vllm.model_executor.models.radio import RadioModel
 from vllm.model_executor.models.whisper import WhisperAttention, WhisperCrossAttention
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )

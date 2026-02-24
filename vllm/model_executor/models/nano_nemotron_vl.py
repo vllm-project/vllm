@@ -27,6 +27,7 @@ from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -55,7 +56,6 @@ from vllm.multimodal.evs import (
     compute_retention_mask,
 )
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
     VideoItem,

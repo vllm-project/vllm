@@ -8,20 +8,18 @@ from typing import Any, Literal
 
 import vllm.envs as envs
 from vllm.config import VllmConfig
-from vllm.inputs.data import (
-    ProcessorInputs,
+from vllm.inputs import (
+    EngineInput,
     PromptType,
-    SingletonInputs,
+    SingletonInput,
+    split_enc_dec_input,
 )
-from vllm.inputs.parse import split_enc_dec_inputs
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
-from vllm.multimodal.inputs import (
-    MultiModalFeatureSpec,
-)
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
@@ -88,7 +86,7 @@ class InputProcessor:
             orig_validate_request = platform_validate_request
 
             def compat_validate_request(
-                processed_inputs: ProcessorInputs,
+                processed_inputs: EngineInput,
                 params: SamplingParams | PoolingParams,
             ):
                 return orig_validate_request(
@@ -225,7 +223,7 @@ class InputProcessor:
     def process_inputs(
         self,
         request_id: str,
-        prompt: PromptType | ProcessorInputs,
+        prompt: PromptType | EngineInput,
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -260,7 +258,7 @@ class InputProcessor:
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
-            processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
+            processed_inputs: EngineInput = prompt  # type: ignore[assignment]
         else:
             logger.warning_once(
                 "Passing raw prompts to InputProcessor is deprecated "
@@ -278,7 +276,7 @@ class InputProcessor:
 
         self._platform_validate_request(processed_inputs, params)
 
-        encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
+        encoder_inputs, decoder_inputs = split_enc_dec_input(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
 
         # Mypy can be conservative for TypedDict unions; normalize access.
@@ -413,7 +411,7 @@ class InputProcessor:
 
     def _validate_model_input(
         self,
-        prompt_inputs: SingletonInputs,
+        prompt_inputs: SingletonInput,
         prompt_type: Literal["encoder", "decoder"],
     ) -> None:
         model_config = self.model_config
@@ -467,8 +465,8 @@ class InputProcessor:
 
     def _validate_model_inputs(
         self,
-        encoder_inputs: SingletonInputs | None,
-        decoder_inputs: SingletonInputs,
+        encoder_inputs: SingletonInput | None,
+        decoder_inputs: SingletonInput,
     ):
         if encoder_inputs is not None:
             self._validate_model_input(encoder_inputs, prompt_type="encoder")

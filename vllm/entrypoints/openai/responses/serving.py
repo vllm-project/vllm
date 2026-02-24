@@ -101,7 +101,7 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import ProcessorInputs, token_inputs
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
@@ -265,7 +265,7 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: ProcessorInputs,
+        engine_prompt: EngineInput,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
         prompt_len = self._extract_prompt_len(engine_prompt)
@@ -626,7 +626,7 @@ class OpenAIServingResponses(OpenAIServing):
 
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = token_inputs(prompt_token_ids)
+        engine_prompt = tokens_input(prompt_token_ids)
 
         # Add cache_salt if provided in the request
         if request.cache_salt is not None:

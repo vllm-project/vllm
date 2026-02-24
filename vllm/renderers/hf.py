@@ -5,7 +5,7 @@ import itertools
 from collections import defaultdict, deque
 from collections.abc import Set
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import jinja2
 import jinja2.ext
@@ -25,6 +25,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
@@ -36,13 +37,6 @@ from .base import BaseRenderer
 from .inputs import DictPrompt
 from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
-
-if TYPE_CHECKING:
-    from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
-else:
-    MultiModalDataDict = dict[str, Any]
-    MultiModalUUIDDict = dict[str, Any]
-
 
 logger = init_logger(__name__)
 
@@ -488,9 +482,9 @@ def safe_apply_chat_template(
 
 
 def rebuild_mm_uuids_from_mm_data(
-    mm_uuids: "MultiModalUUIDDict",
-    mm_data: "MultiModalDataDict",
-) -> "MultiModalUUIDDict":
+    mm_uuids: MultiModalUUIDDict,
+    mm_data: MultiModalDataDict,
+) -> MultiModalUUIDDict:
     """Rebuild mm_uuids after vision_chunk processing.
 
     When videos are split into chunks, the original UUIDs need to be updated
@@ -523,7 +517,7 @@ def rebuild_mm_uuids_from_mm_data(
 
 
 def build_video_prompts_from_mm_data(
-    mm_data: "MultiModalDataDict",
+    mm_data: MultiModalDataDict,
 ) -> list[str]:
     """Build video prompts from vision_chunk data.
 
@@ -561,7 +555,7 @@ def build_video_prompts_from_mm_data(
 
 def replace_vision_chunk_video_placeholder(
     prompt_raw: str | list[int],
-    mm_data: "MultiModalDataDict",
+    mm_data: MultiModalDataDict,
     video_placeholder: str | None,
 ) -> str | list[int]:
     # get video placehoder, replace it with runtime video-chunk prompts

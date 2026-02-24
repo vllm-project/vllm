@@ -33,7 +33,7 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.renderers.inputs.preprocess import prompt_to_seq
@@ -92,7 +92,7 @@ class OpenAIServingPooling(OpenAIServing):
                     "dimensions is currently not supported"
                 )
 
-            engine_prompts: Sequence[ProcessorInputs]
+            engine_prompts: Sequence[EngineInput]
             if use_io_processor := isinstance(request, IOProcessorRequest):
                 if self.io_processor is None:
                     raise ValueError(

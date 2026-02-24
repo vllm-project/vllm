@@ -26,7 +26,7 @@ from vllm.entrypoints.openai.responses.serving import (
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 

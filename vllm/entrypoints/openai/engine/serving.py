@@ -96,12 +96,12 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import (
-    ProcessorInputs,
+from vllm.inputs import (
+    EngineInput,
     PromptType,
     SingletonPrompt,
     TokensPrompt,
-    token_inputs,
+    tokens_input,
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -211,7 +211,7 @@ class ServeContext(Generic[RequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_prompts: list[ProcessorInputs] | None = None
+    engine_prompts: list[EngineInput] | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None
@@ -254,7 +254,7 @@ class OpenAIServing:
 
     async def beam_search(
         self,
-        prompt: ProcessorInputs,
+        prompt: EngineInput,
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
@@ -930,7 +930,7 @@ class OpenAIServing:
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[ProcessorInputs]:
+    ) -> list[EngineInput]:
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(prompt_to_seq(prompt_embeds))
@@ -943,7 +943,7 @@ class OpenAIServing:
         self,
         request: RendererRequest,
         prompts: Sequence[PromptType | bytes],
-    ) -> list[ProcessorInputs]:
+    ) -> list[EngineInput]:
         renderer = self.renderer
         model_config = self.model_config
 
@@ -976,7 +976,7 @@ class OpenAIServing:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
+    ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         renderer = self.renderer
 
         default_template_kwargs = merge_kwargs(
@@ -1022,13 +1022,13 @@ class OpenAIServing:
 
         return conversation, [engine_prompt]
 
-    def _extract_prompt_components(self, prompt: PromptType | ProcessorInputs):
+    def _extract_prompt_components(self, prompt: PromptType | EngineInput):
         return extract_prompt_components(self.model_config, prompt)
 
-    def _extract_prompt_text(self, prompt: ProcessorInputs):
+    def _extract_prompt_text(self, prompt: EngineInput):
         return self._extract_prompt_components(prompt).text
 
-    def _extract_prompt_len(self, prompt: ProcessorInputs):
+    def _extract_prompt_len(self, prompt: EngineInput):
         return extract_prompt_len(self.model_config, prompt)
 
     async def _render_next_turn(
@@ -1058,7 +1058,7 @@ class OpenAIServing:
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
-        engine_prompt: ProcessorInputs,
+        engine_prompt: EngineInput,
         sampling_params: SamplingParams,
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
@@ -1109,7 +1109,7 @@ class OpenAIServing:
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
                 token_ids = context.render_for_completion()
-                engine_prompt = token_inputs(token_ids)
+                engine_prompt = tokens_input(token_ids)
 
                 sampling_params.max_tokens = max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
@@ -1137,7 +1137,7 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType | ProcessorInputs,
+        inputs: PromptType | EngineInput,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:
