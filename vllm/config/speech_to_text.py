@@ -33,4 +33,7 @@ class SpeechToTextConfig:
 
     @property
     def allow_audio_chunking(self) -> bool:
-        return self.min_energy_split_window_size is not None
+        return (
+            self.min_energy_split_window_size is not None
+            and self.max_audio_clip_s is not None
+        )

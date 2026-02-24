@@ -295,6 +295,51 @@ You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the mult
 
 Full example: [examples/offline_inference/audio_language.py](../../examples/offline_inference/audio_language.py)
 
+#### Chunking Long Audio for Transcription
+
+Speech-to-text models like Whisper have a maximum audio length they can process (typically 30 seconds). For longer audio files, vLLM provides a utility to intelligently split audio into chunks at quiet points to minimize cutting through speech.
+
+```python
+import librosa
+from vllm import LLM, SamplingParams
+from vllm.multimodal.audio import split_audio
+
+# Load long audio file
+audio, sr = librosa.load("long_audio.wav", sr=16000)
+
+# Split into chunks at low-energy (quiet) regions
+chunks = split_audio(
+    audio_data=audio,
+    sample_rate=sr,
+    max_clip_duration_s=30.0,      # Maximum chunk length in seconds
+    overlap_duration_s=1.0,         # Search window for finding quiet split points
+    min_energy_window_size=1600,    # Window size for energy calculation (~100ms at 16kHz)
+)
+
+# Initialize Whisper model
+llm = LLM(model="openai/whisper-large-v3-turbo")
+sampling_params = SamplingParams(temperature=0, max_tokens=256)
+
+# Transcribe each chunk
+transcriptions = []
+for chunk in chunks:
+    outputs = llm.generate({
+        "prompt": "<|startoftranscript|><|en|><|transcribe|><|notimestamps|>",
+        "multi_modal_data": {"audio": (chunk, sr)},
+    }, sampling_params)
+    transcriptions.append(outputs[0].outputs[0].text)
+
+# Combine results
+full_transcription = " ".join(transcriptions)
+```
+
+The `split_audio` function:
+
+- Splits audio at quiet points to avoid cutting through speech
+- Uses RMS energy to find low-amplitude regions within the overlap window
+- Preserves all audio samples (no data loss)
+- Supports any sample rate
+
 #### Automatic Audio Channel Normalization
 
 vLLM automatically normalizes audio channels for models that require specific audio formats. When loading audio with libraries like `torchaudio`, stereo files return shape `[channels, time]`, but many audio models (particularly Whisper-based models) expect mono audio with shape `[time]`.
