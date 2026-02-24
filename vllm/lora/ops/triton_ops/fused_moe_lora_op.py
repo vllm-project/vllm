@@ -218,6 +218,10 @@ def _fused_moe_lora_kernel(
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
     USE_TMA: tl.constexpr,
+    # sort_c determines whether tokens are stored in C in the order determined
+    # by sorted_token_ids to enabled later TMA loads from this tensor.
+    # During shrink kernel, sort_c=True and a_desc=None;
+    # during expand, sort_c=False and a_desc is not None.
     sort_c: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
