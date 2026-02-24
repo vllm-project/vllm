@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
@@ -95,6 +96,7 @@ class CudaGraphManager:
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
         uniform_decode: bool = False,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> None:
         # select and check capture function
         assert capture_cg_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], (
@@ -112,13 +114,32 @@ class CudaGraphManager:
             )
         else:
             num_reqs = min(num_tokens, self.max_num_reqs)
-        input_ids = input_buffers.input_ids[:num_tokens]
+            # Ensure num_tokens is evenly divisible by num_reqs so that
+            # prepare_inputs_to_capture produces uniform query lengths.
+            # See flashinfer.py:1109 — TRTLLM asserts this.
+            if num_reqs > 0 and num_tokens > num_reqs and num_tokens % num_reqs != 0:
+                tokens_per_req = cdiv(num_tokens, num_reqs)
+                num_reqs = num_tokens // tokens_per_req
+                if num_tokens % num_reqs != 0:
+                    num_reqs = 1
         positions = input_buffers.positions[:num_tokens]
         if self.uses_mrope:
             assert mrope_positions is not None
             positions = mrope_positions[:, :num_tokens]
-        if inputs_embeds is not None:
-            inputs_embeds = inputs_embeds[:num_tokens]
+
+        # For non-first PP ranks: use intermediate_tensors instead of
+        # input_ids/inputs_embeds.
+        if intermediate_tensors is not None:
+            input_ids = None
+            inputs_embeds = None
+            intermediate_tensors = IntermediateTensors(
+                {k: v[:num_tokens] for k, v in intermediate_tensors.tensors.items()}
+            )
+        else:
+            input_ids = input_buffers.input_ids[:num_tokens]
+            if inputs_embeds is not None:
+                inputs_embeds = inputs_embeds[:num_tokens]
+
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
             num_reqs,
             num_tokens,
@@ -146,18 +167,26 @@ class CudaGraphManager:
                 input_ids=input_ids,
                 positions=positions,
                 inputs_embeds=inputs_embeds,
+                intermediate_tensors=intermediate_tensors,
             )
+
+        # Allocate output buffers (only for ranks that produce hidden states).
+        if isinstance(model_output, IntermediateTensors):
+            # Non-last PP rank: output is IntermediateTensors, not hidden
+            # states. No buffer needed (FULL mode replay not applicable).
+            pass
+        else:
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = model_output
             else:
                 hidden_states = model_output
                 aux_hidden_states = None
-
-        # Allocate output buffers if not already done.
-        if self.hidden_states is None:
-            self.hidden_states = torch.empty_like(hidden_states)
-        if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
-            self.aux_hidden_states = [torch.empty_like(x) for x in aux_hidden_states]
+            if self.hidden_states is None:
+                self.hidden_states = torch.empty_like(hidden_states)
+            if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
+                self.aux_hidden_states = [
+                    torch.empty_like(x) for x in aux_hidden_states
+                ]
 
         capture_fn(
             num_tokens=num_tokens,
@@ -170,6 +199,7 @@ class CudaGraphManager:
             attn_metadata=attn_metadata,
             slot_mappings=slot_mappings,
             has_lora=has_lora,
+            intermediate_tensors=intermediate_tensors,
         )
 
     def _capture_full_graph(
@@ -177,14 +207,19 @@ class CudaGraphManager:
         num_tokens: int,
         num_reqs: int,
         model: nn.Module,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         has_lora: bool = False,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> None:
+        # TODO: support FULL cudagraph mode with PP.
+        assert intermediate_tensors is None, (
+            "FULL cudagraph mode does not yet support pipeline parallelism."
+        )
         assert attn_metadata is not None
         # Capture the graph.
         assert num_tokens not in self.graphs
@@ -224,13 +259,14 @@ class CudaGraphManager:
         num_tokens: int,
         num_reqs: int,
         model: nn.Module,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         inputs_embeds: torch.Tensor | None,
         num_tokens_across_dp: torch.Tensor,
         attn_metadata: dict[str, Any] | None,
         slot_mappings: dict[str, torch.Tensor] | None,
         has_lora: bool = False,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> None:
         # create batch descriptor for piecewise cudagraph dispatch key
         batch_descriptor = BatchDescriptor(num_tokens=num_tokens, has_lora=has_lora)
@@ -249,6 +285,7 @@ class CudaGraphManager:
                 input_ids=input_ids,
                 positions=positions,
                 inputs_embeds=inputs_embeds,
+                intermediate_tensors=intermediate_tensors,
             )
 
     @torch.inference_mode()
@@ -262,6 +299,7 @@ class CudaGraphManager:
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
         has_lora: bool = False,
+        intermediate_tensors: IntermediateTensors | None = None,
     ) -> None:
         common_kwargs = dict(
             device=self.device,
@@ -274,6 +312,7 @@ class CudaGraphManager:
             attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
             has_lora=has_lora,
+            intermediate_tensors=intermediate_tensors,
         )
 
         # Phase 1: Capture for mixed prefill-decode batches if needed.
