@@ -52,14 +52,53 @@ def sample_frames_from_video(frames: npt.NDArray, num_frames: int) -> npt.NDArra
 
 class VideoLoader:
     @classmethod
-    @abstractmethod
-    def load_bytes(
-        cls, data: bytes, num_frames: int = -1, **kwargs
-    ) -> tuple[npt.NDArray, dict[str, Any]]:
+    def sample_frames_index(
+        cls,
+        num_frames: int,
+        fps: float,
+        duration: int,
+        total_frames_num: int,
+        original_fps: float,
+        max_duration: int,
+        **kwargs,
+    ) -> list[int]:
+        """Return the list of frame indices to sample from the video."""
         raise NotImplementedError
 
+    @classmethod
+    @abstractmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        """Load video frames from bytes and return (frames_array, metadata_dict)."""
+        raise NotImplementedError
+
+
+VIDEO_LOADER_REGISTRY = ExtensionManager()
+
+
+class OpenCVVideoBackendMixin:
     @staticmethod
+    def get_cv2_video_api():
+        import cv2.videoio_registry as vr
+
+        api_pref = None
+        for backend in vr.getStreamBufferedBackends():
+            if not vr.hasBackend(backend):
+                continue
+            if not vr.isBackendBuiltIn(backend):
+                _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
+                if abi < 1 or (abi == 1 and api < 2):
+                    continue
+            api_pref = backend
+            break
+        return api_pref
+
+    @classmethod
     def _can_use_for_recovery(
+        cls,
         idx: int,
         failed_frames: list[int],
         next_target_map: dict[int, int],
@@ -72,8 +111,9 @@ class VideoLoader:
         limit = next_target_map.get(oldest_failed, total_frames)
         return idx < limit
 
-    @staticmethod
+    @classmethod
     def _read_frames_with_recovery(
+        cls,
         cap: "cv2.VideoCapture",
         frame_indices: list[int],
         total_frames: int,
@@ -135,7 +175,7 @@ class VideoLoader:
                 continue
 
             # Check if we should retrieve: target frame OR can recover a failed one
-            can_recover = VideoLoader._can_use_for_recovery(
+            can_recover = cls._can_use_for_recovery(
                 idx, failed_frames_idx, next_target_map, total_frames
             )
 
@@ -179,15 +219,16 @@ class VideoLoader:
 
         return frames, valid_frame_indices, recovered_map
 
-    @staticmethod
+    @classmethod
     def _read_frames(
+        cls,
         cap,
         frame_indices: set[int],
-        num_expected_frames: int,
         max_frame_idx: int,
-    ) -> tuple[npt.NDArray, int, list[int]]:
+    ) -> tuple[npt.NDArray, list[int]]:
         import cv2
 
+        num_expected_frames = len(frame_indices)
         width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
         height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
         frames = np.empty((num_expected_frames, height, width, 3), dtype=np.uint8)
@@ -229,28 +270,77 @@ class VideoLoader:
                 valid_num_frames,
             )
 
-        return frames[:valid_num_frames], valid_num_frames, valid_frame_indices
+        return frames[:valid_num_frames], valid_frame_indices
 
+    @classmethod
+    def read_frames(
+        cls,
+        cap: "cv2.VideoCapture",
+        frame_idx: list[int],
+        frame_idx_set: set[int],
+        num_frames_to_sample: int,
+        max_frame_idx: int,
+        total_frames_num: int,
+        *,
+        frame_recovery: bool = False,
+    ) -> tuple[npt.NDArray, list[int]]:
+        if frame_recovery:
+            frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
+                cap, frame_idx, total_frames_num
+            )
 
-VIDEO_LOADER_REGISTRY = ExtensionManager()
+            if recovered_map:
+                logger.info(
+                    "Frame recovery: %d frames recovered using forward scan.",
+                    len(recovered_map),
+                )
+        else:
+            frame_idx_set = set(frame_idx)
+            frames, valid_frame_indices = cls._read_frames(
+                cap, frame_idx_set, max(frame_idx)
+            )
+        valid_num_frames = len(valid_frame_indices)
+        if valid_num_frames < num_frames_to_sample:
+            logger.warning(
+                "Video loading completed with %d broken/unreadable frames. "
+                "Expected to sample %d frames but only loaded %d frames.",
+                num_frames_to_sample - valid_num_frames,
+                num_frames_to_sample,
+                valid_num_frames,
+            )
+        return frames, valid_frame_indices
 
 
 @VIDEO_LOADER_REGISTRY.register("opencv")
-class OpenCVVideoBackend(VideoLoader):
-    def get_cv2_video_api(self):
-        import cv2.videoio_registry as vr
+class OpenCVVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
+    @classmethod
+    def sample_frames_index(
+        cls,
+        num_frames: int,
+        fps: float,
+        duration: int,
+        total_frames_num: int,
+        original_fps: float,
+        max_duration: int,
+        **kwargs,
+    ) -> list[int]:
+        # resample video to target num_frames and fps
+        # - the minimum of the two will be used
+        num_frames_to_sample = total_frames_num
+        if num_frames > 0:
+            num_frames_to_sample = min(num_frames, total_frames_num)
+        if fps > 0:
+            num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
+        num_frames_to_sample = max(1, num_frames_to_sample)  # at least one sample
 
-        api_pref = None
-        for backend in vr.getStreamBufferedBackends():
-            if not vr.hasBackend(backend):
-                continue
-            if not vr.isBackendBuiltIn(backend):
-                _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
-                if abi < 1 or (abi == 1 and api < 2):
-                    continue
-            api_pref = backend
-            break
-        return api_pref
+        if num_frames_to_sample == total_frames_num:
+            frame_idx = list(range(0, num_frames_to_sample))
+        else:
+            uniform_sampled_frames = np.linspace(
+                0, total_frames_num - 1, num_frames_to_sample, dtype=int
+            )
+            frame_idx = uniform_sampled_frames.tolist()
+        return frame_idx
 
     @classmethod
     def load_bytes(
@@ -277,7 +367,7 @@ class OpenCVVideoBackend(VideoLoader):
         """
         import cv2
 
-        backend = cls().get_cv2_video_api()
+        backend = OpenCVVideoBackendMixin.get_cv2_video_api()
         cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
@@ -288,37 +378,24 @@ class OpenCVVideoBackend(VideoLoader):
 
         # resample video to target num_frames and fps
         # - the minimum of the two will be used
-        num_frames_to_sample = total_frames_num
-        if num_frames > 0:
-            num_frames_to_sample = min(num_frames, total_frames_num)
-        if fps > 0:
-            num_frames_to_sample = min(num_frames_to_sample, math.floor(duration * fps))
-        num_frames_to_sample = max(1, num_frames_to_sample)  # at least one sample
+        frame_idx = cls.sample_frames_index(
+            num_frames=num_frames,
+            fps=fps,
+            duration=duration,
+            max_duration=max_duration,
+            total_frames_num=total_frames_num,
+            original_fps=original_fps,
+        )
 
-        if num_frames_to_sample == total_frames_num:
-            frame_idx = list(range(0, num_frames_to_sample))
-        else:
-            uniform_sampled_frames = np.linspace(
-                0, total_frames_num - 1, num_frames_to_sample, dtype=int
-            )
-            frame_idx = uniform_sampled_frames.tolist()
-
-        if frame_recovery:
-            frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
-                cap, frame_idx, total_frames_num
-            )
-            valid_num_frames = len(valid_frame_indices)
-
-            if recovered_map:
-                logger.info(
-                    "Frame recovery: %d frames recovered using forward scan.",
-                    len(recovered_map),
-                )
-        else:
-            frame_idx_set = set(frame_idx)
-            frames, valid_num_frames, valid_frame_indices = cls._read_frames(
-                cap, frame_idx_set, num_frames_to_sample, max(frame_idx)
-            )
+        frames, valid_frame_indices = OpenCVVideoBackendMixin.read_frames(
+            cap,
+            frame_idx,
+            set(frame_idx),
+            len(frame_idx),
+            max(frame_idx),
+            total_frames_num=total_frames_num,
+            frame_recovery=frame_recovery,
+        )
 
         # Use transformers transformers.video_utils.VideoMetadata format
         # NOTE(Isotr0py): For models like Qwen3-VL/GLM4.5V, this metadata
@@ -331,14 +408,52 @@ class OpenCVVideoBackend(VideoLoader):
             "frames_indices": valid_frame_indices,
             # extra field used to control hf processor's video
             # sampling behavior
-            "do_sample_frames": valid_num_frames == total_frames_num,
+            "do_sample_frames": len(valid_frame_indices) == total_frames_num,
         }
 
         return frames, metadata
 
 
 @VIDEO_LOADER_REGISTRY.register("opencv_dynamic")
-class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
+class OpenCVDynamicVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
+    @classmethod
+    def sample_frames_index(
+        cls,
+        num_frames: int,
+        fps: float,
+        duration: int,
+        total_frames_num: int,
+        original_fps: float,
+        max_duration: int,
+        **kwargs,
+    ) -> list[int]:
+        max_frame_idx = total_frames_num - 1
+
+        # Refer to:
+        # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
+        frame_indices_list: list[int]
+        if duration <= max_duration:
+            n = int(math.floor(duration * fps))
+            frame_indices_list = sorted(
+                {
+                    min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
+                    for i in range(n)
+                }
+            )
+        else:
+            num_samples = int(max_duration * fps)
+            if num_samples >= total_frames_num:
+                frame_indices_list = list(range(total_frames_num))
+            else:
+                target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
+                frame_indices_list = sorted(
+                    {
+                        min(max_frame_idx, int(math.ceil(t * original_fps)))
+                        for t in target_seconds
+                    }
+                )
+        return frame_indices_list
+
     @classmethod
     def load_bytes(
         cls,
@@ -377,46 +492,24 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         max_frame_idx = total_frames_num - 1
         duration = duration or round(max_frame_idx / original_fps) + 1
 
-        # Refer to:
-        # https://github.com/huggingface/transformers/blob/v4.55.4/src/transformers/models/glm4v/video_processing_glm4v.py#L103-L140
-        frame_indices_list: list[int]
-        if duration <= max_duration:
-            n = int(math.floor(duration * fps))
-            frame_indices_list = sorted(
-                {
-                    min(max_frame_idx, int(math.ceil(i * original_fps / fps)))
-                    for i in range(n)
-                }
-            )
-        else:
-            num_samples = int(max_duration * fps)
-            if num_samples >= total_frames_num:
-                frame_indices_list = list(range(total_frames_num))
-            else:
-                target_seconds = np.linspace(0, duration, num_samples, endpoint=True)
-                frame_indices_list = sorted(
-                    {
-                        min(max_frame_idx, int(math.ceil(t * original_fps)))
-                        for t in target_seconds
-                    }
-                )
+        frame_indices_list = cls.sample_frames_index(
+            num_frames=num_frames,
+            fps=fps,
+            duration=duration,
+            max_duration=max_duration,
+            total_frames_num=total_frames_num,
+            original_fps=original_fps,
+        )
 
-        if frame_recovery:
-            frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
-                cap, frame_indices_list, total_frames_num
-            )
-            valid_num_frames = len(valid_frame_indices)
-
-            if recovered_map:
-                logger.info(
-                    "Frame recovery: %d frames recovered using forward scan.",
-                    len(recovered_map),
-                )
-        else:
-            frame_indices_set = set(frame_indices_list)
-            frames, valid_num_frames, valid_frame_indices = cls._read_frames(
-                cap, frame_indices_set, len(frame_indices_list), total_frames_num - 1
-            )
+        frames, valid_frame_indices = cls.read_frames(
+            cap,
+            frame_indices_list,
+            set(frame_indices_list),
+            len(frame_indices_list),
+            max(frame_indices_list),
+            total_frames_num=total_frames_num,
+            frame_recovery=frame_recovery,
+        )
 
         # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
@@ -432,22 +525,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
 
 @VIDEO_LOADER_REGISTRY.register("molmo2")
-class Molmo2VideoBackend(VideoLoader):
-    def get_cv2_video_api(self):
-        import cv2.videoio_registry as vr
-
-        api_pref = None
-        for backend in vr.getStreamBufferedBackends():
-            if not vr.hasBackend(backend):
-                continue
-            if not vr.isBackendBuiltIn(backend):
-                _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
-                if abi < 1 or (abi == 1 and api < 2):
-                    continue
-            api_pref = backend
-            break
-        return api_pref
-
+class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
     @classmethod
     def get_candidate_target_fps(
         cls,
@@ -685,10 +763,10 @@ class Molmo2VideoBackend(VideoLoader):
             # Use transformers transformers.video_utils.VideoMetadata format
             frame_idx = list(range(0, total_frames_num))
             frame_idx_set = set(frame_idx)
-            frames, valid_num_frames, valid_frame_indices = cls._read_frames(
-                cap, frame_idx_set, total_frames_num, max(frame_idx)
+            frames, valid_frame_indices = cls._read_frames(
+                cap, frame_idx_set, max(frame_idx)
             )
-            do_sample_frames = valid_num_frames == total_frames_num
+            do_sample_frames = len(valid_frame_indices) == total_frames_num
             metadata = {
                 "total_num_frames": total_frames_num,
                 "fps": original_fps,
@@ -710,10 +788,9 @@ class Molmo2VideoBackend(VideoLoader):
             sampling_fps,
         ).tolist()
 
-        frames, valid_num_frames, valid_frame_indices = cls._read_frames(
+        frames, valid_frame_indices = cls._read_frames(
             cap,
             set(frame_idx),
-            len(frame_idx),
             total_frames_num - 1,
         )
 
