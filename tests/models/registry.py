@@ -1200,6 +1200,11 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         },
         is_available_online=False,
     ),
+    "NemotronHMTPModel": _HfExamplesInfo(
+        "nvidia/Nemotron-Super-Placeholder",
+        speculative_model="nvidia/Nemotron-Super-Placeholder",
+        is_available_online=False,
+    ),
 }
 
 _TRANSFORMERS_BACKEND_MODELS = {
