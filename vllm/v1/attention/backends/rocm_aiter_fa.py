@@ -1135,8 +1135,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     from aiter.ops.triton.unified_attention import (
                         unified_attention,
                     )
-
-<<<<<<< pa_common_shuffle_kv_cache
                 _, num_heads, head_size = query.shape
                 num_seqs = attn_metadata.seq_lens.shape[0]
 
@@ -1156,7 +1154,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                     max_logits = torch.empty_like(exp_sums)
                     num_blocks, block_size, num_kv_heads, _ = key_cache.shape
-=======
                     descale_shape = (
                         attn_metadata.query_start_loc[:num_decodes].shape[0] - 1,
                         key_cache.shape[2],
