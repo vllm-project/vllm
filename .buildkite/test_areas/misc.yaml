@@ -72,7 +72,7 @@ steps:
     - python3 offline_inference/vision_language_multi_image.py --seed 0
     - python3 offline_inference/encoder_decoder_multimodal.py --model-type whisper --seed 0
      # for pooling models
-    - python3 pooling/pooling/vision_language_pooling.py --seed 0
+    - python3 pooling/embed/vision_embedding_offline.py --seed 0
     # for features demo
     - python3 offline_inference/prefix_caching.py
     - python3 offline_inference/llm_engine_example.py
@@ -88,11 +88,6 @@ steps:
   - vllm/
   - tests/v1/tracing
   commands:
-  - "pip install \
-      'opentelemetry-sdk>=1.26.0' \
-      'opentelemetry-api>=1.26.0' \
-      'opentelemetry-exporter-otlp>=1.26.0' \
-      'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
 
 - label: Python-only Installation
@@ -108,9 +103,11 @@ steps:
   timeout_in_minutes: 50
   source_file_dependencies:
   - vllm/
+  - tests/detokenizer
   - tests/multimodal
   - tests/utils_
   commands:
+  - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
 
@@ -122,6 +119,8 @@ steps:
   - vllm/
   - tests/test_inputs.py
   - tests/test_outputs.py
+  - tests/test_pooling_params.py
+  - tests/test_ray_env.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -134,12 +133,27 @@ steps:
   - python3 standalone_tests/lazy_imports.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
+  - pytest -v -s test_pooling_params.py
+  - pytest -v -s test_ray_env.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
+
+- label: GPT-OSS Eval (H100)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  device: h100
+  optional: true
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
 - label: GPT-OSS Eval (B200)
   timeout_in_minutes: 60

@@ -333,7 +333,7 @@ def _support_torch_compile(
     ) -> None:
         def mark_dynamic(arg: torch.Tensor, dims: list[int]) -> None:
             if ds_type == DynamicShapesType.UNBACKED:
-                if is_torch_equal_or_newer("2.10.0.dev"):
+                if is_torch_equal_or_newer("2.10.0"):
                     for dim in dims:
                         torch._dynamo.decorators.mark_unbacked(
                             arg, dim, hint_override=arg.size()[dim]
@@ -373,7 +373,7 @@ def _support_torch_compile(
                     if isinstance(arg, torch.Tensor):
                         # In case dims is specified with negative indexing
                         dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                        if is_torch_equal_or_newer("2.10.0.dev"):
+                        if is_torch_equal_or_newer("2.10.0"):
                             for dim in dims:
                                 torch._dynamo.decorators.mark_unbacked(
                                     arg, dim, hint_override=arg.size()[dim]
@@ -407,10 +407,10 @@ def _support_torch_compile(
         if envs.VLLM_USE_AOT_COMPILE:
             """
             When using torch.compile in AOT mode, we store the cache artifacts
-            under VLLM_CACHE_ROOT/torch_aot_compile/{hash}/rank_i_j. The {hash}
-            contains all of the factors except for the source files being
-            traced through, because we don't actually know which source files
-            to check at this point (before dynamo runs).
+            under VLLM_CACHE_ROOT/torch_compile_cache/torch_aot_compile/{hash}
+            The {hash} contains all of the factors except for the source files
+            being traced through, because we don't actually know which source
+            files to check at this point (before dynamo runs).
             On loading we will actually look at the source files being traced
             through. If any source file have changed (compared with the
             serialized backend artifacts), then we need to generate a new AOT
@@ -424,6 +424,7 @@ def _support_torch_compile(
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
+                "torch_compile_cache",
                 "torch_aot_compile",
                 hash_key,
             )
@@ -525,9 +526,9 @@ def _support_torch_compile(
             fx_config_patches["backed_size_oblivious"] = True
 
         # Prepare inductor config patches
-        # assume_32bit_indexing is only available in torch 2.10.0.dev+
+        # assume_32bit_indexing is only available in torch 2.10.0+
         inductor_config_patches = {}
-        if is_torch_equal_or_newer("2.10.0.dev"):
+        if is_torch_equal_or_newer("2.10.0"):
             inductor_config_patches["assume_32bit_indexing"] = (
                 self.compilation_config.dynamic_shapes_config.assume_32_bit_indexing
             )
