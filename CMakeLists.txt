@@ -783,7 +783,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${DSV3_FUSED_A_GEMM_SRC}"
       CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
     list(APPEND VLLM_EXT_SRC ${DSV3_FUSED_A_GEMM_SRC})
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_DSV3_FUSED_A_GEMM=1")
     message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
   else()
     message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
