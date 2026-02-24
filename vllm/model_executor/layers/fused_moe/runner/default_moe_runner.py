@@ -211,12 +211,14 @@ class DefaultMoERunner(MoERunner):
         # Needed for string -> FusedMoE layer lookup in custom ops.
         self.layer_name = layer.layer_name
 
-        self.moe_forward, self.moe_forward_impl = self._select_forward(layer)
+        self.forward_entry, self.forward_impl = self._select_forward(layer)
 
     def _select_forward(self, layer: torch.nn.Module) -> tuple[Callable, Callable]:
+        # Select implementation based on presence of DP chunking.
         forward_impl_fn = (
-            self.forward_impl_chunked if self.use_dp_chunking else self.forward_impl
+            self._forward_impl_chunked if self.use_dp_chunking else self._forward_impl
         )
+
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
@@ -568,19 +570,20 @@ class DefaultMoERunner(MoERunner):
 
         Calling sequence
         - forward
-          - self.moe_forward (_moe_forward or _moe_forward_shared custom op)
+          - self.forward_entry (_moe_forward or _moe_forward_shared custom op)
             - forward_dispatch
-              - moe_forward_impl (forward_impl or forward_impl_chunked)
+              - forward_impl (_forward_impl or _forward_impl_chunked)
 
         Note: The existence of _moe_forward and _moe_forward_shared custom ops are due
         to the following reasons:
-        1. the chunking loop in forward_impl_chunked cannot be compiled by torch.compile
-        2. pytorch cannot handle union types in custom op signatures so _moe_forward and
-           _moe_forward_shared must be split.
+        1. the chunking loop in _forward_impl_chunked cannot be compiled by
+           torch.compile
+        2. pytorch cannot handle union types in custom op signatures so _moe_forward
+           and _moe_forward_shared must be split.
 
-        If forward_impl_chunked can be implemented via torch.scan we can potentially get
-        rid of _moe_forward and _moe_forward_shared and collapse the whole sequence into
-        the 'forward' method.
+        If _forward_impl_chunked can be implemented via torch.scan we can potentially
+        get rid of _moe_forward and _moe_forward_shared and collapse the whole sequence
+        into the 'forward' method.
         """
 
         # Apply transform for routed experts (e.g., latent projection for latent MoE)
@@ -593,7 +596,7 @@ class DefaultMoERunner(MoERunner):
             hidden_states,
         )
 
-        fused_output = self.moe_forward(
+        fused_output = self.forward_entry(
             hidden_states,
             router_logits,
             shared_experts_input,
@@ -620,7 +623,7 @@ class DefaultMoERunner(MoERunner):
         )
 
         with self._sequence_parallel_context():
-            return self.moe_forward_impl(
+            return self.forward_impl(
                 layer,
                 hidden_states,
                 router_logits,
@@ -647,7 +650,7 @@ class DefaultMoERunner(MoERunner):
         out_slice.copy_(orig_slice, non_blocking=True)
         return out_slice
 
-    def forward_impl_chunked(
+    def _forward_impl_chunked(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
@@ -731,7 +734,7 @@ class DefaultMoERunner(MoERunner):
             assert final_shared_hidden_states is not None
             return (final_shared_hidden_states, final_fused_hidden_states)
 
-    def forward_impl(
+    def _forward_impl(
         self,
         layer: torch.nn.Module,
         hidden_states: torch.Tensor,
