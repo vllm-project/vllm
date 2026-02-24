@@ -1,11 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit test for the D93296098 fix: preprocess_mamba must clear
-mamba_state_idx for resumed requests that were force-preempted
-(e.g. reset_prefix_cache) and appear only in resumed_req_ids,
-not in preempted_req_ids.
-"""
-
 from unittest.mock import MagicMock, patch
 
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
