@@ -115,7 +115,10 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
-            if self.pass_config.enable_sp_moe:
+            if (
+                self.pass_config.enable_sp_moe
+                and config.parallel_config.use_sequence_parallel_moe
+            ):
                 self.passes += [SequenceParallelismMoEPass(config)]
 
             if self.pass_config.enable_sp:

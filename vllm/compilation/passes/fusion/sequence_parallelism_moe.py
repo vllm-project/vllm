@@ -131,15 +131,6 @@ class AllReduceFusedAddRMSNormSequenceParallelChunkPattern(
         self,
         pm_pass: PatternMatcherPass,
     ) -> None:
-        def pattern_first(
-            residual: torch.Tensor,
-            input_: torch.Tensor,
-            weight: torch.Tensor,
-        ) -> torch.Tensor:
-            all_reduce = self._all_reduce(input_)
-            rmsnorm, _ = self.rmsnorm_matcher(all_reduce, weight, residual)
-            return self._sequence_parallel_chunk(rmsnorm)
-
         def pattern(
             residual: torch.Tensor,
             input_: torch.Tensor,
@@ -161,35 +152,14 @@ class AllReduceFusedAddRMSNormSequenceParallelChunkPattern(
                 weight,
                 residual_chunk,
             )
+            # Keep residual interface full-sized for decoder-layer boundaries.
             residual_full = self._all_gather(residual_out)
             residual_full = residual_full[: residual.size(0), ...]
             return rmsnorm, residual_full
 
-        def replacement_first(
-            residual: torch.Tensor,
-            input_: torch.Tensor,
-            weight: torch.Tensor,
-        ) -> torch.Tensor:
-            reduce_scatter = self._reduce_scatter_with_padding(input_)
-            residual_chunk = self._sequence_parallel_chunk(residual)
-            rmsnorm, _ = self.rmsnorm_matcher(
-                reduce_scatter,
-                weight,
-                residual_chunk,
-            )
-            return rmsnorm
-
         pm.register_replacement(
             pattern,
             replacement,
-            self.get_inputs(),
-            pm.fwd_only,
-            pm_pass,
-            skip_duplicates=True,
-        )
-        pm.register_replacement(
-            pattern_first,
-            replacement_first,
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
@@ -212,7 +182,14 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
         )
 
         pattern_dtype = self.model_dtype or torch.get_default_dtype()
-        for epsilon in [1e-5, 1e-6]:
+        # Register model eps first to reduce pattern-matching search space.
+        eps_candidates = [1e-5, 1e-6]
+        model_config = getattr(config, "model_config", None)
+        hf_text_config = getattr(model_config, "hf_text_config", None)
+        model_eps = getattr(hf_text_config, "rms_norm_eps", None)
+        if isinstance(model_eps, float):
+            eps_candidates = [model_eps, *[e for e in eps_candidates if e != model_eps]]
+        for epsilon in eps_candidates:
             AllReduceRMSNormSequenceParallelChunkPattern(
                 epsilon, pattern_dtype, self.device
             ).register(self.patterns)
@@ -222,9 +199,7 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        # Keep the same applicability behavior as sequence_parallelism.py:
-        # always allow full-graph mode, and require concrete divisible size in
-        # piecewise mode.
+        # Align with SequenceParallelismPass behavior.
         if (
             not self.compilation_config.splitting_ops
             or self.compilation_config.use_inductor_graph_partition
@@ -238,5 +213,15 @@ class SequenceParallelismMoEPass(VllmPatternMatcherPass):
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
+        # Fast-exit to avoid pattern matcher overhead for graphs without
+        # sequence_parallel_chunk.
+        chunk_op = torch.ops.vllm.sequence_parallel_chunk_impl.default
+        has_chunk = any(
+            node.op == "call_function" and node.target == chunk_op
+            for node in graph.nodes
+        )
+        if not has_chunk:
+            self.matched_count = 0
+            return
         self.matched_count = self.patterns.apply(graph)
         logger.debug("Replaced %s patterns", self.matched_count)

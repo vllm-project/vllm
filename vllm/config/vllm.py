@@ -811,6 +811,16 @@ class VllmConfig:
         ):
             logger.warning("MoE sequence parallelism requires TP>1, disabling")
             self.compilation_config.pass_config.enable_sp_moe = False
+        elif (
+            self.compilation_config.pass_config.enable_sp_moe
+            and not self.parallel_config.use_sequence_parallel_moe
+        ):
+            logger.warning(
+                "MoE sequence parallelism pass requires "
+                "EP enabled with a supported all2all backend, TP>1, and DP>1; "
+                "disabling enable_sp_moe."
+            )
+            self.compilation_config.pass_config.enable_sp_moe = False
         if self.compilation_config.pass_config.enable_sp:
             if self.parallel_config.tensor_parallel_size == 1:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")

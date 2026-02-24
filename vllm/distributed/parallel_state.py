@@ -147,6 +147,11 @@ def reduce_scatter(
 def reduce_scatter_with_padding(
     tensor: torch.Tensor, dim: int, world_size: int, group_name: str
 ) -> torch.Tensor:
+    """Runtime-safe wrapper around reduce_scatter for non-divisible dim sizes.
+
+    This keeps communication semantics on the existing reduce_scatter path while
+    handling odd sequence lengths that appear in range-compiled graphs.
+    """
     assert group_name in _groups, f"Group {group_name} is not found."
     group = _groups[group_name]()
     if group is None:

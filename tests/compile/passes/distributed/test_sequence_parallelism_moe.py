@@ -63,7 +63,9 @@ class TestAllReduceFusedAddRMSNormChunkModel(torch.nn.Module):
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("with_residual", [False, True])
-@pytest.mark.parametrize("seq_len", [16, 15])
+# Cover both divisible and non-divisible sequence lengths. The pass handles
+# odd lengths via reduce_scatter_with_padding.
+@pytest.mark.parametrize("seq_len", [15, 16])
 @pytest.mark.parametrize("hidden_size", [32])
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only on CUDA")
