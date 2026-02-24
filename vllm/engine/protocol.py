@@ -38,8 +38,15 @@ class StreamingInput:
     sampling_params: SamplingParams | None = None
 
 
-class EngineClient(ABC):
-    """Protocol class for Clients to Engine"""
+class BaseEngineClient(ABC):
+    """Engine client interface for non-inference operations.
+
+    Contains only methods and attributes that don't require a running
+    inference engine: configuration, tokenization, health checks, and
+    status monitoring.
+
+    See :class:`EngineClient` for the full interface including inference.
+    """
 
     vllm_config: VllmConfig
     model_config: ModelConfig
@@ -62,6 +69,30 @@ class EngineClient(ABC):
     @property
     @abstractmethod
     def dead_error(self) -> BaseException: ...
+
+    @abstractmethod
+    async def is_tracing_enabled(self) -> bool: ...
+
+    @abstractmethod
+    async def do_log_stats(self) -> None: ...
+
+    @abstractmethod
+    async def check_health(self) -> None:
+        """Raise if unhealthy"""
+        ...
+
+    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        """Get supported tasks"""
+        raise NotImplementedError
+
+
+class EngineClient(BaseEngineClient):
+    """Full engine client interface including inference operations.
+
+    Extends :class:`BaseEngineClient` with methods that require a running
+    inference engine: generation, encoding, profiling, cache management,
+    scheduler control, and weight transfer.
+    """
 
     @abstractmethod
     def generate(
@@ -107,17 +138,6 @@ class EngineClient(ABC):
             request_id: The unique id of the request,
                         or an iterable of such ids.
         """
-        ...
-
-    @abstractmethod
-    async def is_tracing_enabled(self) -> bool: ...
-
-    @abstractmethod
-    async def do_log_stats(self) -> None: ...
-
-    @abstractmethod
-    async def check_health(self) -> None:
-        """Raise if unhealthy"""
         ...
 
     @abstractmethod
@@ -214,10 +234,6 @@ class EngineClient(ABC):
         kwargs: dict | None = None,
     ):
         """Perform a collective RPC call to the given path."""
-        raise NotImplementedError
-
-    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        """Get supported tasks"""
         raise NotImplementedError
 
     async def init_weight_transfer_engine(
