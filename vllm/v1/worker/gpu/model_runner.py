@@ -438,6 +438,66 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # SP is not supported yet.
         return num_scheduled_tokens
 
+    def _prepare_attn_metadata_inputs(
+        self,
+        *,
+        num_reqs: int,
+        num_tokens: int,
+        num_tokens_after_padding: int,
+        query_start_loc_np_full: np.ndarray,
+        query_start_loc: torch.Tensor,
+        query_start_loc_cpu: torch.Tensor,
+        block_tables: tuple[torch.Tensor, ...],
+        slot_mappings: torch.Tensor,
+        dcp_local_seq_lens: torch.Tensor,
+    ) -> tuple[
+        int,
+        int,
+        torch.Tensor,
+        torch.Tensor,
+        tuple[torch.Tensor, ...],
+        torch.Tensor,
+        torch.Tensor,
+    ]:
+        if num_tokens_after_padding <= num_tokens:
+            return (
+                num_reqs,
+                num_tokens,
+                query_start_loc,
+                query_start_loc_cpu,
+                block_tables,
+                slot_mappings,
+                dcp_local_seq_lens,
+            )
+
+        # keep per-step metadata aligned with the captured full-graph shape.
+        attn_num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
+        attn_num_tokens = num_tokens_after_padding
+        if attn_num_reqs > num_reqs:
+            # fill PAD_SLOT_ID for padded block-table rows.
+            for input_block_table in self.block_tables.input_block_tables:
+                input_block_table[num_reqs:attn_num_reqs].fill_(PAD_SLOT_ID)
+        attn_block_tables = tuple(
+            input_block_table[:attn_num_reqs]
+            for input_block_table in self.block_tables.input_block_tables
+        )
+        attn_slot_mappings = self.block_tables.slot_mappings[:, :attn_num_tokens]
+        attn_query_start_loc = self.input_buffers.query_start_loc[: attn_num_reqs + 1]
+        attn_query_start_loc_cpu = torch.from_numpy(
+            query_start_loc_np_full[: attn_num_reqs + 1]
+        )
+        attn_dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:attn_num_reqs]
+
+        return (
+            attn_num_reqs,
+            attn_num_tokens,
+            attn_query_start_loc,
+            attn_query_start_loc_cpu,
+            attn_block_tables,
+            attn_slot_mappings,
+            attn_dcp_local_seq_lens,
+        )
+
     @torch.inference_mode()
     def capture_model(self) -> int:
         if not self.cudagraph_manager.needs_capture():
@@ -708,37 +768,25 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings, self.kv_cache_config
         )
 
-        # metadata for attention, may be padded
-        attn_num_reqs = num_reqs
-        attn_num_tokens = num_tokens
-        attn_query_start_loc = query_start_loc
-        attn_query_start_loc_cpu = query_start_loc_cpu
-        attn_block_tables = block_tables
-        attn_slot_mappings = slot_mappings
-        attn_dcp_local_seq_lens = dcp_local_seq_lens
-        if num_tokens_after_padding > num_tokens:
-            # case when tokens are padded
-            # keep per-step metadata aligned with the captured full-graph shape
-            attn_num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
-            attn_num_tokens = num_tokens_after_padding
-            if attn_num_reqs > num_reqs:
-                # Fill PAD_SLOT_ID for padded block-table rows.
-                for input_block_table in self.block_tables.input_block_tables:
-                    input_block_table[num_reqs:attn_num_reqs].fill_(PAD_SLOT_ID)
-            attn_block_tables = tuple(
-                input_block_table[:attn_num_reqs]
-                for input_block_table in self.block_tables.input_block_tables
-            )
-            attn_slot_mappings = self.block_tables.slot_mappings[:, :attn_num_tokens]
-            attn_query_start_loc = self.input_buffers.query_start_loc[
-                : attn_num_reqs + 1
-            ]
-            attn_query_start_loc_cpu = torch.from_numpy(
-                query_start_loc_np_full[: attn_num_reqs + 1]
-            )
-            attn_dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[
-                :attn_num_reqs
-            ]
+        (
+            attn_num_reqs,
+            attn_num_tokens,
+            attn_query_start_loc,
+            attn_query_start_loc_cpu,
+            attn_block_tables,
+            attn_slot_mappings,
+            attn_dcp_local_seq_lens,
+        ) = self._prepare_attn_metadata_inputs(
+            num_reqs=num_reqs,
+            num_tokens=num_tokens,
+            num_tokens_after_padding=num_tokens_after_padding,
+            query_start_loc_np_full=query_start_loc_np_full,
+            query_start_loc=query_start_loc,
+            query_start_loc_cpu=query_start_loc_cpu,
+            block_tables=block_tables,
+            slot_mappings=slot_mappings,
+            dcp_local_seq_lens=dcp_local_seq_lens,
+        )
 
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
