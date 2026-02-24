@@ -445,32 +445,31 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 and metadata.num_prefills == 0
                 and metadata.num_decodes == 0
                 and num_spec_decodes <= self.decode_cudagraph_max_bs
-                and metadata.num_spec_decode_tokens
-                <= self.decode_cudagraph_max_bs
+                and metadata.num_spec_decode_tokens <= self.decode_cudagraph_max_bs
             ):
+                assert (
+                    metadata.spec_sequence_masks is not None
+                    and metadata.spec_token_indx is not None
+                    and metadata.non_spec_token_indx is not None
+                    and metadata.spec_query_start_loc is not None
+                )
                 self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                     spec_state_indices_tensor, non_blocking=True
                 )
-                spec_state_indices_tensor = self.spec_state_indices_tensor[
-                    :batch_size
-                ]
+                spec_state_indices_tensor = self.spec_state_indices_tensor[:batch_size]
                 spec_state_indices_tensor[num_spec_decodes:].fill_(PAD_SLOT_ID)
 
                 # Copy remaining persistent buffers for CUDA graph replay
                 self.spec_sequence_masks[:batch_size].copy_(
                     metadata.spec_sequence_masks, non_blocking=True
                 )
-                new_metadata.spec_sequence_masks = (
-                    self.spec_sequence_masks[:batch_size]
-                )
+                new_metadata.spec_sequence_masks = self.spec_sequence_masks[:batch_size]
 
                 spec_token_size = metadata.spec_token_indx.size(0)
                 self.spec_token_indx[:spec_token_size].copy_(
                     metadata.spec_token_indx, non_blocking=True
                 )
-                new_metadata.spec_token_indx = self.spec_token_indx[
-                    :spec_token_size
-                ]
+                new_metadata.spec_token_indx = self.spec_token_indx[:spec_token_size]
 
                 non_spec_token_size = metadata.non_spec_token_indx.size(0)
                 self.non_spec_token_indx[:non_spec_token_size].copy_(
@@ -484,22 +483,20 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.spec_query_start_loc[:spec_qsl_size].copy_(
                     metadata.spec_query_start_loc, non_blocking=True
                 )
-                new_metadata.spec_query_start_loc = (
-                    self.spec_query_start_loc[:spec_qsl_size]
-                )
+                new_metadata.spec_query_start_loc = self.spec_query_start_loc[
+                    :spec_qsl_size
+                ]
 
                 self.num_accepted_tokens[:batch_size].copy_(
                     metadata.num_accepted_tokens, non_blocking=True
                 )
-                new_metadata.num_accepted_tokens = self.num_accepted_tokens[
-                    :batch_size
-                ]
+                new_metadata.num_accepted_tokens = self.num_accepted_tokens[:batch_size]
 
             new_metadata.spec_state_indices_tensor = spec_state_indices_tensor
             if metadata.non_spec_state_indices_tensor is not None:
-                new_metadata.non_spec_state_indices_tensor = (
-                    block_table_tensor[~spec_mask, 0]
-                )
+                new_metadata.non_spec_state_indices_tensor = block_table_tensor[
+                    ~spec_mask, 0
+                ]
         else:
             non_spec_state_indices_tensor = block_table_tensor[:, 0]
             num_decodes = metadata.num_decodes
@@ -513,25 +510,22 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
                 self.non_spec_state_indices_tensor[:num_decodes].copy_(
                     non_spec_state_indices_tensor, non_blocking=True
                 )
-                non_spec_state_indices_tensor = (
-                    self.non_spec_state_indices_tensor[:batch_size]
-                )
+                non_spec_state_indices_tensor = self.non_spec_state_indices_tensor[
+                    :batch_size
+                ]
                 non_spec_state_indices_tensor[num_decodes:].fill_(PAD_SLOT_ID)
 
                 # Copy remaining persistent buffers for CUDA graph replay
-                non_spec_qsl_size = (
-                    metadata.non_spec_query_start_loc.size(0)
-                )
+                assert metadata.non_spec_query_start_loc is not None
+                non_spec_qsl_size = metadata.non_spec_query_start_loc.size(0)
                 self.non_spec_query_start_loc[:non_spec_qsl_size].copy_(
                     metadata.non_spec_query_start_loc, non_blocking=True
                 )
-                new_metadata.non_spec_query_start_loc = (
-                    self.non_spec_query_start_loc[:non_spec_qsl_size]
-                )
+                new_metadata.non_spec_query_start_loc = self.non_spec_query_start_loc[
+                    :non_spec_qsl_size
+                ]
 
-            new_metadata.non_spec_state_indices_tensor = (
-                non_spec_state_indices_tensor
-            )
+            new_metadata.non_spec_state_indices_tensor = non_spec_state_indices_tensor
 
         return new_metadata
 
