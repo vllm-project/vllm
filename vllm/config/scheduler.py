@@ -146,6 +146,16 @@ class SchedulerConfig:
     while a larger value (e.g., 10) reduces host overhead and may increase throughput
     by batching multiple tokens before sending."""
 
+    gap_policy_name: str | None = None
+    """Name of the gap policy to use for KV cache recomputation.
+    Available policies: 'none', 'span_aware', or None (no gaps).
+    Gap policies decide where to insert recomputation gaps within prefix-cached
+    tokens, working uniformly across local and external KV caches."""
+
+    gap_policy_config: dict[str, Any] | None = None
+    """Configuration dictionary for the gap policy.
+    The specific fields depend on the chosen gap_policy_name."""
+
     @staticmethod
     def default_factory(**kwargs):
         """

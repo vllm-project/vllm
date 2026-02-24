@@ -38,7 +38,8 @@ from vllm.v1.core.encoder_cache_manager import (
 )
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
-from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
+from vllm.v1.core.sched.gap_policy import GapPolicy, GapPolicyFactory
+from vllm.v1.core.sched.interface import SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
     GrammarOutput,
@@ -131,6 +132,19 @@ class Scheduler(SchedulerInterface):
                 self.vllm_config.kv_transfer_config.kv_load_failure_policy
             )
             self.recompute_kv_load_failures = kv_load_failure_policy == "recompute"
+
+        # Initialize gap policy for KV cache recomputation
+        self.gap_policy: GapPolicy | None = None
+        if self.scheduler_config.gap_policy_name is not None:
+            self.gap_policy = GapPolicyFactory.create_policy(
+                policy_name=self.scheduler_config.gap_policy_name,
+                policy_config=self.scheduler_config.gap_policy_config,
+            )
+            logger.info(
+                "Initialized gap policy: %s with config: %s",
+                self.scheduler_config.gap_policy_name,
+                self.scheduler_config.gap_policy_config,
+            )
 
         self.kv_event_publisher = EventPublisherFactory.create(
             self.kv_events_config,
@@ -861,18 +875,49 @@ class Scheduler(SchedulerInterface):
         # Track virtual gap request IDs for model runner cleanup
         virtual_gap_req_ids: set[str] = set()
 
-        if self.connector is not None and len(new_reqs_data) > 0:
+        # NEW: Apply gap policy to create gaps in ANY cached tokens
+        if len(new_reqs_data) > 0:
             for nrd in new_reqs_data:
                 request = self.requests.get(nrd.req_id)
                 if request is None:
                     continue
-
-                computed_token_gaps = self.connector.get_computed_token_gaps(request)
+                
+                # Get gaps from policy (works for all cached tokens)
+                computed_token_gaps: list[tuple[int, int]] = []
+                
+                if self.gap_policy is not None:
+                    # Calculate total computed tokens
+                    num_computed_tokens = request.num_computed_tokens
+                    num_external_tokens = request.num_external_computed_tokens
+                    
+                    # Get policy-driven gaps
+                    policy_gaps = self.gap_policy.get_gaps(
+                        request,
+                        num_computed_tokens,
+                        num_external_tokens,
+                    )
+                    computed_token_gaps.extend(policy_gaps)
+                
+                # Merge connector-reported gaps
+                if self.connector is not None:
+                    connector_gaps = self.connector.get_computed_token_gaps(request)
+                    if connector_gaps:
+                        logger.info(
+                            "Connector %s returned gaps via get_computed_token_gaps(). "
+                            "Consider migrating to use GapPolicy at scheduler level.",
+                            type(self.connector).__name__
+                        )
+                        computed_token_gaps.extend(connector_gaps)
+                
+                # Merge and deduplicate gaps if needed
+                if computed_token_gaps:
+                    computed_token_gaps = self._merge_gaps(computed_token_gaps)
+                
                 if not computed_token_gaps:
-                    print("No computed token gaps...")
                     continue
-                reqs_to_prepend = []
-                print("Processing computed_token_gaps...")
+                
+                logger.info("Processing computed_token_gaps for request %s: %s",
+                           request.request_id, computed_token_gaps)
                 for start, end in computed_token_gaps:
                     print(f"Gap: ({start},{end})")
                     nrd_copy = replace(nrd)
@@ -1020,6 +1065,40 @@ class Scheduler(SchedulerInterface):
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
         self.finished_req_ids = set()
+    
+    @staticmethod
+    def _merge_gaps(
+        gaps: list[tuple[int, int]]
+    ) -> list[tuple[int, int]]:
+        """
+        Merge overlapping or adjacent gap intervals.
+        
+        Args:
+            gaps: List of (start, end) tuples, possibly overlapping
+            
+        Returns:
+            Sorted, merged list of non-overlapping gaps
+        """
+        if not gaps:
+            return []
+        
+        # Sort by start position
+        sorted_gaps = sorted(gaps, key=lambda x: x[0])
+        
+        merged = [sorted_gaps[0]]
+        for current_start, current_end in sorted_gaps[1:]:
+            last_start, last_end = merged[-1]
+            
+            # Check if current gap overlaps or is adjacent to last gap
+            if current_start <= last_end:
+                # Merge by extending the last gap
+                merged[-1] = (last_start, max(last_end, current_end))
+            else:
+                # No overlap, add as new gap
+                merged.append((current_start, current_end))
+        
+        return merged
+
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
