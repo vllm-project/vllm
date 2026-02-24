@@ -50,7 +50,7 @@ def can_initialize(
         # FIXME: OOM at 0.8 with 4 layer model - needs investigation.
         # This happens while capturing CUDAGraphs.
         "--gpu-memory-utilization",
-        "0.85",
+        "0.80",
         "--trust-remote-code",
         "--limit-mm-per-prompt",
         json.dumps({"image": 0}),
