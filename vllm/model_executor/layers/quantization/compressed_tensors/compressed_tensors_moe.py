@@ -680,6 +680,10 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
                 shared_experts_input=shared_experts_input,
             )
 
+    @property
+    def supports_eplb(self) -> bool:
+        return True
+
 
 class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
     """W8A8 FP8 MoE quantization using compressed tensors."""

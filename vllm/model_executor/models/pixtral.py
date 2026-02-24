@@ -73,6 +73,7 @@ from .interfaces import (
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
+    is_mixture_of_experts,
 )
 from .module_mapping import MultiModelKeys
 from .utils import StageMissingLayer, init_vllm_registered_model, maybe_prefix
@@ -411,6 +412,52 @@ class PixtralForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+        # Proxy MoE interface from language model if applicable
+        if is_mixture_of_experts(self.language_model):
+            self._setup_moe_from_language_model()
+
+    def _setup_moe_from_language_model(self) -> None:
+        """Proxy MoE attributes from the language model so that
+        ``is_mixture_of_experts(self)`` returns ``True`` and EPLB /
+        expert-parallel features work on the outer model."""
+        lm = self.language_model
+        self.num_moe_layers = lm.num_moe_layers
+        self.num_expert_groups = lm.num_expert_groups
+        self.num_logical_experts = lm.num_logical_experts
+        self.num_physical_experts = lm.num_physical_experts
+        self.num_local_physical_experts = lm.num_local_physical_experts
+        self.num_routed_experts = lm.num_routed_experts
+        self.num_shared_experts = lm.num_shared_experts
+        self.num_redundant_experts = lm.num_redundant_experts
+        self.moe_layers = lm.moe_layers
+        self.expert_weights = lm.expert_weights
+
+    def set_eplb_state(
+        self,
+        expert_load_view: torch.Tensor,
+        logical_to_physical_map: torch.Tensor,
+        logical_replica_count: torch.Tensor,
+    ) -> None:
+        self.language_model.set_eplb_state(
+            expert_load_view,
+            logical_to_physical_map,
+            logical_replica_count,
+        )
+
+    def update_physical_experts_metadata(
+        self,
+        num_physical_experts: int,
+        num_local_physical_experts: int,
+    ) -> None:
+        self.language_model.update_physical_experts_metadata(
+            num_physical_experts=num_physical_experts,
+            num_local_physical_experts=num_local_physical_experts,
+        )
+        # Keep the outer model's proxied attributes in sync
+        self.num_physical_experts = num_physical_experts
+        self.num_local_physical_experts = num_local_physical_experts
+        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
