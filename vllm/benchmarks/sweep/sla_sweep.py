@@ -7,39 +7,45 @@ from dataclasses import dataclass
 
 from typing_extensions import override
 
+SLA_EPS = 1e-8
+"""Offset used to differentiate margins for equality checks."""
+
 
 @dataclass
 class SLACriterionBase(ABC):
     target: float
 
     @abstractmethod
-    def validate(self, actual: float) -> bool:
-        """Return `True` if this criterion is met; otherwise `False`."""
+    def compute_margin(self, actual: float) -> float:
+        """
+        Return a negative value or `0` if this criterion is met;
+        otherwise a positive value indicating the distance to the target.
+        """
         raise NotImplementedError
 
     @abstractmethod
     def format_cond(self, lhs: str) -> str:
         raise NotImplementedError
 
-    def print_and_validate(
+    def print_and_compute_margin(
         self,
         metrics: dict[str, float],
         metrics_key: str,
-    ) -> bool:
+    ) -> float:
         metric = metrics[metrics_key]
-        result = self.validate(metric)
+        margin = self.compute_margin(metric)
 
         cond = self.format_cond(f"{metrics_key} = {metric:.2f}")
-        print(f"Validating SLA: {cond} | " + ("PASSED" if result else "FAILED"))
+        print(f"Validating SLA: {cond} | " + ("PASSED" if margin <= 0 else "FAILED"))
 
-        return result
+        return margin
 
 
 @dataclass
 class SLALessThan(SLACriterionBase):
     @override
-    def validate(self, actual: float) -> bool:
-        return actual < self.target
+    def compute_margin(self, actual: float) -> float:
+        return actual + SLA_EPS - self.target
 
     @override
     def format_cond(self, lhs: str) -> str:
@@ -49,8 +55,8 @@ class SLALessThan(SLACriterionBase):
 @dataclass
 class SLALessThanOrEqualTo(SLACriterionBase):
     @override
-    def validate(self, actual: float) -> bool:
-        return actual <= self.target
+    def compute_margin(self, actual: float) -> float:
+        return actual - self.target
 
     @override
     def format_cond(self, lhs: str) -> str:
@@ -60,8 +66,8 @@ class SLALessThanOrEqualTo(SLACriterionBase):
 @dataclass
 class SLAGreaterThan(SLACriterionBase):
     @override
-    def validate(self, actual: float) -> bool:
-        return actual > self.target
+    def compute_margin(self, actual: float) -> float:
+        return self.target + SLA_EPS - actual
 
     @override
     def format_cond(self, lhs: str) -> str:
@@ -71,8 +77,8 @@ class SLAGreaterThan(SLACriterionBase):
 @dataclass
 class SLAGreaterThanOrEqualTo(SLACriterionBase):
     @override
-    def validate(self, actual: float) -> bool:
-        return actual >= self.target
+    def compute_margin(self, actual: float) -> float:
+        return self.target - actual
 
     @override
     def format_cond(self, lhs: str) -> str:

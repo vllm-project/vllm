@@ -98,6 +98,27 @@ REORDER_TEST_CASES = {
         expected_order=[0, 1, 6, 8, 4, 3, 2, 7, 5],
         expected_modified=True,
     ),
+    "new_request_single_token_prefill": ReorderTestCase(
+        requests=[
+            (100, 0),
+            (1, 0),  # New request with only 1 token (STILL prefill)
+            (50, 100),
+            (1, 10),
+        ],
+        # Only index 3 is a true decode (has num_computed_tokens > 0)
+        expected_order=[3, 2, 0, 1],
+        expected_modified=True,
+    ),
+    "multiple_new_requests_single_token_prefill": ReorderTestCase(
+        requests=[
+            (1, 0),  # New prefill (1 token, no computed)
+            (1, 0),  # New prefill (1 token, no computed)
+            (1, 50),
+            (200, 0),
+        ],
+        expected_order=[2, 1, 0, 3],
+        expected_modified=True,
+    ),
 }
 
 

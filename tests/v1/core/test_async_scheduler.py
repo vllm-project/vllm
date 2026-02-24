@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import deque
 
-import numpy as np
 import pytest
 
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -22,7 +21,7 @@ def _make_model_runner_output(
     return ModelRunnerOutput(
         req_ids=req_ids,
         req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
-        sampled_token_ids=[np.array([i]) for i in range(len(req_ids))],
+        sampled_token_ids=[[i] for i in range(len(req_ids))],
         logprobs=None,
         prompt_logprobs_dict={},
         pooler_output=[],
@@ -237,7 +236,7 @@ def test_prefix_caching_for_multi_turn():
         req._all_token_ids = req.prompt_token_ids.copy()
         req.all_token_ids = ConstantList(req._all_token_ids)
         req.block_hashes = []
-        req.block_hashes = req.get_hash_new_full_blocks()
+        req.update_block_hashes()
 
     # Schedule the next-turn requests.
     for req in next_turn_requests:

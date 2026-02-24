@@ -26,42 +26,50 @@ uv pip install vllm --torch-backend=auto
 
 ??? console "pip"
     ```bash
-    # Install vLLM with CUDA 12.8.
-    pip install vllm --extra-index-url https://download.pytorch.org/whl/cu128
+    # Install vLLM with CUDA 12.9.
+    pip install vllm --extra-index-url https://download.pytorch.org/whl/cu129
     ```
 
-We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`). If this doesn't work, try running `uv self update` to update `uv` first.
+We recommend leveraging `uv` to [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu128`), set `--torch-backend=cu128` (or `UV_TORCH_BACKEND=cu128`). If this doesn't work, try running `uv self update` to update `uv` first.
 
 !!! note
     NVIDIA Blackwell GPUs (B200, GB200) require a minimum of CUDA 12.8, so make sure you are installing PyTorch wheels with at least that version. PyTorch itself offers a [dedicated interface](https://pytorch.org/get-started/locally/) to determine the appropriate pip command to run for a given target configuration.
 
-As of now, vLLM's binaries are compiled with CUDA 12.8 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.6, 11.8, and public PyTorch release versions:
+As of now, vLLM's binaries are compiled with CUDA 12.9 and public PyTorch release versions by default. We also provide vLLM binaries compiled with CUDA 12.8, 13.0, and public PyTorch release versions:
 
 ```bash
-# Install vLLM with a specific CUDA version (e.g., 11.8 or 12.6).
+# Install vLLM with a specific CUDA version (e.g., 13.0).
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-export CUDA_VERSION=118 # or 126
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux1_x86_64.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
+export CUDA_VERSION=130 # or other
+export CPU_ARCH=$(uname -m) # x86_64 or aarch64
+uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_35_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
 ```
 
 #### Install the latest code
 
-LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for Linux running on an x86 platform with CUDA 12 for every commit since `v0.5.3`.
+LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.5.3` on <https://wheels.vllm.ai/nightly>. There are multiple indices that could be used:
+
+* `https://wheels.vllm.ai/nightly`: the default variant (CUDA with version specified in `VLLM_MAIN_CUDA_VERSION`) built with the last commit on the `main` branch. Currently it is CUDA 12.9.
+* `https://wheels.vllm.ai/nightly/<variant>`: all other variants. Now this includes `cu130`, and `cpu`. The default variant (`cu129`) also has a subdirectory to keep consistency.
+
+To install from nightly index, run:
 
 ```bash
 uv pip install -U vllm \
     --torch-backend=auto \
-    --extra-index-url https://wheels.vllm.ai/nightly
+    --extra-index-url https://wheels.vllm.ai/nightly # add variant subdirectory here if needed
 ```
 
-??? console "pip"
-    ```bash
-    pip install -U vllm \
-        --pre \
-        --extra-index-url https://wheels.vllm.ai/nightly
-    ```
+!!! warning "`pip` caveat"
 
-    `--pre` is required for `pip` to consider pre-released versions.
+    Using `pip` to install from nightly indices is _not supported_, because `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version. In contrast, `uv` gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes).
+
+    If you insist on using `pip`, you have to specify the full URL of the wheel file (which can be obtained from the web page).
+
+    ```bash
+    pip install -U https://wheels.vllm.ai/nightly/vllm-0.11.2.dev399%2Bg3c7461c18-cp38-abi3-manylinux_2_31_x86_64.whl # current nightly build (the filename will change!)
+    pip install -U https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-0.11.2.dev399%2Bg3c7461c18-cp38-abi3-manylinux_2_31_x86_64.whl # from specific commit
+    ```
 
 ##### Install specific revisions
 
@@ -71,33 +79,13 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
 uv pip install vllm \
     --torch-backend=auto \
-    --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}
+    --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT} # add variant subdirectory here if needed
 ```
-
-The `uv` approach works for vLLM `v0.6.6` and later and offers an easy-to-remember command. A unique feature of `uv` is that packages in `--extra-index-url` have [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). If the latest public release is `v0.6.6.post1`, `uv`'s behavior allows installing a commit before `v0.6.6.post1` by specifying the `--extra-index-url`. In contrast, `pip` combines packages from `--extra-index-url` and the default index, choosing only the latest version, which makes it difficult to install a development version prior to the released version.
-
-??? note "pip"
-    If you want to access the wheels for previous commits (e.g. to bisect the behavior change,
-    performance regression), due to the limitation of `pip`, you have to specify the full URL of the
-    wheel file by embedding the commit hash in the URL:
-
-    ```bash
-    export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-    pip install https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
-    ```
-
-    Note that the wheels are built with Python 3.8 ABI (see [PEP
-    425](https://peps.python.org/pep-0425/) for more details about ABI), so **they are compatible
-    with Python 3.8 and later**. The version string in the wheel file name (`1.0.0.dev`) is just a
-    placeholder to have a unified URL for the wheels, the actual versions of wheels are contained in
-    the wheel metadata (the wheels listed in the extra index url have correct versions). Although we
-    don't support Python 3.8 any more (because PyTorch 2.5 dropped support for Python 3.8), the
-    wheels are still built with Python 3.8 ABI to keep the same wheel name as before.
 
 # --8<-- [end:pre-built-wheels]
 # --8<-- [start:build-wheel-from-source]
 
-#### Set up using Python-only build (without compilation)
+#### Set up using Python-only build (without compilation) {#python-only-build}
 
 If you only need to change Python code, you can build and install vLLM without compilation. Using `uv pip`'s [`--editable` flag](https://docs.astral.sh/uv/pip/packages/#editable-packages), changes you make to the code will be reflected when you run vLLM:
 
@@ -121,10 +109,16 @@ This command will do the following:
 In case you see an error about wheel not found when running the above command, it might be because the commit you based on in the main branch was just merged and the wheel is being built. In this case, you can wait for around an hour to try again, or manually assign the previous commit in the installation using the `VLLM_PRECOMPILED_WHEEL_LOCATION` environment variable.
 
 ```bash
-export VLLM_COMMIT=72d9c316d3f6ede485146fe5aabd4e61dbc59069 # use full commit hash from the main branch
-export VLLM_PRECOMPILED_WHEEL_LOCATION=https://wheels.vllm.ai/${VLLM_COMMIT}/vllm-1.0.0.dev-cp38-abi3-manylinux1_x86_64.whl
+export VLLM_PRECOMPILED_WHEEL_COMMIT=$(git rev-parse HEAD~1) # or earlier commit on main
+export VLLM_USE_PRECOMPILED=1
 uv pip install --editable .
 ```
+
+There are more environment variables to control the behavior of Python-only build:
+
+* `VLLM_PRECOMPILED_WHEEL_LOCATION`: specify the exact wheel URL or local file path of a pre-compiled wheel to use. All other logic to find the wheel will be skipped.
+* `VLLM_PRECOMPILED_WHEEL_COMMIT`: override the commit hash to download the pre-compiled wheel. It can be `nightly` to use the last **already built** commit on the main branch.
+* `VLLM_PRECOMPILED_WHEEL_VARIANT`: specify the variant subdirectory to use on the nightly index, e.g., `cu129`, `cu130`, `cpu`. If not specified, the variant is auto-detected based on your system's CUDA version (from PyTorch or nvidia-smi). You can also set `VLLM_MAIN_CUDA_VERSION` to override auto-detection.
 
 You can find more information about vLLM's wheels in [Install the latest code](#install-the-latest-code).
 
@@ -132,7 +126,7 @@ You can find more information about vLLM's wheels in [Install the latest code](#
     There is a possibility that your source code may have a different commit ID compared to the latest vLLM wheel, which could potentially lead to unknown errors.
     It is recommended to use the same commit ID for the source code as the vLLM wheel you have installed. Please refer to [Install the latest code](#install-the-latest-code) for instructions on how to install a specified wheel.
 
-#### Full build (with compilation)
+#### Full build (with compilation) {#full-build}
 
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
@@ -158,10 +152,7 @@ uv pip install -e .
 
 ##### Use an existing PyTorch installation
 
-There are scenarios where the PyTorch dependency cannot be easily installed with `uv`, e.g.:
-
-- Building vLLM with PyTorch nightly or a custom PyTorch build.
-- Building vLLM with aarch64 and CUDA (GH200), where the PyTorch wheels are not available on PyPI. Currently, only the PyTorch nightly has wheels for aarch64 with CUDA. You can run `uv pip install --index-url https://download.pytorch.org/whl/nightly/cu128 torch torchvision torchaudio` to [install PyTorch nightly](https://pytorch.org/get-started/locally/) and then build vLLM on top of it.
+There are scenarios where the PyTorch dependency cannot be easily installed with `uv`, for example, when building vLLM with non-default PyTorch builds (like nightly or a custom build).
 
 To build vLLM using an existing PyTorch installation:
 
@@ -248,23 +239,164 @@ uv pip install -e .
 # --8<-- [end:build-wheel-from-source]
 # --8<-- [start:pre-built-images]
 
-See [Using Docker](../../deployment/docker.md) for instructions on using the official Docker image.
-
-Another way to access the latest code is to use the docker images:
+vLLM offers an official Docker image for deployment.
+The image can be used to run OpenAI compatible server and is available on Docker Hub as [vllm/vllm-openai](https://hub.docker.com/r/vllm/vllm-openai/tags).
 
 ```bash
-export VLLM_COMMIT=33f460b17a54acb3b6cc0b03f4a17876cff5eafd # use full commit hash from the main branch
-docker pull public.ecr.aws/q9t5s3a7/vllm-ci-postmerge-repo:${VLLM_COMMIT}
+docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    --env "HF_TOKEN=$HF_TOKEN" \
+    -p 8000:8000 \
+    --ipc=host \
+    vllm/vllm-openai:latest \
+    --model Qwen/Qwen3-0.6B
 ```
 
-These docker images are used for CI and testing only, and they are not intended for production use. They will be expired after several days.
+This image can also be used with other container engines such as [Podman](https://podman.io/).
 
-The latest code can contain bugs and may not be stable. Please use it with caution.
+```bash
+podman run --device nvidia.com/gpu=all \
+-v ~/.cache/huggingface:/root/.cache/huggingface \
+--env "HF_TOKEN=$HF_TOKEN" \
+-p 8000:8000 \
+--ipc=host \
+docker.io/vllm/vllm-openai:latest \
+--model Qwen/Qwen3-0.6B
+```
+
+You can add any other [engine-args](https://docs.vllm.ai/en/latest/configuration/engine_args/) you need after the image tag (`vllm/vllm-openai:latest`).
+
+!!! note
+    You can either use the `ipc=host` flag or `--shm-size` flag to allow the
+    container to access the host's shared memory. vLLM uses PyTorch, which uses shared
+    memory to share data between processes under the hood, particularly for tensor parallel inference.
+
+!!! note
+    Optional dependencies are not included in order to avoid licensing issues (e.g. <https://github.com/vllm-project/vllm/issues/8030>).
+
+    If you need to use those dependencies (having accepted the license terms),
+    create a custom Dockerfile on top of the base image with an extra layer that installs them:
+
+    ```Dockerfile
+    FROM vllm/vllm-openai:v0.11.0
+
+    # e.g. install the `audio` optional dependencies
+    # NOTE: Make sure the version of vLLM matches the base image!
+    RUN uv pip install --system vllm[audio]==0.11.0
+    ```
+
+!!! tip
+    Some new models may only be available on the main branch of [HF Transformers](https://github.com/huggingface/transformers).
+
+    To use the development version of `transformers`, create a custom Dockerfile on top of the base image
+    with an extra layer that installs their code from source:
+
+    ```Dockerfile
+    FROM vllm/vllm-openai:latest
+
+    RUN uv pip install --system git+https://github.com/huggingface/transformers.git
+    ```
 
 # --8<-- [end:pre-built-images]
 # --8<-- [start:build-image-from-source]
 
-See [Building vLLM's Docker Image from Source](../../deployment/docker.md#building-vllms-docker-image-from-source) for instructions on building the Docker image.
+You can build and run vLLM from source via the provided [docker/Dockerfile](https://github.com/vllm-project/vllm/blob/main/docker/Dockerfile). To build vLLM:
+
+```bash
+# optionally specifies: --build-arg max_jobs=8 --build-arg nvcc_threads=2
+DOCKER_BUILDKIT=1 docker build . \
+    --target vllm-openai \
+    --tag vllm/vllm-openai \
+    --file docker/Dockerfile
+```
+
+!!! note
+    By default vLLM will build for all GPU types for widest distribution. If you are just building for the
+    current GPU type the machine is running on, you can add the argument `--build-arg torch_cuda_arch_list=""`
+    for vLLM to find the current GPU type and build for that.
+
+    If you are using Podman instead of Docker, you might need to disable SELinux labeling by
+    adding `--security-opt label=disable` when running `podman build` command to avoid certain [existing issues](https://github.com/containers/buildah/discussions/4184).
+
+!!! note
+    If you have not changed any C++ or CUDA kernel code, you can use precompiled wheels to significantly reduce Docker build time.
+
+    *   **Enable the feature** by adding the build argument: `--build-arg VLLM_USE_PRECOMPILED="1"`.
+    *   **How it works**: By default, vLLM automatically finds the correct wheels from our [Nightly Builds](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds/) by using the merge-base commit with the upstream `main` branch.
+    *   **Override commit**: To use wheels from a specific commit, provide the `--build-arg VLLM_PRECOMPILED_WHEEL_COMMIT=<commit_hash>` argument.
+
+    For a detailed explanation, refer to the documentation on 'Set up using Python-only build (without compilation)' part in [Build wheel from source](https://docs.vllm.ai/en/latest/contributing/ci/nightly_builds/#precompiled-wheels-usage), these args are similar.
+
+#### Building vLLM's Docker Image from Source for Arm64/aarch64
+
+A docker container can be built for aarch64 systems such as the Nvidia Grace-Hopper and Grace-Blackwell. Using the flag `--platform "linux/arm64"` will build for arm64.
+
+!!! note
+    Multiple modules must be compiled, so this process can take a while. Recommend using `--build-arg max_jobs=` & `--build-arg nvcc_threads=`
+    flags to speed up build process. However, ensure your `max_jobs` is substantially larger than `nvcc_threads` to get the most benefits.
+    Keep an eye on memory usage with parallel jobs as it can be substantial (see example below).
+
+??? console "Command"
+
+    ```bash
+    # Example of building on Nvidia GH200 server. (Memory usage: ~15GB, Build time: ~1475s / ~25 min, Image size: 6.93GB)
+    DOCKER_BUILDKIT=1 docker build . \
+    --file docker/Dockerfile \
+    --target vllm-openai \
+    --platform "linux/arm64" \
+    -t vllm/vllm-gh200-openai:latest \
+    --build-arg max_jobs=66 \
+    --build-arg nvcc_threads=2 \
+    --build-arg torch_cuda_arch_list="9.0 10.0+PTX" \
+    --build-arg RUN_WHEEL_CHECK=false
+    ```
+
+For (G)B300, we recommend using CUDA 13, as shown in the following command.
+
+??? console "Command"
+
+    ```bash
+    DOCKER_BUILDKIT=1 docker build \
+    --build-arg CUDA_VERSION=13.0.1 \
+    --build-arg BUILD_BASE_IMAGE=nvidia/cuda:13.0.1-devel-ubuntu22.04 \
+    --build-arg max_jobs=256 \
+    --build-arg nvcc_threads=2 \
+    --build-arg RUN_WHEEL_CHECK=false \
+    --build-arg torch_cuda_arch_list='9.0 10.0+PTX' \
+    --platform "linux/arm64" \
+    --tag vllm/vllm-gb300-openai:latest \
+    --target vllm-openai \
+    -f docker/Dockerfile \
+    .
+    ```
+
+!!! note
+    If you are building the `linux/arm64` image on a non-ARM host (e.g., an x86_64 machine), you need to ensure your system is set up for cross-compilation using QEMU. This allows your host machine to emulate ARM64 execution.
+
+    Run the following command on your host machine to register QEMU user static handlers:
+
+    ```bash
+    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+    ```
+
+    After setting up QEMU, you can use the `--platform "linux/arm64"` flag in your `docker build` command.
+
+#### Use the custom-built vLLM Docker image**
+
+To run vLLM with the custom-built Docker image:
+
+```bash
+docker run --runtime nvidia --gpus all \
+    -v ~/.cache/huggingface:/root/.cache/huggingface \
+    -p 8000:8000 \
+    --env "HF_TOKEN=<secret>" \
+    vllm/vllm-openai <args...>
+```
+
+The argument `vllm/vllm-openai` specifies the image to run, and should be replaced with the name of the custom-built image (the `-t` tag from the build command).
+
+!!! note
+    **For version 0.4.1 and 0.4.2 only** - the vLLM docker images under these versions are supposed to be run under the root user since a library under the root user's home directory, i.e. `/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1` is required to be loaded during runtime. If you are running the container under a different user, you may need to first change the permissions of the library (and all the parent directories) to allow the user to access it, then run vLLM with environment variable `VLLM_NCCL_SO_PATH=/root/.config/vllm/nccl/cu12/libnccl.so.2.18.1` .
 
 # --8<-- [end:build-image-from-source]
 # --8<-- [start:supported-features]

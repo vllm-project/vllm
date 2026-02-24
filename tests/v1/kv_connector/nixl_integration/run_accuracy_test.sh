@@ -3,21 +3,34 @@ set -xe
 
 # Parse command line arguments
 KV_BUFFER_DEVICE="cuda"  # Default to cuda
+ATTENTION_BACKEND=""  # Default to empty (use vllm default)
+CROSS_LAYERS_BLOCKS="False"
 while [[ $# -gt 0 ]]; do
   case $1 in
     --kv_buffer_device)
       KV_BUFFER_DEVICE="$2"
       shift 2
       ;;
+    --attention-backend)
+      ATTENTION_BACKEND="$2"
+      shift 2
+      ;;
+    --enable-cross-layers)
+      CROSS_LAYERS_BLOCKS="True"
+      shift 1
+      ;;
     *)
       echo "Unknown option $1"
-      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>]"
+      echo "Usage: $0 [--kv_buffer_device <cuda|cpu>] [--attention-backend <backend>]"
       exit 1
       ;;
   esac
 done
 
 echo "Running accuracy tests with kv_buffer_device=$KV_BUFFER_DEVICE"
+if [[ -n "$ATTENTION_BACKEND" ]]; then
+  echo "Using attention backend: $ATTENTION_BACKEND"
+fi
 
 DECODER_KV_LAYOUT=${DECODER_KV_LAYOUT:-"HND"} # Default to HND, optional NHD
 if [[ "$DECODER_KV_LAYOUT" == "NHD" ]]; then
@@ -26,11 +39,17 @@ else
   KV_CONFIG_HETERO_LAYOUT=''
 fi
 
+if [[ "$CROSS_LAYERS_BLOCKS" == "True" ]]; then
+  KV_EXTRA_CONFIG=',"kv_connector_extra_config":{"enable_cross_layers_blocks": "True"}'
+else
+  KV_EXTRA_CONFIG=''
+fi
+
 # Build the kv-transfer-config once
 if [[ "$KV_BUFFER_DEVICE" == "cuda" ]]; then
-  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}'}'
+  KV_CONFIG='{"kv_connector":"NixlConnector","kv_role":"kv_both"'${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}'}'
 else
-  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}"}"
+  KV_CONFIG="{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"$KV_BUFFER_DEVICE\""${KV_CONFIG_HETERO_LAYOUT}${KV_EXTRA_CONFIG}"}"
 fi
 
 # Models to run
@@ -90,9 +109,9 @@ get_model_args() {
 
 get_num_gpus() {
   if [[ "$SMI_BIN" == *"nvidia"* ]]; then
-    echo "$($SMI_BIN --query-gpu=name --format=csv,noheader | wc -l)"
+    $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
   elif [[ "$SMI_BIN" == *"rocm"* ]]; then
-    echo "$($SMI_BIN -l | grep GPU | wc -l)"
+    $SMI_BIN -l | grep -c GPU
   else
     # works for non-cuda platforms,
     # assuming at least 1 device and
@@ -148,6 +167,11 @@ run_tests_for_model() {
     --tensor-parallel-size $PREFILLER_TP_SIZE \
     --kv-transfer-config '$KV_CONFIG'"
 
+    # Add attention backend config if specified
+    if [[ -n "$ATTENTION_BACKEND" ]]; then
+      BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
+    fi
+
     if [ -n "$model_args" ]; then
     FULL_CMD="$BASE_CMD $model_args"
     else
@@ -158,7 +182,7 @@ run_tests_for_model() {
 
     # Store host and port for proxy configuration
     PREFILL_HOSTS+=("localhost")
-    PREFILL_PORTS+=($PORT)
+    PREFILL_PORTS+=("$PORT")
   done
 
   # Start decode instances
@@ -188,7 +212,12 @@ run_tests_for_model() {
     --block-size ${DECODE_BLOCK_SIZE} \
     --gpu-memory-utilization $GPU_MEMORY_UTILIZATION \
     --kv-transfer-config '$KV_CONFIG'"
-  
+
+    # Add attention backend config if specified
+    if [[ -n "$ATTENTION_BACKEND" ]]; then
+      BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
+    fi
+
   # DP-EP attention mode
   if [[ -z "$DP_EP" ]]; then
     BASE_CMD="${BASE_CMD} --tensor-parallel-size $DECODER_TP_SIZE"
@@ -208,30 +237,30 @@ run_tests_for_model() {
 
     # Store host and port for proxy configuration
     DECODE_HOSTS+=("localhost")
-    DECODE_PORTS+=($PORT)
+    DECODE_PORTS+=("$PORT")
   done
 
   # Wait for all instances to start
   for PORT in "${PREFILL_PORTS[@]}"; do
     echo "Waiting for prefill instance on port $PORT to start..."
-    wait_for_server $PORT
+    wait_for_server "$PORT"
   done
 
   for PORT in "${DECODE_PORTS[@]}"; do
     echo "Waiting for decode instance on port $PORT to start..."
-    wait_for_server $PORT
+    wait_for_server "$PORT"
   done
 
   # Build the command for the proxy server with all the hosts and ports
   PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
 
   # Add all prefill hosts and ports
-  PROXY_CMD+=" --prefiller-hosts ${PREFILL_HOSTS[@]}"
-  PROXY_CMD+=" --prefiller-ports ${PREFILL_PORTS[@]}"
+  PROXY_CMD+=" --prefiller-hosts ${PREFILL_HOSTS[*]}"
+  PROXY_CMD+=" --prefiller-ports ${PREFILL_PORTS[*]}"
 
   # Add all decode hosts and ports
-  PROXY_CMD+=" --decoder-hosts ${DECODE_HOSTS[@]}"
-  PROXY_CMD+=" --decoder-ports ${DECODE_PORTS[@]}"
+  PROXY_CMD+=" --decoder-hosts ${DECODE_HOSTS[*]}"
+  PROXY_CMD+=" --decoder-ports ${DECODE_PORTS[*]}"
 
   # Start the proxy server
   echo "Starting proxy server with command: $PROXY_CMD"
@@ -242,7 +271,7 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python3 -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  TEST_MODEL=$model_name python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances

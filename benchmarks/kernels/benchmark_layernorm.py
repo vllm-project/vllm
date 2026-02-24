@@ -5,13 +5,14 @@ import time
 
 import torch
 
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.platforms import current_platform
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
+from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 
 
 @torch.inference_mode()
+@default_vllm_config()
 def main(
     num_tokens: int,
     hidden_size: int,
@@ -22,7 +23,7 @@ def main(
     num_warmup_iters: int = 5,
     num_iters: int = 100,
 ) -> None:
-    current_platform.seed_everything(seed)
+    set_random_seed(seed)
     torch.set_default_device("cuda")
 
     layer = RMSNorm(hidden_size).to(dtype=dtype)

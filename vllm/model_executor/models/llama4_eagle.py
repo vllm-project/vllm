@@ -23,13 +23,15 @@ import torch.nn as nn
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.torchao import TorchAOConfig
-from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    ParallelLMHead,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.llama4 import Llama4DecoderLayer, Llama4ForCausalLM
 from vllm.model_executor.models.utils import extract_layer_index
@@ -127,17 +129,11 @@ class LlamaModel(nn.Module):
                 weight_loader(param, loaded_weight, shard_id)
                 break
             else:
-                # if PP disabled then draft will share embed with target
-                if get_pp_group().world_size == 1 and "embed_tokens." in name:
-                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
             loaded_params.add(name)
         for name in params_dict:
-            # if PP disabled then draft will share embed with target
-            if get_pp_group().world_size == 1 and "embed_tokens." in name:
-                continue
             assert name in loaded_params, f"{name} is not loaded!"
         return loaded_params
 
@@ -189,6 +185,12 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
             self.config.vocab_size, scale=logit_scale
         )
 
+        self.lm_head = ParallelLMHead(
+            self.config.draft_vocab_size,
+            self.config.hidden_size,
+            prefix=maybe_prefix(prefix, "lm_head"),
+        )
+
         # Set MoE hyperparameters
         self.set_moe_parameters()
 
@@ -206,6 +208,23 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
 
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """Vocab-parallel argmax without all-gathering full logits.
+
+        Falls back to full logits when draft_id_to_target_id remapping is
+        active, since the shared lm_head covers the full target vocab but
+        the draft model only predicts over a subset (draft_vocab_size).
+        """
+        if (
+            hasattr(self, "draft_id_to_target_id")
+            and self.draft_id_to_target_id is not None
+        ):
+            return self.compute_logits(hidden_states).argmax(dim=-1)
+        return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> None:
         def transform(inputs):
             name, loaded_weight = inputs
@@ -218,6 +237,6 @@ class EagleLlama4ForCausalLM(Llama4ForCausalLM):
         loader = AutoWeightsLoader(
             self,
             # lm_head is tied with target model (Llama4ForCausalLM)
-            skip_prefixes=(["lm_head."]),
+            skip_prefixes=([]),
         )
         loader.load_weights(map(transform, weights))

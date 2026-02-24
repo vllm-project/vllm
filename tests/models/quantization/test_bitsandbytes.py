@@ -259,6 +259,9 @@ def validate_generated_texts(
         tensor_parallel_size=vllm_tp_size,
         enforce_eager=False,
         default_torch_num_threads=1,
+        tokenizer_mode="hf",
+        load_format="hf",
+        config_format="hf",
     ) as llm:
         vllm_outputs = llm.generate_greedy(prompts, max_tokens)
         vllm_logs = log_generated_texts(prompts, vllm_outputs, "VllmRunner")

@@ -20,7 +20,6 @@ def test_extract_hidden_states(hf_runner, vllm_runner, model: str):
         max_model_len=128,
         enforce_eager=True,
         runner="pooling",
-        enable_chunked_prefill=False,
         enable_prefix_caching=True,
     ) as vllm_model:
         pooling_outputs = vllm_model.llm.encode(

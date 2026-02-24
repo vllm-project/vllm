@@ -5,13 +5,15 @@ from abc import abstractmethod
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from vllm.entrypoints.openai.protocol import DeltaMessage
+from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.transformers_utils.tokenizer import AnyTokenizer
+from vllm.tokenizers import TokenizerLike
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.protocol import (
+    from vllm.entrypoints.openai.chat_completion.protocol import (
         ChatCompletionRequest,
+    )
+    from vllm.entrypoints.openai.responses.protocol import (
         ResponsesRequest,
     )
 else:
@@ -43,7 +45,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         """The token that ends reasoning content."""
         raise NotImplementedError
 
-    def __init__(self, tokenizer: AnyTokenizer, *args, **kwargs):
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
 
         if not self.model_tokenizer:
@@ -63,9 +65,22 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 "think start/end tokens in the tokenizer!"
             )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
+        start_token_id = self.start_token_id
         end_token_id = self.end_token_id
-        return any(input_id == end_token_id for input_id in reversed(input_ids))
+
+        for i in range(len(input_ids) - 1, -1, -1):
+            if input_ids[i] == start_token_id:
+                return False
+            if input_ids[i] == end_token_id:
+                return True
+        return False
+
+    def is_reasoning_end_streaming(
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+    ) -> bool:
+        end_token_id = self.end_token_id
+        return end_token_id in delta_ids
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
         """
@@ -160,3 +175,23 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # If generation stops right after end-of-think, return null content
             final_content = content or None
             return reasoning, final_content
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count tokens that fall within start/end thinking markers.
+
+        Uses a depth counter so nested spans are handled safely and stray end
+        tokens do not drive the counter negative.
+        """
+        count = 0
+        depth = 0
+        for token_id in token_ids:
+            if token_id == self.start_token_id:
+                depth += 1
+                continue
+            if token_id == self.end_token_id:
+                if depth > 0:
+                    depth -= 1
+                continue
+            if depth > 0:
+                count += 1
+        return count

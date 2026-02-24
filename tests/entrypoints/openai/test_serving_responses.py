@@ -13,14 +13,22 @@ from openai.types.responses.tool import (
     Tool,
 )
 
-from vllm.entrypoints.context import ConversationContext
-from vllm.entrypoints.openai.protocol import ErrorResponse, ResponsesRequest
-from vllm.entrypoints.openai.serving_responses import (
+import vllm.envs as envs
+from vllm.entrypoints.mcp.tool_server import ToolServer
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorResponse,
+    RequestResponseMetadata,
+)
+from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
+    _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
-from vllm.entrypoints.tool_server import ToolServer
-from vllm.inputs.data import TokensPrompt as EngineTokensPrompt
+from vllm.inputs.data import TokensPrompt
+from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.sampling_params import SamplingParams
 
 
 class MockConversationContext(ConversationContext):
@@ -123,12 +131,14 @@ class TestInitializeToolSessions:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
 
-        engine_client.processor = MagicMock()
+        engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -209,12 +219,14 @@ class TestValidateGeneratorInput:
         engine_client = MagicMock()
 
         model_config = MagicMock()
+        model_config.max_model_len = 100
         model_config.hf_config.model_type = "test"
         model_config.get_diff_sampling_param.return_value = {}
         engine_client.model_config = model_config
 
-        engine_client.processor = MagicMock()
+        engine_client.input_processor = MagicMock()
         engine_client.io_processor = MagicMock()
+        engine_client.renderer = MagicMock()
 
         models = MagicMock()
 
@@ -227,16 +239,13 @@ class TestValidateGeneratorInput:
             chat_template_content_format="auto",
         )
 
-        # Set max_model_len for testing
-        instance.max_model_len = 100
-
         return instance
 
     def test_validate_generator_input(self, serving_responses_instance):
         """Test _validate_generator_input with valid prompt length"""
         # Create an engine prompt with valid length (less than max_model_len)
         valid_prompt_token_ids = list(range(5))  # 5 tokens < 100 max_model_len
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=valid_prompt_token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=valid_prompt_token_ids)
 
         # Call the method
         result = serving_responses_instance._validate_generator_input(engine_prompt)
@@ -246,7 +255,7 @@ class TestValidateGeneratorInput:
 
         # create an invalid engine prompt
         invalid_prompt_token_ids = list(range(200))  # 100 tokens >= 100 max_model_len
-        engine_prompt = EngineTokensPrompt(prompt_token_ids=invalid_prompt_token_ids)
+        engine_prompt = TokensPrompt(prompt_token_ids=invalid_prompt_token_ids)
 
         # Call the method
         result = serving_responses_instance._validate_generator_input(engine_prompt)
@@ -254,3 +263,179 @@ class TestValidateGeneratorInput:
         # Should return an ErrorResponse
         assert result is not None
         assert isinstance(result, ErrorResponse)
+
+
+@pytest.mark.asyncio
+async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
+    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+
+    class FakeTokenizer:
+        def __init__(self):
+            self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
+
+        def get_vocab(self):
+            return self._vocab
+
+    # Force non-harmony, SimpleContext path
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "test"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    tokenizer = FakeTokenizer()
+    engine_client.renderer.get_tokenizer.return_value = tokenizer
+
+    models = MagicMock()
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        reasoning_parser="qwen3",
+    )
+
+    # Build a SimpleContext with thinking tokens in the output.
+    context = SimpleContext()
+    token_ids = [1, 10, 2, 20]  # <think> 10 </think> 20 -> reasoning token count = 1
+    completion = CompletionOutput(
+        index=0,
+        text="<think>reason</think>final",
+        token_ids=token_ids,
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+    req_output = RequestOutput(
+        request_id="req",
+        prompt="hi",
+        prompt_token_ids=[7, 8],
+        prompt_logprobs=None,
+        outputs=[completion],
+        finished=True,
+        num_cached_tokens=0,
+    )
+    context.append_output(req_output)
+
+    async def dummy_result_generator():
+        yield None
+
+    request = ResponsesRequest(input="hi", tools=[], stream=False)
+    sampling_params = SamplingParams(max_tokens=16)
+    metadata = RequestResponseMetadata(request_id="req")
+
+    response = await serving.responses_full_generator(
+        request=request,
+        sampling_params=sampling_params,
+        result_generator=dummy_result_generator(),
+        context=context,
+        model_name="test-model",
+        tokenizer=tokenizer,
+        request_metadata=metadata,
+    )
+
+    assert response.usage.output_tokens_details.reasoning_tokens == 1
+
+
+class TestExtractAllowedToolsFromMcpRequests:
+    """Test class for _extract_allowed_tools_from_mcp_requests function"""
+
+    def test_extract_allowed_tools_basic_formats(self):
+        """Test extraction with list format, object format, and None."""
+        from openai.types.responses.tool import McpAllowedToolsMcpToolFilter
+
+        tools = [
+            # List format
+            Mcp(
+                type="mcp",
+                server_label="server1",
+                allowed_tools=["tool1", "tool2"],
+            ),
+            # Object format
+            Mcp(
+                type="mcp",
+                server_label="server2",
+                allowed_tools=McpAllowedToolsMcpToolFilter(
+                    tool_names=["tool3", "tool4"]
+                ),
+            ),
+            # None (no filter)
+            Mcp(
+                type="mcp",
+                server_label="server3",
+                allowed_tools=None,
+            ),
+        ]
+        result = _extract_allowed_tools_from_mcp_requests(tools)
+        assert result == {
+            "server1": ["tool1", "tool2"],
+            "server2": ["tool3", "tool4"],
+            "server3": None,
+        }
+
+    def test_extract_allowed_tools_star_normalization(self):
+        """Test that '*' wildcard is normalized to None (select all tools).
+
+        This is the key test requested by reviewers to explicitly demonstrate
+        that the "*" select-all scenario is handled correctly.
+        """
+        from openai.types.responses.tool import McpAllowedToolsMcpToolFilter
+
+        tools = [
+            # Star in list format
+            Mcp(
+                type="mcp",
+                server_label="server1",
+                allowed_tools=["*"],
+            ),
+            # Star mixed with other tools in list
+            Mcp(
+                type="mcp",
+                server_label="server2",
+                allowed_tools=["tool1", "*"],
+            ),
+            # Star in object format
+            Mcp(
+                type="mcp",
+                server_label="server3",
+                allowed_tools=McpAllowedToolsMcpToolFilter(tool_names=["*"]),
+            ),
+        ]
+        result = _extract_allowed_tools_from_mcp_requests(tools)
+        # All should be normalized to None (allows all tools)
+        assert result == {
+            "server1": None,
+            "server2": None,
+            "server3": None,
+        }
+
+    def test_extract_allowed_tools_filters_non_mcp(self):
+        """Test that non-MCP tools are ignored during extraction."""
+        tools = [
+            Mcp(
+                type="mcp",
+                server_label="server1",
+                allowed_tools=["tool1"],
+            ),
+            LocalShell(type="local_shell"),  # Non-MCP tool should be ignored
+            Mcp(
+                type="mcp",
+                server_label="server2",
+                allowed_tools=["tool2"],
+            ),
+        ]
+        result = _extract_allowed_tools_from_mcp_requests(tools)
+        # Non-MCP tools should be ignored
+        assert result == {
+            "server1": ["tool1"],
+            "server2": ["tool2"],
+        }

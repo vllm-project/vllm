@@ -4,41 +4,45 @@ import asyncio
 import os
 import socket
 import time
+import warnings
 from collections.abc import AsyncGenerator, Iterable, Mapping
 from copy import copy
-from typing import Any, cast
+from typing import Any
 
-import numpy as np
 import torch
 
 import vllm.envs as envs
+from vllm import TokensPrompt
 from vllm.config import VllmConfig
+from vllm.distributed.weight_transfer.base import (
+    WeightTransferInitRequest,
+    WeightTransferUpdateRequest,
+)
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.utils import _validate_truncation_size
-from vllm.inputs import PromptType
+from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
-from vllm.outputs import PoolingRequestOutput, RequestOutput
+from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
 from vllm.plugins.io_processors import get_io_processor
 from vllm.pooling_params import PoolingParams
-from vllm.sampling_params import SamplingParams
+from vllm.renderers import renderer_from_config
+from vllm.renderers.inputs.preprocess import extract_prompt_components
+from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
+from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
-from vllm.transformers_utils.tokenizer import AnyTokenizer, init_tokenizer_from_configs
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.async_utils import cancel_task_threadsafe
 from vllm.utils.collection_utils import as_list
-from vllm.utils.func_utils import deprecate_kwargs
-from vllm.utils.math_utils import cdiv
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
+from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor, RequestOutputCollector
 from vllm.v1.engine.parallel_sampling import ParentRequest
-from vllm.v1.engine.processor import Processor
 from vllm.v1.executor import Executor
 from vllm.v1.metrics.loggers import (
     StatLoggerFactory,
@@ -51,7 +55,21 @@ from vllm.v1.metrics.stats import IterationStats
 logger = init_logger(__name__)
 
 
+class InputStreamError(Exception):
+    """Wrapper for errors from the input stream generator.
+
+    This is used to propagate errors from the user's input generator
+    without wrapping them in EngineGenerateError.
+    """
+
+    def __init__(self, cause: Exception):
+        self.cause = cause
+        super().__init__(str(cause))
+
+
 class AsyncLLM(EngineClient):
+    """An asynchronous wrapper for the vLLM engine."""
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -91,9 +109,14 @@ class AsyncLLM(EngineClient):
         # Ensure we can serialize custom transformer configs
         maybe_register_config_serialize_by_value()
 
-        self.model_config = vllm_config.model_config
         self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
         self.observability_config = vllm_config.observability_config
+
+        tracing_endpoint = self.observability_config.otlp_traces_endpoint
+        if tracing_endpoint is not None:
+            init_tracer("vllm.llm_engine", tracing_endpoint)
+
         self.log_requests = log_requests
 
         custom_stat_loggers = list(stat_loggers or [])
@@ -108,26 +131,22 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        if self.model_config.skip_tokenizer_init:
-            tokenizer = None
-        else:
-            tokenizer = init_tokenizer_from_configs(self.model_config)
-
-        self.processor = Processor(self.vllm_config, tokenizer)
+        self.renderer = renderer = renderer_from_config(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
         )
 
-        # OutputProcessor (converts EngineCoreOutputs --> RequestOutput).
-        stream_interval = self.vllm_config.scheduler_config.stream_interval
+        # Convert TokPrompt --> EngineCoreRequest.
+        self.input_processor = InputProcessor(self.vllm_config, renderer)
+
+        # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
-            self.tokenizer, log_stats=self.log_stats, stream_interval=stream_interval
+            renderer.tokenizer,
+            log_stats=self.log_stats,
+            stream_interval=self.vllm_config.scheduler_config.stream_interval,
+            tracing_enabled=tracing_endpoint is not None,
         )
-        endpoint = self.observability_config.otlp_traces_endpoint
-        if endpoint is not None:
-            tracer = init_tracer("vllm.llm_engine", endpoint)
-            self.output_processor.tracer = tracer
 
         # EngineCore (starts the engine in background process).
         self.engine_core = EngineCoreClient.make_async_mp_client(
@@ -152,6 +171,8 @@ class AsyncLLM(EngineClient):
             )
             self.logger_manager.log_engine_initialized()
 
+        self._client_count = client_count
+
         self.output_handler: asyncio.Task | None = None
         try:
             # Start output handler eagerly if we are in the asyncio eventloop.
@@ -161,42 +182,30 @@ class AsyncLLM(EngineClient):
             pass
 
         if (
-            envs.VLLM_TORCH_PROFILER_DIR
-            and not envs.VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM
+            vllm_config.profiler_config.profiler == "torch"
+            and not vllm_config.profiler_config.ignore_frontend
         ):
+            profiler_dir = vllm_config.profiler_config.torch_profiler_dir
             logger.info(
                 "Torch profiler enabled. AsyncLLM CPU traces will be collected under %s",  # noqa: E501
-                envs.VLLM_TORCH_PROFILER_DIR,
+                profiler_dir,
             )
-            if envs.VLLM_PROFILER_MAX_ITERS > 0 or envs.VLLM_PROFILER_DELAY_ITERS > 0:
-                logger.warning_once(
-                    "Torch profiler received max_iters or delay_iters setting. These "
-                    "are not compatible with the AsyncLLM profiler and will be ignored "
-                    "for the AsyncLLM process. Engine process profiling will still "
-                    "respect these settings. Consider setting "
-                    "VLLM_TORCH_PROFILER_DISABLE_ASYNC_LLM=1 to disable "
-                    "AsyncLLM profiling."
-                )
             worker_name = f"{socket.gethostname()}_{os.getpid()}.async_llm"
             self.profiler = torch.profiler.profile(
                 activities=[
                     torch.profiler.ProfilerActivity.CPU,
                 ],
-                with_stack=envs.VLLM_TORCH_PROFILER_WITH_STACK,
+                with_stack=vllm_config.profiler_config.torch_profiler_with_stack,
                 on_trace_ready=torch.profiler.tensorboard_trace_handler(
-                    envs.VLLM_TORCH_PROFILER_DIR, worker_name=worker_name, use_gzip=True
+                    profiler_dir,
+                    worker_name=worker_name,
+                    use_gzip=vllm_config.profiler_config.torch_profiler_use_gzip,
                 ),
             )
         else:
             self.profiler = None
 
     @classmethod
-    @deprecate_kwargs(
-        "disable_log_requests",
-        additional_message=(
-            "This argument will have no effect. Use `enable_log_requests` instead."
-        ),
-    )
     def from_vllm_config(
         cls,
         vllm_config: VllmConfig,
@@ -209,7 +218,6 @@ class AsyncLLM(EngineClient):
         client_addresses: dict[str, str] | None = None,
         client_count: int = 1,
         client_index: int = 0,
-        disable_log_requests: bool = True,  # Deprecated, will be removed
     ) -> "AsyncLLM":
         # Create the LLMEngine.
         return cls(
@@ -259,6 +267,9 @@ class AsyncLLM(EngineClient):
 
         shutdown_prometheus()
 
+        if renderer := getattr(self, "renderer", None):
+            renderer.shutdown()
+
         if engine_core := getattr(self, "engine_core", None):
             engine_core.shutdown()
 
@@ -267,12 +278,19 @@ class AsyncLLM(EngineClient):
             cancel_task_threadsafe(handler)
 
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        return await self.engine_core.get_supported_tasks_async()
+        if not hasattr(self, "_supported_tasks"):
+            # Cache the result
+            self._supported_tasks = await self.engine_core.get_supported_tasks_async()
+
+        return self._supported_tasks
 
     async def add_request(
         self,
         request_id: str,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest
+        | PromptType
+        | ProcessorInputs
+        | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
@@ -281,6 +299,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
+        reasoning_ended: bool | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
@@ -289,19 +308,23 @@ class AsyncLLM(EngineClient):
 
         is_pooling = isinstance(params, PoolingParams)
 
-        # Create a new output collector for the request.
-        queue = RequestOutputCollector(output_kind=params.output_kind)
-
-        # Convert Input --> Request.
-        if isinstance(prompt, EngineCoreRequest):
-            request = prompt
-        else:
-            assert prompt_text is None
-            logger.warning_once(
-                "Processor has been moved under OpenAIServing and will "
-                "be removed from AsyncLLM in v0.13."
+        if (
+            self.vllm_config.cache_config.kv_sharing_fast_prefill
+            and not is_pooling
+            and params.prompt_logprobs
+        ):
+            raise ValueError(
+                "--kv-sharing-fast-prefill produces incorrect logprobs for "
+                "prompt tokens, please disable it when the requests need "
+                "prompt logprobs"
             )
-            request = self.processor.process_inputs(
+
+        if isinstance(prompt, AsyncGenerator):
+            if reasoning_ended is not None:
+                raise NotImplementedError
+
+            # Streaming input case.
+            return await self._add_streaming_input_request(
                 request_id,
                 prompt,
                 params,
@@ -312,22 +335,62 @@ class AsyncLLM(EngineClient):
                 priority,
                 data_parallel_rank,
             )
-            if isinstance(prompt, str):
-                prompt_text = prompt
-            elif isinstance(prompt, Mapping):
-                prompt_text = cast(str | None, prompt.get("prompt"))
+
+        # Convert Input --> Request.
+        if isinstance(prompt, EngineCoreRequest):
+            logger.warning_once(
+                "Passing EngineCoreRequest to AsyncLLM.generate() and .add_requests() "
+                "is deprecated and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+            )
+
+            request = prompt
+            if request_id != request.request_id:
+                logger.warning_once(
+                    "AsyncLLM.add_request() was passed a request_id parameter that "
+                    "does not match the EngineCoreRequest.request_id attribute. The "
+                    "latter will be used, and the former will be ignored."
+                )
+        else:
+            request = self.input_processor.process_inputs(
+                request_id,
+                prompt,
+                params,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
+                data_parallel_rank=data_parallel_rank,
+                supported_tasks=await self.get_supported_tasks(),
+            )
+            prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
+
+        if reasoning_ended is not None:
+            request.reasoning_ended = reasoning_ended
+
+        self.input_processor.assign_request_id(request)
+
+        # We start the output_handler on the first call to add_request() so
+        # we can call __init__ before the event loop, which enables us
+        # to handle startup failure gracefully in the OpenAI server.
+        self._run_output_handler()
+
+        # Create a new output collector for the request.
+        queue = RequestOutputCollector(params.output_kind, request.request_id)
+
+        # Use cloned params that may have been updated in process_inputs()
+        params = request.params
 
         if is_pooling or params.n == 1:
             await self._add_request(request, prompt_text, None, 0, queue)
             return queue
 
-        # Get the updated SamplingParams from the request, which
-        # were cloned/updated in processor.process_inputs above.
-        parent_params = request.sampling_params
-        assert parent_params is not None
+        parent_params = params
+        assert isinstance(parent_params, SamplingParams)
 
         # Fan out child requests (for n>1).
-        parent_request = ParentRequest(request_id, parent_params)
+        parent_request = ParentRequest(request)
         for idx in range(parent_params.n):
             request_id, child_params = parent_request.get_child_info(idx)
             child_request = request if idx == parent_params.n - 1 else copy(request)
@@ -355,6 +418,107 @@ class AsyncLLM(EngineClient):
         if self.log_requests:
             logger.info("Added request %s.", request.request_id)
 
+    async def _add_streaming_input_request(
+        self,
+        request_id: str,
+        input_stream: AsyncGenerator[StreamingInput, None],
+        sampling_params: SamplingParams | PoolingParams,
+        arrival_time: float | None = None,
+        lora_request: LoRARequest | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        priority: int = 0,
+        data_parallel_rank: int | None = None,
+    ) -> RequestOutputCollector:
+        self._validate_streaming_input_sampling_params(sampling_params)
+
+        inputs = dict(
+            arrival_time=arrival_time,
+            lora_request=lora_request,
+            tokenization_kwargs=tokenization_kwargs,
+            trace_headers=trace_headers,
+            priority=priority,
+            data_parallel_rank=data_parallel_rank,
+        )
+
+        if not sampling_params.skip_clone:
+            sampling_params = sampling_params.clone()
+            sampling_params.skip_clone = True
+
+        # Create request for validation, also used as the finished signal
+        # once the input stream is closed.
+        final_req = self.input_processor.process_inputs(
+            request_id=request_id,
+            prompt=TokensPrompt(prompt_token_ids=[0]),
+            params=sampling_params,
+            **inputs,  # type: ignore[arg-type]
+        )
+        self.input_processor.assign_request_id(final_req)
+        internal_req_id = final_req.request_id
+
+        queue = RequestOutputCollector(sampling_params.output_kind, internal_req_id)
+
+        async def handle_inputs():
+            cancelled = False
+            try:
+                async for input_chunk in input_stream:
+                    sp = input_chunk.sampling_params
+                    if sp:
+                        self._validate_streaming_input_sampling_params(sp)
+                    else:
+                        sp = sampling_params
+                    # TODO(nick): Avoid re-validating reused sampling parameters
+                    req = self.input_processor.process_inputs(
+                        request_id=internal_req_id,
+                        prompt=input_chunk.prompt,
+                        params=sp,
+                        resumable=True,
+                        **inputs,  # type: ignore[arg-type]
+                    )
+                    req.external_req_id = request_id
+                    if req.prompt_embeds is not None:
+                        raise ValueError(
+                            "prompt_embeds not supported for streaming inputs"
+                        )
+                    prompt_text, _, _ = extract_prompt_components(
+                        self.model_config, input_chunk.prompt
+                    )
+                    await self._add_request(req, prompt_text, None, 0, queue)
+            except (asyncio.CancelledError, GeneratorExit):
+                cancelled = True
+            except Exception as error:
+                # Wrap in InputStreamError so generate() can propagate it
+                # without wrapping in EngineGenerateError.
+                queue.put(InputStreamError(error))
+            finally:
+                queue._input_stream_task = None
+                if not cancelled:
+                    # Send empty final request to indicate that inputs have
+                    # finished. Don't send if cancelled (session was aborted).
+                    await self._add_request(final_req, None, None, 0, queue)
+
+        # Ensure output handler is running.
+        self._run_output_handler()
+
+        queue._input_stream_task = asyncio.create_task(handle_inputs())
+        return queue
+
+    @staticmethod
+    def _validate_streaming_input_sampling_params(
+        params: SamplingParams | PoolingParams,
+    ):
+        if (
+            not isinstance(params, SamplingParams)
+            or params.n > 1
+            or params.output_kind == RequestOutputKind.FINAL_ONLY
+            or params.stop
+        ):
+            raise ValueError(
+                "Input streaming not currently supported "
+                "for pooling models, n > 1, request_kind = FINAL_ONLY "
+                "or with stop strings."
+            )
+
     # TODO: we should support multiple prompts in one call, as you
     # can do with LLM.generate. So that for multi-prompt completion
     # requests we don't need to send multiple messages to core proc,
@@ -362,7 +526,10 @@ class AsyncLLM(EngineClient):
     # re-multiplexed in the API server anyhow.
     async def generate(
         self,
-        prompt: EngineCoreRequest | PromptType,
+        prompt: EngineCoreRequest
+        | PromptType
+        | ProcessorInputs
+        | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
         *,
@@ -372,6 +539,7 @@ class AsyncLLM(EngineClient):
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
+        reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -388,32 +556,8 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
-        if (
-            self.vllm_config.cache_config.kv_sharing_fast_prefill
-            and sampling_params.prompt_logprobs
-        ):
-            raise ValueError(
-                "--kv-sharing-fast-prefill produces incorrect logprobs for "
-                "prompt tokens, please disable it when the requests need "
-                "prompt logprobs"
-            )
-
+        q: RequestOutputCollector | None = None
         try:
-            # We start the output_handler on the first call to generate() so
-            # we can call __init__ before the event loop, which enables us
-            # to handle startup failure gracefully in the OpenAI server.
-            self._run_output_handler()
-
-            if tokenization_kwargs is None:
-                tokenization_kwargs = {}
-                truncate_prompt_tokens = sampling_params.truncate_prompt_tokens
-
-                _validate_truncation_size(
-                    self.model_config.max_model_len,
-                    truncate_prompt_tokens,
-                    tokenization_kwargs,
-                )
-
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -424,6 +568,7 @@ class AsyncLLM(EngineClient):
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
+                reasoning_ended=reasoning_ended,
             )
 
             # The output_handler task pushes items into the queue.
@@ -436,15 +581,17 @@ class AsyncLLM(EngineClient):
 
                 # Note: both OutputProcessor and EngineCore handle their
                 # own request cleanup based on finished.
-                finished = out.finished
                 assert isinstance(out, RequestOutput)
-                yield out
+                finished = out.finished
+                if out is not STREAM_FINISHED:
+                    yield out
 
         # If the request is disconnected by the client, generate()
         # is cancelled or the generator is garbage collected. So,
         # we abort the request if we end up here.
         except (asyncio.CancelledError, GeneratorExit):
-            await self.abort(request_id)
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -456,17 +603,37 @@ class AsyncLLM(EngineClient):
             raise
 
         # Request validation error.
-        except ValueError:
+        except ValueError as e:
             if self.log_requests:
-                logger.info("Request %s failed (bad request).", request_id)
+                logger.info("Request %s failed (bad request): %s.", request_id, e)
             raise
+
+        # Error from input stream generator - propagate directly.
+        except InputStreamError as e:
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
+            if self.log_requests:
+                logger.info("Request %s failed (input error): %s.", request_id, e)
+            raise e.cause from e
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            await self.abort(request_id)
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
-                logger.info("Request %s failed.", request_id)
+                try:
+                    s = f"{e.__class__.__name__}: {e}"
+                except Exception as e2:
+                    s = (
+                        f"{e.__class__.__name__}: "
+                        "error during printing an exception of class"
+                        + e2.__class__.__name__
+                    )
+                logger.info("Request %s failed due to %s.", request_id, s)
             raise EngineGenerateError() from e
+        finally:
+            if q is not None:
+                q.close()
 
     def _run_output_handler(self):
         """Background loop: pulls from EngineCore and pushes to AsyncStreams."""
@@ -480,7 +647,8 @@ class AsyncLLM(EngineClient):
         output_processor = self.output_processor
         log_stats = self.log_stats
         logger_manager = self.logger_manager
-        processor = self.processor
+        renderer = self.renderer
+        chunk_size = envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE
 
         async def output_handler():
             try:
@@ -496,15 +664,10 @@ class AsyncLLM(EngineClient):
                     # Split outputs into chunks of at most
                     # VLLM_V1_OUTPUT_PROC_CHUNK_SIZE, so that we don't block the
                     # event loop for too long.
-                    if num_outputs <= envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE:
-                        slices = (outputs.outputs,)
-                    else:
-                        slices = np.array_split(
-                            outputs.outputs,
-                            cdiv(num_outputs, envs.VLLM_V1_OUTPUT_PROC_CHUNK_SIZE),
-                        )
-
-                    for i, outputs_slice in enumerate(slices):
+                    engine_core_outputs = outputs.outputs
+                    for start in range(0, num_outputs, chunk_size):
+                        end = start + chunk_size
+                        outputs_slice = engine_core_outputs[start:end]
                         # 2) Process EngineCoreOutputs.
                         processed_outputs = output_processor.process_outputs(
                             outputs_slice, outputs.timestamp, iteration_stats
@@ -513,13 +676,14 @@ class AsyncLLM(EngineClient):
                         assert not processed_outputs.request_outputs
 
                         # Allow other asyncio tasks to run between chunks
-                        if i + 1 < len(slices):
+                        if end < num_outputs:
                             await asyncio.sleep(0)
 
                         # 3) Abort any reqs that finished due to stop strings.
-                        await engine_core.abort_requests_async(
-                            processed_outputs.reqs_to_abort
-                        )
+                        if processed_outputs.reqs_to_abort:
+                            await engine_core.abort_requests_async(
+                                processed_outputs.reqs_to_abort
+                            )
 
                     output_processor.update_scheduler_stats(outputs.scheduler_stats)
 
@@ -531,7 +695,7 @@ class AsyncLLM(EngineClient):
                             engine_idx=outputs.engine_index,
                             scheduler_stats=outputs.scheduler_stats,
                             iteration_stats=iteration_stats,
-                            mm_cache_stats=processor.stat_mm_cache(),
+                            mm_cache_stats=renderer.stat_mm_cache(),
                         )
             except Exception as e:
                 logger.exception("AsyncLLM output_handler failed.")
@@ -539,28 +703,74 @@ class AsyncLLM(EngineClient):
 
         self.output_handler = asyncio.create_task(output_handler())
 
-    async def abort(self, request_id: str | Iterable[str]) -> None:
+    async def abort(
+        self, request_id: str | Iterable[str], internal: bool = False
+    ) -> None:
         """Abort RequestId in OutputProcessor and EngineCore."""
 
         request_ids = (
             (request_id,) if isinstance(request_id, str) else as_list(request_id)
         )
-        all_request_ids = self.output_processor.abort_requests(request_ids)
+        all_request_ids = self.output_processor.abort_requests(request_ids, internal)
         await self.engine_core.abort_requests_async(all_request_ids)
 
         if self.log_requests:
             logger.info("Aborted request(s) %s.", ",".join(request_ids))
 
+    async def pause_generation(
+        self,
+        *,
+        mode: PauseMode = "abort",
+        wait_for_inflight_requests: bool | None = None,
+        clear_cache: bool = True,
+    ) -> None:
+        """
+        Pause generation to allow model weight updates.
+
+        All mode handling (abort / wait / keep) and cache clearing is done
+        in the engine. New generation/encoding requests will not be scheduled
+        until resume is called.
+
+        Args:
+            mode: How to handle in-flight requests:
+                - ``"abort"``: Abort all in-flight requests immediately
+                  (default).
+                - ``"wait"``: Wait for in-flight requests to complete.
+                - ``"keep"``: Freeze requests in queue; they resume on
+                  :meth:`resume_generation`.
+            wait_for_inflight_requests: DEPRECATED: use mode argument.
+            clear_cache: Whether to clear KV cache and prefix cache after
+                draining. Set to ``False`` to preserve cache for faster resume.
+        """
+        if wait_for_inflight_requests:
+            warnings.warn(
+                "The `wait_for_inflight_requests` parameter in "
+                "`AsyncLLM.pause_generation()` is deprecated. "
+                "Please use `mode` argument instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+            mode = "wait"
+        await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+
+    async def resume_generation(self) -> None:
+        """Resume generation after :meth:`pause_generation`."""
+        await self.engine_core.resume_scheduler_async()
+
+    async def is_paused(self) -> bool:
+        """Return whether the engine is currently paused."""
+        return await self.engine_core.is_scheduler_paused_async()
+
     async def encode(
         self,
-        prompt: PromptType,
+        prompt: PromptType | ProcessorInputs,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
-        truncate_prompt_tokens: int | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
+        reasoning_ended: bool | None = None,
     ) -> AsyncGenerator[PoolingRequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -576,20 +786,8 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        q: RequestOutputCollector | None = None
         try:
-            # We start the output_handler on the first call to generate() so
-            # we can call __init__ before the event loop, which enables us
-            # to handle startup failure gracefully in the OpenAI server.
-            self._run_output_handler()
-
-            if tokenization_kwargs is None:
-                tokenization_kwargs = {}
-            _validate_truncation_size(
-                self.model_config.max_model_len,
-                truncate_prompt_tokens,
-                tokenization_kwargs,
-            )
-
             q = await self.add_request(
                 request_id,
                 prompt,
@@ -598,6 +796,7 @@ class AsyncLLM(EngineClient):
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
+                reasoning_ended=reasoning_ended,
             )
 
             # The output_handler task pushes items into the queue.
@@ -616,7 +815,8 @@ class AsyncLLM(EngineClient):
         # If the request is disconnected by the client, generate()
         # is cancelled. So, we abort the request if we end up here.
         except asyncio.CancelledError:
-            await self.abort(request_id)
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s aborted.", request_id)
             raise
@@ -635,29 +835,24 @@ class AsyncLLM(EngineClient):
 
         # Unexpected error in the generate() task (possibly recoverable).
         except Exception as e:
-            await self.abort(request_id)
+            if q is not None:
+                await self.abort(q.request_id, internal=True)
             if self.log_requests:
                 logger.info("Request %s failed.", request_id)
             raise EngineGenerateError() from e
+        finally:
+            if q is not None:
+                q.close()
 
     @property
-    def tokenizer(self) -> AnyTokenizer | None:
-        return self.processor.tokenizer
+    def tokenizer(self) -> TokenizerLike | None:
+        return self.renderer.tokenizer
 
-    @tokenizer.setter
-    def tokenizer(self, tokenizer: AnyTokenizer | None) -> None:
-        self.processor.tokenizer = tokenizer
-
-    async def get_tokenizer(self) -> AnyTokenizer:
-        if self.tokenizer is None:
-            raise ValueError(
-                "Unable to get tokenizer because skip_tokenizer_init is True"
-            )
-
-        return self.tokenizer
+    def get_tokenizer(self) -> TokenizerLike:
+        return self.renderer.get_tokenizer()
 
     async def is_tracing_enabled(self) -> bool:
-        return self.observability_config.otlp_traces_endpoint is not None  # type: ignore
+        return self.observability_config.otlp_traces_endpoint is not None
 
     async def do_log_stats(self) -> None:
         if self.logger_manager:
@@ -668,8 +863,8 @@ class AsyncLLM(EngineClient):
         if self.errored:
             raise self.dead_error
 
-    async def start_profile(self) -> None:
-        coros = [self.engine_core.profile_async(True)]
+    async def start_profile(self, profile_prefix: str | None = None) -> None:
+        coros = [self.engine_core.profile_async(True, profile_prefix)]
         if self.profiler is not None:
             coros.append(asyncio.to_thread(self.profiler.start))
         await asyncio.gather(*coros)
@@ -681,14 +876,22 @@ class AsyncLLM(EngineClient):
         await asyncio.gather(*coros)
 
     async def reset_mm_cache(self) -> None:
-        self.processor.clear_mm_cache()
+        self.renderer.clear_mm_cache()
         await self.engine_core.reset_mm_cache_async()
 
-    async def reset_prefix_cache(self) -> None:
-        await self.engine_core.reset_prefix_cache_async()
+    async def reset_prefix_cache(
+        self, reset_running_requests: bool = False, reset_connector: bool = False
+    ) -> bool:
+        return await self.engine_core.reset_prefix_cache_async(
+            reset_running_requests, reset_connector
+        )
+
+    async def reset_encoder_cache(self) -> None:
+        await self.engine_core.reset_encoder_cache_async()
 
     async def sleep(self, level: int = 1) -> None:
-        await self.reset_prefix_cache()
+        if level > 0:
+            await self.reset_prefix_cache()
         await self.engine_core.sleep_async(level)
 
         if self.logger_manager is not None:
@@ -807,3 +1010,44 @@ class AsyncLLM(EngineClient):
     @property
     def dead_error(self) -> BaseException:
         return EngineDeadError()
+
+    async def init_weight_transfer_engine(
+        self, request: WeightTransferInitRequest
+    ) -> None:
+        """
+        Initialize weight transfer for RL training.
+
+        Args:
+            request: Weight transfer initialization request with backend-specific info
+        """
+        from vllm.distributed.weight_transfer.base import (
+            WeightTransferInitRequest,
+        )
+
+        if isinstance(request, WeightTransferInitRequest):
+            init_info_dict = request.init_info
+        else:
+            raise TypeError(f"Expected WeightTransferInitRequest, got {type(request)}")
+
+        await self.collective_rpc(
+            "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
+        )
+
+    async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
+        """
+        Batched weight update for RL training.
+
+        Args:
+            request: Weight update request with backend-specific update info
+        """
+
+        if isinstance(request, WeightTransferUpdateRequest):
+            update_info_dict = request.update_info
+        else:
+            raise TypeError(
+                f"Expected WeightTransferUpdateRequest, got {type(request)}"
+            )
+
+        await self.collective_rpc(
+            "update_weights", kwargs={"update_info": update_info_dict}
+        )

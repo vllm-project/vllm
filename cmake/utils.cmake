@@ -140,16 +140,21 @@ function(vllm_prepare_torch_gomp_shim TORCH_GOMP_SHIM_DIR)
   run_python(_VLLM_TORCH_GOMP_PATH
     "
 import os, glob
-try:
-  import torch
-  torch_pkg = os.path.dirname(torch.__file__)
-  site_root = os.path.dirname(torch_pkg)
-  torch_libs = os.path.join(site_root, 'torch.libs')
-  print(glob.glob(os.path.join(torch_libs, 'libgomp-*.so*'))[0])
-except:
-  print('')
+import torch
+torch_pkg = os.path.dirname(torch.__file__)
+site_root = os.path.dirname(torch_pkg)
+
+# Search both torch.libs and torch/lib
+roots = [os.path.join(site_root, 'torch.libs'), os.path.join(torch_pkg, 'lib')]
+candidates = []
+for root in roots:
+    if not os.path.isdir(root):
+        continue
+    candidates.extend(glob.glob(os.path.join(root, 'libgomp*.so*')))
+
+print(candidates[0] if candidates else '')
 "
-    "failed to probe torch.libs for libgomp")
+    "failed to probe for libgomp")
 
   if(_VLLM_TORCH_GOMP_PATH STREQUAL "" OR NOT EXISTS "${_VLLM_TORCH_GOMP_PATH}")
     return()
@@ -495,7 +500,13 @@ function (define_extension_target MOD_NAME)
     set(SOABI_KEYWORD "")
   endif()
 
-  if (ARG_USE_SABI)
+  run_python(IS_FREETHREADED_PYTHON
+    "import sysconfig; print(1 if sysconfig.get_config_var(\"Py_GIL_DISABLED\") else 0)"
+    "Failed to determine whether interpreter is free-threaded")
+
+  # Free-threaded Python doesn't yet support the stable ABI (see PEP 803/809),
+  # so avoid using the stable ABI under free-threading only.
+  if (ARG_USE_SABI AND NOT IS_FREETHREADED_PYTHON)
     Python_add_library(${MOD_NAME} MODULE USE_SABI ${ARG_USE_SABI} ${SOABI_KEYWORD} "${ARG_SOURCES}")
   else()
     Python_add_library(${MOD_NAME} MODULE ${SOABI_KEYWORD} "${ARG_SOURCES}")

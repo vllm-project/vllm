@@ -10,7 +10,7 @@
   #define gettid() syscall(SYS_gettid)
 #endif
 
-#include "cpu_types.hpp"
+#include "cpu/utils.hpp"
 
 #ifdef VLLM_NUMA_DISABLED
 std::string init_cpu_threads_env(const std::string& cpu_ids) {
@@ -24,6 +24,8 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 #ifndef VLLM_NUMA_DISABLED
 std::string init_cpu_threads_env(const std::string& cpu_ids) {
   bitmask* omp_cpu_mask = numa_parse_cpustring_all(cpu_ids.c_str());
+  TORCH_CHECK(omp_cpu_mask != nullptr,
+              "Failed to parse CPU string: " + cpu_ids);
   TORCH_CHECK(omp_cpu_mask->size > 0);
   std::vector<int> omp_cpu_ids;
   omp_cpu_ids.reserve(omp_cpu_mask->size);
@@ -44,32 +46,79 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 
   // Memory node binding
   if (numa_available() != -1) {
-    int mem_node_id = numa_node_of_cpu(omp_cpu_ids.front());
-    // Verify all CPUs are on the same NUMA node
-    for (size_t i = 1; i < omp_cpu_ids.size(); ++i) {
-      int node_id = numa_node_of_cpu(omp_cpu_ids[i]);
-      TORCH_CHECK(node_id == mem_node_id, "CPU ", omp_cpu_ids[i],
-                  " is on NUMA node ", node_id, ", but CPU ",
-                  omp_cpu_ids.front(), " is on NUMA node ", mem_node_id,
-                  ". All CPUs should be on the same NUMA node for optimal "
-                  "performance. Memory will be bound to NUMA node ",
-                  mem_node_id, ".");
+    std::set<int> node_ids;
+    for (const auto& cpu_id : omp_cpu_ids) {
+      int node_id = numa_node_of_cpu(cpu_id);
+      if (node_id != -1) {
+        node_ids.insert(node_id);
+      }
     }
-    bitmask* mask = numa_parse_nodestring(std::to_string(mem_node_id).c_str());
-    bitmask* src_mask = numa_get_membind();
+    // Concatenate all node_ids into a single comma-separated string
+    if (!node_ids.empty()) {
+      std::string node_ids_str;
+      for (const int node_id : node_ids) {
+        if (!node_ids_str.empty()) {
+          node_ids_str += ",";
+        }
+        node_ids_str += std::to_string(node_id);
+      }
 
-    int pid = getpid();
+      bitmask* mask = numa_parse_nodestring(node_ids_str.c_str());
+      bitmask* src_mask = numa_get_mems_allowed();
 
-    // move all existing pages to the specified numa node.
-    *(src_mask->maskp) = *(src_mask->maskp) ^ *(mask->maskp);
-    int page_num = numa_migrate_pages(pid, src_mask, mask);
-    if (page_num == -1) {
-      TORCH_WARN("numa_migrate_pages failed. errno: " + std::to_string(errno));
+      int pid = getpid();
+
+      if (mask && src_mask) {
+        // move all existing pages to the specified numa node.
+        *(src_mask->maskp) = *(src_mask->maskp) ^ *(mask->maskp);
+        int page_num = numa_migrate_pages(pid, src_mask, mask);
+        if (page_num == -1) {
+          TORCH_WARN("numa_migrate_pages failed. errno: " +
+                     std::to_string(errno));
+        }
+
+        // Restrict memory allocation to the selected NUMA node(s).
+        // Enhances memory locality for the threads bound to those NUMA CPUs.
+        if (node_ids.size() > 1) {
+          errno = 0;
+          numa_set_interleave_mask(mask);
+          if (errno != 0) {
+            TORCH_WARN("numa_set_interleave_mask failed. errno: " +
+                       std::to_string(errno));
+          } else {
+            TORCH_WARN(
+                "NUMA binding: Using INTERLEAVE policy for memory "
+                "allocation across multiple NUMA nodes (nodes: " +
+                node_ids_str +
+                "). Memory allocations will be "
+                "interleaved across the specified NUMA nodes.");
+          }
+        } else {
+          errno = 0;
+          numa_set_membind(mask);
+          if (errno != 0) {
+            TORCH_WARN("numa_set_membind failed. errno: " +
+                       std::to_string(errno));
+          } else {
+            TORCH_WARN(
+                "NUMA binding: Using MEMBIND policy for memory "
+                "allocation on the NUMA nodes (" +
+                node_ids_str +
+                "). Memory allocations will be "
+                "strictly bound to these NUMA nodes.");
+          }
+        }
+
+        numa_set_strict(1);
+
+        numa_free_nodemask(mask);
+        numa_free_nodemask(src_mask);
+      } else {
+        TORCH_WARN(
+            "numa_parse_nodestring or numa_get_run_node_mask failed. errno: " +
+            std::to_string(errno));
+      }
     }
-
-    // restrict memory allocation node.
-    numa_set_membind(mask);
-    numa_set_strict(1);
   }
 
   // OMP threads binding
@@ -114,4 +163,26 @@ std::string init_cpu_threads_env(const std::string& cpu_ids) {
 
   return ss.str();
 }
-#endif
+#endif  // VLLM_NUMA_DISABLED
+
+namespace cpu_utils {
+ScratchPadManager::ScratchPadManager() : size_(0), ptr_(nullptr) {
+  this->realloc(allocation_unit * 128);
+}
+
+void ScratchPadManager::realloc(size_t new_size) {
+  new_size = round(new_size);
+  if (new_size > size_) {
+    if (ptr_ != nullptr) {
+      std::free(ptr_);
+    }
+    ptr_ = std::aligned_alloc(64, new_size);
+    size_ = new_size;
+  }
+}
+
+ScratchPadManager* ScratchPadManager::get_scratchpad_manager() {
+  static ScratchPadManager manager;
+  return &manager;
+}
+}  // namespace cpu_utils

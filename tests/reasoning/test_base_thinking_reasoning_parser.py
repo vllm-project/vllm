@@ -5,7 +5,7 @@ import pytest
 from transformers import AutoTokenizer
 
 from tests.reasoning.utils import run_reasoning_extraction
-from vllm.entrypoints.openai.protocol import ChatCompletionRequest
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
 
@@ -112,7 +112,7 @@ class TestBaseThinkingReasoningParserMethods:
         """Test the is_reasoning_end method."""
         parser = TestThinkingReasoningParser(test_tokenizer)
         end_token_id = parser.end_token_id
-
+        start_token_id = parser.start_token_id
         # Test with end token present
         assert parser.is_reasoning_end([1, 2, end_token_id, 4]) is True
 
@@ -121,6 +121,68 @@ class TestBaseThinkingReasoningParserMethods:
 
         # Test with empty list
         assert parser.is_reasoning_end([]) is False
+
+        # Test with interleaved thinking
+        assert parser.is_reasoning_end([1, start_token_id, 2, end_token_id]) is True
+        assert parser.is_reasoning_end([1, start_token_id, 2, 3]) is False
+        assert (
+            parser.is_reasoning_end(
+                [1, start_token_id, 2, end_token_id, 2, 2, start_token_id]
+            )
+            is False
+        )
+
+    def test_is_reasoning_end_streaming(self, test_tokenizer):
+        """Test the is_reasoning_end_streaming method."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        end_token_id = parser.end_token_id
+        start_token_id = parser.start_token_id
+
+        assert (
+            parser.is_reasoning_end_streaming([1, 2, end_token_id], [end_token_id])
+            is True
+        )
+        assert parser.is_reasoning_end_streaming([1, 2, 3, 4], [4]) is False
+        assert parser.is_reasoning_end_streaming([], []) is False
+        assert (
+            parser.is_reasoning_end_streaming(
+                [1, start_token_id, 2, end_token_id], [end_token_id]
+            )
+            is True
+        )
+        assert (
+            parser.is_reasoning_end_streaming([1, start_token_id, 2, 3], [3]) is False
+        )
+        assert (
+            parser.is_reasoning_end_streaming(
+                [1, start_token_id, 2, end_token_id, 2, start_token_id, 2],
+                [2],
+            )
+            is False
+        )
+        assert (
+            parser.is_reasoning_end_streaming(
+                [1, start_token_id, 2, end_token_id, 2, 2], [2]
+            )
+            is False
+        )
+
+    def test_count_reasoning_tokens(self, test_tokenizer):
+        """Count tokens between start/end markers."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        start = parser.start_token_id
+        end = parser.end_token_id
+        token_ids = [0, start, 11, 12, end, 99]
+        assert parser.count_reasoning_tokens(token_ids) == 2
+
+    def test_count_reasoning_tokens_nested(self, test_tokenizer):
+        """Ensure nested thinking spans count all inner tokens safely."""
+        parser = TestThinkingReasoningParser(test_tokenizer)
+        s = parser.start_token_id
+        e = parser.end_token_id
+        token_ids = [s, 1, s, 2, e, 3, e]
+        # Tokens 1,2,3 are inside reasoning (depth>0) => 3 tokens
+        assert parser.count_reasoning_tokens(token_ids) == 3
 
     def test_extract_content_ids(self, test_tokenizer):
         """Test the extract_content_ids method."""

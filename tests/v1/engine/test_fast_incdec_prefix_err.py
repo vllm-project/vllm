@@ -27,11 +27,11 @@ def test_fast_inc_detok_invalid_utf8_err_case():
     params = SamplingParams(skip_special_tokens=True)
     request = EngineCoreRequest(
         request_id="test",
+        external_req_id="test-ext",
         prompt_token_ids=prompt_token_ids,
         mm_features=None,
         sampling_params=params,
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=0.0,
         lora_request=None,
         cache_salt=None,

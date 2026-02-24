@@ -1,13 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 import time
 
 from vllm import LLM, SamplingParams
-
-# enable torch profiler, can also be set on cmd line
-os.environ["VLLM_TORCH_PROFILER_DIR"] = "./vllm_profile"
 
 # Sample prompts.
 prompts = [
@@ -22,7 +18,14 @@ sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 
 def main():
     # Create an LLM.
-    llm = LLM(model="facebook/opt-125m", tensor_parallel_size=1)
+    llm = LLM(
+        model="facebook/opt-125m",
+        tensor_parallel_size=1,
+        profiler_config={
+            "profiler": "torch",
+            "torch_profiler_dir": "./vllm_profile",
+        },
+    )
 
     llm.start_profile()
 

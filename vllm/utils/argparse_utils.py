@@ -73,14 +73,6 @@ class FlexibleArgumentParser(ArgumentParser):
         # Enable the deprecated kwarg for Python 3.12 and below
 
         def parse_known_args(self, args=None, namespace=None):
-            if args is not None and "--disable-log-requests" in args:
-                # Special case warning because the warning below won't trigger
-                # if –-disable-log-requests because its value is default.
-                logger.warning_once(
-                    "argument '--disable-log-requests' is deprecated and "
-                    "replaced with '--enable-log-requests'. This will be "
-                    "removed in v0.12.0."
-                )
             namespace, args = super().parse_known_args(args, namespace)
             for action in FlexibleArgumentParser._deprecated:
                 if (
@@ -192,13 +184,11 @@ class FlexibleArgumentParser(ArgumentParser):
         if args is None:
             args = sys.argv[1:]
 
-        # Check for --model in command line arguments first
         if args and args[0] == "serve":
+            # Check for --model in command line arguments first
             try:
                 model_idx = next(
-                    i
-                    for i, arg in enumerate(args)
-                    if arg == "--model" or arg.startswith("--model=")
+                    i for i, arg in enumerate(args) if re.match(r"^--model(=.+|$)", arg)
                 )
                 logger.warning(
                     "With `vllm serve`, you should provide the model as a "
@@ -227,6 +217,19 @@ class FlexibleArgumentParser(ArgumentParser):
                 ]
             except StopIteration:
                 pass
+            # Check for --served-model-name without a positional model argument
+            if (
+                len(args) > 1
+                and args[1].startswith("-")
+                and not any(re.match(r"^--config(=.+|$)", arg) for arg in args)
+                and any(
+                    re.match(r"^--served[-_]model[-_]name(=.+|$)", arg) for arg in args
+                )
+            ):
+                raise ValueError(
+                    "`model` should be provided as the first positional argument when "
+                    "using `vllm serve`. i.e. `vllm serve <model> --<arg> <value>`."
+                )
 
         if "--config" in args:
             args = self._pull_args_from_config(args)
@@ -252,19 +255,18 @@ class FlexibleArgumentParser(ArgumentParser):
                 else:
                     key = pattern.sub(repl, arg, count=1)
                     processed_args.append(key)
-            elif arg.startswith("-O") and arg != "-O" and arg[2] != ".":
+            elif arg.startswith("-O") and arg != "-O":
                 # allow -O flag to be used without space, e.g. -O3 or -Odecode
-                # -O.<...> handled later
-                # also handle -O=<mode> here
-                mode = arg[3:] if arg[2] == "=" else arg[2:]
-                processed_args.append(f"-O.mode={mode}")
+                # also handle -O=<optimization_level> here
+                optimization_level = arg[3:] if arg[2] == "=" else arg[2:]
+                processed_args += ["--optimization-level", optimization_level]
             elif (
                 arg == "-O"
                 and i + 1 < len(args)
                 and args[i + 1] in {"0", "1", "2", "3"}
             ):
-                # Convert -O <n> to -O.mode <n>
-                processed_args.append("-O.mode")
+                # Convert -O <n> to --optimization-level <n>
+                processed_args.append("--optimization-level")
             else:
                 processed_args.append(arg)
 
@@ -302,8 +304,22 @@ class FlexibleArgumentParser(ArgumentParser):
         delete = set[int]()
         dict_args = defaultdict[str, dict[str, Any]](dict)
         duplicates = set[str]()
+        # Track regular arguments (non-dict args) for duplicate detection
+        regular_args_seen = set[str]()
         for i, processed_arg in enumerate(processed_args):
             if i in delete:  # skip if value from previous arg
+                continue
+
+            if processed_arg.startswith("--") and "." not in processed_arg:
+                if "=" in processed_arg:
+                    arg_name = processed_arg.split("=", 1)[0]
+                else:
+                    arg_name = processed_arg
+
+                if arg_name in regular_args_seen:
+                    duplicates.add(arg_name)
+                else:
+                    regular_args_seen.add(arg_name)
                 continue
 
             if processed_arg.startswith("-") and "." in processed_arg:
@@ -394,8 +410,7 @@ class FlexibleArgumentParser(ArgumentParser):
         index = args.index("--config")
         if index == len(args) - 1:
             raise ValueError(
-                "No config file specified! \
-                             Please check your command-line arguments."
+                "No config file specified! Please check your command-line arguments."
             )
 
         file_path = args[index + 1]
@@ -440,16 +455,30 @@ class FlexibleArgumentParser(ArgumentParser):
 
     def load_config_file(self, file_path: str) -> list[str]:
         """Loads a yaml file and returns the key value pairs as a
-        flattened list with argparse like pattern
+        flattened list with argparse like pattern.
+
+        Supports both flat configs and nested YAML structures.
+
+        Flat config example:
         ```yaml
             port: 12323
             tensor-parallel-size: 4
         ```
         returns:
-            processed_args: list[str] = [
-                '--port': '12323',
-                '--tensor-parallel-size': '4'
-            ]
+            ['--port', '12323', '--tensor-parallel-size', '4']
+
+        Nested config example:
+        ```yaml
+            compilation-config:
+              pass_config:
+                fuse_allreduce_rms: true
+            speculative-config:
+              model: "nvidia/gpt-oss-120b-Eagle3-v2"
+              num_speculative_tokens: 3
+        ```
+        returns:
+            ['--compilation-config', '{"pass_config": {"fuse_allreduce_rms": true}}',
+             '--speculative-config', '{"model": "nvidia/gpt-oss-120b-Eagle3-v2", ...}']
         """
         extension: str = file_path.split(".")[-1]
         if extension not in ("yaml", "yml"):
@@ -457,10 +486,10 @@ class FlexibleArgumentParser(ArgumentParser):
                 f"Config file must be of a yaml/yml type. {extension} supplied"
             )
 
-        # only expecting a flat dictionary of atomic types
+        # Supports both flat configs and nested dicts
         processed_args: list[str] = []
 
-        config: dict[str, int | str] = {}
+        config: dict[str, Any] = {}
         try:
             with open(file_path) as config_file:
                 config = yaml.safe_load(config_file)
@@ -480,6 +509,11 @@ class FlexibleArgumentParser(ArgumentParser):
                     processed_args.append("--" + key)
                     for item in value:
                         processed_args.append(str(item))
+            elif isinstance(value, dict):
+                # Convert nested dicts to JSON strings so they can be parsed
+                # by the existing JSON argument parsing machinery.
+                processed_args.append("--" + key)
+                processed_args.append(json.dumps(value))
             else:
                 processed_args.append("--" + key)
                 processed_args.append(str(value))

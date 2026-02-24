@@ -15,6 +15,7 @@ API documentation for vLLM's configuration classes.
 - [vllm.config.MultiModalConfig][]
 - [vllm.config.PoolerConfig][]
 - [vllm.config.StructuredOutputsConfig][]
+- [vllm.config.ProfilerConfig][]
 - [vllm.config.ObservabilityConfig][]
 - [vllm.config.KVTransferConfig][]
 - [vllm.config.CompilationConfig][]
@@ -71,7 +72,6 @@ Internal data structures.
 - [vllm.multimodal.inputs.MultiModalFieldConfig][]
 - [vllm.multimodal.inputs.MultiModalKwargsItem][]
 - [vllm.multimodal.inputs.MultiModalKwargsItems][]
-- [vllm.multimodal.inputs.MultiModalKwargs][]
 - [vllm.multimodal.inputs.MultiModalInputs][]
 
 ### Data Parsing
@@ -81,10 +81,6 @@ Internal data structures.
 ### Data Processing
 
 - [vllm.multimodal.processing][]
-
-### Memory Profiling
-
-- [vllm.multimodal.profiling][]
 
 ### Registry
 

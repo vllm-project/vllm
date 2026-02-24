@@ -14,13 +14,11 @@ struct KernelVecType<float> {
   using cvt_vec_type = vec_op::FP32Vec16;
 };
 
-#if !defined(__aarch64__) || defined(ARM_BF16_SUPPORT)
 template <>
 struct KernelVecType<c10::BFloat16> {
   using load_vec_type = vec_op::BF16Vec16;
   using cvt_vec_type = vec_op::FP32Vec16;
 };
-#endif
 
 template <>
 struct KernelVecType<c10::Half> {
@@ -360,13 +358,14 @@ void onednn_scaled_mm(
     const std::optional<torch::Tensor>& azp,      // [M] or [1]
     const std::optional<torch::Tensor>& azp_adj,  // [M] or [1]
     const std::optional<torch::Tensor>& bias,     // [N]
-    int64_t handler) {
+    const torch::Tensor& handler_tensor) {
   CPU_KERNEL_GUARD_IN(onednn_scaled_mm)
   TORCH_CHECK(a.dim() == 2);
   TORCH_CHECK(a.is_contiguous());
   TORCH_CHECK(c.is_contiguous());
   W8A8MatMulPrimitiveHandler* ptr =
-      reinterpret_cast<W8A8MatMulPrimitiveHandler*>(handler);
+      reinterpret_cast<W8A8MatMulPrimitiveHandler*>(
+          handler_tensor.item<int64_t>());
   const int32_t* azp_ptr = nullptr;
   if (azp.has_value()) {
     azp_ptr = azp->data_ptr<int32_t>();
@@ -519,13 +518,14 @@ int64_t create_onednn_mm_handler(const torch::Tensor& b,
 
 void onednn_mm(torch::Tensor& c,        // [M, OC], row-major
                const torch::Tensor& a,  // [M, IC], row-major
-               const std::optional<torch::Tensor>& bias, int64_t handler) {
+               const std::optional<torch::Tensor>& bias,
+               const torch::Tensor& handler_tensor) {
   CPU_KERNEL_GUARD_IN(onednn_mm)
   TORCH_CHECK(a.dim() == 2);
   TORCH_CHECK(a.stride(-1) == 1);
   TORCH_CHECK(c.stride(-1) == 1);
   MatMulPrimitiveHandler* ptr =
-      reinterpret_cast<MatMulPrimitiveHandler*>(handler);
+      reinterpret_cast<MatMulPrimitiveHandler*>(handler_tensor.item<int64_t>());
 
 // ACL matmuls expect contiguous source tensors
 #ifdef VLLM_USE_ACL
