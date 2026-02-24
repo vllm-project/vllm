@@ -6,6 +6,7 @@ Test modular OAI Triton MoE
 
 import pytest
 import torch
+from vllm.tests.utils import wait_for_gpu_memory_to_clear
 
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.utils.import_utils import has_triton_kernels
@@ -169,6 +170,8 @@ def oai_triton_moe_impl(
     topk_ids: torch.Tensor,
     unfused: bool = False,
 ) -> torch.Tensor:
+    wait_for_gpu_memory_to_clear()
+
     quant_config = mxfp4_w4a16_moe_quant_config(
         w1_bias=w1_bias,
         w2_bias=w2_bias,
