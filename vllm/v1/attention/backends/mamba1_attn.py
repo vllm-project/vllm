@@ -29,7 +29,6 @@ class Mamba1AttentionMetadataBuilder(
     BaseMambaAttentionMetadataBuilder[Mamba1AttentionMetadata]
 ):
     metadata_cls = Mamba1AttentionMetadata
-    supports_update_block_table: bool = False
 
     def build(
         self,
