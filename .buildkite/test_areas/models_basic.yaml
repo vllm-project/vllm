@@ -56,7 +56,7 @@ steps:
     - pytest -v -s models/test_utils.py models/test_vision.py
 
 - label: Model strategy test
-  mirror_hardwares: [amdexperimental]
+  device: h100
   source_file_dependencies: []
   commands:
     - pytest -v -s models/nightly/gptoss.py
