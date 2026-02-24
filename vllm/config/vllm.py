@@ -109,8 +109,11 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
     """Enable if rotary embedding custom op is active."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
     return (
-        cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+        rocm_aiter_ops.is_enabled()
+        and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
         and cfg.compilation_config.use_inductor_graph_partition
     )
 
@@ -137,11 +140,11 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and AITER Triton GEMMs
     and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
+    from _aiter_ops import rocm_aiter_ops
 
     return (
-        envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        rocm_aiter_ops.is_rmsnorm_enabled()
+        and not rocm_aiter_ops.is_triton_gemm_enabled()
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
@@ -176,7 +179,7 @@ OPTIMIZATION_LEVEL_01 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
-            "fuse_rope_kvcache": False,
+            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
