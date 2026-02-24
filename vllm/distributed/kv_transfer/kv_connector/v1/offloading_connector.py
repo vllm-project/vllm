@@ -4,7 +4,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 
@@ -41,9 +41,6 @@ from vllm.v1.kv_offload.worker.worker import (
 )
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.kv_connector_model_runner_mixin import CrossLayerGroup
 
 ReqId = str
 
@@ -138,13 +135,15 @@ class OffloadingConnector(KVConnectorBase_V1):
         elif role == KVConnectorRole.WORKER:
             self.connector_worker = OffloadingConnectorWorker(spec)
 
-    def register_kv_caches(
-        self,
-        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
-        cross_layer_groups: "list[CrossLayerGroup] | None" = None,
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        assert self.connector_worker is not None
+        self.connector_worker.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
     ):
         assert self.connector_worker is not None
-        self.connector_worker.register_kv_caches(kv_caches, cross_layer_groups)
+        self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def handle_preemptions(self, preempted_req_ids: set[str]):
         assert self.connector_worker is not None
@@ -592,39 +591,24 @@ class OffloadingConnectorWorker:
         ):
             self.worker.register_handler(src_cls, dst_cls, handler)
 
-    def register_kv_caches(
-        self,
-        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
-        cross_layer_groups: "list[CrossLayerGroup] | None" = None,
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
+        layer_names = list(kv_caches.keys())
+        layers = get_layers_from_vllm_config(
+            self.spec.vllm_config, Attention, layer_names
+        )
+        attn_backends = {
+            layer_name: layers[layer_name].get_attn_backend()
+            for layer_name in layer_names
+        }
+        self._register_handlers(kv_caches, attn_backends)
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
     ):
-        if cross_layer_groups is not None:
-            # Register attention groups only; non-attention groups (e.g.
-            # Mamba) are skipped, matching the per-layer path behaviour.
-            all_layer_names = [
-                name for group in cross_layer_groups for name in group.layer_names
-            ]
-            layers = get_layers_from_vllm_config(
-                self.spec.vllm_config, Attention, all_layer_names
-            )
-            caches: dict[str, torch.Tensor] = {}
-            backends: dict[str, type[AttentionBackend]] = {}
-            for i, group in enumerate(cross_layer_groups):
-                if group.layer_names[0] not in layers:
-                    continue
-                key = f"cross_layer_{i}"
-                caches[key] = group.tensor
-                backends[key] = layers[group.layer_names[0]].get_attn_backend()
-            self._register_handlers(caches, backends)
-        else:
-            layer_names = list(kv_caches.keys())
-            layers = get_layers_from_vllm_config(
-                self.spec.vllm_config, Attention, layer_names
-            )
-            attn_backends = {
-                layer_name: layers[layer_name].get_attn_backend()
-                for layer_name in layer_names
-            }
-            self._register_handlers(kv_caches, attn_backends)
+        cross_layer_name = "ALL_LAYERS"
+        kv_caches = {cross_layer_name: kv_cache}
+        attn_backends = {cross_layer_name: attn_backend}
+        self._register_handlers(kv_caches, attn_backends)
 
     def handle_preemptions(self, preempted_req_ids: set[str]):
         for job_id, transfer_spec in self._unsubmitted_store_jobs:

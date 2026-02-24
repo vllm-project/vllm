@@ -48,9 +48,6 @@ if TYPE_CHECKING:
     from vllm.v1.core.kv_cache_utils import BlockHash
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
-    from vllm.v1.worker.kv_connector_model_runner_mixin import (
-        CrossLayerGroup,
-    )
 
 logger = lmcache_init_logger(__name__)
 
@@ -445,11 +442,7 @@ class LMCacheMPConnector(KVConnectorBase_V1):
         assert self._connector_metadata is not None
         return self._connector_metadata
 
-    def register_kv_caches(
-        self,
-        kv_caches: dict[str, torch.Tensor | list[torch.Tensor]],
-        cross_layer_groups: "list[CrossLayerGroup] | None" = None,
-    ):
+    def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]):
         """
         Initialize with the KV caches. Useful for pre-registering the
         KV Caches in the KVConnector (e.g. for NIXL).
