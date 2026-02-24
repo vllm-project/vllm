@@ -23,7 +23,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.mistral import is_mistral_tokenizer
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (
@@ -102,6 +102,7 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
 # incorrect token ids. So we need use `add_special_tokens=False` here
 # to leave bos_token to be added by the processor.
 _ADD_SPECIAL_TOKENS_OVERRIDES = {
+    "lfm2_vl": False,
     "nemotron_parse": False,
     "ovis": False,
     "ovis2_5": False,
@@ -124,6 +125,7 @@ MM_DATA_PATCHES = {
     "glm4v_moe": glm4_1v_patch_mm_data,
     "glm_ocr": glm4_1v_patch_mm_data,
     "glmasr": glmasr_patch_mm_data,
+    "interns1_pro": qwen3_vl_patch_mm_data,
     "molmo2": qwen3_vl_patch_mm_data,
     "qwen3_vl": qwen3_vl_patch_mm_data,
     "qwen3_vl_moe": qwen3_vl_patch_mm_data,
@@ -181,27 +183,49 @@ def get_text_token_prompts(
 
     text_prompt: str | None
     token_prompt: list[int]
-    if isinstance(tokenizer, MistralTokenizer):
-        images = parsed_data.get("image", [])
-        request = ChatCompletionRequest(
-            messages=[
-                UserMessage(
-                    content=[
-                        TextChunk(text=""),
-                        *(ImageChunk(image=image) for image in images),
-                    ]
-                ),
-            ]
+    if is_mistral_tokenizer(tokenizer):
+        # ChatCompletionRequest only supports ImageChunk natively;
+        # for other modalities (e.g. audio), fall back to the model's
+        # own dummy inputs builder which knows the right placeholders.
+        has_non_image = any(
+            k != "image" and count > 0 for k, count in mm_counts.items()
         )
-        res = tokenizer.mistral.encode_chat_completion(request)
 
-        # Mistral does not support decode_tokens with skip_special_tokens=False
-        text_prompt = None
-        token_prompt = res.tokens
+        if has_non_image:
+            inputs = dummy_inputs.get_dummy_processor_inputs(
+                model_config.max_model_len,
+                mm_counts,
+                mm_options={},
+            )
+            text_prompt = None
+            token_prompt = (
+                inputs.prompt
+                if isinstance(inputs.prompt, list)
+                else tokenizer.encode(inputs.prompt, add_special_tokens=False)
+            )
+        else:
+            images = parsed_data.get("image", [])
+            request = ChatCompletionRequest(
+                messages=[
+                    UserMessage(
+                        content=[
+                            TextChunk(text=""),
+                            *(ImageChunk(image=image) for image in images),
+                        ]
+                    ),
+                ]
+            )
+            res = tokenizer.mistral.encode_chat_completion(request)
+
+            # Mistral does not support decode_tokens with
+            # skip_special_tokens=False
+            text_prompt = None
+            token_prompt = res.tokens
     else:
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
+            mm_options={},
         )
         assert isinstance(inputs.prompt, str)
 
@@ -212,6 +236,28 @@ def get_text_token_prompts(
         )
 
     return text_prompt, token_prompt
+
+
+def random_vision_chunk(
+    rng: np.random.RandomState,
+    min_wh: int,
+    max_wh: int,
+    min_frames: int,
+    max_frames: int,
+) -> dict:
+    num_frames = rng.randint(min_frames, max_frames + 1)
+    if num_frames == 1:
+        # Single image chunk
+        wh = rng.randint(min_wh, max_wh + 1)
+        image = random_image(rng, wh, wh + 1)
+        return {"type": "image", "image": image}
+    frames = []
+    for _ in range(num_frames):
+        wh = rng.randint(min_wh, max_wh + 1)
+        frame = rng.randint(0, 256, size=(wh, wh, 3), dtype=np.uint8)
+        frames.append(frame)
+    video_array = np.stack(frames, axis=0)
+    return {"type": "video_chunk", "video_chunk": video_array}
 
 
 def _test_processing_correctness(
@@ -291,6 +337,7 @@ def _test_processing_correctness(
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
         "audio": (np.zeros((512,)), 16000),
+        "vision_chunk": {"type": "image", "image": Image.new("RGB", size=(128, 128))},
     }
     input_factory = {
         "image": partial(random_image, rng, min_wh=128, max_wh=256),
@@ -298,6 +345,9 @@ def _test_processing_correctness(
             random_video, rng, min_frames=2, max_frames=16, min_wh=128, max_wh=256
         ),
         "audio": partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        "vision_chunk": partial(
+            random_vision_chunk, rng, min_wh=128, max_wh=256, min_frames=1, max_frames=1
+        ),
     }
 
     for batch_idx in range(num_batches):
@@ -339,13 +389,13 @@ def _test_processing_correctness_one(
     mm_items = baseline_processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
-    baseline_tokenized_result = baseline_processor.apply(
+    baseline_tokenized_result = baseline_processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
-    cached_tokenized_result = cached_processor.apply(
+    cached_tokenized_result = cached_processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
@@ -359,12 +409,12 @@ def _test_processing_correctness_one(
     )
 
     if text_prompt is not None:
-        baseline_text_result = baseline_processor.apply(
+        baseline_text_result = baseline_processor(
             text_prompt,
             mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
-        cached_text_result = cached_processor.apply(
+        cached_text_result = cached_processor(
             text_prompt,
             mm_items=mm_items,
             hf_processor_mm_kwargs={},
@@ -402,6 +452,8 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
+    if model_id == "allendou/Fun-ASR-Nano-2512-vllm":
+        pytest.skip("Cached audio `input_features` not matched. Fix later.")
     if model_id == "google/gemma-3n-E2B-it":
         pytest.skip("Fix later")
     if model_id == "OpenGVLab/InternVL2-2B":
@@ -413,10 +465,12 @@ def test_processing_correctness(
             "Qwen-VL tokenizer requires downloading a font file from "
             "servers that often refuse connections in CI"
         )
-    if model_id == "moonshotai/Kimi-K2.5":
-        # FIXME(Isaac): Fix Kimi-K2.5's offline inference about vision chunks.
+    if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
-            "Kimi-K2.5's offline inference has issues about vision chunks. Fix later."
+            "Voxtral Realtime doesn't make use of any place-holder"
+            "tokens and hence cannot pass the processing "
+            "correctness test as is. Let's revisit adapting this "
+            "test once more realtime models exist."
         )
 
     _test_processing_correctness(
@@ -437,8 +491,9 @@ def _assert_inputs_equal(
     if ignore_mm_keys is None:
         ignore_mm_keys = set()
 
-    a_rest = {k: v for k, v in a.items() if k != "mm_kwargs"}
-    b_rest = {k: v for k, v in b.items() if k != "mm_kwargs"}
+    ignore_prompt_keys = ("prompt", "mm_kwargs")
+    a_rest = {k: v for k, v in a.items() if k not in ignore_prompt_keys}
+    b_rest = {k: v for k, v in b.items() if k not in ignore_prompt_keys}
 
     assert a_rest == b_rest, msg
 

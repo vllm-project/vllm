@@ -1,2 +1,4 @@
 DeepSeek-R1-TP.yaml
 DeepSeek-R1-DP.yaml
+DeepSeek-V3.2-TP.yaml
+DeepSeek-V3.2-DP.yaml

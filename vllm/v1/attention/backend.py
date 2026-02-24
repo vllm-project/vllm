@@ -347,7 +347,7 @@ class CommonAttentionMetadata:
         """
     Prefer using device seq_lens directly to avoid implicit H<>D sync.
     If a CPU copy is needed, use `seq_lens.cpu()` instead.
-    Will be removed in a future release (v0.15.0)
+    Will be removed in a future release, please migrate as soon as possible.
     """
     )
     def seq_lens_cpu(self) -> torch.Tensor:
@@ -361,7 +361,7 @@ class CommonAttentionMetadata:
     Prefer using device seq_lens directly to avoid implicit H<>D sync which breaks full
     async scheduling. If a CPU copy is needed, it can be derived from 
     query_start_loc_cpu and seq_lens.
-    Will be removed in a future release (v0.15.0)
+    Will be removed in a future release, please migrate as soon as possible.
     """
     )
     def num_computed_tokens_cpu(self) -> torch.Tensor:
@@ -480,9 +480,14 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                 speculative_config is not None
                 and speculative_config.num_speculative_tokens is not None
             ):
+                max_num_queries_for_spec = (
+                    1
+                    + (2 if speculative_config.parallel_drafting else 1)
+                    * speculative_config.num_speculative_tokens
+                )
                 self.reorder_batch_threshold = max(
                     self.reorder_batch_threshold,
-                    1 + speculative_config.num_speculative_tokens,
+                    max_num_queries_for_spec,
                 )
 
         if (
@@ -717,6 +722,33 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
         :return: is fusion supported for this type of quantization
         """
         return False
+
+    def fused_rope_kvcache_supported(self):
+        """
+        Does this attention implementation support RoPE+KVCache fusion.
+        This is used by the RopeKVCacheFusionPass to only fuse the RoPE ops
+        with the KV cache update for implementations that support it.
+        """
+        return False
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        """
+        If `fused_rope_kvcache_supported` returns True, this method will be called
+        by torch.ops.vllm.fused_rope_and_unified_kv_cache_update
+        to perform the inplace RoPE and KV cache update.
+        """
+        raise NotImplementedError
 
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):

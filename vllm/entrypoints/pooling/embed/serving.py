@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import json
-from collections.abc import AsyncGenerator, Mapping
-from typing import Any, Final, TypeAlias
+from collections.abc import AsyncGenerator, Callable, Mapping
+from functools import partial
+from typing import Any, Final, Literal, TypeAlias, cast
 
 import torch
 from fastapi import Request
@@ -22,16 +23,18 @@ from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingResponse,
     EmbeddingResponseData,
 )
-from vllm.inputs.data import EmbedsPrompt, TokensPrompt
+from vllm.entrypoints.pooling.utils import (
+    encode_pooling_bytes,
+    encode_pooling_output_base64,
+    encode_pooling_output_float,
+)
+from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
 from vllm.logger import init_logger
 from vllm.outputs import PoolingOutput, PoolingRequestOutput
 from vllm.pooling_params import PoolingParams
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import chunk_list
-from vllm.utils.serial_utils import (
-    encode_pooling_bytes,
-    encode_pooling_output,
-)
+from vllm.utils.serial_utils import EmbedDType, Endianness
 
 logger = init_logger(__name__)
 
@@ -65,16 +68,8 @@ class OpenAIServingEmbedding(OpenAIServing):
         self.trust_request_chat_template = trust_request_chat_template
 
         pooler_config = self.model_config.pooler_config
-
-        # Avoid repeated attribute lookups
-        self.supports_chunked_processing = bool(
-            pooler_config and pooler_config.enable_chunked_processing
-        )
-        self.max_embed_len = (
-            pooler_config.max_embed_len
-            if pooler_config and pooler_config.max_embed_len
-            else None
-        )
+        assert pooler_config is not None
+        self.pooler_config = pooler_config
 
     async def _preprocess(
         self,
@@ -113,79 +108,120 @@ class OpenAIServingEmbedding(OpenAIServing):
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(str(e))
 
+    def request_output_to_embed_json_response(
+        self,
+        final_res_batch: list[PoolingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+        encoding_format: Literal["float", "base64"],
+        embed_dtype: EmbedDType,
+        endianness: Endianness,
+    ) -> EmbeddingResponse:
+        encode_fn = cast(
+            Callable[[PoolingRequestOutput], list[float] | str],
+            (
+                encode_pooling_output_float
+                if encoding_format == "float"
+                else partial(
+                    encode_pooling_output_base64,
+                    embed_dtype=embed_dtype,
+                    endianness=endianness,
+                )
+            ),
+        )
+
+        items: list[EmbeddingResponseData] = []
+        num_prompt_tokens = 0
+
+        for idx, final_res in enumerate(final_res_batch):
+            item = EmbeddingResponseData(
+                index=idx,
+                embedding=encode_fn(final_res),
+            )
+            prompt_token_ids = final_res.prompt_token_ids
+
+            items.append(item)
+            num_prompt_tokens += len(prompt_token_ids)
+
+        usage = UsageInfo(
+            prompt_tokens=num_prompt_tokens,
+            total_tokens=num_prompt_tokens,
+        )
+
+        return EmbeddingResponse(
+            id=request_id,
+            created=created_time,
+            model=model_name,
+            data=items,
+            usage=usage,
+        )
+
+    def request_output_to_embed_bytes_response(
+        self,
+        final_res_batch: list[PoolingRequestOutput],
+        request_id: str,
+        created_time: int,
+        model_name: str,
+        encoding_format: Literal["bytes", "bytes_only"],
+        embed_dtype: EmbedDType,
+        endianness: Endianness,
+    ) -> EmbeddingBytesResponse:
+        content, items, usage = encode_pooling_bytes(
+            pooling_outputs=final_res_batch,
+            embed_dtype=embed_dtype,
+            endianness=endianness,
+        )
+
+        headers = (
+            None
+            if encoding_format == "bytes_only"
+            else {
+                "metadata": json.dumps(
+                    {
+                        "id": request_id,
+                        "created": created_time,
+                        "model": model_name,
+                        "data": items,
+                        "usage": usage,
+                    }
+                )
+            }
+        )
+
+        return EmbeddingBytesResponse(content=content, headers=headers)
+
     def _build_response(
         self,
         ctx: EmbeddingServeContext,
     ) -> EmbeddingResponse | EmbeddingBytesResponse | ErrorResponse:
-        final_res_batch_checked = ctx.final_res_batch
-
         encoding_format = ctx.request.encoding_format
         embed_dtype = ctx.request.embed_dtype
         endianness = ctx.request.endianness
 
-        def encode_float_base64():
-            items: list[EmbeddingResponseData] = []
-            num_prompt_tokens = 0
-
-            for idx, final_res in enumerate(final_res_batch_checked):
-                item = EmbeddingResponseData(
-                    index=idx,
-                    embedding=encode_pooling_output(
-                        final_res,
-                        encoding_format=encoding_format,
-                        embed_dtype=embed_dtype,
-                        endianness=endianness,
-                    ),
-                )
-                prompt_token_ids = final_res.prompt_token_ids
-
-                items.append(item)
-                num_prompt_tokens += len(prompt_token_ids)
-
-            usage = UsageInfo(
-                prompt_tokens=num_prompt_tokens,
-                total_tokens=num_prompt_tokens,
-            )
-
-            return EmbeddingResponse(
-                id=ctx.request_id,
-                created=ctx.created_time,
-                model=ctx.model_name,
-                data=items,
-                usage=usage,
-            )
-
-        def encode_bytes(bytes_only: bool) -> EmbeddingBytesResponse:
-            content, items, usage = encode_pooling_bytes(
-                pooling_outputs=final_res_batch_checked,
-                embed_dtype=embed_dtype,
-                endianness=endianness,
-            )
-
-            headers = (
-                None
-                if bytes_only
-                else {
-                    "metadata": json.dumps(
-                        {
-                            "id": ctx.request_id,
-                            "created": ctx.created_time,
-                            "model": ctx.model_name,
-                            "data": items,
-                            "usage": usage,
-                        }
-                    )
-                }
-            )
-
-            return EmbeddingBytesResponse(content=content, headers=headers)
-
         if encoding_format == "float" or encoding_format == "base64":
-            return encode_float_base64()
-        elif encoding_format == "bytes" or encoding_format == "bytes_only":
-            return encode_bytes(bytes_only=encoding_format == "bytes_only")
-        else:
-            assert_never(encoding_format)
+            return self.request_output_to_embed_json_response(
+                ctx.final_res_batch,
+                ctx.request_id,
+                ctx.created_time,
+                ctx.model_name,
+                encoding_format,
+                embed_dtype,
+                endianness,
+            )
+
+        if encoding_format == "bytes" or encoding_format == "bytes_only":
+            return self.request_output_to_embed_bytes_response(
+                ctx.final_res_batch,
+                ctx.request_id,
+                ctx.created_time,
+                ctx.model_name,
+                encoding_format,
+                embed_dtype,
+                endianness,
+            )
+
+        assert_never(encoding_format)
 
     def _get_max_position_embeddings(self) -> int:
         """Get the model's effective maximum sequence length for chunking."""
@@ -195,7 +231,7 @@ class OpenAIServingEmbedding(OpenAIServing):
         """Check if chunked processing should be used for this request."""
         return (
             isinstance(request, (EmbeddingCompletionRequest, EmbeddingChatRequest))
-            and self.supports_chunked_processing
+            and self.pooler_config.enable_chunked_processing
         )
 
     async def _process_chunked_request(
@@ -219,7 +255,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             chunk_request_id = f"{ctx.request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
 
             # Create engine prompt for this chunk
-            chunk_engine_prompt = TokensPrompt(prompt_token_ids=chunk_tokens)
+            chunk_engine_prompt = token_inputs(chunk_tokens)
 
             # Log the chunk
             self._log_inputs(
@@ -229,16 +265,12 @@ class OpenAIServingEmbedding(OpenAIServing):
                 lora_request=ctx.lora_request,
             )
 
-            tok_params = ctx.request.build_tok_params(self.model_config)
-            tokenization_kwargs = tok_params.get_encode_kwargs()
-
             # Create generator for this chunk and wrap it to return indices
             original_generator = self.engine_client.encode(
                 chunk_engine_prompt,
                 pooling_params,
                 chunk_request_id,
                 lora_request=ctx.lora_request,
-                tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=ctx.request.priority,
             )
@@ -265,14 +297,14 @@ class OpenAIServingEmbedding(OpenAIServing):
             max_pos_embeddings = self._get_max_position_embeddings()
 
             # Determine the effective max length for validation
-            if self.max_embed_len is not None:
+            if self.pooler_config.max_embed_len:
                 # Use max_embed_len for validation instead of max_model_len
                 length_type = "maximum embedding input length"
-                max_length_value = self.max_embed_len
+                max_length_value = self.pooler_config.max_embed_len
             else:
                 # Fall back to max_model_len validation (original behavior)
                 length_type = "maximum context length"
-                max_length_value = self.max_model_len
+                max_length_value = self.model_config.max_model_len
 
             validation_error_msg = (
                 "This model's {length_type} is {max_length_value} tokens. "
@@ -325,7 +357,7 @@ class OpenAIServingEmbedding(OpenAIServing):
     async def _create_single_prompt_generator(
         self,
         ctx: EmbeddingServeContext,
-        engine_prompt: TokensPrompt | EmbedsPrompt,
+        engine_prompt: ProcessorInputs,
         pooling_params: PoolingParams,
         trace_headers: Mapping[str, str] | None,
         prompt_index: int,
@@ -340,16 +372,12 @@ class OpenAIServingEmbedding(OpenAIServing):
             lora_request=ctx.lora_request,
         )
 
-        tok_params = ctx.request.build_tok_params(self.model_config)
-        tokenization_kwargs = tok_params.get_encode_kwargs()
-
         # Return the original generator without wrapping
         return self.engine_client.encode(
             engine_prompt,
             pooling_params,
             request_id_item,
             lora_request=ctx.lora_request,
-            tokenization_kwargs=tokenization_kwargs,
             trace_headers=trace_headers,
             priority=ctx.request.priority,
         )
@@ -379,12 +407,6 @@ class OpenAIServingEmbedding(OpenAIServing):
             pooling_params = self._create_pooling_params(ctx)
             if isinstance(pooling_params, ErrorResponse):
                 return pooling_params
-
-            # Verify and set the task for pooling params
-            try:
-                pooling_params.verify("embed", self.model_config)
-            except ValueError as e:
-                return self.create_error_response(str(e))
 
             if ctx.engine_prompts is None:
                 return self.create_error_response("Engine prompts not available")
@@ -419,8 +441,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return None
 
         except Exception as e:
-            # TODO: Use a vllm-specific Validation Error
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def _collect_batch(
         self,
@@ -590,7 +611,7 @@ class OpenAIServingEmbedding(OpenAIServing):
             return None
 
         except Exception as e:
-            return self.create_error_response(str(e))
+            return self.create_error_response(e)
 
     async def create_embedding(
         self,
@@ -617,18 +638,3 @@ class OpenAIServingEmbedding(OpenAIServing):
         )
 
         return await self.handle(ctx)  # type: ignore[return-value]
-
-    def _create_pooling_params(
-        self,
-        ctx: EmbeddingServeContext,
-    ) -> PoolingParams | ErrorResponse:
-        pooling_params = super()._create_pooling_params(ctx)
-        if isinstance(pooling_params, ErrorResponse):
-            return pooling_params
-
-        try:
-            pooling_params.verify("embed", self.model_config)
-        except ValueError as e:
-            return self.create_error_response(str(e))
-
-        return pooling_params

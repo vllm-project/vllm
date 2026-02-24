@@ -11,7 +11,6 @@ This module defines:
 - KimiK25ForConditionalGeneration: Main model class
 """
 
-import copy
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Annotated, Any, Literal
@@ -24,7 +23,15 @@ from transformers.processing_utils import ProcessorMixin
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.logger import init_logger
-from vllm.model_executor.models.interfaces import SupportsMultiModal, SupportsPP
+from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+    CompressedTensorsConfig,
+)
+from vllm.model_executor.models.interfaces import (
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsQuant,
+)
 from vllm.model_executor.models.kimi_k25_vit import (
     KimiK25MultiModalProjector,
     MoonViT3dPretrainedModel,
@@ -96,16 +103,20 @@ class MoonshotKimiVAutoProcessor(ProcessorMixin):
     attributes = ["tokenizer"]
     tokenizer_class = "AutoTokenizer"
 
-    def __init__(self, media_processor=None, tokenizer=None):
+    def __init__(
+        self, media_processor=None, tokenizer=None, media_token_id: int | None = None
+    ):
         super().__init__(tokenizer)
         self.media_processor = media_processor
+        self.media_token_id = media_token_id
+        assert self.media_token_id is not None
 
     # We do not support str input for text here
     def __call__(
         self,
         vision_chunks: list[VisionChunk] | None = None,
         *,
-        text: list[int],
+        text: list[int] | str,
         **kwargs,
     ) -> BatchFeature:
         """
@@ -122,13 +133,30 @@ class MoonshotKimiVAutoProcessor(ProcessorMixin):
             - **grid_thws** -- list of image 3D grid in LLM. Returned when `vision_chunks` is not `None`.
         """
         mm_inputs = {}
+        input_ids = self.tokenizer.encode(text) if isinstance(text, str) else text
         if vision_chunks is not None:
             assert isinstance(vision_chunks, list)
             mm_inputs = self.media_processor.preprocess(vision_chunks)
+
+            num_tokens_per_chunk = [
+                self.media_processor.media_tokens_calculator(chunk)
+                for chunk in vision_chunks
+            ]
+
+            new_input_ids = []
+            for token in input_ids:
+                if token == self.media_token_id:
+                    new_input_ids.extend(
+                        [self.media_token_id] * num_tokens_per_chunk.pop(0)
+                    )
+                else:
+                    new_input_ids.append(token)
+            input_ids = new_input_ids
+
         # XXX: _apply_hf_processor_text_mm will call tolist() on input_ids
         return BatchFeature(
             data={
-                "input_ids": torch.tensor([text]),
+                "input_ids": torch.tensor([input_ids]),
                 **mm_inputs,
             }
         )
@@ -152,6 +180,7 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_processor = MoonshotKimiVAutoProcessor(
             media_processor=self.media_processor,
             tokenizer=self.get_tokenizer(),
+            media_token_id=self.media_token_id,
         )
         self.media_tokens_calculator = self.media_processor.media_tokens_calculator
 
@@ -174,9 +203,9 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
         self.media_token_id = self.info.media_token_id
         self.frame_per_chunk = self.info.media_processor.num_frames_per_chunk
 
-    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> list[int]:
+    def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
         num_media = mm_counts.get("vision_chunk", 0)
-        return [self.media_token_id] * num_media
+        return "<|media_pad|>" * num_media
 
     def get_dummy_mm_items(self):
         dummy_videos = self._get_dummy_images(
@@ -211,7 +240,7 @@ class KimiK25DummyInputsBuilder(BaseDummyInputsBuilder[KimiK25ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         # TODO: Support mm_options for vision_chunk to allow user configuration
         dummy_items = self.get_dummy_mm_items()
@@ -280,7 +309,9 @@ class KimiK25MultiModalProcessor(BaseMultiModalProcessor[KimiK25ProcessingInfo])
     info=KimiK25ProcessingInfo,
     dummy_inputs=KimiK25DummyInputsBuilder,
 )
-class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class KimiK25ForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant
+):
     """Kimi-K2.5 model for conditional generation.
 
     Supports both image and video-chunk modalities.
@@ -290,8 +321,12 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     supports_encoder_tp_data = True
 
-    weights_mapper = WeightsMapper(
+    hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            # For legacy NVFP4 checkpoint compatibility:
+            # see https://github.com/vllm-project/vllm/pull/33346#issuecomment-3851475033
+            "language_model.layers.": "language_model.model.layers.",
+            # mm projector
             "mm_projector.proj.0": "mm_projector.linear_1",
             "mm_projector.proj.2": "mm_projector.linear_2",
         }
@@ -329,6 +364,7 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         with self._mark_tower_model(vllm_config, "vision_chunk"):
             self.vision_tower = MoonViT3dPretrainedModel(
                 config.vision_config,
+                quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "vision_tower"),
             )
             self.vision_tower = self.vision_tower.to(
@@ -338,6 +374,7 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             self.mm_projector = KimiK25MultiModalProjector(
                 config=config.vision_config,
                 use_data_parallel=self.use_data_parallel,
+                quant_config=self._maybe_ignore_quant_config(quant_config),
                 prefix=maybe_prefix(prefix, "mm_projector"),
             )
             self.mm_projector = self.mm_projector.to(
@@ -345,10 +382,6 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             )
 
         self.quant_config = quant_config
-        sub_vllm_config = copy.deepcopy(vllm_config)
-        sub_vllm_config.model_config.hf_config = (
-            sub_vllm_config.model_config.hf_config.text_config
-        )
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
@@ -360,6 +393,11 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             self.language_model.make_empty_intermediate_tensors
         )
         self.media_placeholder: int = self.config.media_placeholder_token_id
+
+    def _maybe_ignore_quant_config(self, quant_config: QuantizationConfig):
+        if isinstance(quant_config, CompressedTensorsConfig):
+            return None
+        return quant_config
 
     def _parse_and_validate_media_input(
         self, **kwargs: object
@@ -443,4 +481,4 @@ class KimiK25ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights, mapper=self.weights_mapper)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
