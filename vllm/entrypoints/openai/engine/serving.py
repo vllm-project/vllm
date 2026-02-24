@@ -95,7 +95,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
-from vllm.exceptions import RequestRejectedError, VLLMValidationError
+from vllm.exceptions import GenerationError, RequestRejectedError, VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
