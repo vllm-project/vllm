@@ -9,9 +9,10 @@ import json
 import operator
 import os
 import pprint
+import tempfile
 import time
 from collections.abc import Callable, Generator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from copy import deepcopy
 from functools import partial
 from typing import Any
@@ -210,8 +211,18 @@ class CompilerManager:
             return
         printer = pprint.PrettyPrinter(indent=4)
         data = printer.pformat(self.cache)
-        with open(self.cache_file_path, "w") as f:
-            f.write(data)
+        # Write atomically to prevent corrupt cache files from
+        # interrupted writes (issue #35061).
+        cache_dir = os.path.dirname(self.cache_file_path)
+        fd, tmp_path = tempfile.mkstemp(dir=cache_dir, suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as f:
+                f.write(data)
+            os.replace(tmp_path, self.cache_file_path)
+        except BaseException:
+            with suppress(OSError):
+                os.unlink(tmp_path)
+            raise
 
     def load(
         self,

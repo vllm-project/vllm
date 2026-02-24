@@ -6,6 +6,7 @@ import hashlib
 import inspect
 import os
 import sys
+import tempfile
 from collections.abc import Callable, Generator
 from typing import TYPE_CHECKING, Any, TypeVar, overload
 from unittest.mock import patch
@@ -454,6 +455,17 @@ def _support_torch_compile(
                         aot_compilation_path,
                         str(e),
                     )
+                    # Remove corrupt cache files (e.g. 0-byte files from
+                    # interrupted saves) so they don't cause repeated
+                    # failures on every restart (issue #35061).
+                    try:
+                        os.remove(aot_compilation_path)
+                        logger.info(
+                            "Removed corrupt AOT cache file %s",
+                            aot_compilation_path,
+                        )
+                    except OSError:
+                        pass
                 if envs.VLLM_FORCE_AOT_LOAD:
                     raise e
             if getattr(self, "aot_compiled_fn", None) is not None:
@@ -575,7 +587,20 @@ def _support_torch_compile(
         logger.info("saving AOT compiled function to %s", self._aot_compilation_path)
         try:
             os.makedirs(self._aot_cache_dir, exist_ok=True)
-            self.aot_compiled_fn.save_compiled_function(self._aot_compilation_path)
+            # Serialize into memory first so that if serialization fails,
+            # no file is created or truncated on disk (issue #35061).
+            data = type(self.aot_compiled_fn).serialize(self.aot_compiled_fn)
+            # Write atomically: temp file in the same directory, then
+            # os.replace() which is atomic on POSIX within the same fs.
+            fd, tmp_path = tempfile.mkstemp(dir=self._aot_cache_dir)
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(data)
+                os.replace(tmp_path, self._aot_compilation_path)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(tmp_path)
+                raise
             logger.info("saved AOT compiled function to %s", self._aot_compilation_path)
         except Exception as e:
             logger.warning(
