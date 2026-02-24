@@ -123,6 +123,8 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
+    enable_qk_norm_rope_fusion: bool = False
+    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # ROCm/AITER specific fusions
     fuse_act_padding: bool = Field(default=None)
