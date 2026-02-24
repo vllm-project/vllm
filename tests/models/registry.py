@@ -963,7 +963,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         enforce_eager=True,
         max_transformers_version="4.57",
         transformers_version_reason={
-            "hf": (
+            "vllm": (
                 "OpenPanguVLVideoProcessorInitKwargs does not specify total=False, "
                 "making all kwargs required. See https://huggingface.co/FreedomIntelligence/openPangu-VL-7B/discussions/2"
             )
