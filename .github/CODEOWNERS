@@ -55,7 +55,7 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/v1/kv_cache_interface.py @heheda12345
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/worker/gpu/kv_connector.py @orozery
-/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery
+/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche
 
 # Model runner V2
 /vllm/v1/worker/gpu @WoosukKwon
