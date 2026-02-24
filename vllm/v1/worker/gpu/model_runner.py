@@ -26,6 +26,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from vllm import SamplingParams
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
@@ -375,9 +376,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         expanded_local_pos = torch.zeros(
             num_reqs, dtype=torch.int32, device=self.device
         )
-        # NOTE(woosuk): During the initial memory profiling, the sampler may skip
-        # top_k, top_p, and logprobs, using less GPU memory than what is possible
-        # during actual execution.
+        # NOTE: We aren't currently including grammar bitmask or prompt logprobs
+        # processing here, which could use additional memory.
+        sampling_params = SamplingParams.for_sampler_warmup()
+        for req_idx in range(num_reqs):
+            self.sampler.add_request(0, self.max_model_len // 2, sampling_params)
+        self.sampler.apply_staged_writes()
         self.sampler(
             logits,
             idx_mapping,
