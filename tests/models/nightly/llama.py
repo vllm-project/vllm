@@ -21,21 +21,25 @@ from tests.utils import RemoteOpenAIServer
 
 
 AITER_MODEL_LIST = [
-    "meta-llama/Llama-3.2-1B-Instruct"
+    "openai/gpt-oss-20b"
 ]
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "openai/gpt-oss-20b"
 
 
 @pytest.fixture(scope="module")
 def default_server_args():
+    attention_backend = (
+        "ROCM_AITER_UNIFIED_ATTN" if current_platform.is_rocm()
+        else "TRITON_ATTN"
+    )
     return [
-        "--max-model-len",
-        "2048",
-        "--max-num-seqs",
-        "256",
-        "--gpu-memory-utilization",
-        "0.9",
+        "--enforce-eager",
+        "--max-model-len", "2048",
+        "--max-num-seqs", "256",
+        "--gpu-memory-utilization", "0.9",
+        "--reasoning-parser", "openai_gptoss",
+        "--attention-backend", attention_backend,
     ]
 
 
@@ -69,7 +73,7 @@ async def test_online_serving_v1_completions(
     model_name: str,
 ) -> None:
     """
-    Test online serving via /v1/completions endpoint for Llama-3.2-1B-Instruct.
+    Test online serving via /v1/completions endpoint for gpt-oss-20b.
     
     This test verifies that the vLLM HTTP server correctly handles:
     - Single prompt completions
@@ -223,7 +227,7 @@ async def test_online_serving_v1_chat_completions(
     model_name: str,
 ) -> None:
     """
-    Test online serving via /v1/chat/completions endpoint for Llama-3.2-1B-Instruct.
+    Test online serving via /v1/chat/completions endpoint for gpt-oss-20b.
     
     This test verifies that the vLLM HTTP server correctly handles:
     - Single chat completion requests
@@ -473,7 +477,7 @@ async def test_online_serving_concurrent_requests(
     completion_results = [r for r in all_results if r["type"] == "completion"]
     chat_results = [r for r in all_results if r["type"] == "chat"]
     
-    print(f"\n Concurrent requests completed successfully!")
+    print(f"\nConcurrent requests completed successfully!")
     print(f"Total time: {total_time:.2f}s")
     print(f"Completion requests: {len(completion_results)}")
     print(f"Chat requests: {len(chat_results)}")
@@ -493,7 +497,7 @@ async def test_online_serving_concurrent_requests(
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_accuracy_gsm8k(server: RemoteOpenAIServer, model_name: str) -> None:
     """
-    Measure accuracy via GSM8K evaluation against the same model (Llama-3.2-1B-Instruct).
+    Measure accuracy via GSM8K evaluation against the same model (gpt-oss-20b).
     Uses the isolated GSM8K script against the already-running vLLM server.
     """
     server_url = server.url_for("v1")
