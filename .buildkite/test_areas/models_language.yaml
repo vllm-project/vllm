@@ -12,6 +12,11 @@ steps:
     # Test standard language models, excluding a subset of slow tests
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Language Models Tests (Extra Standard) %N
   timeout_in_minutes: 45
