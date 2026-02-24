@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
-import io
 import math
 import time
 import zlib
@@ -24,7 +23,6 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.speech_to_text.utils import load_audio_bytes
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,
@@ -37,6 +35,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
 )
+from vllm.entrypoints.openai.speech_to_text.utils import load_audio_bytes
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs

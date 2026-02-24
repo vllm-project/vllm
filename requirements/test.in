@@ -27,6 +27,7 @@ tblib # for pickling test exceptions
 timm >=1.0.17 # required for internvl and gemma3n-mm test
 torch==2.10.0
 torchaudio==2.10.0
+torchcodec==0.10.0 # Required by torchaudio>=2.9 for audio decoding (MP4/M4A/WebM)
 torchvision==0.25.0
 transformers_stream_generator # required for qwen-vl test
 matplotlib # required for qwen-vl test
