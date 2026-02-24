@@ -63,6 +63,8 @@ def _moe_forward(
     layer_name: str,
 ) -> torch.Tensor:
     layer = get_layer_from_name(layer_name)
+    # TODO(bnell): this can be removed after MK migration is complete.
+    layer.ensure_moe_quant_config_init()
     return layer.runner.forward_impl(
         layer, hidden_states, router_logits, shared_experts_input
     )
@@ -84,6 +86,8 @@ def _moe_forward_shared(
     layer_name: str,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     layer = get_layer_from_name(layer_name)
+    # TODO(bnell): this can be removed after MK migration is complete.
+    layer.ensure_moe_quant_config_init()
     return layer.runner.forward_impl(
         layer, hidden_states, router_logits, shared_experts_input
     )
@@ -147,7 +151,7 @@ class DefaultMoERunner(MoERunner):
     kernels for different parallel execution modes.
 
     Eventually, this class will be split up and specialized for different
-    configurations, e.g. the presense or absence of shared experts, a gate, etc.
+    configurations, e.g. the presence or absence of shared experts, a gate, etc.
     """
 
     def __init__(
@@ -236,24 +240,22 @@ class DefaultMoERunner(MoERunner):
             )
         )
 
-        hidden_states_clone: torch.Tensor | None = None
+        shared_experts_input: torch.Tensor | None = None
         if use_shared_experts_stream:
             assert self.shared_experts_stream is not None
+            assert self.moe_config.disable_inplace
 
             shared_experts_input = (
                 shared_input if shared_input is not None else hidden_states
             )
 
-            # Clone BEFORE switching streams to avoid race condition
-            # where routed_expert kernel may mutate hidden_states.
-            hidden_states_clone = shared_experts_input.clone()
-
-            # Record that the clone will be used by shared_experts_stream
-            # to avoid gc issue from deallocation of hidden_states_clone
-            # For more details: https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
+            # Record that the shared_experts_input will be used in the
+            # shared_experts_stream to to avoid gc issue from
+            # deallocation. For more details:
+            # https://docs.pytorch.org/docs/stable/generated/torch.Tensor.record_stream.html # noqa: E501
             # NOTE: We don't need shared_output.record_stream(current_stream())
             # because we synch the streams before using shared_output.
-            hidden_states_clone.record_stream(self.shared_experts_stream)
+            shared_experts_input.record_stream(self.shared_experts_stream)
 
             # Mark sync start point for the separate shared experts
             # stream here since we want to run in parallel with the
@@ -261,7 +263,7 @@ class DefaultMoERunner(MoERunner):
             assert self.shared_experts_stream is not None
             self.shared_experts_stream.wait_stream(current_stream())
 
-        return use_shared_experts_stream, hidden_states_clone
+        return use_shared_experts_stream, shared_experts_input
 
     def ensure_dp_chunking_init(self):
         if not self.use_dp_chunking or self.batched_hidden_states is not None:
@@ -382,8 +384,11 @@ class DefaultMoERunner(MoERunner):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # For latent MoE: save ORIGINAL hidden_states before transform
         # (shared_experts need original dimension, routed experts use transformed)
-        original_hidden_states = hidden_states
-        original_hidden_dim = hidden_states.shape[-1]
+        if self.shared_experts is not None:
+            original_hidden_states = hidden_states
+            original_hidden_dim = hidden_states.shape[-1]
+        else:
+            original_hidden_states = None
 
         # Apply transform for routed experts (e.g., latent projection for latent MoE)
         hidden_states = self.apply_routed_input_transform(hidden_states)
@@ -405,7 +410,7 @@ class DefaultMoERunner(MoERunner):
             self._encode_layer_name(),
         )
 
-        if isinstance(fused_output, tuple):
+        if self.shared_experts is not None:
             orig_hidden_dims = [original_hidden_dim, transformed_hidden_dim]
         else:
             orig_hidden_dims = [transformed_hidden_dim]
@@ -417,7 +422,7 @@ class DefaultMoERunner(MoERunner):
         layer: torch.nn.Module,
         full_hidden_states: torch.Tensor,
         full_router_logits: torch.Tensor,
-        shared_input: torch.Tensor | None,
+        full_shared_input: torch.Tensor | None,
         has_separate_shared_experts: bool,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.batched_hidden_states is not None
@@ -445,6 +450,11 @@ class DefaultMoERunner(MoERunner):
             chunk_size = chunk_end - chunk_start
             hidden_states = full_hidden_states[chunk_start:chunk_end, :]
             router_logits = full_router_logits[chunk_start:chunk_end, :]
+            shared_input = (
+                full_shared_input[chunk_start:chunk_end, :]
+                if full_shared_input is not None
+                else None
+            )
 
             assert self.batched_hidden_states is not None
             assert self.batched_router_logits is not None
@@ -472,8 +482,13 @@ class DefaultMoERunner(MoERunner):
             staged_hidden_states.copy_(hidden_states, non_blocking=True)
             staged_router_logits.copy_(router_logits, non_blocking=True)
 
+            shared_input = (
+                shared_input if shared_input is not None else staged_hidden_states
+            )
+
             # Matrix multiply.
             if self.quant_method.is_monolithic:
+                assert has_separate_shared_experts or self.shared_experts is None
                 final_hidden_states = self.quant_method.apply_monolithic(
                     layer=layer,
                     x=staged_hidden_states,
@@ -497,7 +512,7 @@ class DefaultMoERunner(MoERunner):
                 assert not isinstance(final_hidden_states, tuple)
                 assert self.shared_experts is not None
 
-                shared_output = self.shared_experts(staged_hidden_states)
+                shared_output = self.shared_experts(shared_input)
 
                 final_hidden_states = (
                     shared_output,
@@ -570,7 +585,7 @@ class DefaultMoERunner(MoERunner):
 
         use_chunked_impl = self.use_dp_chunking
 
-        use_shared_experts_stream, hidden_states_clone = (
+        use_shared_experts_stream, shared_experts_input = (
             self._maybe_setup_shared_experts_stream(
                 hidden_states,
                 shared_input,
@@ -712,7 +727,7 @@ class DefaultMoERunner(MoERunner):
                     with torch.cuda.stream(self.shared_experts_stream):
                         # Note that hidden_states clone() is necessary here to avoid
                         # conflict with the main stream
-                        shared_output = self.shared_experts(hidden_states_clone)
+                        shared_output = self.shared_experts(shared_experts_input)
                     current_stream().wait_stream(self.shared_experts_stream)
 
                 final_hidden_states = (

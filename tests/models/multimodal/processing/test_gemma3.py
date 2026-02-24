@@ -168,6 +168,7 @@ def test_get_image_size_with_most_features(
         image_width=max_image_size.width,
         image_height=max_image_size.height,
         processor=hf_processor,
+        mm_kwargs=hf_processor_mm_kwargs,
     )
 
     prompt = "<start_of_image>"
@@ -175,7 +176,7 @@ def test_get_image_size_with_most_features(
 
     for asset in image_assets:
         mm_data = {"image": [asset.pil_image]}
-        processed_inputs = processor.apply(
+        processed_inputs = processor(
             prompt,
             mm_items=processor.info.parse_mm_data(mm_data),
             hf_processor_mm_kwargs=hf_processor_mm_kwargs,
