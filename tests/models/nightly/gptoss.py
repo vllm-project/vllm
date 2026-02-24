@@ -35,11 +35,13 @@ def default_server_args():
     )
     return [
         "--enforce-eager",
-        "--max-model-len", "2048",
+        "--max-model-len", "1024",
         "--max-num-seqs", "256",
         "--gpu-memory-utilization", "0.9",
         "--reasoning-parser", "openai_gptoss",
-        "--attention-backend", attention_backend,
+        "--tensor-parallel-size", "2",
+        "--cpu-offload-gb", "4",
+        "--attention-backend", 
     ]
 
 
