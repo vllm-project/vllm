@@ -714,8 +714,18 @@ class VllmBackend:
         # in future we need PostGradPassManager.uuid() to be executed
         # only at compile time.
         self.inductor_config = deepcopy(self.compilation_config.inductor_compile_config)
-        # `torch.compile` is JIT compiled, so we don't need to
-        # do anything here
+
+        # Configure post-grad passes (including AllReduceFusionPass) during
+        # backend init rather than at torch.compile time, so that expensive
+        # one-time setup (e.g. FlashInfer workspace allocation) is not
+        # attributed to compilation latency.
+        start = time.time()
+        self.configure_post_pass()
+        logger.info_once(
+            "Post-grad pass configuration time: %.2f s",
+            time.time() - start,
+            scope="local",
+        )
 
     def collect_standalone_compile_artifacts(
         self,
@@ -988,7 +998,6 @@ class VllmBackend:
         assert not self._called, "VllmBackend can only be called once"
 
         self.graph = graph
-        self.configure_post_pass()
 
         if self.compilation_config.use_inductor_graph_partition:
             # Let Inductor decide partitioning; avoid FX-level pre-splitting.
