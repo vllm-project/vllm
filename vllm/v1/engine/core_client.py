@@ -1319,6 +1319,10 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             "Only ray DP backend supports scaling elastic EP"
         )
 
+        assert not self.vllm_config.parallel_config.eplb_config.use_async, (
+            "scale_down/scale_up are not supported when async EPLB is enabled"
+        )
+
         scale_up = new_data_parallel_size > cur_data_parallel_size
 
         if scale_up:

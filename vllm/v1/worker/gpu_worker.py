@@ -799,6 +799,9 @@ class Worker(WorkerBase):
             for old_ep_rank in range(old_ep_size)
         }
         assert self.model_runner.eplb_state is not None
+        # Rearrange defers weight transfer to the async eplb thread when running async
+        # eplb which is not compatible with scale_up/scale_down
+        assert not self.model_runner.eplb_state.is_async
         self.model_runner.eplb_state.rearrange(
             execute_shuffle=True,
             global_expert_loads=None,
@@ -820,6 +823,9 @@ class Worker(WorkerBase):
             logger.info("[Elastic EP] Starting expert resharding after scaling up...")
         rank_mapping = {old_ep_rank: old_ep_rank for old_ep_rank in range(old_ep_size)}
         assert self.model_runner.eplb_state is not None
+        # Rearrange defers weight transfer to the async eplb thread when running async
+        # eplb which is not compatible with scale_up/scale_down
+        assert not self.model_runner.eplb_state.is_async
         self.model_runner.eplb_state.rearrange(
             execute_shuffle=True,
             global_expert_loads=global_expert_loads,
