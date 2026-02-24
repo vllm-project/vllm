@@ -148,6 +148,27 @@ class XPUPlatform(Platform):
         return device_props.total_memory
 
     @classmethod
+    def mem_get_info(cls, device=None):
+        """Get free and total memory for XPU device.
+
+        Falls back to get_device_properties().total_memory when
+        mem_get_info is not supported (e.g. TBX simulated devices).
+        """
+        try:
+            return torch.xpu.mem_get_info(device)
+        except RuntimeError:
+            logger.warning(
+                "torch.xpu.mem_get_info() not supported on this device. "
+                "Falling back to get_device_properties().total_memory.")
+            if device is None:
+                device = 0
+            elif isinstance(device, torch.device):
+                device = device.index or 0
+            total = cls.get_device_total_memory(device)
+            allocated = torch.xpu.memory_allocated(device)
+            return (total - allocated, total)
+
+    @classmethod
     def inference_mode(cls):
         return torch.no_grad()
 
