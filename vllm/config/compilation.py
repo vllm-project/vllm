@@ -153,8 +153,6 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
-    enable_qk_norm_rope_fusion: bool = False
-    """Enable fused Q/K RMSNorm + RoPE pass."""
 
     # TODO(luka) better pass enabling system.
 
@@ -833,6 +831,15 @@ class CompilationConfig:
             self.inductor_compile_config[k] = (
                 func if isinstance(func, InductorPass) else CallableInductorPass(func)
             )
+
+        if self.pass_config.enable_qk_norm_rope_fusion:
+            # TODO(zhuhaoran): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+        if self.pass_config.fuse_rope_kvcache:
+            # TODO(Rohan138): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
 
         if (
             is_torch_equal_or_newer("2.9.0.dev")
