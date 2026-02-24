@@ -170,8 +170,6 @@ def oai_triton_moe_impl(
     topk_ids: torch.Tensor,
     unfused: bool = False,
 ) -> torch.Tensor:
-    wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
-
     quant_config = mxfp4_w4a16_moe_quant_config(
         w1_bias=w1_bias,
         w2_bias=w2_bias,
@@ -227,6 +225,7 @@ def test_oai_triton_moe(
     unfused: bool,
     workspace_init,
 ):
+    wait_for_gpu_memory_to_clear(devices=[0], threshold_ratio=0.1)
     set_random_seed(0)
     (
         w1,
