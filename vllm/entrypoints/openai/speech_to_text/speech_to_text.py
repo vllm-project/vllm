@@ -41,7 +41,10 @@ from vllm.exceptions import VLLMValidationError
 from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
-from vllm.model_executor.models import SupportsTranscription, supports_transcription
+from vllm.model_executor.models import (
+    SupportsTranscription,
+    supports_transcription,
+)
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
@@ -242,10 +245,57 @@ class OpenAISpeechToText(OpenAIServing):
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
+    async def _detect_language(
+        self,
+        audio_chunk: np.ndarray,
+        request_id: str,
+    ) -> str:
+        """Auto-detect the spoken language from an audio chunk.
+
+        Delegates prompt construction and output parsing to the model class
+        via ``get_language_detection_prompt`` and
+        ``parse_language_detection_output``.
+        """
+        from vllm.sampling_params import SamplingParams
+
+        prompt = self.model_cls.get_language_detection_prompt(
+            audio_chunk,
+            self.asr_config,
+        )
+        allowed_token_ids = self.model_cls.get_language_token_ids(
+            self.tokenizer,
+        )
+        sampling_params = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            allowed_token_ids=allowed_token_ids,
+        )
+
+        result_generator = self.engine_client.generate(
+            prompt,
+            sampling_params,
+            request_id,
+        )
+
+        final_output: RequestOutput
+        async for final_output in result_generator:
+            if final_output.finished:
+                break
+
+        token_ids = list(final_output.outputs[0].token_ids)
+        lang = self.model_cls.parse_language_detection_output(
+            token_ids,
+            self.tokenizer,
+        )
+
+        logger.info("Auto-detected language: '%s'", lang)
+        return lang
+
     async def _preprocess_speech_to_text(
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
+        request_id: str,
     ) -> tuple[list[ProcessorInputs], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
@@ -274,6 +324,15 @@ class OpenAISpeechToText(OpenAIServing):
             and duration > self.asr_config.max_audio_clip_s
         )
         chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
+
+        if language is None and getattr(
+            self.model_cls, "supports_explicit_language_detection", False
+        ):
+            language = await self._detect_language(
+                chunks[0], f"{request_id}-lang_detect"
+            )
+            request.language = language
+
         parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
             # The model has control over the construction, as long as it
@@ -435,6 +494,7 @@ class OpenAISpeechToText(OpenAIServing):
             engine_prompts, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
+                request_id=request_id,
             )
 
         except ValueError as e:
