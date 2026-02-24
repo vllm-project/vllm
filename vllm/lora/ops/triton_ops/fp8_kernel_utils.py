@@ -146,8 +146,12 @@ def fp8_mm_k(
         iter_k = k * STEP_K + base_k
         block_end = iter_k + BLOCK_K
 
-        if EVEN_K:
-            # K is divisible by BLOCK_K, no masking ever needed
+        # Skip iterations that are entirely past the K boundary
+        if not EVEN_K and iter_k >= K:
+            pass
+        elif EVEN_K or block_end <= K:
+            # No masking needed: either K is evenly divisible (EVEN_K)
+            # or this block fits entirely within K
             tiled_b = tl.load(b_ptr)
             if USE_GDC:
                 tl.extra.cuda.gdc_wait()
@@ -171,56 +175,31 @@ def fp8_mm_k(
                 use_int8_w8a16,
             )
         else:
-            if iter_k >= K:
-                pass
-            elif block_end <= K:
-                tiled_b = tl.load(b_ptr)
-                if USE_GDC:
-                    tl.extra.cuda.gdc_wait()
-                tiled_a = tl.load(a_ptr)
-                if CAST_TYPE:
-                    tiled_a = tiled_a.to(b_dtype)
+            # Partial block at the tail: mask out-of-bounds elements
+            k_offsets = tl.arange(0, BLOCK_K)
+            mask = iter_k + k_offsets < K
+            tiled_b = tl.load(b_ptr, mask=mask[:, None], other=0.0)
+            if USE_GDC:
+                tl.extra.cuda.gdc_wait()
+            tiled_a = tl.load(a_ptr, mask=mask[None, :], other=0.0)
+            if CAST_TYPE:
+                tiled_a = tiled_a.to(b_dtype)
 
-                accumulator = _accumulate_mm(
-                    tiled_a,
-                    tiled_b,
-                    accumulator,
-                    a_scale_ptr,
-                    b_scale_ptr,
-                    a_scale_k_stride,
-                    b_scale_k_stride,
-                    iter_k,
-                    group_k,
-                    group_n,
-                    use_fp8_w8a8,
-                    use_int8_w8a8,
-                    use_int8_w8a16,
-                )
-            else:
-                k_offsets = tl.arange(0, BLOCK_K)
-                mask = iter_k + k_offsets < K
-                tiled_b = tl.load(b_ptr, mask=mask[:, None], other=0.0)
-                if USE_GDC:
-                    tl.extra.cuda.gdc_wait()
-                tiled_a = tl.load(a_ptr, mask=mask[None, :], other=0.0)
-                if CAST_TYPE:
-                    tiled_a = tiled_a.to(b_dtype)
-
-                accumulator = _accumulate_mm(
-                    tiled_a,
-                    tiled_b,
-                    accumulator,
-                    a_scale_ptr,
-                    b_scale_ptr,
-                    a_scale_k_stride,
-                    b_scale_k_stride,
-                    iter_k,
-                    group_k,
-                    group_n,
-                    use_fp8_w8a8,
-                    use_int8_w8a8,
-                    use_int8_w8a16,
-                )
+            accumulator = _accumulate_mm(
+                tiled_a,
+                tiled_b,
+                accumulator,
+                a_scale_ptr,
+                b_scale_ptr,
+                a_scale_k_stride,
+                b_scale_k_stride,
+                iter_k,
+                group_k,
+                group_n,
+                use_fp8_w8a8,
+                use_int8_w8a8,
+                use_int8_w8a16,
+            )
 
         a_ptr += STEP_K * ak_stride
         b_ptr += STEP_K * bk_stride
