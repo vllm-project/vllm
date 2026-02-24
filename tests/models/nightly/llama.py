@@ -523,6 +523,7 @@ def test_accuracy_gsm8k(server: RemoteOpenAIServer, model_name: str) -> None:
     print(f"{'='*60}\n")
     assert accuracy >= 0.0, "GSM8K accuracy should be non-negative"
 
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
 def test_run_guidellm_benchmark(
     server: RemoteOpenAIServer,
     model_name: str,
