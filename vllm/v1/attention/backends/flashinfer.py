@@ -557,12 +557,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.dcp_rank = 0
             self.dcp_kv_cache_interleave_size = 1
         self.use_dcp = self.dcp_world_size > 1
-        try:
-            self.dcp_a2a = (
-                self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
-            )
-        except AttributeError:
-            self.dcp_a2a = False
+        self.dcp_a2a = (
+            self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
+        )
 
         self.num_qo_heads = self.model_config.get_num_attention_heads(
             self.vllm_config.parallel_config

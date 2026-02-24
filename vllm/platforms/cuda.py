@@ -298,19 +298,6 @@ class CudaPlatformBase(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        # PCP also requires PIECEWISE CUDA graphs
-        pcp_size = parallel_config.prefill_context_parallel_size
-        if pcp_size > 1:
-            from vllm.config.compilation import CUDAGraphMode
-
-            compilation_config = vllm_config.compilation_config
-            if compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE:
-                logger.info(
-                    "PCP requires PIECEWISE CUDA graphs. "
-                    "Forcing cudagraph_mode=PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
         if (

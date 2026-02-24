@@ -602,14 +602,11 @@ class FlashAttentionImpl(AttentionImpl):
 
         self.supports_quant_query_input = True
 
-        try:
-            parallel_config = get_current_vllm_config().parallel_config
-            dcp_a2a = (
-                parallel_config.decode_context_parallel_size > 1
-                and parallel_config.dcp_comm_backend == "a2a"
-            )
-        except AttributeError:
-            dcp_a2a = False
+        parallel_config = get_current_vllm_config().parallel_config
+        dcp_a2a = (
+            parallel_config.decode_context_parallel_size > 1
+            and parallel_config.dcp_comm_backend == "a2a"
+        )
         if dcp_a2a:
             self.dcp_combine = dcp_a2a_lse_reduce
         else:
