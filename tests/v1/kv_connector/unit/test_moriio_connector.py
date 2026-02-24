@@ -55,7 +55,7 @@ def is_ibverbs_available():
     from subprocess import check_output
 
     output = check_output(["ibv_devices"]).decode("UTF-8")
-    if len(output.split("\n")) < 12:
+    if len(output.split("\n")) == 3:
         return False
     return True
 
