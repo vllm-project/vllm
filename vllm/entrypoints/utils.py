@@ -16,11 +16,11 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.background import BackgroundTask, BackgroundTasks
 
 from vllm import envs
-from vllm.engine.arg_utils import EngineArgs
 from vllm.logger import current_formatter_type, init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 if TYPE_CHECKING:
+    from vllm.engine.arg_utils import EngineArgs
     from vllm.entrypoints.openai.engine.protocol import StreamOptions
     from vllm.entrypoints.openai.models.protocol import LoRAModulePath
 else:
@@ -201,7 +201,8 @@ def get_max_tokens(
     )
 
 
-def log_non_default_args(args: Namespace | EngineArgs):
+def log_non_default_args(args: "Namespace | EngineArgs"):
+    from vllm.engine.arg_utils import EngineArgs
     from vllm.entrypoints.openai.cli_args import make_arg_parser
 
     non_default_args = {}
