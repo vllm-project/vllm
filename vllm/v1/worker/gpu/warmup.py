@@ -25,15 +25,14 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
     tokens each. The second iteration simulates a decode step with all
     requests generating 1 token each.
     """
+    prompt_token_ids = [0, 1]
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
-        model_runner.scheduler_config.max_num_batched_tokens // 2,
+        model_runner.scheduler_config.max_num_batched_tokens // len(prompt_token_ids),
     )
 
     num_kv_cache_groups = len(model_runner.kv_cache_config.kv_cache_groups)
-
     req_ids = [f"_warmup_{i}_" for i in range(num_reqs)]
-    prompt_token_ids = [0, 1]
 
     # SamplingParams exercising all sampling features.
     if model_runner.is_pooling_model:
