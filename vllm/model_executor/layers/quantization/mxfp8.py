@@ -1,16 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from typing import Any
 
 import torch
 from torch.nn import Module
 
 from vllm import _custom_ops as ops
-from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
     FusedMoEMethodBase,
@@ -27,13 +26,14 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8KVCacheMethod,
     _copy_missing_attrs,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    Mxfp8MoeBackend,
+    select_mxfp8_moe_backend,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
 from vllm.model_executor.model_loader.weight_utils import initialize_single_dummy_weight
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
-from vllm.platforms import current_platform
-
-logger = init_logger(__name__)
-MXFP8_GROUP_SIZE = 32
 
 
 class Mxfp8Config(QuantizationConfig):
@@ -116,24 +116,25 @@ class Mxfp8Config(QuantizationConfig):
 class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
     """Online MoE method specialized for SM100 MXFP8 grouped kernels."""
 
-    @staticmethod
-    def is_supported_on_current_platform() -> bool:
-        return (
-            current_platform.is_cuda()
-            and current_platform.is_device_capability_family(100)
-            and hasattr(torch.ops._C, "mxfp8_experts_quant")
-            and hasattr(torch.ops._C, "cutlass_mxfp8_grouped_mm")
-        )
-
     def __init__(self, quant_config: Mxfp8Config, layer: torch.nn.Module):
         super().__init__(layer.moe_config)
         self.quant_config = quant_config
-        self.use_sm100_mxfp8_es = self.is_supported_on_current_platform()
-        if not self.use_sm100_mxfp8_es:
-            raise RuntimeError(
-                "MXFP8 online MoE requires CUDA SM100 and "
-                "es_sm100_mxfp8_blockscaled_grouped_{quant,mm} kernels."
+        self.backend_name = select_mxfp8_moe_backend()
+        self.backend_impl = self._select_backend_impl()
+
+    def _select_backend_impl(
+        self,
+    ) -> Callable[
+        [FusedMoE, torch.Tensor, torch.Tensor, torch.Tensor],
+        torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    ]:
+        if self.backend_name == Mxfp8MoeBackend.VLLM_CUTLASS_GROUPED_GEMM:
+            from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+                vllm_cutlass_moe_mxfp8_impl,
             )
+
+            return vllm_cutlass_moe_mxfp8_impl
+        raise ValueError(f"Unsupported MXFP8 MoE backend: {self.backend_name.value}")
 
     def create_weights(
         self,
@@ -151,8 +152,8 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
         layer.weight_block_size = None
 
         if (
-            hidden_size % MXFP8_GROUP_SIZE != 0
-            or intermediate_size_per_partition % MXFP8_GROUP_SIZE != 0
+            hidden_size % MXFP8_BLOCK_SIZE != 0
+            or intermediate_size_per_partition % MXFP8_BLOCK_SIZE != 0
         ):
             raise ValueError(
                 "MXFP8 online MoE requires hidden/intermediate sizes divisible by 32."
@@ -234,7 +235,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
             torch.zeros(
                 num_experts,
                 2 * intermediate_size_per_partition,
-                hidden_size // MXFP8_GROUP_SIZE,
+                hidden_size // MXFP8_BLOCK_SIZE,
                 dtype=torch.uint8,
             ),
             requires_grad=False,
@@ -243,7 +244,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
             torch.zeros(
                 num_experts,
                 hidden_size,
-                intermediate_size_per_partition // MXFP8_GROUP_SIZE,
+                intermediate_size_per_partition // MXFP8_BLOCK_SIZE,
                 dtype=torch.uint8,
             ),
             requires_grad=False,
@@ -260,7 +261,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         weight = weight.contiguous()
         num_experts, m_dim, k_dim = weight.shape
-        assert k_dim % MXFP8_GROUP_SIZE == 0
+        assert k_dim % MXFP8_BLOCK_SIZE == 0
 
         flat_weight = weight.view(-1, k_dim).contiguous()
         problem_sizes = torch.empty(
@@ -287,7 +288,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
 
         qweight = torch.empty_like(flat_weight, dtype=torch.float8_e4m3fn)
         scales = torch.empty(
-            (num_experts * aligned_m, k_dim // MXFP8_GROUP_SIZE),
+            (num_experts * aligned_m, k_dim // MXFP8_BLOCK_SIZE),
             dtype=torch.uint8,
             device=weight.device,
         )
@@ -301,7 +302,7 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
         )
 
         qweight = qweight.view_as(weight)
-        scales = scales.view(num_experts, aligned_m, k_dim // MXFP8_GROUP_SIZE)
+        scales = scales.view(num_experts, aligned_m, k_dim // MXFP8_BLOCK_SIZE)
         if aligned_m != m_dim:
             scales = scales[:, :m_dim, :]
         return qweight, scales
@@ -311,8 +312,8 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
             return
 
         if (
-            layer.w13_weight.shape[2] % MXFP8_GROUP_SIZE != 0
-            or layer.w2_weight.shape[2] % MXFP8_GROUP_SIZE != 0
+            layer.w13_weight.shape[2] % MXFP8_BLOCK_SIZE != 0
+            or layer.w2_weight.shape[2] % MXFP8_BLOCK_SIZE != 0
         ):
             raise ValueError("MXFP8 online MoE weights must have K divisible by 32.")
 
@@ -358,123 +359,13 @@ class Mxfp8OnlineMoEMethod(FusedMoEMethodBase):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        shared_experts_input: torch.Tensor | None,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        m_tokens = x.shape[0]
-        topk = topk_ids.shape[1]
-        out_dtype = x.dtype
-        num_experts = layer.local_num_experts
-        k_hidden = layer.hidden_size
-        n_intermediate = layer.intermediate_size_per_partition
-        device = x.device
-
-        if layer.apply_router_weight_on_input:
-            assert topk == 1, (
-                "apply_router_weight_on_input is only supported for topk=1"
-            )
-            x = x * topk_weights.to(out_dtype)
-
-        expert_offsets = torch.empty(
-            (num_experts + 1), dtype=torch.int32, device=device
-        )
-        blockscale_offsets = torch.empty(
-            (num_experts + 1), dtype=torch.int32, device=device
-        )
-        problem_sizes1 = torch.empty((num_experts, 3), dtype=torch.int32, device=device)
-        problem_sizes2 = torch.empty((num_experts, 3), dtype=torch.int32, device=device)
-        a_map = torch.empty((topk_ids.numel(),), dtype=torch.int32, device=device)
-        c_map = torch.empty((topk_ids.numel(),), dtype=torch.int32, device=device)
-
-        ops.get_cutlass_moe_mm_data(
+        ## TODO: Handle shared_experts_input
+        del shared_experts_input
+        return self.backend_impl(
+            layer,
+            x,
+            topk_weights,
             topk_ids,
-            expert_offsets,
-            problem_sizes1,
-            problem_sizes2,
-            a_map,
-            c_map,
-            num_experts,
-            n_intermediate,
-            k_hidden,
-            blockscale_offsets,
         )
-
-        rep_a = ops.shuffle_rows(x, a_map)
-        rep_a_q = torch.empty_like(rep_a, dtype=torch.float8_e4m3fn)
-
-        # max_blockscale_rows = int(blockscale_offsets[-1].item())
-        # Capture-safe upper bound for total blockscale rows:
-        # sum_e align128(tokens_for_expert_e) <=
-        # total_tokens + (align-1) * min(num_experts, total_tokens).
-        # Avoid reading GPU values (e.g. blockscale_offsets[-1].item()) during
-        # CUDA graph capture.
-        total_tokens = m_tokens * topk
-        nonzero_experts_ub = min(num_experts, total_tokens)
-        max_blockscale_rows = (
-            (total_tokens + (128 - 1) * nonzero_experts_ub + 127) // 128
-        ) * 128
-        rep_a1_scales = torch.empty(
-            (max_blockscale_rows, k_hidden // MXFP8_GROUP_SIZE),
-            dtype=torch.uint8,
-            device=device,
-        )
-        ops.mxfp8_experts_quant(
-            rep_a,
-            problem_sizes1,
-            expert_offsets[:-1],
-            blockscale_offsets[:-1],
-            rep_a_q,
-            rep_a1_scales,
-        )
-
-        c1 = torch.empty(
-            (m_tokens * topk, 2 * n_intermediate), device=device, dtype=out_dtype
-        )
-        # Kernel expects B and B scales in column-major layout.
-        # Keep transposed view strides; do not call contiguous() here.
-        ops.cutlass_mxfp8_grouped_mm(
-            rep_a_q,
-            layer.w13_weight.transpose(1, 2),
-            rep_a1_scales,
-            layer.w13_weight_scale.transpose(1, 2),
-            c1,
-            problem_sizes1,
-            expert_offsets[:-1],
-            blockscale_offsets[:-1],
-        )
-
-        intermediate = torch.empty(
-            (m_tokens * topk, n_intermediate), device=device, dtype=out_dtype
-        )
-        apply_moe_activation(layer.activation, intermediate, c1)
-
-        intermediate_q = torch.empty_like(intermediate, dtype=torch.float8_e4m3fn)
-        rep_a2_scales = torch.empty(
-            (max_blockscale_rows, n_intermediate // MXFP8_GROUP_SIZE),
-            dtype=torch.uint8,
-            device=device,
-        )
-        ops.mxfp8_experts_quant(
-            intermediate,
-            problem_sizes2,
-            expert_offsets[:-1],
-            blockscale_offsets[:-1],
-            intermediate_q,
-            rep_a2_scales,
-        )
-
-        c2 = torch.empty((m_tokens * topk, k_hidden), device=device, dtype=out_dtype)
-        ops.cutlass_mxfp8_grouped_mm(
-            intermediate_q,
-            layer.w2_weight.transpose(1, 2),
-            rep_a2_scales,
-            layer.w2_weight_scale.transpose(1, 2),
-            c2,
-            problem_sizes2,
-            expert_offsets[:-1],
-            blockscale_offsets[:-1],
-        )
-
-        c2 = ops.shuffle_rows(c2, c_map).view(m_tokens, topk, k_hidden)
-        if layer.apply_router_weight_on_input:
-            return c2.sum(dim=1)
-        return (c2 * topk_weights.view(m_tokens, topk, 1).to(out_dtype)).sum(dim=1)

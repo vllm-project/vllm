@@ -6,6 +6,7 @@ from enum import Enum
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -13,6 +14,24 @@ logger = init_logger(__name__)
 
 class Mxfp8LinearBackend(Enum):
     EMULATION = "emulation"
+
+
+class Mxfp8MoeBackend(Enum):
+    VLLM_CUTLASS_GROUPED_GEMM = "VLLM_CUTLASS_GROUPED_GEMM"
+
+
+def select_mxfp8_moe_backend() -> Mxfp8MoeBackend:
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and hasattr(torch.ops._C, "mxfp8_experts_quant")
+        and hasattr(torch.ops._C, "cutlass_mxfp8_grouped_mm")
+    ):
+        return Mxfp8MoeBackend.VLLM_CUTLASS_GROUPED_GEMM
+
+    raise RuntimeError(
+        "MXFP8 online MoE requires CUDA SM100 and cutlass_mxfp8_grouped_mm kernel."
+    )
 
 
 # MXFP8 constants
