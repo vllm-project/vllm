@@ -396,8 +396,7 @@ class AiterFlashAttentionMetadata:
 class AiterFlashAttentionMetadataBuilder(
     AttentionMetadataBuilder[AiterFlashAttentionMetadata]
 ):
-    _cudagraph_support = AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    reorder_batch_threshold: int = 1
+    _cudagraph_support = AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(
         self,
@@ -422,6 +421,7 @@ class AiterFlashAttentionMetadataBuilder(
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
         self.total_tokens: int = 0
+        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
 
         sliding_window_configs: set[tuple[int, int] | None] = set()
         layers = get_layers_from_vllm_config(self.vllm_config, Attention)
@@ -466,6 +466,7 @@ class AiterFlashAttentionMetadataBuilder(
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> "AiterFlashAttentionMetadata":
+        assert self.reorder_batch_threshold is not None
         split_ret = split_decodes_prefills_and_extends(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
@@ -676,6 +677,53 @@ class AiterFlashAttentionMetadataBuilder(
             v_scale=self.scale,
         )
         return attn_metadata
+
+    def build_for_drafting(
+        self,
+        common_attn_metadata: CommonAttentionMetadata,
+        draft_index: int,
+    ) -> AiterFlashAttentionMetadata:
+        """
+        Build attention metadata for draft model without CPU-GPU sync.
+
+        During EAGLE drafting all requests are uniform decodes, so we can
+        skip split_decodes_prefills_and_extends() and avoid all .cpu() /
+        .item() calls that would otherwise break CUDA graph capture.
+        """
+        num_reqs = common_attn_metadata.num_reqs
+        num_tokens = common_attn_metadata.num_actual_tokens
+
+        decode_metadata = AiterFlashAttentionDecodeMetadata(
+            max_query_len=common_attn_metadata.max_query_len,
+            min_query_len=common_attn_metadata.max_query_len,  # uniform batch
+            max_seq_len=common_attn_metadata.max_seq_len,
+            query_start_loc=common_attn_metadata.query_start_loc,
+        )
+
+        return AiterFlashAttentionMetadata(
+            num_actual_tokens=num_tokens,
+            num_actual_kv_tokens=0,  # not used in unified_attention path
+            max_query_len=common_attn_metadata.max_query_len,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            max_seq_len=common_attn_metadata.max_seq_len,
+            seq_lens=common_attn_metadata.seq_lens,
+            block_table=common_attn_metadata.block_table_tensor,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            num_decodes=num_reqs,
+            num_decode_tokens=num_tokens,
+            num_prefills=0,
+            num_prefill_tokens=0,
+            num_extends=0,
+            num_extend_tokens=0,
+            decode_metadata=decode_metadata,
+            prefill_metadata=None,
+            extend_metadata=None,
+            use_cascade=False,
+            common_prefix_len=0,
+            total_tokens=self.total_tokens,
+            k_scale=self.scale,
+            v_scale=self.scale,
+        )
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
         return False
@@ -1114,7 +1162,50 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                     return
 
-                if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                # The ll4mi kernel in paged_attention_v1 requires
+                # HEAD_SIZE >= 16 * NWARPS (= 64 on ROCm with NWARPS=4).
+                # For smaller head sizes or sliding window attention,
+                # fall back to the unified_attention triton kernel which
+                # handles both correctly.
+                _MIN_HEAD_SIZE_FOR_LL4MI = 64
+                use_unified_attention = self.head_size < _MIN_HEAD_SIZE_FOR_LL4MI
+
+                if use_unified_attention:
+                    assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
+                        "unified_attention fallback with shuffle layout "
+                        "is not supported yet."
+                    )
+                    from aiter.ops.triton.unified_attention import (
+                        unified_attention,
+                    )
+
+                    decode_cu_seqlens_q = attn_metadata.query_start_loc[
+                        : num_decodes + 1
+                    ]
+                    descale_shape = (
+                        num_decodes,
+                        key_cache.shape[2],
+                    )
+                    unified_attention(
+                        q=query[:num_decode_tokens],
+                        k=key_cache,
+                        v=value_cache,
+                        out=output[:num_decode_tokens],
+                        cu_seqlens_q=decode_cu_seqlens_q,
+                        max_seqlen_q=1,
+                        seqused_k=attn_metadata.seq_lens[:num_decodes],
+                        max_seqlen_k=attn_metadata.max_seq_len,
+                        softmax_scale=self.scale,
+                        causal=True,
+                        alibi_slopes=self.alibi_slopes,
+                        window_size=self.sliding_window,
+                        block_table=attn_metadata.block_table[:num_decodes],
+                        softcap=self.logits_soft_cap,
+                        q_descale=None,
+                        k_descale=layer._k_scale.expand(descale_shape),
+                        v_descale=layer._v_scale.expand(descale_shape),
+                    )
+                elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
                     x = 16 // key_cache.element_size()
                     k_cache_template = torch.empty(

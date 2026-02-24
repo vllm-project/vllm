@@ -5,12 +5,14 @@ import time
 
 import torch
 
+from vllm.benchmarks.lib.utils import default_vllm_config
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
 
 
 @torch.inference_mode()
+@default_vllm_config()
 def main(
     num_tokens: int,
     hidden_size: int,
