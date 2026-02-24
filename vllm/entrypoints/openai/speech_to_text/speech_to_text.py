@@ -4,6 +4,7 @@ import asyncio
 import io
 import math
 import time
+import warnings
 import zlib
 from collections.abc import AsyncGenerator, Callable
 from functools import cached_property
@@ -581,10 +582,12 @@ class OpenAISpeechToText(OpenAIServing):
             text = ""
             chunk_size_in_s = self.asr_config.max_audio_clip_s
             if chunk_size_in_s is None:
-                logger.warning(
+                warnings.warn(
                     "Setting max_audio_clip_s=None is deprecated and will be "
-                    "removed in a future release. Audio chunking will be enabled "
-                    "by default for long audio files."
+                    "removed in a future release. Audio chunking will be "
+                    "enabled by default for long audio files.",
+                    DeprecationWarning,
+                    stacklevel=2,
                 )
                 assert len(list_result_generator) == 1, (
                     "`max_audio_clip_s` is set to None, audio cannot be chunked"
