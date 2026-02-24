@@ -929,14 +929,14 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     serving_chat = _build_serving_chat(mock_engine)
 
     orig_render_chat_request = serving_chat.render_chat_request
-    captured_prompts = []
+    captured_inputs = []
 
     async def render_chat_request(request):
         result = await orig_render_chat_request(request)
 
         assert isinstance(result, tuple)
-        conversation, engine_prompts = result
-        captured_prompts.extend(engine_prompts)
+        conversation, engine_inputs = result
+        captured_inputs.extend(engine_inputs)
 
         return result
 
@@ -952,18 +952,18 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
 
-    assert len(captured_prompts) == 1
-    assert "cache_salt" not in captured_prompts[0]
+    assert len(captured_inputs) == 1
+    assert "cache_salt" not in captured_inputs[0]
 
-    captured_prompts.clear()
+    captured_inputs.clear()
 
     # Test with certain cache_salt
     req.cache_salt = "test_salt"
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
 
-    assert len(captured_prompts) == 1
-    assert captured_prompts[0]["cache_salt"] == "test_salt"
+    assert len(captured_inputs) == 1
+    assert captured_inputs[0]["cache_salt"] == "test_salt"
 
 
 @pytest.mark.asyncio

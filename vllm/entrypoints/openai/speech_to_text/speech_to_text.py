@@ -370,9 +370,9 @@ class OpenAISpeechToText(OpenAIServing):
 
             parsed_prompts.append(parsed_prompt)
 
-        engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
+        engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_prompts, duration
+        return engine_inputs, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -505,7 +505,7 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            engine_prompts, duration_s = await self._preprocess_speech_to_text(
+            engine_inputs, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
                 request_id=request_id,
@@ -538,12 +538,12 @@ class OpenAISpeechToText(OpenAIServing):
                 sampling_params.logprobs = 1
 
             list_result_generator = []
-            for i, engine_prompt in enumerate(engine_prompts):
+            for i, engine_input in enumerate(engine_inputs):
                 request_id_item = f"{request_id}_{i}"
 
                 self._log_inputs(
                     request_id_item,
-                    engine_prompt,
+                    engine_input,
                     params=sampling_params,
                     lora_request=lora_request,
                 )
@@ -555,7 +555,7 @@ class OpenAISpeechToText(OpenAIServing):
                 )
 
                 generator = self.engine_client.generate(
-                    engine_prompt,
+                    engine_input,
                     sampling_params,
                     request_id_item,
                     lora_request=lora_request,

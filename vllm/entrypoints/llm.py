@@ -696,8 +696,8 @@ class LLM:
         eos_token_id = tokenizer.eos_token_id
         sort_beams_key = create_sort_beams_key_function(eos_token_id, length_penalty)
 
-        engine_prompts = self._preprocess_cmpl(prompts)
-        lora_requests = self._lora_request_to_seq(lora_request, len(engine_prompts))
+        engine_inputs = self._preprocess_cmpl(prompts)
+        lora_requests = self._lora_request_to_seq(lora_request, len(engine_inputs))
 
         if use_tqdm and concurrency_limit is not None:
             logger.warning(
@@ -707,7 +707,7 @@ class LLM:
             use_tqdm = False
 
         if concurrency_limit is None:
-            concurrency_limit = len(engine_prompts)
+            concurrency_limit = len(engine_inputs)
 
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
@@ -720,7 +720,7 @@ class LLM:
         )
         instances: list[BeamSearchInstance] = []
 
-        for lora_req, prompt in zip(lora_requests, engine_prompts):
+        for lora_req, prompt in zip(lora_requests, engine_inputs):
             if prompt["type"] == "embeds":
                 raise NotImplementedError(
                     "Embedding prompt not supported for beam search"
@@ -899,14 +899,14 @@ class LLM:
             **(tokenization_kwargs or {})
         )
 
-        _, engine_prompts = renderer.render_chat(
+        _, engine_inputs = renderer.render_chat(
             conversations,
             chat_params,
             tok_params,
             prompt_extras={"mm_processor_kwargs": mm_processor_kwargs},
         )
 
-        return engine_prompts
+        return engine_inputs
 
     def _preprocess_chat_one(
         self,

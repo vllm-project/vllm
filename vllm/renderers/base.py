@@ -573,9 +573,9 @@ class BaseRenderer(ABC, Generic[_T]):
     ) -> TokensInput | MultiModalInput:
         prompt_token_ids = prompt["prompt_token_ids"]
 
-        inputs: TokensInput | MultiModalInput
+        engine_input: TokensInput | MultiModalInput
         if multi_modal_data := prompt.get("multi_modal_data"):
-            inputs = self._process_multimodal(
+            engine_input = self._process_multimodal(
                 prompt_token_ids,
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
@@ -583,14 +583,14 @@ class BaseRenderer(ABC, Generic[_T]):
                 mm_uuids=prompt.get("multi_modal_uuids"),
             )
         else:
-            inputs = tokens_input(prompt_token_ids)
+            engine_input = tokens_input(prompt_token_ids)
 
         if prompt_text := prompt.get("prompt"):
-            inputs["prompt"] = prompt_text
+            engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
-            inputs["cache_salt"] = cache_salt
+            engine_input["cache_salt"] = cache_salt
 
-        return inputs
+        return engine_input
 
     def _process_embeds(self, prompt: EmbedsPrompt) -> EmbedsInput:
         if not self.model_config.enable_prompt_embeds:
@@ -642,15 +642,15 @@ class BaseRenderer(ABC, Generic[_T]):
         )
 
     def process_for_engine(self, prompt: TokPrompt, arrival_time: float) -> EngineInput:
-        engine_prompt: EngineInput
+        engine_input: EngineInput
         if "encoder_prompt" in prompt:
-            engine_prompt = self._process_enc_dec(prompt)  # type: ignore[arg-type]
+            engine_input = self._process_enc_dec(prompt)  # type: ignore[arg-type]
         else:
-            engine_prompt = self._process_singleton(prompt)
+            engine_input = self._process_singleton(prompt)
 
-        engine_prompt["arrival_time"] = arrival_time
+        engine_input["arrival_time"] = arrival_time
 
-        return engine_prompt
+        return engine_input
 
     # Top-level methods
     def render_cmpl(
