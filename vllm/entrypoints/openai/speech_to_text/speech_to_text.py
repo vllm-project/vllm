@@ -36,14 +36,18 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranslationSegment,
     TranslationStreamResponse,
 )
+from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import PromptType
+from vllm.inputs import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
-from vllm.model_executor.models import SupportsTranscription, supports_transcription
+from vllm.model_executor.models import (
+    SupportsTranscription,
+    supports_transcription,
+)
 from vllm.outputs import RequestOutput
-from vllm.renderers.inputs import EncoderDecoderDictPrompt
-from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt
+from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
+from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.import_utils import PlaceholderModule
 
@@ -202,8 +206,6 @@ class OpenAISpeechToText(OpenAIServing):
             return
 
         try:
-            from vllm.sampling_params import SamplingParams
-
             warmup_start = time.perf_counter()
             logger.info("Warming up multimodal input processor...")
 
@@ -221,21 +223,11 @@ class OpenAISpeechToText(OpenAIServing):
                 request_prompt="",
                 to_language=None,
             )
-
-            # Create minimal sampling params
-            dummy_params = SamplingParams(
-                max_tokens=1,
-                temperature=0.0,
-                skip_clone=True,  # Internal warmup, safe to skip clone
-            )
+            parsed_prompt = parse_model_prompt(self.model_config, dummy_prompt)
 
             # Process the dummy input through the input processor
             # This will trigger all the multimodal processing initialization
-            _ = self.input_processor.process_inputs(
-                request_id="warmup",
-                prompt=dummy_prompt,
-                params=dummy_params,
-            )
+            _ = self.renderer.render_cmpl([parsed_prompt])
 
             warmup_elapsed = time.perf_counter() - warmup_start
             logger.info("Input processor warmup completed in %.2fs", warmup_elapsed)
@@ -253,11 +245,58 @@ class OpenAISpeechToText(OpenAIServing):
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
 
+    async def _detect_language(
+        self,
+        audio_chunk: np.ndarray,
+        request_id: str,
+    ) -> str:
+        """Auto-detect the spoken language from an audio chunk.
+
+        Delegates prompt construction and output parsing to the model class
+        via ``get_language_detection_prompt`` and
+        ``parse_language_detection_output``.
+        """
+        from vllm.sampling_params import SamplingParams
+
+        prompt = self.model_cls.get_language_detection_prompt(
+            audio_chunk,
+            self.asr_config,
+        )
+        allowed_token_ids = self.model_cls.get_language_token_ids(
+            self.tokenizer,
+        )
+        sampling_params = SamplingParams(
+            max_tokens=1,
+            temperature=0.0,
+            allowed_token_ids=allowed_token_ids,
+        )
+
+        result_generator = self.engine_client.generate(
+            prompt,
+            sampling_params,
+            request_id,
+        )
+
+        final_output: RequestOutput
+        async for final_output in result_generator:
+            if final_output.finished:
+                break
+
+        token_ids = list(final_output.outputs[0].token_ids)
+        lang = self.model_cls.parse_language_detection_output(
+            token_ids,
+            self.tokenizer,
+        )
+
+        logger.info("Auto-detected language: '%s'", lang)
+        return lang
+
     async def _preprocess_speech_to_text(
         self,
         request: SpeechToTextRequest,
         audio_data: bytes,
-    ) -> tuple[list[PromptType], float]:
+        request_id: str,
+    ) -> tuple[list[ProcessorInputs], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.
@@ -285,7 +324,16 @@ class OpenAISpeechToText(OpenAIServing):
             and duration > self.asr_config.max_audio_clip_s
         )
         chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
-        prompts = []
+
+        if language is None and getattr(
+            self.model_cls, "supports_explicit_language_detection", False
+        ):
+            language = await self._detect_language(
+                chunks[0], f"{request_id}-lang_detect"
+            )
+            request.language = language
+
+        parsed_prompts: list[DictPrompt] = []
         for chunk in chunks:
             # The model has control over the construction, as long as it
             # returns a valid PromptType.
@@ -298,12 +346,19 @@ class OpenAISpeechToText(OpenAIServing):
                 request_prompt=request.prompt,
                 to_language=to_language,
             )
+
+            parsed_prompt: DictPrompt
             if request.response_format == "verbose_json":
-                prompt = self._preprocess_verbose_prompt(parse_enc_dec_prompt(prompt))
+                parsed_prompt = parse_enc_dec_prompt(prompt)
+                parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
+            else:
+                parsed_prompt = parse_model_prompt(self.model_config, prompt)
 
-            prompts.append(prompt)
+            parsed_prompts.append(parsed_prompt)
 
-        return prompts, duration
+        engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
+
+        return engine_prompts, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -436,66 +491,64 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            prompts, duration_s = await self._preprocess_speech_to_text(
+            engine_prompts, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
+                request_id=request_id,
             )
 
         except ValueError as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(e)
 
+        # Schedule the request and get the result generator.
+        max_model_len = self.model_config.max_model_len
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
         try:
             # Unlike most decoder-only models, whisper generation length is not
             # constrained by the size of the input audio, which is mapped to a
             # fixed-size log-mel-spectogram. Still, allow for fewer tokens to be
             # generated by respecting the extra completion tokens arg.
-            if request.max_completion_tokens is None:
-                default_max_tokens = self.model_config.max_model_len
-            else:
-                default_max_tokens = min(
-                    self.model_config.max_model_len, request.max_completion_tokens
-                )
+            max_tokens = get_max_tokens(
+                max_model_len,
+                request.max_completion_tokens,
+                0,
+                self.default_sampling_params,
+            )
+
             sampling_params = request.to_sampling_params(
-                default_max_tokens, self.default_sampling_params
+                max_tokens,
+                self.default_sampling_params,
             )
             if request.response_format == "verbose_json":
                 sampling_params.logprobs = 1
 
-            self._log_inputs(
-                request_id,
-                # It will not display special tokens like <|startoftranscript|>
-                request.prompt,
-                params=sampling_params,
-                lora_request=lora_request,
-            )
-
-            trace_headers = (
-                None
-                if raw_request is None
-                else await self._get_trace_headers(raw_request.headers)
-            )
-
             list_result_generator = []
-            for i, prompt in enumerate(prompts):
+            for i, engine_prompt in enumerate(engine_prompts):
                 request_id_item = f"{request_id}_{i}"
-                engine_request = self.input_processor.process_inputs(
+
+                self._log_inputs(
                     request_id_item,
-                    prompt,
+                    engine_prompt,
+                    params=sampling_params,
+                    lora_request=lora_request,
+                )
+
+                trace_headers = (
+                    None
+                    if raw_request is None
+                    else await self._get_trace_headers(raw_request.headers)
+                )
+
+                generator = self.engine_client.generate(
+                    engine_prompt,
                     sampling_params,
+                    request_id_item,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=0,
                 )
-                list_result_generator.append(
-                    self.engine_client.generate(
-                        engine_request,
-                        sampling_params,
-                        request_id_item,
-                        lora_request=lora_request,
-                    )
-                )
+
+                list_result_generator.append(generator)
         except ValueError as e:
             return self.create_error_response(e)
 

@@ -23,6 +23,17 @@ from vllm import _custom_ops as ops
 from vllm.config import set_current_vllm_config
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.platforms import current_platform
+
+# TODO: Integrate ROCMAiterMLASparseBackend for ROCm.
+# The ROCm sparse MLA backend (rocm_aiter_mla_sparse.py) has a compatible
+# forward_mqa interface but needs validation on ROCm hardware.
+if not current_platform.is_cuda():
+    pytest.skip(
+        "Sparse MLA backend tests currently only support CUDA. "
+        "ROCm support requires integrating ROCMAiterMLASparseBackend.",
+        allow_module_level=True,
+    )
+
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseBackend,
