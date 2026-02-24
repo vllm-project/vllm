@@ -13,6 +13,10 @@ from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
+# exp(x) = exp2(x * log2(e)). tl.math.exp2 maps directly to the hardware
+# ex2.approx.f32 PTX instruction, avoiding the libdevice __nv_expf overhead.
+LOG2E: float = 1.4426950408889634
+
 # Track which kernels have already logged their chosen autotune config (log once per kernel)
 _logged_autotune_configs = set()
 
@@ -297,7 +301,7 @@ def _chunk_state_fwd_kernel(
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size_limit - k, other=0.0).to(
             tl.float32
         )
-        scale = tl.exp(dA_cs_last - dA_cs_k) * dt_k
+        scale = tl.math.exp2((dA_cs_last - dA_cs_k) * LOG2E) * dt_k
         b *= scale[:, None]
         b = b.to(x_ptr.dtype.element_ty)
         acc += tl.dot(x, b)
@@ -506,7 +510,7 @@ def _chunk_state_varlen_kernel(
         )
         scale = tl.where(
             (offs_k >= start_idx_cur - k) & (offs_k < chunk_size_limit - k),
-            tl.exp(dA_cs_last - dA_cs_k) * dt_k,
+            tl.math.exp2((dA_cs_last - dA_cs_k) * LOG2E) * dt_k,
             0.0,
         )
         b *= scale[:, None]
@@ -559,7 +563,7 @@ def _chunk_state_varlen_kernel(
             other=0.0,
         ).to(tl.float32)
 
-        scale = tl.exp(dA_cs_last - dA_cs_boundary)
+        scale = tl.math.exp2((dA_cs_last - dA_cs_boundary) * LOG2E)
         acc += past_states * scale
 
     states = acc.to(states_ptr.dtype.element_ty)
