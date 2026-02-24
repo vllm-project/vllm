@@ -735,7 +735,7 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return self.gate is not None
+        return self._gate is not None
 
     def _maybe_init_expert_routing_tables(
         self,

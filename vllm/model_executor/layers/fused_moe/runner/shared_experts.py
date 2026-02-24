@@ -120,7 +120,7 @@ class SharedExperts:
         if self._shared_experts is None:
             return SharedExpertsOrder.NONE, False
 
-        if self._has_external_experts:
+        if self._has_external_experts and not self._use_dp_chunking:
             return SharedExpertsOrder.EXTERNAL, False
 
         if (
@@ -193,7 +193,7 @@ class SharedExperts:
 
     @property
     def output(self) -> torch.Tensor | None:
-        assert self._shared_experts is None == self._output is None
+        assert (self._shared_experts is None) == (self._output is None)
         output = self._output
         self._output = None
         return output

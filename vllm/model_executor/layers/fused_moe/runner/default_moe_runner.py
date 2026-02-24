@@ -186,11 +186,10 @@ class DefaultMoERunner(MoERunner):
         # These need to exist ahead of time due to CUDAgraph construction
         # needing a fixed buffer address.
         # TODO: these could be global, i.e. shared by all layers
+        self.use_dp_chunking = self.moe_config.moe_parallel_config.use_dp_chunking
         self.batched_hidden_states: torch.Tensor | None = None
         self.batched_router_logits: torch.Tensor | None = None
         self._maybe_init_dp_chunking()
-
-        self.use_dp_chunking = self.moe_config.moe_parallel_config.use_dp_chunking
 
         # Needed for string -> FusedMoE layer lookup in custom ops.
         self.layer_name = layer.layer_name
