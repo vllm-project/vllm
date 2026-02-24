@@ -23,6 +23,54 @@ from vllm.v1.spec_decode.utils import create_vllm_config_for_draft_model
 MTP_SIMILARITY_RATE = 0.8
 
 
+@dataclass
+class PromptMeta:
+    kind: str  # "repeat", "sentence", or "mm"
+    word: str  # the word the prompt asks the model to use
+
+
+def _assert_matches_by_prompt_type(
+    ref_outputs,
+    spec_outputs,
+    prompt_metas: list[PromptMeta],
+):
+    """Compare outputs and assert correctness per prompt type.
+
+    "repeat" and "mm" prompts are deterministic — they must exactly match the reference
+    output.  "sentence" prompts are non-deterministic due to batch-scheduling noise and
+    being very open ended prompts (even two identical LLM instances diverge), so we
+    verify the requested word appears in the outputinstead.
+    """
+    det_mismatches: list[tuple[str, str, str]] = []
+    word_missing: list[tuple[str, str]] = []
+
+    for ref_output, spec_output, meta in zip(ref_outputs, spec_outputs, prompt_metas):
+        spec_text = spec_output.outputs[0].text
+        ref_text = ref_output.outputs[0].text
+
+        if meta.kind == "sentence":
+            if meta.word not in spec_text.lower():
+                word_missing.append((meta.word, spec_text))
+        else:
+            if ref_text != spec_text:
+                det_mismatches.append((meta.kind, ref_text, spec_text))
+
+    for kind, ref_text, spec_text in det_mismatches:
+        print(f"[{kind}] ref : {ref_text}")
+        print(f"[{kind}] spec: {spec_text}")
+    for word, spec_text in word_missing:
+        print(f"[sentence] word '{word}' not in spec output: {spec_text!r}")
+
+    assert not det_mismatches, (
+        f"{len(det_mismatches)} deterministic prompt(s) did not "
+        f"exactly match the reference output"
+    )
+    assert not word_missing, (
+        f"{len(word_missing)} sentence prompt(s) did not contain "
+        f"the requested word in the output"
+    )
+
+
 def _skip_if_insufficient_gpus_for_tp(tp_size: int):
     """Skip test if available GPUs < tp_size on ROCm."""
     available_gpus = torch.cuda.device_count()
@@ -37,11 +85,12 @@ Messages = list[dict[str, Any]]
 
 def get_test_prompts(
     mm_enabled: bool, quiet: bool = False, num_prompts: int = 100
-) -> list[Messages]:
+) -> tuple[list[Messages], list[PromptMeta]]:
     prompt_types = ["repeat", "sentence"]
     if mm_enabled:
         prompt_types.append("mm")
     prompts = []
+    metas = []
 
     random.seed(0)
     random_prompt_type_choices = random.choices(prompt_types, k=num_prompts)
@@ -83,8 +132,9 @@ def get_test_prompts(
         else:
             raise ValueError(f"Unknown prompt type: {kind}")
         prompts.append([{"role": "user", "content": prompt}])
+        metas.append(PromptMeta(kind=kind, word=word))
 
-    return prompts
+    return prompts, metas
 
 
 def get_instruct_coder_messages(n: int) -> list[Messages]:
@@ -146,7 +196,7 @@ def test_ngram_and_suffix_correctness(
     Compare the outputs of an original LLM and a speculative LLM
     should be the same when using ngram speculative decoding.
     """
-    test_prompts = get_test_prompts(mm_enabled=False)
+    test_prompts, prompt_metas = get_test_prompts(mm_enabled=False)
 
     ref_llm = LLM(model=model_name, max_model_len=1024)
     ref_outputs = ref_llm.chat(test_prompts, sampling_config)
@@ -160,19 +210,7 @@ def test_ngram_and_suffix_correctness(
         max_model_len=1024,
     )
     spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-    matches = 0
-    misses = 0
-    for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-        if ref_output.outputs[0].text == spec_output.outputs[0].text:
-            matches += 1
-        else:
-            misses += 1
-            print(f"ref_output: {ref_output.outputs[0].text}")
-            print(f"spec_output: {spec_output.outputs[0].text}")
-
-    # Heuristic: expect at least 66% of the prompts to match exactly
-    # Upon failure, inspect the outputs to check for inaccuracy.
-    assert matches >= int(0.66 * len(ref_outputs))
+    _assert_matches_by_prompt_type(ref_outputs, spec_outputs, prompt_metas)
     del spec_llm
     torch.cuda.empty_cache()
     cleanup_dist_env_and_memory()
@@ -187,7 +225,7 @@ def test_suffix_decoding_acceptance(
     Check that suffix decoding caching takes effect and improves acceptance
     lengths and acceptance rates over multiple runs of the same prompts.
     """
-    test_prompts = get_test_prompts(mm_enabled=False)
+    test_prompts, _ = get_test_prompts(mm_enabled=False)
 
     spec_llm = LLM(
         model=model_name,
@@ -267,7 +305,7 @@ def test_speculators_model_integration(
     monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
     # Generate test prompts
-    test_prompts = get_test_prompts(mm_enabled=False)
+    test_prompts, prompt_metas = get_test_prompts(mm_enabled=False)
 
     # First run: Direct speculator model (simplified integration)
     spec_llm = LLM(model=model_path, max_model_len=1024)
@@ -304,17 +342,7 @@ def test_speculators_model_integration(
     cleanup_dist_env_and_memory()
 
     # Compare outputs
-    matches = sum(
-        1
-        for ref, spec in zip(ref_outputs, spec_outputs)
-        if ref.outputs[0].text == spec.outputs[0].text
-    )
-
-    # Heuristic: expect at least 66% of prompts to match exactly
-    assert matches >= int(0.66 * len(ref_outputs)), (
-        f"Only {matches}/{len(ref_outputs)} outputs matched. "
-        f"Expected at least {int(0.66 * len(ref_outputs))} matches."
-    )
+    _assert_matches_by_prompt_type(ref_outputs, spec_outputs, prompt_metas)
 
 
 @pytest.mark.parametrize(
@@ -460,7 +488,7 @@ def test_eagle_correctness(
             )
 
     # Generate test prompts inside the function instead of using fixture
-    test_prompts = get_test_prompts(mm_enabled)
+    test_prompts, prompt_metas = get_test_prompts(mm_enabled)
     """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using eagle speculative decoding.
@@ -527,19 +555,7 @@ def test_eagle_correctness(
             attention_config=attention_config,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
-
-        # Heuristic: expect at least 60% of the prompts to match exactly
-        # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(0.6 * len(ref_outputs))
+        _assert_matches_by_prompt_type(ref_outputs, spec_outputs, prompt_metas)
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
@@ -560,7 +576,7 @@ def test_mtp_correctness(
     mm_enabled: bool,
 ):
     # Generate test prompts inside the function instead of using fixture
-    test_prompts = get_test_prompts(mm_enabled)
+    test_prompts, prompt_metas = get_test_prompts(mm_enabled)
     """
     Compare the outputs of a original LLM and a speculative LLM
     should be the same when using MTP speculative decoding.
@@ -595,19 +611,7 @@ def test_mtp_correctness(
             max_model_len=2048,
         )
         spec_outputs = spec_llm.chat(test_prompts, sampling_config)
-        matches = 0
-        misses = 0
-        for ref_output, spec_output in zip(ref_outputs, spec_outputs):
-            if ref_output.outputs[0].text == spec_output.outputs[0].text:
-                matches += 1
-            else:
-                misses += 1
-                print(f"ref_output: {ref_output.outputs[0].text}")
-                print(f"spec_output: {spec_output.outputs[0].text}")
-
-        # Heuristic: expect at least 80% of the prompts to match exactly
-        # Upon failure, inspect the outputs to check for inaccuracy.
-        assert matches > int(MTP_SIMILARITY_RATE * len(ref_outputs))
+        _assert_matches_by_prompt_type(ref_outputs, spec_outputs, prompt_metas)
         del spec_llm
         torch.cuda.empty_cache()
         cleanup_dist_env_and_memory()
@@ -817,7 +821,8 @@ def assert_draft_model_correctness(args: ArgsTest):
 
 def get_messages(dataset: str, n: int) -> list[Messages]:
     if dataset == "test_prompts":
-        return get_test_prompts(mm_enabled=False, quiet=True, num_prompts=n)
+        prompts, _ = get_test_prompts(mm_enabled=False, quiet=True, num_prompts=n)
+        return prompts
     elif dataset == "likaixin/InstructCoder":
         return get_instruct_coder_messages(n=n)
     else:
