@@ -643,9 +643,16 @@ class ModelConfig:
     def get_model_arch_config(
         self,
     ) -> ModelArchitectureConfig:
-        convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
-            self.hf_config.model_type, ModelArchConfigConvertorBase
-        )
+        if getattr(self.hf_config, "block_configs", None):
+            from vllm.transformers_utils.model_arch_config_convertor import (
+                AnyModelArchConfigConvertor,
+            )
+
+            convertor_cls = AnyModelArchConfigConvertor
+        else:
+            convertor_cls = MODEL_ARCH_CONFIG_CONVERTORS.get(
+                self.hf_config.model_type, ModelArchConfigConvertorBase
+            )
         convertor = convertor_cls(self.hf_config, self.hf_text_config)
         return convertor.convert()
 
@@ -1031,11 +1038,17 @@ class ModelConfig:
         if architecture is None:
             return
 
-        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
+        from vllm.model_executor.models.config import (
+            MODELS_CONFIG_MAP,
+            AnyModelForCausalLMConfig,
+        )
 
         cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_model_config(self)
+
+        if getattr(self.hf_config, "block_configs", None):
+            AnyModelForCausalLMConfig.verify_and_update_model_config(self)
 
     def verify_dual_chunk_attention_config(
         self,
