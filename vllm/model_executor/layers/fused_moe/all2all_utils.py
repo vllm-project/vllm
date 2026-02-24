@@ -7,16 +7,26 @@ import torch
 from vllm.distributed import (
     get_ep_group,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
     FusedMoEQuantConfig,
 )
+from vllm.model_executor.layers.fused_moe.flashinfer_a2a_prepare_finalize import (
+    FlashInferA2APrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize import (
+    MoEPrepareAndFinalizeNaiveEP,
+    MoEPrepareAndFinalizeNoEP,
+)
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import has_deep_ep, has_pplx
+from vllm.utils.import_utils import has_deep_ep, has_mori, has_pplx
+
+logger = init_logger(__name__)
 
 if current_platform.is_cuda_alike():
     if has_pplx():
@@ -30,6 +40,8 @@ if current_platform.is_cuda_alike():
             DEEPEP_QUANT_BLOCK_SHAPE,
             DeepEPLLPrepareAndFinalize,
         )
+    if has_mori():
+        from .mori_prepare_finalize import MoriPrepareAndFinalize
 
 
 def maybe_roundup_layer_hidden_size(
@@ -68,19 +80,45 @@ def maybe_make_prepare_finalize(
     moe: FusedMoEConfig,
     quant_config: FusedMoEQuantConfig | None,
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    allow_new_interface: bool = False,
 ) -> FusedMoEPrepareAndFinalize | None:
+    # NOTE(rob): we are migrating each quant_method to hold the MK
+    # in all cases. The allow_new_interface=False flag allow us to fall
+    # back to the old method for methods that have not yet been migrated.
+    #
+    # In old method:
+    #   * maybe_init_modular_kernel() calls this function. If we are
+    #     using no Dp/Ep or naive all2all, we return None this function
+    #     returns None and no ModularKernelMethod is created. If non-naive
+    #     all2all is used, this returns a PrepareAndFinalize object and
+    #     a ModularKernelMethod is created.
+    # In new method:
+    #   * maybe_make_prepare_finalize() is called from the oracle. We
+    #     always return a PrepareAndFinalize object and the quant method
+    #     holds the ModularKernel.
     if not moe.moe_parallel_config.use_all2all_kernels:
-        return None
+        if not allow_new_interface:
+            return None
+
+        # For DP/TP case, fall back to naive P/F.
+        if moe.moe_parallel_config.dp_size > 1:
+            logger.info_once(
+                "Detected DP deployment with no --enable-expert-parallel. "
+                "Falling back to AllGather+ReduceScatter dispatch/combine."
+            )
+            return MoEPrepareAndFinalizeNaiveEP(
+                is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
+                num_dispatchers=(
+                    get_ep_group().device_communicator.all2all_manager.world_size
+                ),
+            )
+        else:
+            return MoEPrepareAndFinalizeNoEP()
 
     all2all_manager = get_ep_group().device_communicator.all2all_manager
     assert all2all_manager is not None
 
     prepare_finalize: FusedMoEPrepareAndFinalize | None = None
-
-    # TODO(rob): update this as part of the MoE refactor.
-    assert not moe.use_flashinfer_cutlass_kernels, (
-        "Must be created in modelopt.py or fp8.py"
-    )
 
     if moe.use_pplx_kernels:
         assert quant_config is not None
@@ -168,6 +206,49 @@ def maybe_make_prepare_finalize(
             global_to_physical=global_to_physical,
             physical_to_global=physical_to_global,
             local_expert_global_ids=local_expert_global_ids,
+        )
+    elif moe.use_mori_kernels:
+        assert quant_config is not None
+
+        # Note: We may want to use FP8 dispatch just to reduce
+        # data movement.
+        use_fp8_dispatch = (
+            quant_config.is_per_act_token or quant_config.is_block_quantized
+        )
+        # For PTPC (per token per channel) quant, the scale dim for each token is 1
+        # For 1x128 quant, the scale dim for each token is hidden_dim // 128
+        scale_dim = 1 if quant_config.is_per_act_token else moe.hidden_dim // 128
+        all_to_all_args = dict(
+            rank=all2all_manager.rank,
+            num_ep_ranks=all2all_manager.world_size,
+            quant_dtype=quant_config.quant_dtype,
+            token_hidden_size=moe.hidden_dim,
+            scale_dim=scale_dim,
+            scale_type_size=torch.float32.itemsize,
+            max_num_tokens_per_dp_rank=moe.max_num_tokens,
+            input_dtype=moe.in_dtype,
+            num_local_experts=moe.num_experts // all2all_manager.world_size,
+            num_experts_per_token=moe.experts_per_token,
+        )
+        handle = all2all_manager.get_handle(all_to_all_args)
+
+        prepare_finalize = MoriPrepareAndFinalize(
+            handle,
+            max_tokens_per_rank=moe.max_num_tokens,
+            num_dispatchers=all2all_manager.world_size,
+            use_fp8_dispatch=use_fp8_dispatch,
+        )
+
+    elif moe.use_fi_all2allv_kernels:
+        assert quant_config is not None
+        prepare_finalize = FlashInferA2APrepareAndFinalize(
+            num_dispatchers=all2all_manager.world_size,
+        )
+
+    elif moe.use_naive_all2all_kernels and allow_new_interface:
+        prepare_finalize = MoEPrepareAndFinalizeNaiveEP(
+            is_sequence_parallel=(moe.moe_parallel_config.is_sequence_parallel),
+            num_dispatchers=all2all_manager.world_size,
         )
 
     return prepare_finalize

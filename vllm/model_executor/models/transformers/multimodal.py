@@ -31,14 +31,19 @@ from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalInputs,
-    MultiModalUUIDDict,
     PlaceholderRange,
+    mm_inputs,
 )
-from vllm.multimodal.parse import ImageProcessorItems, MultiModalDataItems
+from vllm.multimodal.parse import (
+    ImageProcessorItems,
+    MultiModalDataItems,
+)
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
+    TimingContext,
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
@@ -97,13 +102,13 @@ class MultiModalDummyInputsBuilder(BaseDummyInputsBuilder[MultiModalProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, "BaseDummyOptions"] | None = None,
+        mm_options: Mapping[str, "BaseDummyOptions"],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_max_image_size()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -173,11 +178,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object] | None = None,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
         """
         Process multi-modal inputs to be used in vLLM.
@@ -185,28 +187,30 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         Apply HF Processor on prompt text and multi-modal data together,
         outputting token IDs and processed tensors.
         """
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
+        prompt = inputs.prompt
+        mm_items = inputs.mm_data_items
+        hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
+        tokenization_kwargs = inputs.tokenization_kwargs
 
-        mm_items = self._to_mm_items(mm_data)
-        hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        if not isinstance(prompt, str):
-            # the prompt is the tokenized ids which is not supported
-            # by the hf_processor, which is why we would need to decode the ids
-            # into string
-            prompt = hf_processor.decode(prompt)
+        with timing_ctx.record("apply_hf_processor"):
+            hf_processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
+            if not isinstance(prompt, str):
+                # the prompt is the tokenized ids which is not supported
+                # by the hf_processor, which is why we would need to decode the ids
+                # into string
+                prompt = hf_processor.decode(prompt)
 
-        # Bypass cached processor and always apply to the full set of mm inputs
-        # NOTE: we can't just set caching=False because base class method
-        # transforms outputs to `MultiModalKwargs` which is not going to
-        # work for Transformers. We have a lot of logic tied to
-        # `mm_tokens_per_modality` below
-        prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(
-            prompt_text=prompt,
-            mm_items=mm_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+            # Bypass cached processor and always apply to the full set of mm inputs
+            # NOTE: we can't just set caching=False because base class method
+            # transforms outputs to `MultiModalKwargs` which is not going to
+            # work for Transformers. We have a lot of logic tied to
+            # `mm_tokens_per_modality` below
+            prompt_ids, processed_data, _ = self._apply_hf_processor_text_mm(
+                prompt_text=prompt,
+                mm_items=mm_items,
+                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
+                tokenization_kwargs=tokenization_kwargs,
+            )
 
         # For gemma3 we check `token_type_ids` as the key
         token_type_key = (
@@ -220,15 +224,14 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         # it for each input `mm_data`.
         mm_positions = torch.where(mm_token_type_ids == 1)[1]
         images = mm_items.get_items("image", ImageProcessorItems)
-        multimodal_config = self.info.ctx.model_config.multimodal_config
-        mm_processor_kwargs = multimodal_config.mm_processor_kwargs or {}
         image_sizes = []
         for item_idx in range(len(images)):
             image_size = images.get_image_size(item_idx)
             image_sizes.append((image_size.height, image_size.width))
 
         mm_tokens_per_modality = hf_processor._get_num_multimodal_tokens(
-            image_sizes=image_sizes, **mm_processor_kwargs
+            image_sizes=image_sizes,
+            **self.info.ctx.get_merged_mm_kwargs({}),
         )
 
         mm_placeholders = {}
@@ -256,12 +259,10 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
         )
 
         # Use overrides if provided; fallback to data-dependent hashing.
-        mm_hashes = self._hash_mm_items(
-            mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
-        )
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
 
-        return MultiModalInputs(
-            type="multimodal",
+        return mm_inputs(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
@@ -376,20 +377,54 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                     pixel_values, **kwargs
                 )
 
-            if isinstance(vision_embeddings, torch.Tensor):
-                if vision_embeddings.ndim == 2:
-                    vision_embeddings = vision_embeddings.unsqueeze(0)
+            # Transformers `v5`, `self.get_image_features` returns a tuple
+            # containing the features and optionally attentions/hidden_states
+            # After v5 is settled, we can enable qwen3-vl with several outputs
+            # from `self.get_image_features`
+            if isinstance(vision_embeddings, tuple):
+                vision_embeddings = vision_embeddings[0]
+            elif isinstance(vision_embeddings, dict):
+                vision_embeddings = vision_embeddings.pooler_output
 
-                # Embeddings have to be 2D tensors of length `num_images`
-                # but transformers returns concat tensors if each patch
-                # is of different size. We split it back to make vLLM happy
-                vision_embeddings = torch.split(
-                    vision_embeddings, num_image_patches.flatten().tolist()
-                )
-                vision_embeddings = [
-                    embed.flatten(start_dim=0, end_dim=-2)
-                    for embed in vision_embeddings
-                ]
+            if isinstance(vision_embeddings, torch.Tensor):
+                split_sizes = num_image_patches.flatten().tolist()
+                total_patches = sum(split_sizes)
+
+                # Flatten to 2D: [total_tokens, hidden_dim]
+                if vision_embeddings.ndim == 3:
+                    vision_embeddings = vision_embeddings.view(
+                        -1, vision_embeddings.shape[-1]
+                    )
+
+                total_tokens = vision_embeddings.shape[0]
+                if total_tokens == total_patches:
+                    # Direct match: num_image_patches are actual token counts
+                    # (e.g., Qwen2.5-VL style)
+                    token_split_sizes = split_sizes
+                elif total_patches > 0 and total_tokens % total_patches == 0:
+                    # Uniform expansion: each patch expands to N tokens
+                    # (e.g., Idefics3 style)
+                    tokens_per_patch = total_tokens // total_patches
+                    token_split_sizes = [s * tokens_per_patch for s in split_sizes]
+                elif total_patches > 0:
+                    # Mismatch (profiling with dummy data) - pad/truncate
+                    if total_tokens == 0:
+                        raise ValueError(
+                            "Vision encoder returned empty embeddings. "
+                            f"Expected {total_patches} patches from "
+                            f"num_image_patches={split_sizes}"
+                        )
+                    if total_tokens < total_patches:
+                        repeat_factor = (
+                            total_patches + total_tokens - 1
+                        ) // total_tokens
+                        vision_embeddings = vision_embeddings.repeat(repeat_factor, 1)
+                    vision_embeddings = vision_embeddings[:total_patches]
+                    token_split_sizes = split_sizes
+                else:
+                    return []
+
+                return list(torch.split(vision_embeddings, token_split_sizes, dim=0))
 
             return vision_embeddings
         else:

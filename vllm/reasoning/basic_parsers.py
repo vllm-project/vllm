@@ -65,7 +65,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
                 "think start/end tokens in the tokenizer!"
             )
 
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         start_token_id = self.start_token_id
         end_token_id = self.end_token_id
 
@@ -77,7 +77,7 @@ class BaseThinkingReasoningParser(ReasoningParser):
         return False
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Sequence[int]
     ) -> bool:
         end_token_id = self.end_token_id
         return end_token_id in delta_ids
@@ -175,3 +175,23 @@ class BaseThinkingReasoningParser(ReasoningParser):
             # If generation stops right after end-of-think, return null content
             final_content = content or None
             return reasoning, final_content
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count tokens that fall within start/end thinking markers.
+
+        Uses a depth counter so nested spans are handled safely and stray end
+        tokens do not drive the counter negative.
+        """
+        count = 0
+        depth = 0
+        for token_id in token_ids:
+            if token_id == self.start_token_id:
+                depth += 1
+                continue
+            if token_id == self.end_token_id:
+                if depth > 0:
+                    depth -= 1
+                continue
+            if depth > 0:
+                count += 1
+        return count
