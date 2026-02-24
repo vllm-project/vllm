@@ -555,8 +555,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data["structured_outputs"]
+        # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
+        # as a StructuredOutputsParams dataclass instance.
+        if isinstance(structured_outputs_kwargs, StructuredOutputsParams):
+            _get = getattr
+        else:
+            _get = lambda obj, key: obj.get(key)
         count = sum(
-            structured_outputs_kwargs.get(k) is not None
+            _get(structured_outputs_kwargs, k) is not None
             for k in ("json", "regex", "choice")
         )
         # you can only use one kind of constraints for structured outputs
