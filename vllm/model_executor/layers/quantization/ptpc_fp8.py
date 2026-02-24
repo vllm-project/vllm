@@ -42,10 +42,8 @@ class PTPCFp8Config(Fp8Config):
         if not current_platform.is_rocm():
             raise ValueError("ptpc_fp8 quantization is supported only on ROCm.")
 
-        if not current_platform.has_device_capability(94):
-            raise ValueError(
-                "ptpc_fp8 quantization is supported only on AMD Instinct MI300 GPUs and newer."  # noqa: E501
-            )
+        if not current_platform.supports_fp8():
+            raise ValueError("ptpc_fp8 quantization requires an FP8-capable AMD GPU.")
         if activation_scheme == "static":
             raise ValueError("ptpc_fp8 as of now only support dynamic quantization.")
 
@@ -86,8 +84,8 @@ class PTPCFp8LinearMethod(Fp8LinearMethod):
     the model weights are loaded.
 
     Limitations:
-    1. Only support float8_e4m3fnuz data type due to the limitation of
-       torch._scaled_mm (https://github.com/ROCm/pytorch/blob/8c0504d7f3fb0ee4c278c096a5c3caedb01129fa/aten/src/ATen/native/cuda/Blas.cpp#L1041)
+    1. FP8 dtype is platform-dependent: float8_e4m3fnuz on MI300 (gfx94x),
+       float8_e4m3fn on RDNA4 (gfx12x) and newer.
 
     Args:
         quant_config: The quantization config.
