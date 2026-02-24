@@ -51,7 +51,7 @@ if TYPE_CHECKING:
         MultiModalInputs,
         MultiModalUUIDDict,
     )
-    from vllm.multimodal.parse import MultiModalDataItems
+    from vllm.multimodal.parse import MultiModalDataItems, MultiModalUUIDItems
     from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
@@ -85,13 +85,13 @@ class BaseRenderer(ABC, Generic[_T]):
         self._mm_cache_stats: MultiModalCacheStats | None = None
         if config.model_config.is_multimodal_model:
             from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
+            from vllm.multimodal.registry import MultiModalTimingRegistry
 
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
             with set_default_torch_num_threads():
                 self.mm_processor = mm_registry.create_processor(
                     config.model_config,
-                    config.observability_config,
                     tokenizer=tokenizer,
                     cache=mm_processor_cache,
                 )
@@ -102,6 +102,9 @@ class BaseRenderer(ABC, Generic[_T]):
             # This is used to generate internal request ID for MM processing
             # It has no relation to the request ID for engine core
             self._mm_req_counter = AtomicCounter()
+            self._mm_timing_registry = MultiModalTimingRegistry(
+                config.observability_config
+            )
 
     def get_tokenizer(self) -> _T:
         tokenizer = self.tokenizer
@@ -463,24 +466,26 @@ class BaseRenderer(ABC, Generic[_T]):
     def _validate_mm_uuids(
         self,
         mm_data: "MultiModalDataDict",
-        mm_items: "MultiModalDataItems",
-        mm_uuids: "MultiModalUUIDDict | None",
+        mm_data_items: "MultiModalDataItems",
+        mm_uuid_items: "MultiModalUUIDItems",
     ) -> None:
-        if mm_uuids is None:
-            mm_uuids = {}
-
-        # NOTE: Keys corresponding to `None` in `mm_data` don't appear in `mm_items`
-        modalities = mm_data.keys() | mm_uuids.keys()
+        # NOTE: Keys corresponding to `None` in `mm_data` don't appear in
+        # `mm_data_items`
+        modalities = mm_data.keys() | mm_uuid_items.keys()
 
         for modality in modalities:
-            data_items = mm_items.get(modality) or list[Any]()
+            data_items = mm_data_items.get(modality)
+            uuid_items = mm_uuid_items.get(modality)
 
-            uuid_items = mm_uuids.get(modality) or list[str | None]()
-            if isinstance(uuid_items, str):
-                uuid_items = [uuid_items]
+            if data_items is None:
+                if uuid_items is None:
+                    raise ValueError(
+                        f"multi_modal_data[{modality!r}] is empty but "
+                        f"multi_modal_uuids[{modality!r}] is missing."
+                    )
 
-            if len(data_items) > 0:
-                if len(uuid_items) > 0 and len(data_items) != len(uuid_items):
+            elif uuid_items is not None:
+                if len(data_items) != len(uuid_items):
                     raise ValueError(
                         f"If given, multi_modal_uuids[{modality!r}] must have "
                         f"same length as multi_modal_data[{modality!r}], but "
@@ -488,24 +493,17 @@ class BaseRenderer(ABC, Generic[_T]):
                     )
 
                 for i, item in enumerate(data_items):
-                    if item is None:
-                        if not uuid_items:
-                            raise ValueError(
-                                f"multi_modal_data[{modality!r}][{i}] is empty but "
-                                f"multi_modal_uuids[{modality!r}] is missing."
-                            )
-
-                        if uuid_items[i] is None:
-                            raise ValueError(
-                                f"multi_modal_data[{modality!r}][{i}] is empty but "
-                                f"multi_modal_uuids[{modality!r}][{i}] is missing."
-                            )
+                    if item is None and uuid_items[i] is None:
+                        raise ValueError(
+                            f"multi_modal_data[{modality!r}][{i}] is empty but "
+                            f"multi_modal_uuids[{modality!r}][{i}] is missing."
+                        )
 
     def _process_mm_uuids(
         self,
         mm_data: "MultiModalDataDict",
-        mm_items: "MultiModalDataItems",
-        mm_uuids: "MultiModalUUIDDict | None",
+        mm_data_items: "MultiModalDataItems",
+        mm_uuid_items: "MultiModalUUIDItems",
         mm_req_id: str,
     ):
         model_config = self.model_config
@@ -520,41 +518,49 @@ class BaseRenderer(ABC, Generic[_T]):
             and model_config.multimodal_config.mm_processor_cache_gb == 0
             and not self.config.cache_config.enable_prefix_caching
         ):
-            mm_uuids = {
+            mm_uuid_items = {
                 modality: [f"{mm_req_id}-{modality}-{i}" for i in range(data_count)]
-                for modality, data_count in mm_items.get_all_counts().items()
+                for modality, data_count in mm_data_items.get_all_counts().items()
             }
 
-        self._validate_mm_uuids(mm_data, mm_items, mm_uuids)
+        self._validate_mm_uuids(mm_data, mm_data_items, mm_uuid_items)
 
-        return mm_uuids
+        return mm_uuid_items
 
     # TODO: Remove str and tokenization_kwargs after deprecating InputPreprocessor
     def _process_multimodal(
         self,
         prompt: list[int] | str,
         mm_data: "MultiModalDataDict",
+        mm_uuids: "MultiModalUUIDDict | None",
         mm_processor_kwargs: Mapping[str, object] | None,
         tokenization_kwargs: dict[str, Any] | None,
-        mm_uuids: "MultiModalUUIDDict | None",
     ) -> "MultiModalInputs":
-        from vllm.multimodal.processing.context import set_request_id
+        from vllm.multimodal.parse import parse_mm_uuids
+        from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 
         mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
 
         mm_processor = self.get_mm_processor()
 
-        mm_items = mm_processor.info.parse_mm_data(mm_data)
-        mm_uuids = self._process_mm_uuids(mm_data, mm_items, mm_uuids, mm_req_id)
+        mm_data_items = mm_processor.info.parse_mm_data(mm_data)
+        mm_uuid_items = parse_mm_uuids(mm_uuids)
 
-        with set_request_id(mm_req_id), set_default_torch_num_threads():
-            mm_inputs = mm_processor.apply(
-                prompt,
-                mm_items,
-                hf_processor_mm_kwargs=mm_processor_kwargs or {},
-                tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
-            )
+        mm_uuid_items = self._process_mm_uuids(
+            mm_data, mm_data_items, mm_uuid_items, mm_req_id
+        )
+
+        mm_processor_inputs = MMProcessorInputs(
+            prompt,
+            mm_data_items,
+            mm_uuid_items,
+            hf_processor_mm_kwargs=mm_processor_kwargs or {},
+            tokenization_kwargs=tokenization_kwargs or {},
+        )
+        mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
+
+        with set_default_torch_num_threads():
+            mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
 
         self.update_mm_cache_stats()
 
