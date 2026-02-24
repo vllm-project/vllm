@@ -127,7 +127,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
 
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  m.impl("dsv3_router_gemm", torch::kCUDA, &dsv3_router_gemm);
+  // conditionally compiled so impl registration is in source file
 #endif
 }
 
