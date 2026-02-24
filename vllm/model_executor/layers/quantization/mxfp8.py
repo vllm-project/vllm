@@ -92,7 +92,7 @@ class Mxfp8Config(QuantizationConfig):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            # return MXfp8LinearMethod(self)
+            ## TODO: Add Mxfp8LinearMethod
             return UnquantizedLinearMethod()
 
         if isinstance(layer, FusedMoE):
