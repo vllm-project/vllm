@@ -260,10 +260,18 @@ class UBatchWrapper:
                 sorted_results = [value for position, value in sorted(results)]
                 result = torch.cat(sorted_results, dim=0)
                 cudagraph_metadata.outputs = result
+<<<<<<< HEAD
                 # Join offloader's copy stream after forward to avoid unjoined
                 # stream error. The last layer's start_prefetch forks copy_stream,
                 # but wait_prefetch only happens in the next forward pass.
                 get_offloader().join_after_forward()
+=======
+            # import time
+            # logger.info("jcz _capture_ubatches begin debug_dump")
+            # cudagraph_metadata.cudagraph.debug_dump(f"/home/fq9hpsac/fq9hpsacuser03/attn_debug_{time.time()}")
+            # logger.info("jcz _capture_ubatches end debug_dump")
+            # cudagraph_metadata.cudagraph.instantiate()
+>>>>>>> b2b25dc1e (temp)
             self.cudagraphs[num_tokens] = cudagraph_metadata
         return cudagraph_metadata.outputs
 
@@ -428,11 +436,10 @@ class UBatchWrapper:
             # num_tokens, we don't have a non-ubatched one. Without this
             # check, the cudagraph wrapper will try to capture a cudagraph
             # for this shape during a normal run.
-            logger.info(f"jcz UBatchWrapper __call__ cudagraph_runtime_mode:{cudagraph_runtime_mode}")
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
-                if batch_descriptor.num_tokens in self.cudagraphs:
-                    cudagraph_runtime_mode = CUDAGraphMode.NONE
+                # if batch_descriptor.num_tokens in self.cudagraphs:
+                #     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
                 logger.info(f"jcz UBatchWrapper __call__ 1")
@@ -440,8 +447,7 @@ class UBatchWrapper:
             else:
                 assert self.cudagraph_wrapper is not None
                 logger.info("jcz UBatchWrapper __call__ 2")
-                # return self.cudagraph_wrapper(*args, **kwargs)
-                return self.runnable(*args, **kwargs)
+                return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
         slot_mapping = forward_context.slot_mapping
@@ -490,8 +496,7 @@ class UBatchWrapper:
             )
             with self.sm_control:
                 logger.info("jcz UBatchWrapper __call__ 3")
-                # return self._capture_ubatches(ubatch_metadata, self.model)
-                return self._run_ubatches(ubatch_metadata, self.model)
+                return self._capture_ubatches(ubatch_metadata, self.model)
         elif (
             num_tokens in self.cudagraphs
             and cudagraph_runtime_mode is CUDAGraphMode.FULL

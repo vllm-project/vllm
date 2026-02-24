@@ -66,6 +66,7 @@ def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
     # there are no "empty" second ubatches
     orig_min_num_tokens = int(orig_num_tokens_tensor.min().item())
     padded_max_num_tokens = int(padded_num_tokens_tensor.max().item())
+    logger.info(f"jcz _post_process_ubatch orig_min_num_tokens:{orig_min_num_tokens} padded_max_num_tokens:{padded_max_num_tokens} num_ubatches:{num_ubatches}")
     if is_last_ubatch_empty(orig_min_num_tokens, padded_max_num_tokens, num_ubatches):
         logger.debug(
             "Aborting ubatching %s %s", orig_min_num_tokens, padded_max_num_tokens
