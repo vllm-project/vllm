@@ -697,19 +697,26 @@ class WorkerProc:
         if death_pipe is None:
             return
 
-        def death_pipe_monitor():
+        def death_pipe_monitor(queues_to_shutdown: list[MessageQueue]):
             try:
                 # This will block until parent process exits (pipe closes)
                 death_pipe.recv()
             except EOFError:
-                # Parent process has exited, terminate this worker
-                logger.info_once("Parent process exited, terminating worker")
+                logger.info_once("Parent process exited, terminating worker queues")
                 shutdown_requested.set()
-                self.shutdown()
+                for mq in queues_to_shutdown:
+                    if mq is not None:
+                        mq.shutdown()
             except Exception as e:
                 logger.warning("Death monitoring error: %s", e)
 
-        Thread(target=death_pipe_monitor, daemon=True, name="DeathPipeMonitor").start()
+        # Pass queue references directly to avoid gc issues if passing self
+        Thread(
+            target=death_pipe_monitor,
+            args=([self.rpc_broadcast_mq, self.worker_response_mq],),
+            daemon=True,
+            name="DeathPipeMonitor",
+        ).start()
 
     @staticmethod
     def worker_main(*args, **kwargs):

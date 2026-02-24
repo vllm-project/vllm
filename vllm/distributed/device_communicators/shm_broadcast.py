@@ -624,17 +624,17 @@ class MessageQueue:
             """
             if self.timeout is None:
                 return self.warning_wait_timeout_ms
-            else:
-                time_left = self.deadline - time.monotonic()
-                time_left_ms = int(time_left * 1000)
-                if time_left_ms <= 0:
-                    raise TimeoutError
 
-                return (
-                    time_left_ms
-                    if self.warning_wait_timeout_ms is None
-                    else min(self.warning_wait_timeout_ms, time_left_ms)
-                )
+            time_left = self.deadline - time.monotonic()
+            time_left_ms = int(time_left * 1000)
+            if time_left_ms <= 0:
+                raise TimeoutError
+
+            return (
+                time_left_ms
+                if self.warning_wait_timeout_ms is None
+                else min(self.warning_wait_timeout_ms, time_left_ms)
+            )
 
         def should_warn(self) -> bool:
             """Returns true if it's time to log a warning for a timeout that is not

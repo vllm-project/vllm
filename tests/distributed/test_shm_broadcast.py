@@ -33,10 +33,6 @@ def distributed_run(fn, world_size, timeout=60):
         world_size: Number of processes to spawn
         timeout: Maximum time in seconds to wait for processes (default: 60)
     """
-    # Use spawn method for better macOS compatibility
-    # Get the context for spawn method
-    # ctx = mp.get_context('spawn')
-
     number_of_processes = world_size
     processes = []
     for i in range(number_of_processes):
