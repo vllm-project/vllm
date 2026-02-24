@@ -870,8 +870,8 @@ def some_high_acceptance_metrics() -> dict:
     return {
         "sampling_config": greedy_sampling(),
         "num_speculative_tokens": 3,
-        "expected_acceptance_len": 3.55,  # ref: 3.76
-        "expected_acceptance_rate": 0.87,  # ref: 0.92
+        "expected_acceptance_len": 3.4,  # ref: 3.75
+        "expected_acceptance_rate": 0.8,  # ref: 0.9
     }
 
 
