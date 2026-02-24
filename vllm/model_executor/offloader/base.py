@@ -90,13 +90,17 @@ class NoopOffloader(BaseOffloader):
         return list(modules_generator)
 
 
-# Global singleton offloader instance
-_instance: BaseOffloader | None = NoopOffloader()
+# Global singleton offloader instance.
+# Starts as None so that accidental use before set_offloader() fails loudly.
+_instance: BaseOffloader | None = None
 
 
 def get_offloader() -> BaseOffloader:
     """Get the global offloader instance."""
-    assert _instance is not None, "Offloader instance is None"
+    assert _instance is not None, (
+        "Offloader not initialized. set_offloader() must be called "
+        "before get_offloader()."
+    )
     return _instance
 
 
