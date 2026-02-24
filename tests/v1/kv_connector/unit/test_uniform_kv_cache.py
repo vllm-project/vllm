@@ -102,7 +102,7 @@ def _allocate(
     kernel_block_sizes=None,
     attn_groups=None,
 ):
-    """Shorthand for allocate_uniform_kv_caches with FullAttentionSpec."""
+    """Shorthand for allocate_hybrid_kv_caches with FullAttentionSpec."""
     spec = FullAttentionSpec(
         block_size=BLOCK_SIZE,
         num_kv_heads=NUM_KV_HEADS,
@@ -114,7 +114,7 @@ def _allocate(
         attn_groups = [_make_group(group_id=0, layer_names=names, backend=backend)]
     if kernel_block_sizes is None:
         kernel_block_sizes = [BLOCK_SIZE] * len(attn_groups)
-    return KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+    return KVConnectorModelRunnerMixin.allocate_hybrid_kv_caches(
         kv_cache_config=KVCacheConfig(
             num_blocks=num_blocks,
             kv_cache_tensors=[
@@ -185,7 +185,7 @@ def test_allocate_multi_group_shared_tensors():
     )
 
     kv_caches, cross_layer_groups = (
-        KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+        KVConnectorModelRunnerMixin.allocate_hybrid_kv_caches(
             kv_cache_config=kv_cache_config,
             attn_groups=[
                 _make_group(group_id=0, layer_names=[f"full.{i}" for i in range(4)]),
@@ -218,7 +218,7 @@ def test_mamba_allocation():
     )
     nb = 2
 
-    kv, groups = KVConnectorModelRunnerMixin.allocate_uniform_kv_caches(
+    kv, groups = KVConnectorModelRunnerMixin.allocate_hybrid_kv_caches(
         kv_cache_config=KVCacheConfig(
             num_blocks=nb,
             kv_cache_tensors=[

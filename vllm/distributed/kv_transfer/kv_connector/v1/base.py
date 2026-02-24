@@ -41,12 +41,13 @@ The class provides the following primitives:
 import enum
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -78,6 +79,25 @@ CopyBlocksOp = Callable[
 ]
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class KVCacheTopology:
+    """
+    Physical dimension layout of a cross-layer KV cache tensor.
+
+    Each field gives the index of that logical dimension in the
+    physical tensor shape. None means the dimension does not exist
+    in this tensor (e.g. num_heads_dim is absent for Mamba/MLA layers).
+    """
+
+    num_blocks_dim: int
+    num_layers_dim: int
+    # None for MLA (heads folded into latent dim) and Mamba (no attention).
+    num_heads_dim: int | None = None
+    # None when tokens-per-block is folded into the page bytes
+    # (e.g. MLA, Mamba, or the default cross-layer layout).
+    block_size_dim: int | None = None
 
 
 class SupportsHMA(ABC):
@@ -251,6 +271,45 @@ class KVConnectorBase_V1(ABC):
                 this argument and use kv_caches instead.
         """
         return
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type["AttentionBackend"]
+    ):
+        """
+        Initialize with a single KV cache tensor used by all layers.
+        The first dimension should be num_layers.
+        This function will only be called for models with uniform layers,
+        and only if the prefers_cross_layer_blocks is set to True.
+        Only one of the functions
+        {register_kv_caches, register_cross_layers_kv_cache} will be called.
+
+        Args:
+            kv_cache: a cross-layers kv cache tensor
+            attn_backend: The attention backend that corresponds to all layers
+        """
+        return
+
+    def register_hybrid_kv_caches(
+        self,
+        cross_layer_groups: "list[CrossLayerGroup]",
+    ) -> None:
+        """
+        Register cross-layer KV cache tensors for models with multiple
+        KV cache groups (e.g. hybrid attention architectures).
+
+        Called instead of register_kv_caches / register_cross_layers_kv_cache
+        when the model runner allocates cross-layer tensors. Connectors
+        that override this method opt in to the multi-group cross-layer
+        allocation path.
+
+        Each CrossLayerGroup contains:
+            tensor: the cross-layer tensor packing all layers in the group.
+            layer_names: names of the layers in this group.
+            page_size_bytes: page size used by these layers.
+            topologies: per-layer KVCacheTopology describing where
+                logical dimensions appear in the tensor.
+        """
+        raise NotImplementedError
 
     def set_host_xfer_buffer_ops(self, copy_operation: CopyBlocksOp):
         """
