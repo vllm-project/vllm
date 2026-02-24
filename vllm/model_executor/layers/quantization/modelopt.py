@@ -238,6 +238,26 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             self.exclude_modules = hf_to_vllm_mapper.apply_list(new_exclude_modules)
 
     @staticmethod
+    def _extract_modelopt_quant_algo(
+        hf_quant_cfg: dict[str, Any] | None,
+    ) -> str | None:
+        """Extract upper-cased quant_algo from a modelopt config.
+
+        Returns the quant_algo string (upper-cased), or None if the config
+        is not a modelopt config.
+        """
+        if hf_quant_cfg is None:
+            return None
+        if hf_quant_cfg.get("quant_method", "").lower() != "modelopt":
+            raise ValueError("Only modelopt is supported as quant_method.")
+        if "quantization" in hf_quant_cfg:
+            quant_config = hf_quant_cfg["quantization"]
+            if isinstance(quant_config, dict):
+                return str(quant_config.get("quant_algo", "")).upper()
+            return None
+        return str(hf_quant_cfg.get("quant_algo", "")).upper()
+
+    @staticmethod
     def get_config_filenames() -> list[str]:
         return ["hf_quant_config.json"]
 
@@ -381,32 +401,9 @@ class ModelOptFp8Config(ModelOptQuantConfigBase):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        """Detect if this ModelOpt config should be used based on
-        quantization config."""
-
-        if hf_quant_cfg is None:
-            return None
-
-        # Use the community standard 'quant_method'
-        quant_method = hf_quant_cfg.get("quant_method", "").lower()
-
-        # Only proceed if the method is explicitly "modelopt"
-        if quant_method != "modelopt":
-            return None
-
-        # Look for ModelOpt-specific config structure
-        if "quantization" in hf_quant_cfg:
-            quant_config = hf_quant_cfg["quantization"]
-            if isinstance(quant_config, dict):
-                quant_algo = str(quant_config.get("quant_algo", ""))
-                if quant_algo.upper() == "FP8":
-                    return "modelopt"
-        else:
-            # Check for compressed-tensors style config with specific quant_algo
-            quant_algo = str(hf_quant_cfg.get("quant_algo", ""))
-            if quant_algo.upper() == "FP8":
-                return "modelopt"
-
+        algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
+        if algo is not None and algo == "FP8":
+            return "modelopt"
         return None
 
     @classmethod
@@ -1033,32 +1030,9 @@ class ModelOptNvFp4Config(ModelOptQuantConfigBase):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        """Detect if this ModelOpt FP4 config should be used based on
-        quantization config."""
-        if hf_quant_cfg is None:
-            return None
-
-        # Use the community standard 'quant_method'
-        quant_method = hf_quant_cfg.get("quant_method", "").lower()
-
-        # Only proceed if the method is explicitly "modelopt"
-        if quant_method != "modelopt":
-            return None
-
-        # Look for ModelOpt-specific config structure
-        if "quantization" in hf_quant_cfg:
-            quant_config = hf_quant_cfg["quantization"]
-            if isinstance(quant_config, dict):
-                quant_algo = quant_config.get("quant_algo", "")
-                if "NVFP4" in quant_algo:
-                    return "modelopt_fp4"
-        else:
-            # Check for compressed-tensors style config with specific
-            # quant_algo field
-            quant_algo = hf_quant_cfg.get("quant_algo", "")
-            if isinstance(quant_algo, str) and "FP4" in quant_algo.upper():
-                return "modelopt_fp4"
-
+        algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
+        if algo is not None and ("NVFP4" in algo or "FP4" in algo):
+            return "modelopt_fp4"
         return None
 
     @classmethod
@@ -1621,31 +1595,9 @@ class ModelOptMxFp8Config(ModelOptQuantConfigBase):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        """Detect if this ModelOpt MXFP8 config should be used based on
-        quantization config."""
-        if hf_quant_cfg is None:
-            return None
-
-        # Use the community standard 'quant_method'
-        quant_method = hf_quant_cfg.get("quant_method", "").lower()
-
-        # Only proceed if the method is explicitly "modelopt"
-        if quant_method != "modelopt":
-            return None
-
-        # Look for ModelOpt-specific config structure
-        if "quantization" in hf_quant_cfg:
-            quant_config = hf_quant_cfg["quantization"]
-            if isinstance(quant_config, dict):
-                quant_algo = str(quant_config.get("quant_algo", "")).upper()
-                if "MXFP8" in quant_algo:
-                    return "modelopt_mxfp8"
-        else:
-            # Check for compressed-tensors style config with specific quant_algo
-            quant_algo = str(hf_quant_cfg.get("quant_algo", "")).upper()
-            if "MXFP8" in quant_algo:
-                return "modelopt_mxfp8"
-
+        algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
+        if algo is not None and "MXFP8" in algo:
+            return "modelopt_mxfp8"
         return None
 
     @classmethod
@@ -1851,7 +1803,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     Supports checkpoints where different layers use different quantization
     algorithms (e.g., FP8 for dense layers and NVFP4 for MoE experts).
     The per-layer algorithm is specified in the ``quantized_layers`` dict
-    inside ``hf_quant_config.json``.
+    inside ``config.json``'s ``quantization_config`` (preferred) or the
+    legacy ``hf_quant_config.json``.
     """
 
     def __init__(
@@ -1882,24 +1835,9 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
     def override_quantization_method(
         cls, hf_quant_cfg, user_quant
     ) -> QuantizationMethods | None:
-        if hf_quant_cfg is None:
-            return None
-
-        quant_method = hf_quant_cfg.get("quant_method", "").lower()
-        if quant_method != "modelopt":
-            return None
-
-        if "quantization" in hf_quant_cfg:
-            quant_config = hf_quant_cfg["quantization"]
-            if isinstance(quant_config, dict):
-                quant_algo = str(quant_config.get("quant_algo", "")).upper()
-                if quant_algo == "MIXED_PRECISION":
-                    return "modelopt_mixed"
-        else:
-            quant_algo = str(hf_quant_cfg.get("quant_algo", "")).upper()
-            if quant_algo == "MIXED_PRECISION":
-                return "modelopt_mixed"
-
+        algo = cls._extract_modelopt_quant_algo(hf_quant_cfg)
+        if algo is not None and algo == "MIXED_PRECISION":
+            return "modelopt_mixed"
         return None
 
     @classmethod

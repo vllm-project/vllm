@@ -286,10 +286,18 @@ def get_quant_config(
             n_kv_heads if n_kv_heads is not None else n_heads
         )
 
-    if hf_quant_config is not None and model_config.quantization != "modelopt_mixed":
-        # ModelOpt mixed-precision needs the per-layer quantized_layers map
-        # from hf_quant_config.json, which is not in config.json.
-        return quant_cls.from_config(hf_quant_config)
+    if hf_quant_config is not None:
+        # For modelopt_mixed, config.json's quantization_config may or may
+        # not contain the per-layer quantized_layers map.  Newer checkpoints
+        # embed it directly; older ones keep it only in hf_quant_config.json.
+        # If it is missing, fall through to the file-based loading path.
+        if (
+            model_config.quantization == "modelopt_mixed"
+            and "quantized_layers" not in hf_quant_config
+        ):
+            pass  # fall through to file-based loading below
+        else:
+            return quant_cls.from_config(hf_quant_config)
 
     # if hf_quant_config is None, we will try to get config from
     # hf_overrides
