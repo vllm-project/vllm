@@ -54,7 +54,6 @@ def make_request() -> EngineCoreRequest:
         mm_features=None,
         sampling_params=SamplingParams(),
         pooling_params=None,
-        eos_token_id=None,
         arrival_time=time.time(),
         lora_request=None,
         cache_salt=None,
