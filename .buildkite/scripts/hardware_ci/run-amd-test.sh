@@ -16,13 +16,19 @@ export PYTHONPATH=".."
 ###############################################################################
 
 wait_for_clean_gpus() {
-  echo "--- Waiting for clean GPU state"
+  local timeout=${1:-300}
+  local start=$SECONDS
+  echo "--- Waiting for clean GPU state (timeout: ${timeout}s)"
   while true; do
-    sleep 3
     if grep -q clean /opt/amdgpu/etc/gpu_state; then
       echo "GPUs state is \"clean\""
       return
     fi
+    if (( SECONDS - start >= timeout )); then
+      echo "Error: GPUs did not reach clean state within ${timeout}s" >&2
+      exit 1
+    fi
+    sleep 3
   done
 }
 
@@ -74,136 +80,25 @@ is_multi_node() {
 }
 
 ###############################################################################
-# Pytest marker/keyword re-quoting
+# Pytest marker re-quoting
 #
 # When commands are passed through Buildkite -> shell -> $* -> bash -c,
-# quotes around multi-word pytest -m/-k expressions get stripped:
+# quotes around pytest -m marker expressions get stripped:
 #   pytest -v -s -m 'not cpu_test' v1/core
 # becomes:
 #   pytest -v -s -m not cpu_test v1/core
 #
 # pytest then interprets "cpu_test" as a file path, not part of the marker.
-#
-# This function detects unquoted expressions after -m/-k and re-quotes them
-# by collecting tokens until a recognizable boundary is reached:
-#   - test path (contains '/')
-#   - test file (ends with '.py')
-#   - another pytest flag (--xxx or -x single-char flags)
-#   - command separator (&& || ; |)
-#   - environment variable assignment (FOO=bar)
-#
-# Single-word markers (e.g. -m cpu_test, -m hybrid_model) pass through
-# unquoted since they have no spaces and work fine.
-#
-# Already-quoted expressions (containing literal single quotes) are passed
-# through untouched to avoid double-quoting values injected by
-# apply_rocm_test_overrides.
+# This function detects unquoted multi-word marker expressions and re-quotes
+# them so they survive the final bash -c expansion.
 ###############################################################################
+
 re_quote_pytest_markers() {
-  local input="$1"
-  local output=""
-  local collecting=false
-  local marker_buf=""
-
-  # Flatten newlines for consistent tokenization
-  local flat="${input//$'\n'/ }"
-
-  # Disable globbing to prevent *.py etc. from expanding during read -ra
-  local restore_glob
-  restore_glob="$(shopt -p -o noglob 2>/dev/null || true)"
-  set -o noglob
-  local -a words
-  read -ra words <<< "$flat"
-  eval "$restore_glob"
-
-  for word in "${words[@]}"; do
-    if $collecting; then
-      # If the token we're about to collect already contains a literal
-      # single quote, the expression was already quoted upstream.
-      # Flush and stop collecting.
-      if [[ "$word" == *"'"* ]]; then
-        if [[ -n "$marker_buf" ]]; then
-          # Should not normally happen (partial buf + quote), flush raw
-          output+="${marker_buf} "
-          marker_buf=""
-        fi
-        output+="${word} "
-        collecting=false
-        continue
-      fi
-
-      local is_boundary=false
-      case "$word" in
-        # Command separators
-        "&&"|"||"|";"|"|")
-          is_boundary=true ;;
-        # Long flags (--ignore, --shard-id, etc.)
-        --*)
-          is_boundary=true ;;
-        # Short flags (-v, -s, -x, etc.) but NOT negative marker tokens
-        # like "not" which don't start with "-". Also skip -k/-m which
-        # would start a new marker (handled below).
-        -[a-zA-Z])
-          is_boundary=true ;;
-        # Test path (contains /)
-        */*)
-          is_boundary=true ;;
-        # Test file (ends with .py, possibly with ::method)
-        *.py|*.py::*)
-          is_boundary=true ;;
-        # Environment variable assignment preceding a command (FOO=bar)
-        *=*)
-          # Only treat as boundary if it looks like VAR=value, not
-          # pytest filter expressions like num_gpus=2 inside markers
-          if [[ "$word" =~ ^[A-Z_][A-Z0-9_]*= ]]; then
-            is_boundary=true
-          fi
-          ;;
-      esac
-
-      if $is_boundary; then
-        # Flush the collected marker expression
-        if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
-          output+="'${marker_buf}' "
-        else
-          output+="${marker_buf} "
-        fi
-        collecting=false
-        marker_buf=""
-        # Check if this boundary word itself starts a new -m/-k
-        if [[ "$word" == "-m" || "$word" == "-k" ]]; then
-          output+="${word} "
-          collecting=true
-        else
-          output+="${word} "
-        fi
-      else
-        # Accumulate into marker buffer
-        if [[ -n "$marker_buf" ]]; then
-          marker_buf+=" ${word}"
-        else
-          marker_buf="${word}"
-        fi
-      fi
-    elif [[ "$word" == "-m" || "$word" == "-k" ]]; then
-      output+="${word} "
-      collecting=true
-      marker_buf=""
-    else
-      output+="${word} "
-    fi
-  done
-
-  # Flush any trailing marker expression (marker at end of command)
-  if $collecting && [[ -n "$marker_buf" ]]; then
-    if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
-      output+="'${marker_buf}'"
-    else
-      output+="${marker_buf}"
-    fi
-  fi
-
-  echo "${output% }"
+  local cmds="$1"
+  # Pattern: -m not <identifier>  ->  -m 'not <identifier>'
+  # Handles the common cases: 'not cpu_test', 'not slow_test', etc.
+  cmds=$(echo "$cmds" | sed -E "s/-m not ([a-zA-Z_][a-zA-Z0-9_]*)/-m 'not \1'/g")
+  echo "$cmds"
 }
 
 ###############################################################################
@@ -341,8 +236,6 @@ echo "Raw commands: $commands"
 
 # Fix quoting before ROCm overrides (so overrides see correct structure)
 commands=$(re_quote_pytest_markers "$commands")
-echo "After re-quoting: $commands"
-
 commands=$(apply_rocm_test_overrides "$commands")
 echo "Final commands: $commands"
 
@@ -410,6 +303,7 @@ if is_multi_node "$commands"; then
     exit 111
   fi
 else
+  echo "--- Single-node job"
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
