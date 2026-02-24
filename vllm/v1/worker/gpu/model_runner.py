@@ -24,7 +24,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput
@@ -269,6 +269,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
         ]
+        # Non-attention groups (e.g. Mamba) are replicated, not sharded by
+        # DCP, so they use cp_size=1 for block table sizing.
+        cp_sizes = [
+            self.dcp_size if isinstance(g.kv_cache_spec, AttentionSpec) else 1
+            for g in kv_cache_config.kv_cache_groups
+        ]
 
         self.block_tables = BlockTables(
             block_sizes=block_sizes,
@@ -279,6 +285,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_size=self.dcp_size,
             cp_rank=self.dcp_rank,
             cp_interleave=self.cp_interleave,
+            cp_sizes=cp_sizes,
         )
 
         self.attn_backends, self.attn_groups = init_attn_backend(

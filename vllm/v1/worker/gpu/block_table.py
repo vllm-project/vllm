@@ -21,6 +21,7 @@ class BlockTables:
         cp_size: int = 1,
         cp_rank: int = 0,
         cp_interleave: int = 1,
+        cp_sizes: list[int] | None = None,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -31,6 +32,11 @@ class BlockTables:
         self.cp_size = cp_size
         self.cp_rank = cp_rank
         self.cp_interleave = cp_interleave
+        # Per-group cp_sizes for max_num_blocks computation.  Non-attention
+        # groups (e.g. Mamba) are not sharded by DCP and use cp_size=1.
+        self.cp_sizes = (
+            cp_sizes if cp_sizes is not None else [cp_size] * len(block_sizes)
+        )
 
         self.num_kv_cache_groups = len(self.block_sizes)
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
@@ -40,7 +46,9 @@ class BlockTables:
             # When using DCP, each request's KV cache is sharded among different ranks.
             # As a result, one block on the current rank covers `block_size * cp_size`
             # tokens in the full, global (unsharded) sequence.
-            max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
+            # Non-attention groups (e.g. Mamba) use cp_size=1 since their
+            # state is replicated, not sharded.
+            max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_sizes[i])
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,

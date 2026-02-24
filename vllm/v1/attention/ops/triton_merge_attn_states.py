@@ -105,7 +105,12 @@ def merge_attn_states_kernel(
     # Do not multiply the output with tl.exp(p_lse) or tl.exp(s_lse) directly.
     p_scale = p_se / out_se
     s_scale = s_se / out_se
-    out = p_out * p_scale + s_out * s_scale
+    # Guard against IEEE 754: 0 * NaN = NaN.  When p_se/s_se is 0 (i.e.
+    # the corresponding LSE is -inf), the attention output may be
+    # uninitialized garbage, so force the contribution to 0.
+    p_contrib = tl.where(p_se == 0, 0.0, p_out * p_scale)
+    s_contrib = tl.where(s_se == 0, 0.0, s_out * s_scale)
+    out = p_contrib + s_contrib
     tl.store(
         output
         + token_idx * num_heads * output_head_stride
