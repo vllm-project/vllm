@@ -124,6 +124,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
   m.impl("grouped_topk", torch::kCUDA, &grouped_topk);
+
+  // DeepSeek V3 optimized router GEMM for SM90+
+  m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
+  // conditionally compiled so impl registration is in source file
 #endif
 }
 
