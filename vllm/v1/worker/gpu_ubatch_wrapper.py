@@ -444,11 +444,10 @@ class UBatchWrapper:
             # num_tokens, we don't have a non-ubatched one. Without this
             # check, the cudagraph wrapper will try to capture a cudagraph
             # for this shape during a normal run.
-            logger.info(f"jcz UBatchWrapper __call__ cudagraph_runtime_mode:{cudagraph_runtime_mode}")
             if cudagraph_runtime_mode is CUDAGraphMode.FULL:
                 assert batch_descriptor is not None
-                if batch_descriptor.num_tokens in self.cudagraphs:
-                    cudagraph_runtime_mode = CUDAGraphMode.NONE
+                # if batch_descriptor.num_tokens in self.cudagraphs:
+                #     cudagraph_runtime_mode = CUDAGraphMode.NONE
 
             if cudagraph_runtime_mode in (CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE):
                 logger.info(f"jcz UBatchWrapper __call__ 1")
@@ -456,8 +455,7 @@ class UBatchWrapper:
             else:
                 assert self.cudagraph_wrapper is not None
                 logger.info("jcz UBatchWrapper __call__ 2")
-                # return self.cudagraph_wrapper(*args, **kwargs)
-                return self.runnable(*args, **kwargs)
+                return self.cudagraph_wrapper(*args, **kwargs)
 
         attn_metadata = forward_context.attn_metadata
         slot_mapping = forward_context.slot_mapping
@@ -505,13 +503,7 @@ class UBatchWrapper:
                 afd_metadata=afd_metadata,
             )
             with self.sm_control:
-<<<<<<< HEAD
                 return self._capture_ubatches(ubatch_metadata, self.runnable)
-=======
-                logger.info("jcz UBatchWrapper __call__ 3")
-                # return self._capture_ubatches(ubatch_metadata, self.model)
-                return self._run_ubatches(ubatch_metadata, self.model)
->>>>>>> 1348e18bb (remove sycronize)
         elif (
             num_tokens in self.cudagraphs
             and cudagraph_runtime_mode is CUDAGraphMode.FULL

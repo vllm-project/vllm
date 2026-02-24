@@ -512,23 +512,16 @@ class P2PAFDConnector(AFDConnectorBase):
         device = torch.device(f"cuda:{self.local_rank}")
         # Use explicit device (cuda:local_rank) so multi-process on same node
         # don't all use cuda:0 and block; sync to isolate from graph stream.
-        print("jcz send_dp_metadata_list before synchronize", flush=True)
-        torch.cuda.synchronize()
-        print("jcz send_dp_metadata_list after synchronize", flush=True)
         for dst in self.dst_list:
             object_bytes = pickle.dumps(send_data)
             # Use CUDA tensor for NCCL backend on explicit device
-            print("jcz send_dp_metadata_list 2", flush=True)
             object_tensor_cpu = torch.frombuffer(
                 bytearray(object_bytes), dtype=torch.uint8
             )
-            print("jcz send_dp_metadata_list 3", flush=True)
             object_tensor = object_tensor_cpu.to(device)
-            print("jcz send_dp_metadata_list 4", flush=True)
             size_tensor = torch.tensor(
                 [object_tensor.numel()], dtype=torch.long, device=device
             )
-            print("jcz send_dp_metadata_list 5", flush=True)
             logger.info(
                 "jcz send_dp_metadata_list dst:%s self.p2p_rank:%s "
                 "is_graph_capturing:%s is_warmup:%s",
@@ -537,14 +530,8 @@ class P2PAFDConnector(AFDConnectorBase):
                 is_graph_capturing,
                 is_warmup,
             )
-            t0 = time.perf_counter()
-            print("jcz send_dp_metadata_list 6", flush=True)
             torch.distributed.send(size_tensor, dst=dst, group=self.p2p_pg)
-            print("jcz send_dp_metadata_list 7", flush=True)
             torch.distributed.send(object_tensor, dst=dst, group=self.p2p_pg)
-            print("jcz send_dp_metadata_list 8", flush=True)
-            elapsed_ms = (time.perf_counter() - t0) * 1000
-            logger.info("jcz send_dp_metadata_list elapsed: %.3f ms", elapsed_ms)
 
     def recv_dp_metadata_list(self):
         src = self.p2p_rank % self.min_size + self.ffn_size
@@ -552,7 +539,6 @@ class P2PAFDConnector(AFDConnectorBase):
 
         # Use CUDA tensor for NCCL backend
         device = torch.device(f"cuda:{self.local_rank}")
-        t0 = time.perf_counter()
         size_tensor = torch.empty(1, dtype=torch.long, device=device)
         rank_size = torch.distributed.recv(size_tensor, src=src, group=self.p2p_pg)
 
@@ -560,8 +546,6 @@ class P2PAFDConnector(AFDConnectorBase):
             size_tensor.item(), dtype=torch.uint8, device=device
         )
         rank_object = torch.distributed.recv(object_tensor, src=src, group=self.p2p_pg)
-        elapsed_ms = (time.perf_counter() - t0) * 1000
-        logger.info("jcz recv_dp_metadata_list elapsed: %.3f ms", elapsed_ms)
 
         assert rank_object == rank_size, "Received object sender rank does not match the size sender rank."
 
