@@ -340,8 +340,12 @@ class CudaGraphManager:
         self, num_tokens: int
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         assert num_tokens in self.graphs, f"No cudagraph for {num_tokens} tokens"
-        # Sync offloader before replay - ensures any external dependencies
-        # from pre-capture prefetches are satisfied.
+        # Sync offloader before replay - needed when transitioning from
+        # eager/piecewise to full cudagraph (e.g., prefill → decode).
+        # The previous eager iteration's start_prefetch may have queued
+        # H2D copies on copy_stream that the graph's captured events
+        # cannot see. Without this, replay could overwrite static buffers
+        # while those copies are still in flight.
         get_offloader().sync_prev_onload()
         self.graphs[num_tokens].replay()
         assert self.hidden_states is not None
