@@ -3,8 +3,6 @@
 import asyncio
 import io
 import math
-import os
-import subprocess
 import time
 import zlib
 from collections.abc import AsyncGenerator, Callable
@@ -26,6 +24,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.openai.speech_to_text.utils import load_audio_bytes
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
     TranscriptionResponseStreamChoice,
@@ -76,91 +75,6 @@ ResponseType: TypeAlias = (
 )
 
 logger = init_logger(__name__)
-
-
-def _decode_audio_bytes_ffmpeg(
-    audio_data: bytes,
-    sr: int | float,
-) -> tuple[np.ndarray, int]:
-    """
-    Decode audio bytes to float32 PCM via ffmpeg, entirely in memory.
-
-    Uses ``os.memfd_create`` to present the raw bytes to ffmpeg as a
-    seekable file descriptor (via ``/proc/self/fd/<N>``).  This avoids
-    writing to disk (tempfile) while still allowing ffmpeg to seek, which is
-    required for container formats like MP4/M4A whose metadata (the
-    ``moov`` atom) may be located at the end of the file.
-
-    The output is mono float32 audio resampled to *sr* Hz, matching the
-    return convention of ``librosa.load``.
-    """
-    sr = int(sr)
-    fd = os.memfd_create("vllm_audio")
-    try:
-        os.write(fd, audio_data)
-        os.lseek(fd, 0, os.SEEK_SET)
-
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            f"/proc/self/fd/{fd}",
-            "-vn",  # discard video
-            "-ac",
-            "1",  # mono
-            "-ar",
-            str(sr),  # target sample rate
-            "-f",
-            "f32le",  # raw float32 little-endian PCM
-            "pipe:1",  # write to stdout
-        ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            pass_fds=(fd,),  # inherit only this fd
-        )
-    finally:
-        os.close(fd)
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "ffmpeg failed to decode audio: "
-            + result.stderr.decode("utf-8", errors="replace").strip()
-        )
-
-    y = np.frombuffer(result.stdout, dtype=np.float32)
-    if y.size == 0:
-        raise RuntimeError(
-            "ffmpeg produced no audio samples (file may be empty or corrupt)"
-        )
-    return y, sr
-
-
-def _load_audio_bytes(
-    audio_data: bytes,
-    sr: int | float,
-) -> tuple[np.ndarray, int]:
-    """Load audio from raw bytes, with an in-memory ffmpeg fallback.
-
-    First tries ``librosa.load(BytesIO(...))`` which works for formats
-    that *soundfile* can auto-detect (WAV, FLAC, MP3, OGG, ...).  If
-    that fails (typically for container formats like MP4/M4A/WebM whose
-    headers soundfile cannot recognise from a seekable buffer), the bytes
-    are decoded via ffmpeg using an in-memory file descriptor so that
-    ffmpeg can seek the container metadata without any disk I/O.
-    """
-    # default: should work for most formats
-    try:
-        with io.BytesIO(audio_data) as buf:
-            return librosa.load(buf, sr=sr)  # type: ignore[return-value]
-    except Exception:
-        pass
-
-    # fallback: ffmpeg via in-memory fd
-    logger.debug("BytesIO decode failed; falling back to ffmpeg in-memory decode")
-    return _decode_audio_bytes_ffmpeg(audio_data, sr)
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -406,7 +320,7 @@ class OpenAISpeechToText(OpenAIServing):
         # transparently falls back to ffmpeg via an in-memory fd.
         # NOTE resample to model SR here for efficiency. This is also a
         # pre-requisite for chunking, as it assumes Whisper SR.
-        y, sr = _load_audio_bytes(audio_data, sr=self.asr_config.sample_rate)
+        y, sr = load_audio_bytes(audio_data, sr=self.asr_config.sample_rate)
 
         duration = librosa.get_duration(y=y, sr=sr)
         do_split_audio = (
