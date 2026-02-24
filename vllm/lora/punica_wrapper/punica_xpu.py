@@ -47,7 +47,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         torch._dynamo.mark_dynamic(self._sampler_indices_padded, 0)
 
         self.lora_config = kwargs["lora_config"]
-        self.max_loras = kwargs["max_loras"]
+        self.max_loras = self.lora_config.max_loras
         self.token_mapping_meta = LoRAKernelMeta.make(
             self.max_loras, max_num_batched_tokens, device=device
         )

@@ -49,5 +49,6 @@ def bgmv_expand_slice(
         lora_b_weights,
         lora_indices_tensor,
         slice_offset,
+        slice_size,
         add_inputs,
     )
