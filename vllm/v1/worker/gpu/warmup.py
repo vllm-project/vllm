@@ -82,19 +82,14 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
         grammar_output = None
         if model_runner.is_last_pp_rank:
             # Build a GrammarOutput to exercise the structured output bitmask
-            # kernel during the prefill step. Apply to a subset of requests.
-            # Bitmask with all bits set (-1 in int32) allows all tokens.
-            grammar_req_ids = req_ids[:2]
+            # kernel during the prefill step.
             vocab_size = model_runner.model_config.get_vocab_size()
             bitmask_width = (vocab_size + 31) // 32
             grammar_bitmask = np.full(
-                (len(grammar_req_ids), bitmask_width),
-                fill_value=-1,
-                dtype=np.int32,
+                (len(req_ids), bitmask_width), fill_value=-1, dtype=np.int32
             )
             grammar_output = GrammarOutput(
-                structured_output_request_ids=list(grammar_req_ids),
-                grammar_bitmask=grammar_bitmask,
+                structured_output_request_ids=req_ids, grammar_bitmask=grammar_bitmask
             )
 
         model_runner.sample_tokens(grammar_output)
