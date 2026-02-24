@@ -659,6 +659,17 @@ class ParallelConfig:
                 "backend is mp, uni or external_launcher."
             )
 
+        if (
+            self.all2all_backend == "allgather_reducescatter"
+            and self.eplb_config.use_async
+        ):
+            logger.warning(
+                "Async EPLB causes hangs with the "
+                "'allgather_reducescatter' all2all backend. "
+                "Forcing synchronous EPLB."
+            )
+            self.eplb_config.use_async = False
+
     @property
     def use_ray(self) -> bool:
         return self.distributed_executor_backend == "ray" or (
