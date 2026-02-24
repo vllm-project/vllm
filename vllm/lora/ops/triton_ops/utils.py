@@ -13,6 +13,7 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
+from vllm.triton_utils import triton
 from vllm.utils.math_utils import next_power_of_2
 
 logger = init_logger(__name__)
@@ -316,3 +317,16 @@ def supports_pdl(device: torch.device | None = None) -> bool:
         and current_platform.has_device_capability(90)
         and not envs.VLLM_LORA_DISABLE_PDL
     )
+
+
+@lru_cache
+def supports_tma(device: torch.device | None = None) -> bool:
+    # TMA requires compute capability SM90 or above
+    return current_platform.is_cuda() and current_platform.has_device_capability(90)
+
+
+def _set_triton_allocator(device: torch.device):
+    def alloc_fn(size: int, alignment: int, stream: int | None):
+        return torch.empty(size, device=device, dtype=torch.int8)
+
+    triton.set_allocator(alloc_fn)
