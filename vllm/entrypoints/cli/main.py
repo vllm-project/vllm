@@ -36,8 +36,7 @@ def main():
     cli_env_setup()
 
     # For 'vllm bench *': use CPU instead of UnspecifiedPlatform by default.
-    # When showing help, skip this to avoid triggering CUDA/platform init
-    # (which can take ~10s or fail without a GPU).
+    # When showing help, skip this to avoid triggering platform detection.
     if len(sys.argv) > 1 and sys.argv[1] == "bench" and not showing_help:
         logger.debug(
             "Bench command detected, must ensure current platform is not "
