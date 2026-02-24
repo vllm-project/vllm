@@ -3,10 +3,9 @@
 """Audio decoding utilities for the speech-to-text endpoints."""
 
 import io
-import os
-import subprocess
 
 import numpy as np
+import torchaudio
 
 from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
@@ -31,62 +30,36 @@ logger = init_logger(__name__)
 _BAD_SF_CODES = {1, 3, 4}
 
 
-def _decode_audio_bytes_ffmpeg(
+def _decode_audio_bytes_torchaudio(
     audio_data: bytes,
-    sr: int | float,
+    sr: int,
 ) -> tuple[np.ndarray, int]:
+    """Decode audio bytes to mono float32 PCM via torchaudio, in-process.
+
+    ``torchaudio.load`` (backed by TorchCodec / FFmpeg) can decode
+    container formats (MP4, M4A, WebM) directly from a ``BytesIO``
+    buffer without spawning a subprocess.  The decoded waveform is
+    down-mixed to mono and resampled to *sr* Hz, matching the return
+    convention of ``librosa.load``.
     """
-    Decode audio bytes to float32 PCM via ffmpeg, entirely in memory.
+    buf = io.BytesIO(audio_data)
+    waveform, orig_sr = torchaudio.load(buf)
 
-    Uses ``os.memfd_create`` to present the raw bytes to ffmpeg as a
-    seekable file descriptor (via ``/proc/self/fd/<N>``).  This avoids
-    writing to disk (tempfile) while still allowing ffmpeg to seek, which is
-    required for container formats like MP4/M4A whose metadata (the
-    ``moov`` atom) may be located at the end of the file.
+    # Down-mix to mono (average across channels).
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
 
-    The output is mono float32 audio resampled to *sr* Hz, matching the
-    return convention of ``librosa.load``.
-    """
-    sr = int(sr)
-    fd = os.memfd_create("vllm_audio")
-    try:
-        os.write(fd, audio_data)
-        os.lseek(fd, 0, os.SEEK_SET)
-
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-i",
-            f"/proc/self/fd/{fd}",
-            "-vn",  # discard video
-            "-ac",
-            "1",  # mono
-            "-ar",
-            str(sr),  # target sample rate
-            "-f",
-            "f32le",  # raw float32 little-endian PCM
-            "pipe:1",  # write to stdout
-        ]
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            pass_fds=(fd,),  # inherit only this fd
-        )
-    finally:
-        os.close(fd)
-
-    if result.returncode != 0:
-        raise RuntimeError(
-            "ffmpeg failed to decode audio: "
-            + result.stderr.decode("utf-8", errors="replace").strip()
+    # Resample to the target sample rate when necessary.
+    if orig_sr != sr:
+        waveform = torchaudio.functional.resample(
+            waveform, orig_freq=orig_sr, new_freq=sr
         )
 
-    y = np.frombuffer(result.stdout, dtype=np.float32)
+    # Squeeze channel dim → 1-D float32 numpy array (same as librosa.load).
+    y = waveform.squeeze(0).numpy()
     if y.size == 0:
         raise RuntimeError(
-            "ffmpeg produced no audio samples (file may be empty or corrupt)"
+            "torchaudio produced no audio samples (file may be empty or corrupt)"
         )
     return y, sr
 
@@ -95,16 +68,18 @@ def load_audio_bytes(
     audio_data: bytes,
     sr: int | float,
 ) -> tuple[np.ndarray, int]:
-    """Load audio from raw bytes, with an in-memory ffmpeg fallback.
+    """Load audio from raw bytes, with an in-process torchaudio fallback.
 
     First tries ``librosa.load(BytesIO(...))`` which works for formats
     that *soundfile* can auto-detect (WAV, FLAC, MP3, OGG, ...).  If
     that fails with a ``LibsndfileError`` indicating an unrecognised or
     unsupported format (typically container formats like MP4/M4A/WebM),
-    the bytes are decoded via ffmpeg using an in-memory file descriptor
-    so that ffmpeg can seek the container metadata without any disk I/O.
+    the bytes are decoded in-process via ``torchaudio`` (backed by
+    TorchCodec / FFmpeg) which handles these containers natively.
     """
-    # default: should work for most formats
+    sr = int(sr)
+
+    # default: soundfile (librosa)
     try:
         with io.BytesIO(audio_data) as buf:
             return librosa.load(buf, sr=sr)  # type: ignore[return-value]
@@ -118,12 +93,12 @@ def load_audio_bytes(
         ):
             logger.debug(
                 "librosa/soundfile could not decode audio from BytesIO "
-                "(code=%s: %s); falling back to ffmpeg in-memory decode",
+                "(code=%s: %s); falling back to torchaudio in-process decode",
                 exc.code,
                 exc,
             )
         else:
             raise
 
-    # fallback: ffmpeg via in-memory fd
-    return _decode_audio_bytes_ffmpeg(audio_data, sr)
+    # Fallback: torchaudio in-process decode (no subprocess overhead).
+    return _decode_audio_bytes_torchaudio(audio_data, sr)
