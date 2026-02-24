@@ -20,7 +20,6 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     fp8_w8a8_moe_quant_config,
-    mxfp4_w4a4_moe_quant_config,
     mxfp4_w4a8_moe_quant_config,
     mxfp4_w4a16_moe_quant_config,
     ocp_mx_moe_quant_config,
@@ -78,9 +77,6 @@ class QuarkMoEMethod(FusedMoEMethodBase):
                 "quantized are not supported"
             )
 
-        emulate = not current_platform.supports_mx() or not (
-            rocm_aiter_ops.is_fused_moe_enabled()
-        )
         weight_config = layer_quant_config.get("weight")
         input_config = layer_quant_config.get("input_tensors")
 
@@ -89,12 +85,14 @@ class QuarkMoEMethod(FusedMoEMethodBase):
         elif quant_config._is_fp8_w8a8(weight_config, input_config):
             return QuarkW8A8Fp8MoEMethod(weight_config, input_config, module.moe_config)
         elif quant_config._is_w_ocp_mx_a_x(weight_config, input_config):
-            from vllm.config import get_current_vllm_config
-
-            model_type = getattr(
-                get_current_vllm_config().model_config.hf_config, "model_type", None
+            emulate = not current_platform.supports_mx() or not (
+                rocm_aiter_ops.is_fused_moe_enabled()
             )
-            if model_type == "gpt_oss" and not emulate:
+            if (
+                input_config.get("dtype") == "fp8_e4m3"
+                and not input_config.get("is_dynamic")
+                and not emulate
+            ):
                 return QuarkOCP_MX_MoEMethod_OSS(
                     weight_config, input_config, module.moe_config
                 )
@@ -1122,6 +1120,7 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
                 weight_scale=w13_scale,
                 flex_ctx=FlexCtx(rhs_data=w13_flex, lhs_data=lhs_data13),
             )
+
             self.w2_precision_config = PrecisionConfig(
                 weight_scale=w2_scale,
                 flex_ctx=FlexCtx(rhs_data=w2_flex, lhs_data=lhs_data2),
@@ -1130,15 +1129,14 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
     ) -> FusedMoEQuantConfig | None:
-        w1_scale = self.w13_precision_config
-        w2_scale = self.w2_precision_config
-
-        # TODO: how to set scale?
-        return mxfp4_w4a4_moe_quant_config(
+        return mxfp4_w4a8_moe_quant_config(
+            w1_scale=self.w13_precision_config,
+            w2_scale=self.w2_precision_config,
+            a1_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
             w1_bias=layer.w13_bias,
             w2_bias=layer.w2_bias,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
+            block_shape=None,
         )
 
     @property

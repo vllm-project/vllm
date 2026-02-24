@@ -329,7 +329,7 @@ def triton_kernel_moe_oss_forward(
         routing_data, gather_idx, scatter_idx = routing(
             gating_output, topk, sm_first=not renormalize
         )
-    elif quant_config.use_mxfp4_w4a4:
+    elif quant_config.use_mxfp4_w4a8:
         from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
 
         routing_data, gather_idx, scatter_idx = aiter_routing(
@@ -424,7 +424,7 @@ def triton_kernel_fused_oss_experts(
             y=output_tensor,
         )
 
-    elif quant_config.use_mxfp4_w4a4:
+    elif quant_config.use_mxfp4_w4a8:
         from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
         from aiter.ops.triton.quant_moe import downcast_to_static_fp8
 
