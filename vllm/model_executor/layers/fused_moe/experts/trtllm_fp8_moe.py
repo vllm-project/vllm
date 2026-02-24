@@ -13,7 +13,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
 )
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
-    activation_to_flashinfer_type,
+    activation_to_flashinfer_int,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
@@ -67,7 +67,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             self._g1_scale_c = (
                 self._g1_alphas / self.quant_config.a2_scale
                 if moe_config.is_act_and_mul
-                else torch.ones_like(self._g1_alphas) * self.quant_config.a2_scale
+                else torch.ones_like(self._g1_alphas) / self.quant_config.a2_scale
             )
 
     @staticmethod
@@ -216,6 +216,7 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
+            use_shuffled_weight=False,
         )
 
     def _apply_per_tensor(
@@ -237,7 +238,9 @@ class TrtLlmFp8Experts(mk.FusedMoEExpertsMonolithic):
     ) -> torch.Tensor:
         # Confirm supported activation function.
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
-        activation_type = activation_to_flashinfer_type(activation)
+        from flashinfer.fused_moe.core import ActivationType
+
+        activation_type = ActivationType(activation_to_flashinfer_int(activation))
 
         # Confirm Llama-4 routing is proper.
         if self.routing_method_type == RoutingMethodType.Llama4:
