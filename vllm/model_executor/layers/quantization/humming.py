@@ -107,6 +107,17 @@ def parse_single_config(config):
     return result_dict
 
 
+def parse_single_input_config(config):
+    config = config.copy()
+    if "input_dtype" not in config:
+        return {}
+
+    return {
+        "a_dtype": config["input_dtype"],
+        "input_scale_group_size_k": config.get("group_size", 0)
+    }
+
+
 class HummingLayerQuantizationConfig(QuantizationConfig):
     def __init__(
         self,
@@ -216,7 +227,6 @@ class HummingConfig(QuantizationConfig):
         for regex in config.get("dynamic", {}):
             if regex[:1] != "-":
                 continue
-            regex = regex[2:]
             if re.match(regex[2:], prefix):
                 return True
 
@@ -242,6 +252,27 @@ class HummingConfig(QuantizationConfig):
 
         return layer_config
 
+    @classmethod
+    def get_layer_input_quant_config(cls, prefix: str) -> dict[str, Any] | None:
+        config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
+        if config is None:
+            return {}
+
+        layer_config = parse_single_input_config(config)
+        for regex, override_config in config.get("dynamic", {}).items():
+            if regex[:1] == "-":
+                return {}
+            elif regex[:1] != "+":
+                continue
+            regex = regex[2:]
+            if re.match(regex[2:], prefix):
+                layer_config = config.copy()
+                layer_config.update(override_config)
+                layer_config = parse_single_input_config(layer_config)
+                break
+
+        return layer_config
+
     def get_quant_config_for_layer(
         self, prefix: str
     ) -> HummingLayerQuantizationConfig | None:
@@ -254,7 +285,9 @@ class HummingConfig(QuantizationConfig):
                 weight_config["ckpt_quant_method"] = None
 
         if weight_config is not None:
-            return HummingLayerQuantizationConfig.from_config(weight_config)
+            config = weight_config.copy()
+            config.update(self.get_layer_input_quant_config(prefix))
+            return HummingLayerQuantizationConfig.from_config(config)
         return None
 
     def get_quant_method(
@@ -302,6 +335,11 @@ class HummingLinearMethod(LinearMethodBase):
         self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
         self.quant_config.c_dtype = self.quant_config.c_dtype or f16_dtype
         self.quant_config.bs_dtype = self.quant_config.bs_dtype or f16_dtype
+        is_f16_accum_supported = (
+            self.quant_config.c_dtype == dtypes.float16
+            and self.quant_config.a_dtype in [dtypes.float16, dtypes.float8e4m3]
+        )
+        self.use_f16_accum = is_f16_accum_supported and envs.VLLM_HUMMING_USE_F16_ACCUM
 
         meta = HummingLayerMeta(
             a_dtype=self.quant_config.a_dtype,
@@ -395,7 +433,11 @@ class HummingLinearMethod(LinearMethodBase):
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         HummingMethod.finish_load(layer)
         use_stream_k = not vllm_is_batch_invariant()
-        HummingMethod.prepare_default_kernel_configs(layer, use_stream_k=use_stream_k)
+        HummingMethod.prepare_default_kernel_configs(
+            layer,
+            use_stream_k=use_stream_k,
+            use_f16_accum=self.use_f16_accum,
+        )
 
     def apply(
         self,
@@ -433,6 +475,12 @@ class HummingMoEMethod(FusedMoEMethodBase):
         self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
         self.quant_config.c_dtype = self.quant_config.c_dtype or f16_dtype
         self.quant_config.bs_dtype = self.quant_config.bs_dtype or f16_dtype
+
+        is_f16_accum_supported = (
+            self.quant_config.c_dtype == dtypes.float16
+            and self.quant_config.a_dtype in [dtypes.float16, dtypes.float8e4m3]
+        )
+        self.use_f16_accum = is_f16_accum_supported and envs.VLLM_HUMMING_USE_F16_ACCUM
 
         base_meta = HummingLayerMeta(
             a_dtype=self.quant_config.a_dtype,
@@ -570,6 +618,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             layer,
             sublayer_name="w13",
             use_stream_k=use_stream_k,
+            use_f16_accum=self.use_f16_accum,
             is_moe=True,
             top_k=layer.top_k,
             is_moe_down=False,
@@ -578,6 +627,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             layer,
             sublayer_name="w2",
             use_stream_k=use_stream_k,
+            use_f16_accum=self.use_f16_accum,
             is_moe=True,
             top_k=layer.top_k,
             is_moe_down=True,
