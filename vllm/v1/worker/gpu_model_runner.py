@@ -5441,6 +5441,7 @@ class GPUModelRunner(
             if self.model.cudagraph_wrapper is not None:
                 self.model.cudagraph_wrapper.concrete_cudagraph_entries.clear()
                 self.model.cudagraph_wrapper.graph_pool = original_pool
+        self.maybe_remove_all_loras(self.lora_config)
         self._cleanup_profiling_kv_cache()
 
         # Reset counter to exclude FULL graphs (will be recaptured in
