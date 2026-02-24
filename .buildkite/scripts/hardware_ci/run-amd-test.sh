@@ -16,13 +16,19 @@ export PYTHONPATH=".."
 ###############################################################################
 
 wait_for_clean_gpus() {
-  echo "--- Waiting for clean GPU state"
+  local timeout=${1:-300}
+  local start=$SECONDS
+  echo "--- Waiting for clean GPU state (timeout: ${timeout}s)"
   while true; do
-    sleep 3
     if grep -q clean /opt/amdgpu/etc/gpu_state; then
       echo "GPUs state is \"clean\""
       return
     fi
+    if (( SECONDS - start >= timeout )); then
+      echo "Error: GPUs did not reach clean state within ${timeout}s" >&2
+      exit 1
+    fi
+    sleep 3
   done
 }
 
