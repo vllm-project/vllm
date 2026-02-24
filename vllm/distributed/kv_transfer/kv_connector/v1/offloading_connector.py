@@ -146,12 +146,6 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.register_kv_caches(kv_caches, cross_layer_groups)
 
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        assert self.connector_worker is not None
-        self.connector_worker.register_cross_layers_kv_cache(kv_cache, attn_backend)
-
     def handle_preemptions(self, preempted_req_ids: set[str]):
         assert self.connector_worker is not None
         self.connector_worker.handle_preemptions(preempted_req_ids)
@@ -631,14 +625,6 @@ class OffloadingConnectorWorker:
                 for layer_name in layer_names
             }
             self._register_handlers(kv_caches, attn_backends)
-
-    def register_cross_layers_kv_cache(
-        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
-    ):
-        cross_layer_name = "ALL_LAYERS"
-        kv_caches = {cross_layer_name: kv_cache}
-        attn_backends = {cross_layer_name: attn_backend}
-        self._register_handlers(kv_caches, attn_backends)
 
     def handle_preemptions(self, preempted_req_ids: set[str]):
         for job_id, transfer_spec in self._unsubmitted_store_jobs:
