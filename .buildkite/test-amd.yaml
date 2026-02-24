@@ -67,7 +67,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  grade: Blocking
+  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py

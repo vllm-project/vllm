@@ -3524,6 +3524,9 @@ class GPUModelRunner(
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+        # When spec decode is enabled, delay clearing connector metadata
+        # until after draft model runs in sample_tokens.
+        clear_kv_metadata = self.speculative_config is None
         with (
             set_forward_context(
                 attn_metadata,
@@ -3537,7 +3540,9 @@ class GPUModelRunner(
                 skip_compiled=has_encoder_input,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
-            self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+            self.maybe_get_kv_connector_output(
+                scheduler_output, clear_metadata=clear_kv_metadata
+            ) as kv_connector_output,
         ):
             model_output = self._model_forward(
                 input_ids=input_ids,
@@ -3764,6 +3769,12 @@ class GPUModelRunner(
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
+
+        # Clear KV connector metadata after draft model runs (if spec decode).
+        # This was deferred from target model forward to allow draft model
+        # to also save its KV cache.
+        if self.speculative_config is not None:
+            self.clear_kv_connector_metadata()
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
@@ -6261,7 +6272,7 @@ class GPUModelRunner(
                         self.encoder_timing_registry[req_id] = EncoderTimingStats()
 
                     stats = self.encoder_timing_registry[req_id]
-                    stats.encoder_forward_time += per_request_time
+                    stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
 
 
@@ -6269,7 +6280,7 @@ class GPUModelRunner(
 class EncoderTimingStats:
     """Per-request timing statistics for encoder forward pass."""
 
-    encoder_forward_time: float = 0.0
+    encoder_forward_secs: float = 0.0
     """Time spent in vision encoder forward pass (seconds)."""
 
     num_encoder_calls: int = 0
@@ -6277,6 +6288,6 @@ class EncoderTimingStats:
 
     def to_dict(self) -> dict[str, float | int]:
         return {
-            "encoder_forward_time": self.encoder_forward_time,
+            "encoder_forward_secs": self.encoder_forward_secs,
             "num_encoder_calls": self.num_encoder_calls,
         }
