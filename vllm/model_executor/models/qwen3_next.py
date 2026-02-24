@@ -590,24 +590,23 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
         # Part 1: Input Projection
         # ============================================================
         if self.aux_stream is not None:
-            projected_states_qkvz, projected_states_ba = (
-                torch.ops.vllm.gdn_in_proj_dual_stream(
-                    hidden_states,
-                    self.prefix,
-                    self.projection_size_qkvz // self.tp_size,
-                    self.projection_size_ba // self.tp_size,
-                )
+            mixed_qkv, z, b, a = torch.ops.vllm.gdn_in_proj_dual_stream(
+                hidden_states,
+                self.prefix,
+                self.conv_dim // self.tp_size,
+                self.num_v_heads // self.tp_size,
+                self.head_v_dim,
             )
         else:
             projected_states_qkvz, _ = self.in_proj_qkvz(hidden_states)
             projected_states_ba, _ = self.in_proj_ba(hidden_states)
-        query, key, value, z, b, a = self.fix_query_key_value_ordering(
-            projected_states_qkvz, projected_states_ba
-        )
-        query, key, value = map(
-            lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
-        )
-        mixed_qkv = torch.cat((query, key, value), dim=-1)
+            query, key, value, z, b, a = self.fix_query_key_value_ordering(
+                projected_states_qkvz, projected_states_ba
+            )
+            query, key, value = map(
+                lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+            )
+            mixed_qkv = torch.cat((query, key, value), dim=-1)
 
         # ============================================================
         # Part 2: Core Attention (Custom Op)
@@ -1566,9 +1565,10 @@ def fused_gdn_gating(
 def _gdn_in_proj_dual_stream_impl(
     hidden_states: torch.Tensor,
     layer_name: str,
-    projection_size_qkvz: int,
-    projection_size_ba: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    mixed_qkv_size: int,
+    num_v_heads: int,
+    head_v_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Implementation of dual-stream input projection for GatedDeltaNet.
     Runs in_proj_qkvz on main stream and in_proj_ba on auxiliary stream.
@@ -1598,15 +1598,40 @@ def _gdn_in_proj_dual_stream_impl(
     # Default stream waits only for the ba projection to finish
     self.event_aux.wait()
 
-    return projected_states_qkvz, projected_states_ba
+    query, key, value, z, b, a = self.fix_query_key_value_ordering(
+        projected_states_qkvz, projected_states_ba
+    )
+    query, key, value = map(
+        lambda x: rearrange(x, "l p d -> l (p d)"), (query, key, value)
+    )
+    mixed_qkv = torch.cat((query, key, value), dim=-1).contiguous()
+
+    # Keep the downstream RMSNormGated fast path on contiguous inputs.
+    z = z.contiguous()
+    b = b.contiguous()
+    a = a.contiguous()
+
+    if (
+        mixed_qkv.shape[-1] != mixed_qkv_size
+        or z.shape[-2] != num_v_heads
+        or z.shape[-1] != head_v_dim
+    ):
+        raise RuntimeError(
+            "Unexpected output shape from gdn_in_proj_dual_stream: "
+            f"got mixed_qkv={tuple(mixed_qkv.shape)}, z={tuple(z.shape)}, "
+            f"expected last dims ({mixed_qkv_size}, {num_v_heads}, {head_v_dim})."
+        )
+
+    return mixed_qkv, z, b, a
 
 
 def _gdn_in_proj_dual_stream_fake(
     hidden_states: torch.Tensor,
     layer_name: str | None,
-    projection_size_qkvz: int,
-    projection_size_ba: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
+    mixed_qkv_size: int,
+    num_v_heads: int,
+    head_v_dim: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Fake implementation for shape inference during torch.compile.
     Returns empty tensors with the expected output shapes.
@@ -1614,12 +1639,22 @@ def _gdn_in_proj_dual_stream_fake(
     num_tokens = hidden_states.size(0)
     return (
         torch.empty(
-            (num_tokens, projection_size_qkvz),
+            (num_tokens, mixed_qkv_size),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         ),
         torch.empty(
-            (num_tokens, projection_size_ba),
+            (num_tokens, num_v_heads, head_v_dim),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        ),
+        torch.empty(
+            (num_tokens, num_v_heads),
+            dtype=hidden_states.dtype,
+            device=hidden_states.device,
+        ),
+        torch.empty(
+            (num_tokens, num_v_heads),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         ),
