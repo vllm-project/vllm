@@ -959,7 +959,8 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
         _install_mamba_ssm_stub_if_missing(monkeypatch)
         hf_config = AutoConfig.from_pretrained(model_name, trust_remote_code=True)
         hf_model = AutoModelForCausalLM.from_config(hf_config, trust_remote_code=True)
-        ref_hf_layer = hf_model.backbone.layers[1].mixer.cuda()
+        first_expert_layer_index = hf_config.hybrid_override_pattern.find("E")
+        ref_hf_layer = hf_model.backbone.layers[first_expert_layer_index].mixer.cuda()
 
         # Load weights from our layer to the reference hf layer before
         # post-processing, since some of the weights get padded and size changes.
