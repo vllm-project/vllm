@@ -452,7 +452,7 @@ class RocmPlatform(Platform):
     @with_amdsmi_context
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         device0 = amdsmi_get_processor_handles()[0]
-        asic_info = amdsmi.amdsmi_get_gpu_asic_info(device0)
+        asic_info = amdsmi_get_gpu_asic_info(device0)
         target_id = asic_info['target_graphics_version']
         major_minor = target_id[3:]
         if len(major_minor) == 4:
@@ -631,7 +631,7 @@ class RocmPlatform(Platform):
     def supports_mx(cls) -> bool:
         #gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         device0 = amdsmi_get_processor_handles()[0]
-        asic_info = amdsmi.amdsmi_get_gpu_asic_info(device0)
+        asic_info = amdsmi_get_gpu_asic_info(device0)
         gcn_arch = asic_info['target_graphics_version']
         return any(gfx in gcn_arch for gfx in ["gfx95"])
 
@@ -640,7 +640,7 @@ class RocmPlatform(Platform):
     def supports_fp8(cls) -> bool:
         #gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         device0 = amdsmi_get_processor_handles()[0]
-        asic_info = amdsmi.amdsmi_get_gpu_asic_info(device0)
+        asic_info = amdsmi_get_gpu_asic_info(device0)
         gcn_arch = asic_info['target_graphics_version']
         return any(gfx in gcn_arch for gfx in ["gfx94", "gfx95", "gfx12"])
 
@@ -649,7 +649,7 @@ class RocmPlatform(Platform):
     def is_fp8_fnuz(cls) -> bool:
         # only device 0 is checked, this assumes MI300 platforms are homogeneous
         device0 = amdsmi_get_processor_handles()[0]
-        asic_info = amdsmi.amdsmi_get_gpu_asic_info(device0)
+        asic_info = amdsmi_get_gpu_asic_info(device0)
         return "gfx94" in asic_info['target_graphics_version']
         #return "gfx94" in torch.cuda.get_device_properties(0).gcnArchName
 
@@ -666,7 +666,7 @@ class RocmPlatform(Platform):
         # We only enable custom allreduce for MI300 series
         #gcn_arch = torch.cuda.get_device_properties(0).gcnArchName
         device0 = amdsmi_get_processor_handles()[0]
-        asic_info = amdsmi.amdsmi_get_gpu_asic_info(device0)
+        asic_info = amdsmi_get_gpu_asic_info(device0)
         gcn_arch = asic_info['target_graphics_version']
         supported_archs = ["gfx94", "gfx95"]
         return any(gfx in gcn_arch for gfx in supported_archs)
