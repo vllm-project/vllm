@@ -71,7 +71,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import create_error_response
-from vllm.exceptions import RequestRejectedError, VLLMValidationError
+from vllm.exceptions import GenerationError, RequestRejectedError, VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
