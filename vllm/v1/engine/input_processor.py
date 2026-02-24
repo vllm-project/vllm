@@ -26,7 +26,7 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.sampling_params import SamplingParams
-from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
 from vllm.utils.func_utils import supports_kw
@@ -111,10 +111,8 @@ class InputProcessor:
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
-        # TODO: Validate generation tasks as well once `supported_tasks`
-        # is passed to all `process_inputs` calls
-        supported_tasks: tuple[SupportedTask, ...] | None,
-    ):
+        supported_tasks: tuple[SupportedTask, ...],
+    ) -> None:
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
         if params.truncate_prompt_tokens is not None:
             params_type = type(params).__name__
@@ -127,6 +125,12 @@ class InputProcessor:
             )
 
         if isinstance(params, SamplingParams):
+            supported_generation_tasks = [
+                task for task in supported_tasks if task in GENERATION_TASKS
+            ]
+            if not supported_generation_tasks:
+                raise ValueError("This model does not support generation")
+
             params.verify(
                 self.model_config,
                 self.speculative_config,
@@ -134,17 +138,13 @@ class InputProcessor:
                 self.tokenizer,
             )
         elif isinstance(params, PoolingParams):
-            if supported_tasks is None:
-                raise RuntimeError("`supported_tasks` must be passed for pooling")
-
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
             ]
+            if not supported_pooling_tasks:
+                raise ValueError("This model does not support pooling")
 
             if params.task is None:
-                if not supported_pooling_tasks:
-                    raise ValueError("Pooling tasks are not supported")
-
                 if "token_embed" in supported_pooling_tasks:
                     params.task = "token_embed"
                 elif "token_classify" in supported_pooling_tasks:
@@ -227,17 +227,17 @@ class InputProcessor:
         request_id: str,
         prompt: PromptType | ProcessorInputs,
         params: SamplingParams | PoolingParams,
+        supported_tasks: tuple[SupportedTask, ...],
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
-        supported_tasks: tuple[SupportedTask, ...] | None = None,
         resumable: bool = False,
     ) -> EngineCoreRequest:
-        self._validate_lora(lora_request)
         self._validate_params(params, supported_tasks)
+        self._validate_lora(lora_request)
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size

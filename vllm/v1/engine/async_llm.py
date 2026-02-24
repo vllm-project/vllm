@@ -356,13 +356,13 @@ class AsyncLLM(EngineClient):
                 request_id,
                 prompt,
                 params,
+                supported_tasks=await self.get_supported_tasks(),
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
-                supported_tasks=await self.get_supported_tasks(),
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -433,6 +433,7 @@ class AsyncLLM(EngineClient):
         self._validate_streaming_input_sampling_params(sampling_params)
 
         inputs = dict(
+            supported_tasks=await self.get_supported_tasks(),
             arrival_time=arrival_time,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
