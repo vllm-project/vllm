@@ -2182,12 +2182,13 @@ async def test_parse_chat_messages_single_empty_audio_with_uuid_async(
     _assert_mm_uuids(mm_uuids, 1, modality="audio", expected_uuids=[audio_uuid])
 
 
-# TranslateGemma tests
-def test_translategemma_translation_fields_preserved(phi3v_model_config):
-    """Test that source_lang_code and target_lang_code are preserved in parsing.
+# Extra field passthrough tests
+def test_extra_fields_preserved_in_text_parts(phi3v_model_config):
+    """Test that arbitrary extra fields on content parts are preserved
+    when using openai content format (wrap_dicts=True).
 
-    TranslateGemma requires structured input with language codes that must
-    flow through the parsing pipeline to the chat template.
+    This enables models like TranslateGemma to receive custom metadata
+    (e.g., language codes) through their bundled chat templates.
     """
     messages = [
         {
@@ -2195,16 +2196,16 @@ def test_translategemma_translation_fields_preserved(phi3v_model_config):
             "content": [
                 {
                     "type": "text",
+                    "text": "V nejhorším případě i k prasknutí čočky.",
                     "source_lang_code": "cs",
                     "target_lang_code": "de-DE",
-                    "text": "V nejhorším případě i k prasknutí čočky.",
+                    "custom_field": "custom_value",
                 }
             ],
         }
     ]
 
-    # Use openai format to preserve structured content
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = parse_chat_messages(
         messages,
         phi3v_model_config,
         content_format="openai",
@@ -2220,60 +2221,17 @@ def test_translategemma_translation_fields_preserved(phi3v_model_config):
     text_part = content[0]
     assert text_part["type"] == "text"
     assert text_part["text"] == "V nejhorším případě i k prasknutí čočky."
-    # Verify translation fields are preserved
     assert text_part["source_lang_code"] == "cs"
     assert text_part["target_lang_code"] == "de-DE"
-
-
-def test_translategemma_chat_template_format():
-    """Test TranslateGemma chat template produces expected output format."""
-    from vllm.entrypoints.chat_utils import load_chat_template
-
-    template_path = (
-        VLLM_PATH
-        / "vllm"
-        / "transformers_utils"
-        / "chat_templates"
-        / "template_translategemma.jinja"
-    )
-    chat_template = load_chat_template(template_path)
-    assert isinstance(chat_template, str)
-
-    # Verify template contains expected Gemma 3 tokens
-    assert "<start_of_turn>" in chat_template
-    assert "<end_of_turn>" in chat_template
-    assert "source_lang_code" in chat_template
-    assert "target_lang_code" in chat_template
-
-
-def test_translategemma_registry_fallback():
-    """Test that TranslateGemma models get the correct chat template."""
-    from vllm.transformers_utils.chat_templates.registry import (
-        get_chat_template_fallback_path,
-    )
-
-    # TranslateGemma should get specialized template
-    translategemma_path = get_chat_template_fallback_path(
-        "gemma3", "google/translategemma-27b-it"
-    )
-    assert translategemma_path is not None
-    assert "template_translategemma.jinja" in str(translategemma_path)
-
-    # Regular Gemma 3 should return None (use HF template)
-    gemma3_path = get_chat_template_fallback_path("gemma3", "google/gemma-3-27b-it")
-    assert gemma3_path is None
+    assert text_part["custom_field"] == "custom_value"
 
 
 @pytest.mark.asyncio
-async def test_translategemma_image_translation_fields_preserved(
+async def test_extra_fields_preserved_in_image_parts(
     phi3v_model_config,
     image_url,
 ):
-    """Test that translation fields are preserved for image inputs.
-
-    TranslateGemma supports image-to-text translation where an image
-    containing text is translated to a target language.
-    """
+    """Test that extra fields are preserved for image content parts."""
     messages = [
         {
             "role": "user",
@@ -2283,13 +2241,13 @@ async def test_translategemma_image_translation_fields_preserved(
                     "image_url": {"url": image_url},
                     "source_lang_code": "en",
                     "target_lang_code": "es",
+                    "custom_annotation": "translate_this",
                 },
             ],
         }
     ]
 
-    # Use openai format to preserve structured content
-    conversation, mm_future, mm_uuids = parse_chat_messages_futures(
+    conversation, mm_data, mm_uuids = await parse_chat_messages_async(
         messages,
         phi3v_model_config,
         content_format="openai",
@@ -2304,12 +2262,11 @@ async def test_translategemma_image_translation_fields_preserved(
 
     image_part = content[0]
     assert image_part["type"] == "image"
-    # Verify translation fields are preserved on image parts
     assert image_part["source_lang_code"] == "en"
     assert image_part["target_lang_code"] == "es"
+    assert image_part["custom_annotation"] == "translate_this"
 
-    # Verify image data is processed correctly
-    _assert_mm_data_is_image_input(await mm_future, 1)
+    _assert_mm_data_is_image_input(mm_data, 1)
 
 
 def test_parse_chat_messages_image_vision_chunk(

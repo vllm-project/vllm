@@ -1216,6 +1216,26 @@ MM_PARSER_MAP: dict[
     "video_url": lambda part: _VideoParser(part).get("video_url", {}).get("url", None),
 }
 
+# Fields already consumed by the content part parser. Any field NOT in this
+# set is treated as an extra field and passed through to the chat template
+# when using the OpenAI (wrap_dicts) content format.
+_KNOWN_CONTENT_PART_FIELDS: frozenset[str] = frozenset({
+    "type",
+    "text", "refusal", "thinking", "input_text", "output_text", "closed",
+    "image_url", "image_pil", "image_embeds", "detail",
+    "audio_url", "input_audio", "audio_embeds",
+    "video_url", "input_image", "uuid",
+})
+
+
+def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
+    """Collect fields from a content part that are not consumed by the parser.
+
+    This allows model-specific metadata (e.g., language codes for translation
+    models) to flow through to the chat template.
+    """
+    return {k: v for k, v in part.items() if k not in _KNOWN_CONTENT_PART_FIELDS}
+
 
 def _parse_chat_message_content_mm_part(
     part: ChatCompletionContentPartParam,
@@ -1389,11 +1409,7 @@ def _parse_chat_message_content_part(
         str_content = cast(str, content)
         if wrap_dicts:
             result: dict[str, Any] = {"type": "text", "text": str_content}
-            # Preserve translation-specific fields for models like TranslateGemma
-            part_dict = cast(dict[str, Any], part)
-            for field in ("source_lang_code", "target_lang_code"):
-                if field in part_dict:
-                    result[field] = part_dict[field]
+            result.update(_collect_extra_fields(cast(dict[str, Any], part)))
             return result
         else:
             return str_content
@@ -1438,11 +1454,7 @@ def _parse_chat_message_content_part(
 
     if wrap_dicts:
         result = {"type": modality}
-        # Preserve translation-specific fields for models like TranslateGemma
-        part_dict = cast(dict[str, Any], part)
-        for field in ("source_lang_code", "target_lang_code"):
-            if field in part_dict:
-                result[field] = part_dict[field]
+        result.update(_collect_extra_fields(cast(dict[str, Any], part)))
         return result
     else:
         return MODALITY_PLACEHOLDERS_MAP[modality] if interleave_strings else None
