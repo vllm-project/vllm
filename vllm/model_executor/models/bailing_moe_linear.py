@@ -76,6 +76,25 @@ def is_linear_layer(layer_idx, layer_group_size):
         return False
 
 
+def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
+    rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
+    if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
+        rope_parameters["rope_theta"] = config.rope_theta
+    if "partial_rotary_factor" not in rope_parameters and hasattr(
+        config, "partial_rotary_factor"
+    ):
+        rope_parameters["partial_rotary_factor"] = config.partial_rotary_factor
+
+    rope_scaling = getattr(config, "rope_scaling", None)
+    if isinstance(rope_scaling, dict):
+        rope_scaling = copy.deepcopy(rope_scaling)
+        if "type" in rope_scaling and "rope_type" not in rope_scaling:
+            rope_scaling["rope_type"] = rope_scaling.pop("type")
+        rope_parameters.update(rope_scaling)
+
+    return rope_parameters or None
+
+
 class BailingMoeV25MLAAttention(nn.Module):
     """
     MLA Attention for BailingMoeV2.5 full attention layers.
@@ -176,16 +195,13 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_a_layernorm = None
             self.q_b_proj = None
 
-        rope_theta = getattr(config, "rope_theta", 600000)
+        rope_parameters = _build_rope_parameters(config)
         max_position = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             head_size=self.qk_rope_head_dim,
             max_position=max_position,
             is_neox_style=False,
-            rope_parameters={
-                "rope_theta": rope_theta,
-                "partial_rotary_factor": 0.5,
-            },
+            rope_parameters=rope_parameters or None,
             dtype=torch.float32,
         )
 
@@ -553,15 +569,7 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         )
 
         # use fp32 rotary embedding
-        rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
-        if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
-            rope_parameters["rope_theta"] = config.rope_theta
-        rope_scaling = getattr(config, "rope_scaling", None)
-        if isinstance(rope_scaling, dict):
-            rope_scaling = copy.deepcopy(rope_scaling)
-            if "type" in rope_scaling and "rope_type" not in rope_scaling:
-                rope_scaling["rope_type"] = rope_scaling.pop("type")
-            rope_parameters.update(rope_scaling)
+        rope_parameters = _build_rope_parameters(config)
 
         self.rotary_emb = get_rope(
             self.head_dim,
@@ -770,81 +778,6 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
         return hidden
 
 
-class BailingMoeV25Attention(nn.Module):
-    """
-    Full attention for BailingMoE v2.5 using standard Attention.
-    Note: This uses standard Attention (not MLA) for full attention layers.
-    The Attention module handles its own KV cache registration.
-    """
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
-        layer_id: int = 0,
-        prefix: str = "attention",
-        cache_config: CacheConfig | None = None,
-    ) -> None:
-        super().__init__()
-        self.layer_id = layer_id
-        self.hidden_size = config.hidden_size
-        self.total_num_heads = config.num_attention_heads
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.num_heads = self.total_num_heads // self.tp_size
-
-        # Use standard attention dimensions
-        self.head_dim = getattr(
-            config, "head_dim", config.hidden_size // self.total_num_heads
-        )
-        self.scaling = self.head_dim**-0.5
-
-        # QKV projection (standard, not MLA-style)
-        self.query_key_value = QKVParallelLinear(
-            self.hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            bias=getattr(config, "attention_bias", False),
-            quant_config=quant_config,
-            prefix=f"{prefix}.query_key_value",
-        )
-
-        # Output projection
-        self.o_proj = RowParallelLinear(
-            self.num_heads * self.head_dim,
-            self.hidden_size,
-            bias=getattr(config, "attention_bias", False),
-            quant_config=quant_config,
-            prefix=f"{prefix}.o_proj",
-        )
-
-        # Standard Attention
-        from vllm.model_executor.layers.attention import Attention
-
-        self.attn = Attention(
-            self.num_heads,
-            self.head_dim,
-            self.scaling,
-            num_kv_heads=self.num_heads,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=f"{prefix}.attn",
-        )
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> torch.Tensor:
-        # QKV projection
-        qkv, _ = self.query_key_value(hidden_states)
-        q, k, v = qkv.split([self.num_heads * self.head_dim] * 3, dim=-1)
-
-        # Attention
-        attn_output = self.attn(q, k, v)
-        output, _ = self.o_proj(attn_output)
-        return output
-
-
 class BailingMoeV25DecoderLayer(nn.Module):
     """Decoder layer supporting both linear and full attention."""
 
@@ -952,7 +885,14 @@ class BailingMoeV25DecoderLayer(nn.Module):
         return hidden_states, None
 
 
-@support_torch_compile
+@support_torch_compile(
+    dynamic_arg_dims={
+        "input_ids": 0,
+        "positions": -1,
+        "intermediate_tensors": 0,
+        "inputs_embeds": 0,
+    }
+)
 class BailingMoeV25Model(nn.Module):
     """Bailing MoE v2.5 Model with hybrid attention support."""
 
@@ -1287,11 +1227,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         cls,
         vllm_config: VllmConfig,
     ) -> tuple[tuple[int, ...], ...]:
-        """Calculate shape for linear attention cache.
-
-        Note: Padding for MLA alignment is handled by HybridAttentionMambaModelConfig
-        via mamba_page_size_padded, not by modifying shapes.
-        """
+        """Calculate shape for linear attention cache."""
         config = vllm_config.model_config.hf_config
         tp_size = vllm_config.parallel_config.tensor_parallel_size
 
