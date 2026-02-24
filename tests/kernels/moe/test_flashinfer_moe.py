@@ -290,15 +290,13 @@ def test_flashinfer_trtllm_fp4_moe_no_graph(
         a_scale_linear = a_scale_interleaved_kernel.view(torch.float8_e4m3fn).reshape(
             m, k // quant_blocksize
         )
-        a_in_dtype = (
-            (
-                break_fp4_bytes(a_fp4_kernel, torch.float32).reshape(
-                    m, k // quant_blocksize, quant_blocksize
-                )
-                * (a_scale_linear.to(torch.float32) / a_global_scale).unsqueeze(-1)
-            )
-            .reshape(m, k)
-            .to(dtype)
+        a_in_dtype = _dequant_nvfp4_to_shape(
+            a_fp4_kernel,
+            a_scale_linear,
+            a_global_scale,
+            dtype=dtype,
+            block_size=quant_blocksize,
+            target_shape=(m, k),
         )
 
         w1_d = torch.empty(
@@ -307,33 +305,22 @@ def test_flashinfer_trtllm_fp4_moe_no_graph(
         w2_d = torch.empty((e, k, n), device="cuda", dtype=dtype)
 
         for idx in range(0, e):
-            w1_d[idx] = (
-                (
-                    break_fp4_bytes(w1_q[idx], torch.float32).reshape(
-                        w13_rows, k // quant_blocksize, quant_blocksize
-                    )
-                    * (
-                        w13_scale_linear[idx]
-                        .view(torch.float8_e4m3fn)
-                        .to(torch.float32)
-                        / (1 / w13_scale_2_prepared[idx])
-                    ).unsqueeze(-1)
-                )
-                .reshape(w13_rows, k)
-                .to(dtype)
+            w1_d[idx] = _dequant_nvfp4_to_shape(
+                w1_q[idx],
+                w13_scale_linear[idx],
+                w13_scale_2_prepared[idx],
+                dtype=dtype,
+                block_size=quant_blocksize,
+                target_shape=(w13_rows, k),
             )
-            w2_d[idx] = (
-                (
-                    break_fp4_bytes(w2_q[idx], torch.float32).reshape(
-                        k, n // quant_blocksize, quant_blocksize
-                    )
-                    * (
-                        w2_scale_linear[idx].view(torch.float8_e4m3fn).to(torch.float32)
-                        / (1 / w2_scale_2_prepared[idx])
-                    ).unsqueeze(-1)
-                )
-                .reshape(k, n)
-                .to(dtype)
+
+            w2_d[idx] = _dequant_nvfp4_to_shape(
+                w2_q[idx],
+                w2_scale_linear[idx],
+                w2_scale_2_prepared[idx],
+                dtype=dtype,
+                block_size=quant_blocksize,
+                target_shape=(k, n),
             )
 
         topk_weights, topk_ids, _ = fused_topk(
@@ -351,6 +338,26 @@ def test_flashinfer_trtllm_fp4_moe_no_graph(
         torch.testing.assert_close(
             torch_output, flashinfer_output, atol=1e-1, rtol=1e-1
         )
+
+
+def _dequant_nvfp4_to_shape(
+    quantized_tensor: torch.Tensor,
+    scale: torch.Tensor,
+    global_scale: torch.Tensor,
+    dtype: torch.dtype,
+    block_size: int,
+    target_shape: torch.Size,
+) -> torch.Tensor:
+    return (
+        (
+            break_fp4_bytes(quantized_tensor, torch.float32).reshape(
+                target_shape[-2], target_shape[-1] // block_size, block_size
+            )
+            * (scale.to(torch.float32) * global_scale).unsqueeze(-1)
+        )
+        .reshape(target_shape[-2], target_shape[-1])
+        .to(dtype)
+    )
 
 
 if __name__ == "__main__":
