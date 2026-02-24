@@ -21,7 +21,7 @@ AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct"
 ]
 
-MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
+MODEL_NAME = "openai/gpt-oss-120b"
 
 
 @pytest.fixture(scope="module")
@@ -605,13 +605,16 @@ def test_run_guidellm_benchmark(
         # Print the raw JSON output
         print(result.stdout)
 
-        # Parse JSON output
-        try:
-            benchmark_data = json.loads(result.stdout)
-        except json.JSONDecodeError:
-            # If JSON parsing fails, create a basic result structure
-            print("Warning: Could not parse guidellm JSON output, using raw output")
-            benchmark_data = {
-                "raw_output": result.stdout,
-                "stderr": result.stderr,
-            }
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Guidellm benchmark timed out after {timeout} seconds")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"Guidellm benchmark failed with exit code {e.returncode}:\n"
+            f"stdout: {e.stdout}\n"
+            f"stderr: {e.stderr}"
+        )
+    except FileNotFoundError:
+        raise RuntimeError(
+            "guidellm command not found. Please install guidellm:\n"
+            "  pip install guidellm"
+        )
