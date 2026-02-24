@@ -660,13 +660,13 @@ class ParallelConfig:
             )
 
         if (
-            self.all2all_backend == "allgather_reducescatter"
+            self.all2all_backend in ("allgather_reducescatter", "naive")
             and self.eplb_config.use_async
         ):
             logger.warning(
-                "Async EPLB causes hangs with the "
-                "'allgather_reducescatter' all2all backend. "
-                "Forcing synchronous EPLB."
+                "Async EPLB causes hangs with the '%s' all2all backend. "
+                "Forcing synchronous EPLB.",
+                self.all2all_backend,
             )
             self.eplb_config.use_async = False
 
