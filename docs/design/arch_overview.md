@@ -19,7 +19,7 @@ server.
 
 Here is a sample of `LLM` class usage:
 
-code
+??? code
 
     ```python
     from vllm import LLM, SamplingParams
@@ -247,7 +247,7 @@ vision-language model.
 
     To avoid accidentally passing incorrect arguments, the constructor is now keyword-only. This ensures that the constructor will raise an error if old configurations are passed. vLLM developers have already made this change for all models within vLLM. For out-of-tree registered models, developers need to update their models, for example by adding shim code to adapt the old constructor signature to the new one:
 
-    code
+    ??? code
 
         ```python
         class MyOldModel(nn.Module):
