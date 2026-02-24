@@ -96,7 +96,7 @@ class ModelArchConfigConvertorBase:
         ]
         # For non-grouped-query attention models, the number of KV heads is
         # equal to the number of attention heads.
-        default_factory = lambda: self.get_total_num_attention_heads()
+        default_factory = self.get_total_num_attention_heads
         return getattr_iter(
             self.hf_text_config, attributes, default_factory=default_factory
         )
