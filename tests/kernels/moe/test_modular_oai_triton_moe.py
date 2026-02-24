@@ -6,8 +6,8 @@ Test modular OAI Triton MoE
 
 import pytest
 import torch
-from vllm.tests.utils import wait_for_gpu_memory_to_clear
 
+from tests.utils import wait_for_gpu_memory_to_clear
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.utils.import_utils import has_triton_kernels
 
