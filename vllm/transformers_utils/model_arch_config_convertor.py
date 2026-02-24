@@ -403,6 +403,70 @@ class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
 
+class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    """Convertor for NAS-optimized models with heterogeneous block_configs.
+
+    Reads per-layer num_key_value_heads from block_configs, falling back
+    to the global config value.  For MoE models, returns the max expert
+    count across layers so that weight buffers are large enough.
+    """
+
+    def get_total_num_kv_heads(self) -> int:
+        block_configs = getattr(self.hf_text_config, "block_configs", None)
+        if block_configs:
+            for bc in block_configs:
+                attn = bc if not isinstance(bc, dict) else bc
+                attn_section = (
+                    attn.get("attention")
+                    if isinstance(attn, dict)
+                    else getattr(attn, "attention", None)
+                )
+                if attn_section is None:
+                    continue
+                no_op = (
+                    attn_section.get("no_op", False)
+                    if isinstance(attn_section, dict)
+                    else getattr(attn_section, "no_op", False)
+                )
+                if no_op:
+                    continue
+                kv = (
+                    attn_section.get("num_key_value_heads")
+                    if isinstance(attn_section, dict)
+                    else getattr(attn_section, "num_key_value_heads", None)
+                )
+                if kv is not None:
+                    return kv
+        return super().get_total_num_kv_heads()
+
+    def get_num_experts(self) -> int:
+        block_configs = getattr(self.hf_text_config, "block_configs", None)
+        if block_configs:
+            max_experts = 0
+            for bc in block_configs:
+                ffn = (
+                    bc.get("ffn") if isinstance(bc, dict) else getattr(bc, "ffn", None)
+                )
+                if ffn is None:
+                    continue
+                moe = (
+                    ffn.get("moe")
+                    if isinstance(ffn, dict)
+                    else getattr(ffn, "moe", None)
+                )
+                if moe is None:
+                    continue
+                n = (
+                    moe.get("num_local_experts", 0)
+                    if isinstance(moe, dict)
+                    else getattr(moe, "num_local_experts", 0)
+                )
+                max_experts = max(max_experts, n)
+            if max_experts > 0:
+                return max_experts
+        return super().get_num_experts()
+
+
 class DeepSeekMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
