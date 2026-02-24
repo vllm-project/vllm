@@ -812,10 +812,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "InternS1ProForConditionalGeneration": _HfExamplesInfo(
         "internlm/Intern-S1-Pro",
         trust_remote_code=True,
-        max_transformers_version="4.57",
-        transformers_version_reason={
-            "hf": "Custom model code is not compatible with Transformers v5."
-        },
     ),
     "InternVLChatModel": _HfExamplesInfo(
         "OpenGVLab/InternVL2-1B",
