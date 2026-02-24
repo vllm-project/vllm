@@ -12,8 +12,6 @@ from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.plugins.io_processors.interface import (
     IOProcessor,
-    IOProcessorInput,
-    IOProcessorOutput,
 )
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
@@ -29,12 +27,14 @@ from .types import (
 logger = init_logger(__name__)
 
 
-class BgeM3SparseEmbeddingsProcessor(IOProcessor):
-    def __init__(self, vllm_config: VllmConfig):
+class BgeM3SparseEmbeddingsProcessor(
+    IOProcessor[SparseEmbeddingCompletionRequestMixin, SparseEmbeddingResponse]
+):
+    def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer | None = None):
         super().__init__(vllm_config)
         self.offline_requests: list[SparseEmbeddingCompletionRequestMixin] = []
         self.online_requests: dict[str, SparseEmbeddingCompletionRequestMixin] = {}
-        self.renderer: BaseRenderer = None
+        self.renderer: BaseRenderer | None = renderer
 
     def merge_pooling_params(
         self,
@@ -51,7 +51,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
                 params.truncate_prompt_tokens = request.truncate_prompt_tokens
         return params
 
-    def parse_request(self, request_data: Any) -> IOProcessorInput:
+    def parse_request(self, request_data: Any) -> SparseEmbeddingCompletionRequestMixin:
         # for vllm.entrypoints.llm.LLM, offline mode, calls `encode` directly.
         if isinstance(request_data, dict):
             return SparseEmbeddingCompletionRequestMixin(**request_data)
@@ -68,8 +68,6 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
             self.online_requests[request_id] = prompt
         else:
             self.offline_requests.append(prompt)
-        if self.renderer is None and "renderer" in kwargs:
-            self.renderer = kwargs["renderer"]
         return prompt.input
 
     def _get_sparse_embedding_request(self, request_id: str | None = None):
@@ -86,7 +84,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
         token_weights = sparse_embedding.values()
         tokens = [None] * len(token_ids)
 
-        if return_tokens:
+        if return_tokens and self.renderer is not None:
             tokens = convert_ids_list_to_tokens(
                 self.renderer.get_tokenizer(), token_ids
             )
@@ -104,7 +102,7 @@ class BgeM3SparseEmbeddingsProcessor(IOProcessor):
         model_output: Sequence[PoolingRequestOutput],
         request_id: str | None = None,
         **kwargs,
-    ) -> IOProcessorOutput:
+    ) -> SparseEmbeddingResponse:
         num_prompt_tokens = 0
         response_data = []
         return_tokens = self._get_sparse_embedding_request(request_id).return_tokens

@@ -135,6 +135,7 @@ class AsyncLLM(EngineClient):
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
+            self.renderer,
         )
 
         # Convert TokPrompt --> EngineCoreRequest.
