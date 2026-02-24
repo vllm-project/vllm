@@ -411,7 +411,7 @@ class InputProcessor:
 
     def _validate_model_input(
         self,
-        prompt_inputs: SingletonInput,
+        prompt_input: SingletonInput,
         prompt_type: Literal["encoder", "decoder"],
     ) -> None:
         model_config = self.model_config
@@ -419,20 +419,18 @@ class InputProcessor:
 
         prompt_ids = (
             None
-            if prompt_inputs["type"] == "embeds"
-            else prompt_inputs["prompt_token_ids"]
+            if prompt_input["type"] == "embeds"
+            else prompt_input["prompt_token_ids"]
         )
         prompt_embeds = (
-            prompt_inputs["prompt_embeds"]
-            if prompt_inputs["type"] == "embeds"
-            else None
+            prompt_input["prompt_embeds"] if prompt_input["type"] == "embeds" else None
         )
 
         prompt_len = length_from_prompt_token_ids_or_embeds(prompt_ids, prompt_embeds)
         self._validate_prompt_len(prompt_len, prompt_type)
 
-        if prompt_inputs["type"] == "multimodal":
-            decoder_mm_positions = prompt_inputs["mm_placeholders"]
+        if prompt_input["type"] == "multimodal":
+            decoder_mm_positions = prompt_input["mm_placeholders"]
             for modality, mm_positions in decoder_mm_positions.items():
                 for mm_position in mm_positions:
                     embed_length = mm_position.get_num_embeds()
@@ -465,10 +463,10 @@ class InputProcessor:
 
     def _validate_model_inputs(
         self,
-        encoder_inputs: SingletonInput | None,
-        decoder_inputs: SingletonInput,
+        encoder_input: SingletonInput | None,
+        decoder_input: SingletonInput,
     ):
-        if encoder_inputs is not None:
-            self._validate_model_input(encoder_inputs, prompt_type="encoder")
+        if encoder_input is not None:
+            self._validate_model_input(encoder_input, prompt_type="encoder")
 
-        self._validate_model_input(decoder_inputs, prompt_type="decoder")
+        self._validate_model_input(decoder_input, prompt_type="decoder")

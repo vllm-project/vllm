@@ -249,28 +249,31 @@ which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 """
 
 
-def _validate_enc_input(input_: SingletonInput) -> EncoderInput:
-    if input_["type"] == "embeds":
+def _validate_enc_input(enc_input: SingletonInput) -> EncoderInput:
+    if enc_input["type"] == "embeds":
         raise ValueError(
             "Embedding inputs are not supported for encoder-decoder models"
         )
 
-    if input_["type"] == "multimodal" and "encoder_prompt_token_ids" not in input_:
+    if (
+        enc_input["type"] == "multimodal"
+        and "encoder_prompt_token_ids" not in enc_input
+    ):
         raise RuntimeError(
             "You should register an encoder-decoder multi-modal processor "
             "for encoder-decoder models."
         )
 
-    return input_  # type: ignore[return-value]
+    return enc_input  # type: ignore[return-value]
 
 
-def _validate_dec_input(inputs: SingletonInput) -> DecoderEngineInput:
-    if inputs["type"] == "embeds":
+def _validate_dec_input(dec_input: SingletonInput) -> DecoderEngineInput:
+    if dec_input["type"] == "embeds":
         raise ValueError(
             "Embedding inputs are not supported for encoder-decoder models"
         )
 
-    return inputs
+    return dec_input
 
 
 def _prepare_decoder_input_ids_for_generation(
