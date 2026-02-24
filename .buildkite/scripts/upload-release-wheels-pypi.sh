@@ -58,8 +58,8 @@ echo "Wheels copied to local directory"
 python setup.py sdist --dist-dir=$DIST_DIR
 ls -la $DIST_DIR
 
-sdist_file=$(find $DIST_DIR -name "vllm*.tar.gz")
-echo "Found sdist: $sdist_file"
+SDIST_FILE=$(find $DIST_DIR -name "vllm*.tar.gz")
+echo "Found sdist: $SDIST_FILE"
 
 # upload wheels to PyPI (only default variant, i.e. files without '+' in the name)
 PYPI_WHEEL_FILES=$(find $DIST_DIR -name "vllm-${PURE_VERSION}*.whl" -not -name "*+*")
@@ -68,6 +68,6 @@ if [[ -z "$PYPI_WHEEL_FILES" ]]; then
   exit 1
 fi
 
-python3 -m twine check "$PYPI_WHEEL_FILES" "$sdist_file"
-python3 -m twine upload --non-interactive --verbose "$PYPI_WHEEL_FILES" "$sdist_file"
+python3 -m twine check "$PYPI_WHEEL_FILES" "$SDIST_FILE"
+python3 -m twine upload --non-interactive --verbose "$PYPI_WHEEL_FILES" "$SDIST_FILE"
 echo "Wheels and source distribution uploaded to PyPI"
