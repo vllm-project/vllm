@@ -66,7 +66,7 @@ backoff==2.2.1
     # via
     #   -r requirements/test.in
     #   schemathesis
-bitsandbytes==0.46.1
+bitsandbytes==0.49.2
     # via
     #   -r requirements/test.in
     #   lightning
@@ -287,9 +287,13 @@ greenlet==3.2.3
     # via sqlalchemy
 grpcio==1.78.0
     # via
+    #   -r requirements/test.in
+    #   grpcio-reflection
     #   grpcio-tools
     #   ray
     #   tensorboard
+grpcio-reflection==1.78.0
+    # via -r requirements/test.in
 grpcio-tools==1.78.0
     # via -r requirements/test.in
 h11==0.14.0
@@ -487,7 +491,7 @@ msgpack==1.1.0
     # via
     #   librosa
     #   ray
-mteb==2.1.2
+mteb==2.8.3
     # via -r requirements/test.in
 multidict==6.1.0
     # via
@@ -653,6 +657,7 @@ orjson==3.11.5
 packaging==24.2
     # via
     #   accelerate
+    #   bitsandbytes
     #   black
     #   datamodel-code-generator
     #   datasets
@@ -757,6 +762,7 @@ protobuf==6.33.2
     # via
     #   google-api-core
     #   googleapis-common-protos
+    #   grpcio-reflection
     #   grpcio-tools
     #   opentelemetry-proto
     #   proto-plus

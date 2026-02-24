@@ -57,6 +57,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 )
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
+    maybe_remap_kv_scale_name,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
@@ -397,6 +398,12 @@ class Qwen3_5Model(Qwen3NextModel):
             if name.startswith("mtp."):
                 continue
 
+            # Remapping the name of FP8 kv-scale.
+            if name.endswith("scale"):
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if "experts.gate_up_proj" in name or "experts.down_proj" in name:
                     is_fused_expert = True
@@ -523,6 +530,9 @@ class Qwen3_5ForCausalLMBase(
             "v_proj",
         ],
         "gate_up_proj": ["gate_proj", "up_proj"],
+        # GDN fused projections.
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
     }
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -620,7 +630,12 @@ class Qwen3_5MoeForCausalLM(Qwen3_5ForCausalLMBase, QwenNextMixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    packed_modules_mapping = Qwen3VLForConditionalGeneration.packed_modules_mapping | {
+        "in_proj_qkvz": ["in_proj_qkv", "in_proj_z"],
+        "in_proj_ba": ["in_proj_b", "in_proj_a"],
+    }
+
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
         config: Qwen3_5Config = vllm_config.model_config.hf_config
@@ -828,7 +843,7 @@ class Qwen3_5_MoeMixtureOfExperts(MixtureOfExperts):
 class Qwen3_5MoeForConditionalGeneration(
     Qwen3_5ForConditionalGeneration, Qwen3_5_MoeMixtureOfExperts
 ):
-    def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
+    def __init__(self, *, vllm_config: VllmConfig, prefix: str = "model"):
         # protocols have not __init__ method, so we need to use nn.Module.__init__
         nn.Module.__init__(self)
         config: Qwen3_5MoeConfig = vllm_config.model_config.hf_config
