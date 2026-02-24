@@ -446,10 +446,11 @@ class Ernie4_5_VisionTransformer(nn.Module):
 
     def compute_attn_mask_seqlen(self, cu_seqlens: torch.Tensor) -> torch.Tensor | None:
         max_seqlen = None
-        if (
-            self.attn_backend == AttentionBackendEnum.FLASH_ATTN
-            or self.attn_backend == AttentionBackendEnum.ROCM_AITER_FA
-        ):
+        if self.attn_backend in {
+            AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
+        }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
@@ -1167,8 +1168,7 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1178,8 +1178,8 @@ class Ernie4_5_VLDummyInputsBuilder(BaseDummyInputsBuilder[Ernie4_5_VLProcessing
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
