@@ -171,8 +171,7 @@ class WorkerSentinel(BaseSentinel):
                 nccl_comm.nccl_abort_comm()
 
         def _abort_process_group(group: GroupCoordinator):
-            device = torch.device("cuda")
-            backend = group.device_group._get_backend(device)
+            backend = group.device_group._get_backend(self.device)
             backend.abort()
 
         executor = ThreadPoolExecutor(max_workers=len(model_groups) * 2)
