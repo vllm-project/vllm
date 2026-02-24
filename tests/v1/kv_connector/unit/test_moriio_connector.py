@@ -46,6 +46,24 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def is_ibverbs_available():
+    from shutil import which
+
+    print(f"which = {which('ibv_devices')}")
+    if which("ibv_devices") is None:
+        return False
+    from subprocess import check_output
+
+    output = check_output(["ibv_devices"]).decode("UTF-8")
+    if len(output.split("\n")) < 12:
+        return False
+    return True
+
+
+if not is_ibverbs_available():
+    pytest.skip("This test requires IB Verbs to run", allow_module_level=True)
+
+
 @pytest.fixture
 def mock_parallel_groups():
     """Mock tensor/data parallel group functions for single-rank tests."""
