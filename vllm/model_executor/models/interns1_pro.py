@@ -464,6 +464,9 @@ class InternS1ProMoeLLMModel(Qwen3MoeLLMModel):
         prefix: str = "",
         decoder_layer_type: type[torch.nn.Module] = InternS1ProMoeDecoderLayer,
     ):
+        # Qwen3MoeLLMModel expects pad_token_id, which is not in InternS1ProTextConfig
+        if not hasattr(vllm_config.model_config.hf_text_config, "pad_token_id"):
+            vllm_config.model_config.hf_text_config.pad_token_id = None
         super().__init__(
             vllm_config=vllm_config,
             prefix=prefix,
