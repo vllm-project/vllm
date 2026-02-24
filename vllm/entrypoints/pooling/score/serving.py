@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.engine.serving import OpenAIServingInference
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.score.protocol import (
     RerankDocument,
@@ -47,7 +47,7 @@ from vllm.utils.mistral import is_mistral_tokenizer
 logger = init_logger(__name__)
 
 
-class ServingScores(OpenAIServing):
+class ServingScores(OpenAIServingInference):
     def __init__(
         self,
         engine_client: EngineClient,

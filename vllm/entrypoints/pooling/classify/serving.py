@@ -11,7 +11,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.engine.serving import OpenAIServing, ServeContext
+from vllm.entrypoints.openai.engine.serving import OpenAIServingInference, ServeContext
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
@@ -29,7 +29,7 @@ logger = init_logger(__name__)
 ClassificationServeContext: TypeAlias = ServeContext[ClassificationRequest]
 
 
-class ServingClassification(OpenAIServing):
+class ServingClassification(OpenAIServingInference):
     request_id_prefix = "classify"
 
     def __init__(

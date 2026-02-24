@@ -52,7 +52,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
-    OpenAIServing,
+    OpenAIServingInference,
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -85,7 +85,7 @@ from vllm.utils.mistral import mt as _mt
 logger = init_logger(__name__)
 
 
-class OpenAIServingChat(OpenAIServing):
+class OpenAIServingChat(OpenAIServingInference):
     def __init__(
         self,
         engine_client: EngineClient,

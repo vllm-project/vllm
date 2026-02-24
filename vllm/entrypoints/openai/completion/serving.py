@@ -28,7 +28,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
-    OpenAIServing,
+    OpenAIServingInference,
     clamp_prompt_logprobs,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -46,7 +46,7 @@ from vllm.utils.collection_utils import as_list
 logger = init_logger(__name__)
 
 
-class OpenAIServingCompletion(OpenAIServing):
+class OpenAIServingCompletion(OpenAIServingInference):
     def __init__(
         self,
         engine_client: EngineClient,

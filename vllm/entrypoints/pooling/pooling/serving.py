@@ -16,7 +16,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.engine.serving import OpenAIServingInference
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.pooling.protocol import (
     IOProcessorRequest,
@@ -43,7 +43,7 @@ from vllm.utils.serial_utils import EmbedDType, EncodingFormat, Endianness
 logger = init_logger(__name__)
 
 
-class OpenAIServingPooling(OpenAIServing):
+class OpenAIServingPooling(OpenAIServingInference):
     def __init__(
         self,
         engine_client: EngineClient,

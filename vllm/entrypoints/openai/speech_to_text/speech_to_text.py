@@ -22,7 +22,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
+from vllm.entrypoints.openai.engine.serving import (
+    OpenAIServingInference,
+    SpeechToTextRequest,
+)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionResponse,
@@ -76,7 +79,7 @@ ResponseType: TypeAlias = (
 logger = init_logger(__name__)
 
 
-class OpenAISpeechToText(OpenAIServing):
+class OpenAISpeechToText(OpenAIServingInference):
     """Base class for speech-to-text operations like transcription and
     translation."""
 

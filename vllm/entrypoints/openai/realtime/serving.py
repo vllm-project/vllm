@@ -10,7 +10,7 @@ import numpy as np
 
 from vllm.engine.protocol import EngineClient, StreamingInput
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.engine.serving import OpenAIServingInference
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -20,7 +20,7 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt
 logger = init_logger(__name__)
 
 
-class OpenAIServingRealtime(OpenAIServing):
+class OpenAIServingRealtime(OpenAIServingInference):
     """Realtime audio transcription service via WebSocket streaming.
 
     Provides streaming audio-to-text transcription by transforming audio chunks

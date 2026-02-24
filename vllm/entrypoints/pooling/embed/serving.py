@@ -13,7 +13,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.engine.serving import OpenAIServing, ServeContext
+from vllm.entrypoints.openai.engine.serving import OpenAIServingInference, ServeContext
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
@@ -42,7 +42,7 @@ logger = init_logger(__name__)
 EmbeddingServeContext: TypeAlias = ServeContext[EmbeddingRequest]
 
 
-class OpenAIServingEmbedding(OpenAIServing):
+class OpenAIServingEmbedding(OpenAIServingInference):
     request_id_prefix = "embd"
 
     def __init__(
