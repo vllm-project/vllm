@@ -97,12 +97,17 @@ class UniProcExecutor(Executor):
     def execute_model(  # type: ignore[override]
         self, scheduler_output: SchedulerOutput, non_block: bool = False
     ) -> ModelRunnerOutput | None | Future[ModelRunnerOutput | None]:
-        return self.collective_rpc(
+        res = self.collective_rpc(
             "execute_model",
             args=(scheduler_output,),
             non_block=non_block,
             single_value=True,
         )
+        # In non-blocking mode, surface any exception as early as possible.
+        if non_block and res.done():
+            # Re-raise the exception if the task failed.
+            res.result()
+        return res
 
     def sample_tokens(  # type: ignore[override]
         self, grammar_output: GrammarOutput | None, non_block: bool = False

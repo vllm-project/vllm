@@ -442,9 +442,10 @@ class EngineCore:
         deferred_scheduler_output = None
         if self.scheduler.has_requests():
             scheduler_output = self.scheduler.schedule()
-            exec_future = self.model_executor.execute_model(
-                scheduler_output, non_block=True
-            )
+            with self.log_error_detail(scheduler_output):
+                exec_future = self.model_executor.execute_model(
+                    scheduler_output, non_block=True
+                )
             if not self.is_ec_producer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
