@@ -48,7 +48,6 @@ class RealtimeConnection:
         self.generation_task: asyncio.Task | None = None
 
         self._is_connected = False
-        self._is_input_finished = False
         self._is_model_validated = False
 
         self._max_audio_filesize_mb = envs.VLLM_MAX_AUDIO_CLIP_FILESIZE_MB
@@ -145,7 +144,7 @@ class RealtimeConnection:
             commit_event = InputAudioBufferCommit(**event)
             # final signals that the audio is finished
             if commit_event.final:
-                self._is_input_finished = True
+                self.audio_queue.put_nowait(None)
             else:
                 await self.start_generation()
         else:
@@ -206,7 +205,7 @@ class RealtimeConnection:
 
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,
-                max_tokens=1,
+                max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
                 skip_clone=True,
             )
@@ -237,11 +236,6 @@ class RealtimeConnection:
 
                 if not self._is_connected:
                     # finish because websocket connection was killed
-                    break
-
-                if self.audio_queue.empty() and self._is_input_finished:
-                    # finish because client signals that audio input
-                    # is finished
                     break
 
             usage = UsageInfo(
