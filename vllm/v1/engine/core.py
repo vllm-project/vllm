@@ -212,7 +212,7 @@ class EngineCore:
 
         self.aborts_queue = queue.Queue[list[str]]()
 
-        self.per_step_hooks: set[Callable] = set()
+        self._idle_state_callbacks: list[Callable] = []
 
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
@@ -593,6 +593,11 @@ class EngineCore:
         # Reset the GPU model runner's encoder cache (physical storage)
         self.model_executor.reset_encoder_cache()
 
+    def _reset_caches(self, reset_running_requests=True) -> None:
+        self.reset_prefix_cache(reset_running_requests=reset_running_requests)
+        self.reset_mm_cache()
+        self.reset_encoder_cache()
+
     def pause_scheduler(
         self, mode: PauseMode = "abort", clear_cache: bool = True
     ) -> Future | None:
@@ -619,11 +624,8 @@ class EngineCore:
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-
         if clear_cache:
-            self.reset_prefix_cache(reset_running_requests=True)
-            self.reset_mm_cache()
-            self.reset_encoder_cache()
+            self._reset_caches()
 
         return None
 
@@ -1086,6 +1088,10 @@ class EngineCoreProc(EngineCore):
     def _init_data_parallel(self, vllm_config: VllmConfig):
         pass
 
+    def has_work(self) -> bool:
+        """Returns true if the engine should be stepped."""
+        return self.engines_running or self.scheduler.has_requests() or self.batch_queue
+
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
@@ -1095,19 +1101,14 @@ class EngineCoreProc(EngineCore):
             self._process_input_queue()
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
-            # 3) Run any per-step hooks.
-            self._process_per_step_hooks()
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while (
-            not self.engines_running
-            and not self.scheduler.has_requests()
-            and not self.batch_queue
-            and not self.per_step_hooks
-        ):
+        while not self.has_work():
+            # Notify callbacks waiting for engine to become idle.
+            self._notify_idle_state_callbacks()
             if self.input_queue.empty():
                 # Drain aborts queue; all aborts are also processed via input_queue.
                 with self.aborts_queue.mutex:
@@ -1146,12 +1147,10 @@ class EngineCoreProc(EngineCore):
 
         return model_executed
 
-    def _process_per_step_hooks(self) -> None:
-        if self.per_step_hooks:
-            for hook in list(self.per_step_hooks):
-                finished = hook(self)
-                if finished:
-                    self.per_step_hooks.discard(hook)
+    def _notify_idle_state_callbacks(self) -> None:
+        while self._idle_state_callbacks:
+            callback = self._idle_state_callbacks.pop()
+            callback(self)
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
@@ -1425,19 +1424,10 @@ class EngineCoreProc(EngineCore):
         if mode not in ("keep", "abort", "wait"):
             raise ValueError(f"Invalid pause mode: {mode}")
 
-        output_queue = self.output_queue
-
-        def wait_until_idle(engine: "EngineCore", future: Future[Any] | None) -> bool:
-            has_unfinished = engine.scheduler.has_unfinished_requests()
-            if has_unfinished or engine.batch_queue or not output_queue.empty():
-                return False
+        def engine_idle_callback(engine: "EngineCoreProc", future: Future[Any]) -> None:
             if clear_cache:
-                engine.reset_prefix_cache(reset_running_requests=True)
-                engine.reset_mm_cache()
-                engine.reset_encoder_cache()
-            if future is not None:
-                future.set_result(None)
-            return True
+                engine._reset_caches()
+            future.set_result(None)
 
         if mode == "abort":
             aborted_reqs = self.scheduler.finish_requests(
@@ -1447,11 +1437,13 @@ class EngineCoreProc(EngineCore):
 
         pause_state = PauseState.PAUSED_ALL if mode == "keep" else PauseState.PAUSED_NEW
         self.scheduler.set_pause_state(pause_state)
-        if wait_until_idle(self, future=None):
+        if not self.has_work():
+            if clear_cache:
+                self._reset_caches()
             return None
 
         future = Future[Any]()
-        self.per_step_hooks.add(partial(wait_until_idle, future=future))
+        self._idle_state_callbacks.append(partial(engine_idle_callback, future=future))
         return future
 
     def _send_abort_outputs(self, aborted_reqs: list[tuple[str, int]]) -> None:
@@ -1524,6 +1516,7 @@ class DPEngineCoreProc(EngineCoreProc):
             stateless_destroy_torch_distributed_process_group(dp_group)
 
     def add_request(self, request: Request, request_wave: int = 0):
+        super().add_request(request, request_wave)
         if self.has_coordinator and request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
@@ -1534,7 +1527,13 @@ class DPEngineCoreProc(EngineCoreProc):
                     (-1, EngineCoreOutputs(start_wave=self.current_wave))
                 )
 
-        super().add_request(request, request_wave)
+    def resume_scheduler(self):
+        super().resume_scheduler()
+        if not self.engines_running and self.scheduler.has_unfinished_requests():
+            # Wake up other DP engines.
+            self.output_queue.put_nowait(
+                (-1, EngineCoreOutputs(start_wave=self.current_wave))
+            )
 
     def _handle_client_request(
         self, request_type: EngineCoreRequestType, request: Any
