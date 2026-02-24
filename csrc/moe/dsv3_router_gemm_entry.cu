@@ -20,10 +20,12 @@
 
 #include <ATen/ATen.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <torch/all.h>
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+#include "core/registration.h"
 #include "dsv3_router_gemm_utils.h"
 
 static constexpr int DEFAULT_NUM_EXPERTS = 256;
@@ -160,4 +162,8 @@ void dsv3_router_gemm(at::Tensor& output,       // [num_tokens, num_experts]
               reinterpret_cast<__nv_bfloat16 const*>(mat_b.data_ptr()), stream);
     }
   }
+}
+
+TORCH_LIBRARY_IMPL_EXPAND(TORCH_EXTENSION_NAME, CUDA, m) {
+  m.impl("dsv3_router_gemm", &dsv3_router_gemm);
 }

@@ -248,12 +248,12 @@ class LLMEngine:
                 request_id,
                 prompt,
                 params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
                 supported_tasks=self.get_supported_tasks(),
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
