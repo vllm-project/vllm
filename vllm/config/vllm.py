@@ -635,6 +635,8 @@ class VllmConfig:
             "external_launcher",
         )
 
+        from vllm.platforms import current_platform
+
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative
@@ -660,8 +662,12 @@ class VllmConfig:
                     f"`{executor_backend}`."
                 )
         elif self.scheduler_config.async_scheduling is None:
+            if current_platform.is_xpu():
+                # We disable async scheduling for xpu if use doesn't explicitly
+                # enable it.
+                self.scheduler_config.async_scheduling = False
             # Enable async scheduling unless there is an incompatible option.
-            if (
+            elif (
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
             ):
@@ -712,8 +718,6 @@ class VllmConfig:
                 self.parallel_config.disable_nccl_for_dp_synchronization = True
             else:
                 self.parallel_config.disable_nccl_for_dp_synchronization = False
-
-        from vllm.platforms import current_platform
 
         if (
             self.model_config is not None
