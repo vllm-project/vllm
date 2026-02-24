@@ -113,17 +113,6 @@ VisionChunk: TypeAlias = VisionChunkImage | VisionChunkVideo
 """A vision chunk is either an image or a video chunk."""
 
 
-NestedTensors: TypeAlias = Union[
-    list["NestedTensors"],
-    list["torch.Tensor"],
-    "torch.Tensor",
-    tuple["torch.Tensor", ...],
-]
-"""
-Uses a list instead of a tensor if the dimensions of each element do not match.
-"""
-
-
 @dataclass(frozen=True)
 class PlaceholderRange:
     """
@@ -223,6 +212,17 @@ class PlaceholderRange:
             return self.is_embed is None
 
         return nested_tensors_equal(self.is_embed, other.is_embed)
+
+
+NestedTensors: TypeAlias = Union[
+    list["NestedTensors"],
+    list["torch.Tensor"],
+    "torch.Tensor",
+    tuple["torch.Tensor", ...],
+]
+"""
+Uses a list instead of a tensor if the dimensions of each element do not match.
+"""
 
 
 def nested_tensors_equal(a: NestedTensors, b: NestedTensors) -> bool:
