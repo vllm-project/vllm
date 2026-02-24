@@ -283,8 +283,9 @@ void rms_norm_per_block_quant(torch::stable::Tensor& out,
                   "Unsupported group size: ", group_size);
 
   if (scales.stride(1) > 1) {
-    TORCH_CHECK(is_scale_transposed,
-                "Outer scale stride must be 1 when scales are not transposed");
+    STD_TORCH_CHECK(
+        is_scale_transposed,
+        "Outer scale stride must be 1 when scales are not transposed");
   }
 
   rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,

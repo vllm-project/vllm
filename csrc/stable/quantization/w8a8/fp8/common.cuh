@@ -2,68 +2,16 @@
 
 #include "../../vectorization.cuh"
 #include "../../utils.cuh"
+#include "../../../torch_utils.h"
 
-#include <torch/headeronly/util/Exception.h>
-
-#include <cuda_runtime.h>
 #include <cmath>
-#include <deque>
-#include <mutex>
 #include <string>
-#include <vector>
 
 #ifndef USE_ROCM
-  #include "quantization/w8a8/fp8/nvidia/quant_utils.cuh"
+  #include "../../../../quantization/w8a8/fp8/nvidia/quant_utils.cuh"
 #else
-  #include "quantization/w8a8/fp8/amd/quant_utils.cuh"
+  #include "../../../../quantization/w8a8/fp8/amd/quant_utils.cuh"
 #endif
-
-namespace {
-
-// Device properties cache for stable ABI compatibility
-// Uses raw CUDA/HIP APIs instead of ATen functions
-std::deque<std::once_flag> device_flags;
-std::vector<cudaDeviceProp> device_properties;
-
-inline void initDeviceVectors() {
-  static bool init_flag [[maybe_unused]] = []() {
-    int device_count;
-    cudaError_t err = cudaGetDeviceCount(&device_count);
-    if (err != cudaSuccess) {
-      STD_TORCH_CHECK(false, "cudaGetDeviceCount failed: " +
-                                 std::string(cudaGetErrorString(err)));
-    }
-    device_flags.resize(device_count);
-    device_properties.resize(device_count);
-    return true;
-  }();
-}
-
-inline void initDeviceProperty(int device_index) {
-  cudaDeviceProp device_prop{};
-  cudaError_t err = cudaGetDeviceProperties(&device_prop, device_index);
-  if (err != cudaSuccess) {
-    STD_TORCH_CHECK(false, "cudaGetDeviceProperties failed: " +
-                               std::string(cudaGetErrorString(err)));
-  }
-  device_properties[device_index] = device_prop;
-}
-
-}  // anonymous namespace
-
-// Get device properties using raw CUDA/HIP APIs (stable ABI compatible)
-inline cudaDeviceProp* get_device_prop() {
-  initDeviceVectors();
-  int device_index;
-  cudaError_t err = cudaGetDevice(&device_index);
-  if (err != cudaSuccess) {
-    STD_TORCH_CHECK(
-        false, "cudaGetDevice failed: " + std::string(cudaGetErrorString(err)));
-  }
-
-  std::call_once(device_flags[device_index], initDeviceProperty, device_index);
-  return &device_properties[device_index];
-}
 
 // Determines the preferred FP8 type for the current platform.
 // Returns true for OCP format (Float8_e4m3fn), false for FNUZ format

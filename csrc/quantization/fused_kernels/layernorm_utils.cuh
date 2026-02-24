@@ -4,8 +4,8 @@
  * __device__ layernorm utilities.
  */
 
-#include "stable/quantization/vectorization.cuh"
-#include "stable/quantization/utils.cuh"
+#include "../../stable/quantization/vectorization.cuh"
+#include "../../stable/quantization/utils.cuh"
 #include "quant_conversions.cuh"
 
 #include "../../cub_helpers.h"

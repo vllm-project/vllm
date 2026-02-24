@@ -1,5 +1,5 @@
 #pragma once
-#include "stable/quantization/vectorization.cuh"
+#include "../stable/quantization/vectorization.cuh"
 
 namespace vllm {
 
