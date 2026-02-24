@@ -46,7 +46,7 @@ def tokens_input(
     cache_salt: str | None = None,
 ) -> TokensInput:
     """
-    Construct [`TokensInputs`][vllm.inputs.engine.TokensInputs]
+    Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
     from optional values.
     """
     inputs = TokensInput(type="token", prompt_token_ids=prompt_token_ids)
