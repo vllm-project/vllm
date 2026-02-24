@@ -156,6 +156,7 @@ def tt_run_launch(
     Uses args from override_tt_config:
       - rank_binding: str (required, already parsed)
       - mpi_args: str (optional, parsed here)
+      - extra_ttrun_args: str (optional, parsed here)
       - config_pkl_dir: str (required, parsed here)
     Args:
         handshake_address: ZMQ address for engine handshake communication.
@@ -173,6 +174,7 @@ def tt_run_launch(
     # Parse override_tt_config for optional fields.
     override_tt_config = vllm_config.model_config.override_tt_config or {}
     mpi_args = override_tt_config.get("mpi_args", "")
+    extra_ttrun_args = override_tt_config.get("extra_ttrun_args")
     cfg_dir = override_tt_config.get("config_pkl_dir")
 
     if not cfg_dir:
@@ -223,7 +225,30 @@ def tt_run_launch(
     with open(tmp_rb_path, "w") as tf:
         yaml.safe_dump(rb, tf)
 
-    cmd = ["tt-run", "--rank-binding", tmp_rb_path]
+    normalized_extra_ttrun_args: list[str] = []
+    if extra_ttrun_args:
+        if not isinstance(extra_ttrun_args, str):
+            raise RuntimeError(
+                "override_tt_config['extra_ttrun_args'] must be a string"
+            )
+        normalized_extra_ttrun_args = shlex.split(extra_ttrun_args)
+
+        # Prevent ambiguous/duplicated flags that vLLM is responsible for.
+        reserved_flags = {"--rank-binding", "--mpi-args"}
+        if any(
+            (tok in reserved_flags)
+            or any(tok.startswith(f"{flag}=") for flag in reserved_flags)
+            for tok in normalized_extra_ttrun_args
+        ):
+            raise RuntimeError(
+                "override_tt_config['extra_ttrun_args'] must not include "
+                "--rank-binding or --mpi-args (vLLM sets these)"
+            )
+
+    cmd = ["tt-run"]
+    if normalized_extra_ttrun_args:
+        cmd.extend(normalized_extra_ttrun_args)
+    cmd.extend(["--rank-binding", tmp_rb_path])
     if mpi_args:
         # Pass raw string; tt-run will shlex.split it
         cmd.extend(["--mpi-args", mpi_args])
@@ -243,7 +268,8 @@ def tt_run_launch(
     )
 
     child_env = os.environ.copy()
-    logger.info("Launching engines with tt-run: %s", " ".join(cmd))
+    pretty_cmd = shlex.join(cmd)
+    logger.info("Launching engines with tt-run: %s", pretty_cmd)
     mpi_proc = subprocess.Popen(cmd, env=child_env)
 
     # Set up finalizer for MPI subprocess cleanup

@@ -292,7 +292,7 @@ pytest tests/tt -v --tt-server-url=http://localhost:8000 --tt-model-name=meta-ll
 To run offline inference or a server on a multi-host system, vLLM needs to be launched from the host that has MPI rank 0 (determined from the rankfile). Underneath the hood, the `tt-run` utility from tt-metal will be used to spawn MPI processes on each host. For example, for offline inference on 2 Wormhole Galaxy hosts with DP=2 (distributed across hosts):
 
 ```sh
-MESH_DEVICE=(8,8) python -u examples/offline_inference_tt.py --model <MODEL_NAME> --data_parallel_size 2 --async_engine --override_tt_config '{"rank_binding": "<PATH_TO_TT_METAL>/tests/tt_metal/distributed/config/dual_galaxy_rank_bindings.yaml", "mpi_args": "--host <HOST1>,<HOST2> --map-by rankfile:file=/etc/mpirun/rankfile --mca btl self,tcp --mca btl_tcp_if_include cnx1 --bind-to none --tag-output", "config_pkl_dir": "<PATH_TO_SHARED_TMP_DIR>", "fabric_config": "FABRIC_1D", "fabric_reliability_mode": "RELAXED_INIT", "env_passthrough":["VLLM_*", "MESH_DEVICE"]}'
+MESH_DEVICE=(8,8) python -u examples/offline_inference_tt.py --model <MODEL_NAME> --data_parallel_size 2 --async_engine --override_tt_config '{"rank_binding": "<PATH_TO_TT_METAL>/tests/tt_metal/distributed/config/dual_galaxy_rank_bindings.yaml", "extra_ttrun_args": "--tcp-interface cnx1", "mpi_args": "--host <HOST1>,<HOST2> --map-by rankfile:file=/etc/mpirun/rankfile", "config_pkl_dir": "<PATH_TO_SHARED_TMP_DIR>", "fabric_config": "FABRIC_1D", "fabric_reliability_mode": "RELAXED_INIT", "env_passthrough":["VLLM_*", "MESH_DEVICE"]}'
 ```
 
 > **Notes:**
@@ -301,3 +301,4 @@ MESH_DEVICE=(8,8) python -u examples/offline_inference_tt.py --model <MODEL_NAME
 > - To check which host has MPI rank 0, examine the rankfile (commonly /etc/mpirun/rankfile). If you launch from another host, vLLM will raise an error and indicate which host to run from.
 > - `config_pkl_dir` needs to be set to a directory that is shared by all hosts (used during initialization to write a temporary config file that is read by other hosts).
 > - If you need to set environment variables that should be propagated to all hosts, you can either 1) specify them as part of `env_passthrough` in `--override_tt_config` or 2) add them as a `global_env` in the rank_binding file.
+> - `extra_ttrun_args` can be used to pass additional flags directly to `tt-run` as a raw string (e.g. `"--tcp-interface cnx1"`, `"--bare"`, `"--debug-gdbserver"`).
