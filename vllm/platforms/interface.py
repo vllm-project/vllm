@@ -566,6 +566,24 @@ class Platform:
         return False
 
     @classmethod
+    def get_moe_forward_op(cls) -> Any:
+        """
+        Return the platform-specific custom op for the MoE forward pass
+        (without shared experts). Platforms that need a different op can
+        override this method.
+        """
+        return torch.ops.vllm.moe_forward
+
+    @classmethod
+    def get_moe_forward_shared_op(cls) -> Any:
+        """
+        Return the platform-specific custom op for the MoE forward pass
+        (with shared experts). Platforms that need a different op can
+        override this method.
+        """
+        return torch.ops.vllm.moe_forward_shared
+
+    @classmethod
     def validate_request(
         cls,
         prompt: "PromptType | DictPrompt | TokPrompt",
