@@ -5,15 +5,20 @@
  * Currently, only static fp8 quantization is supported.
  */
 
+#include <torch/csrc/stable/tensor.h>
+#include <torch/csrc/stable/accelerator.h>
+#include <torch/headeronly/core/ScalarType.h>
+#include <torch/headeronly/macros/Macros.h>
+
+#include <numeric>
+
 #include "type_convert.cuh"
 #include "quantization/w8a8/fp8/common.cuh"
-#include "dispatch_utils.h"
 #include "cub_helpers.h"
 #include "core/batch_invariant.hpp"
 #include "quantization/vectorization_utils.cuh"
-
-#include <torch/cuda.h>
-#include <c10/cuda/CUDAGuard.h>
+#include "dispatch_utils.h"
+#include "torch_utils.h"
 
 namespace vllm {
 
@@ -79,8 +84,8 @@ __global__ void rms_norm_static_fp8_quant_kernel(
 template <typename scalar_t, int width, typename fp8_type>
 __global__ std::enable_if_t<(width > 0) && _typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
-    fp8_type* __restrict__ out,    // [..., hidden_size]
-    scalar_t* __restrict__ input,  // [..., hidden_size]
+    fp8_type* __restrict__ out,          // [..., hidden_size]
+    const scalar_t* __restrict__ input,  // [..., hidden_size]
     const int input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
@@ -98,7 +103,7 @@ fused_add_rms_norm_static_fp8_quant_kernel(
      not aliased in practice. Argument pointers should not be dereferenced
      in this kernel as that would be undefined behavior */
   auto* __restrict__ input_v =
-      reinterpret_cast<_f16Vec<scalar_t, width>*>(input);
+      reinterpret_cast<const _f16Vec<scalar_t, width>*>(input);
   auto* __restrict__ residual_v =
       reinterpret_cast<_f16Vec<scalar_t, width>*>(residual);
   auto* __restrict__ weight_v =
@@ -144,8 +149,8 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 template <typename scalar_t, int width, typename fp8_type>
 __global__ std::enable_if_t<(width == 0) || !_typeConvert<scalar_t>::exists>
 fused_add_rms_norm_static_fp8_quant_kernel(
-    fp8_type* __restrict__ out,    // [..., hidden_size]
-    scalar_t* __restrict__ input,  // [..., hidden_size]
+    fp8_type* __restrict__ out,          // [..., hidden_size]
+    const scalar_t* __restrict__ input,  // [..., hidden_size]
     const int input_stride,
     scalar_t* __restrict__ residual,      // [..., hidden_size]
     const scalar_t* __restrict__ weight,  // [hidden_size]
@@ -184,12 +189,13 @@ fused_add_rms_norm_static_fp8_quant_kernel(
 
 }  // namespace vllm
 
-void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
-                               torch::Tensor& input,   // [..., hidden_size]
-                               torch::Tensor& weight,  // [hidden_size]
-                               torch::Tensor& scale,   // [1]
-                               double epsilon) {
-  TORCH_CHECK(out.is_contiguous());
+void rms_norm_static_fp8_quant(
+    torch::stable::Tensor& out,           // [..., hidden_size]
+    const torch::stable::Tensor& input,   // [..., hidden_size]
+    const torch::stable::Tensor& weight,  // [hidden_size]
+    const torch::stable::Tensor& scale,   // [1]
+    double epsilon) {
+  STD_TORCH_CHECK(out.is_contiguous());
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
@@ -197,24 +203,26 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
   // For large num_tokens, use smaller blocks to increase SM concurrency.
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 grid(num_tokens);
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
-  VLLM_DISPATCH_FLOATING_TYPES(
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device_index());
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(
       input.scalar_type(), "rms_norm_kernel_scalar_type", [&] {
-        VLLM_DISPATCH_FP8_TYPES(
+        VLLM_STABLE_DISPATCH_FP8_TYPES(
             out.scalar_type(), "rms_norm_kernel_fp8_type", [&] {
               const int calculated_vec_size =
                   std::gcd(16 / sizeof(scalar_t), hidden_size);
               const int block_size =
                   std::min(hidden_size / calculated_vec_size, max_block_size);
               dim3 block(block_size);
-              VLLM_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
+              VLLM_STABLE_DISPATCH_VEC_SIZE(calculated_vec_size, [&] {
                 vllm::rms_norm_static_fp8_quant_kernel<scalar_t, fp8_t,
                                                        vec_size>
                     <<<grid, block, 0, stream>>>(
-                        out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),
-                        input_stride, weight.data_ptr<scalar_t>(),
-                        scale.data_ptr<float>(), epsilon, num_tokens,
+                        out.mutable_data_ptr<fp8_t>(),
+                        input.const_data_ptr<scalar_t>(), input_stride,
+                        weight.const_data_ptr<scalar_t>(),
+                        scale.const_data_ptr<float>(), epsilon, num_tokens,
                         hidden_size);
               });
             });
@@ -222,30 +230,33 @@ void rms_norm_static_fp8_quant(torch::Tensor& out,     // [..., hidden_size]
 }
 
 #define LAUNCH_FUSED_ADD_RMS_NORM(width)                                     \
-  VLLM_DISPATCH_FLOATING_TYPES(                                              \
+  VLLM_STABLE_DISPATCH_FLOATING_TYPES(                                       \
       input.scalar_type(), "fused_add_rms_norm_kernel_scalar_type", [&] {    \
-        VLLM_DISPATCH_FP8_TYPES(                                             \
+        VLLM_STABLE_DISPATCH_FP8_TYPES(                                      \
             out.scalar_type(), "fused_add_rms_norm_kernel_fp8_type", [&] {   \
               vllm::fused_add_rms_norm_static_fp8_quant_kernel<scalar_t,     \
                                                                width, fp8_t> \
                   <<<grid, block, 0, stream>>>(                              \
-                      out.data_ptr<fp8_t>(), input.data_ptr<scalar_t>(),     \
-                      input_stride, residual.data_ptr<scalar_t>(),           \
-                      weight.data_ptr<scalar_t>(), scale.data_ptr<float>(),  \
-                      epsilon, num_tokens, hidden_size);                     \
+                      out.mutable_data_ptr<fp8_t>(),                         \
+                      input.const_data_ptr<scalar_t>(), input_stride,        \
+                      residual.mutable_data_ptr<scalar_t>(),                 \
+                      weight.const_data_ptr<scalar_t>(),                     \
+                      scale.const_data_ptr<float>(),                         \
+                      static_cast<float>(epsilon), num_tokens, hidden_size); \
             });                                                              \
       });
+
 void fused_add_rms_norm_static_fp8_quant(
-    torch::Tensor& out,       // [..., hidden_size],
-    torch::Tensor& input,     // [..., hidden_size]
-    torch::Tensor& residual,  // [..., hidden_size]
-    torch::Tensor& weight,    // [hidden_size]
-    torch::Tensor& scale,     // [1]
+    torch::stable::Tensor& out,           // [..., hidden_size],
+    const torch::stable::Tensor& input,   // [..., hidden_size]
+    torch::stable::Tensor& residual,      // [..., hidden_size]
+    const torch::stable::Tensor& weight,  // [hidden_size]
+    const torch::stable::Tensor& scale,   // [1]
     double epsilon) {
-  TORCH_CHECK(out.is_contiguous());
-  TORCH_CHECK(residual.is_contiguous());
-  TORCH_CHECK(residual.scalar_type() == input.scalar_type());
-  TORCH_CHECK(weight.scalar_type() == input.scalar_type());
+  STD_TORCH_CHECK(out.is_contiguous());
+  STD_TORCH_CHECK(residual.is_contiguous());
+  STD_TORCH_CHECK(residual.scalar_type() == input.scalar_type());
+  STD_TORCH_CHECK(weight.scalar_type() == input.scalar_type());
   int hidden_size = input.size(-1);
   int input_stride = input.stride(-2);
   int num_tokens = input.numel() / hidden_size;
@@ -257,8 +268,9 @@ void fused_add_rms_norm_static_fp8_quant(
      hiding on global mem ops. */
   const int max_block_size = (num_tokens < 256) ? 1024 : 256;
   dim3 block(std::min(hidden_size, max_block_size));
-  const at::cuda::OptionalCUDAGuard device_guard(device_of(input));
-  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device());
+  const cudaStream_t stream = get_current_cuda_stream(input.get_device());
   /*If the tensor types are FP16/BF16, try to use the optimized kernel
     with packed + vectorized ops.
     Max optimization is achieved with a width-8 vector of FP16/BF16s
@@ -266,9 +278,9 @@ void fused_add_rms_norm_static_fp8_quant(
     However, this requires each tensor's data to be aligned to 16
     bytes.
    */
-  auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.data_ptr());
-  auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.data_ptr());
-  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.data_ptr());
+  auto inp_ptr = reinterpret_cast<std::uintptr_t>(input.const_data_ptr());
+  auto res_ptr = reinterpret_cast<std::uintptr_t>(residual.mutable_data_ptr());
+  auto wt_ptr = reinterpret_cast<std::uintptr_t>(weight.const_data_ptr());
   bool ptrs_are_aligned =
       inp_ptr % 16 == 0 && res_ptr % 16 == 0 && wt_ptr % 16 == 0;
   bool batch_invariant_launch = vllm::vllm_is_batch_invariant();
