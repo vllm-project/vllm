@@ -140,7 +140,7 @@ class KVConnectorModelRunnerMixin:
             have the same page size.
         2. A KV connector is configured, and the KV connector instance prefers
             to use this layout (prefer_cross_layer_blocks() returns True)
-        2. The flash attention backend supports this layout
+        3. The attention backend supports this layout
             (get_kv_cache_stride_order(True) includes a placement for a
             num_layers dimension)
 
@@ -179,12 +179,9 @@ class KVConnectorModelRunnerMixin:
             cache_dtype_str=cache_dtype,
         )
 
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
-            )
-        except (AttributeError, NotImplementedError):
-            return False
+        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+            include_num_layers_dimension=True
+        )
 
         # check that attention backend include a layers dimension
         return len(kv_cache_stride_order) == len(kv_cache_shape) + 1
@@ -249,13 +246,10 @@ class KVConnectorModelRunnerMixin:
         # prepend a num_layers dimension into the shape
         kv_cache_shape = (num_layers,) + kv_cache_shape
 
-        try:
-            kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                include_num_layers_dimension=True
-            )
-            assert len(kv_cache_stride_order) == len(kv_cache_shape)
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+        kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
+            include_num_layers_dimension=True
+        )
+        assert len(kv_cache_stride_order) == len(kv_cache_shape)
 
         kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
