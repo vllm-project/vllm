@@ -153,9 +153,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
         self.speculator = None
+        self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
-            self.do_spec_decode = True
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -165,9 +165,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.use_aux_hidden_state_outputs = True
                 if self.pp_size > 1:
                     raise ValueError("EAGLE3 with pipeline parallel is not supported.")
-        else:
-            self.do_spec_decode = False
-            self.num_speculative_steps = 0
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -251,10 +248,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         prepare_communication_buffer_for_model(self.model)
-        if self.do_spec_decode:
-            speculator_model = getattr(self.speculator, "model", None)
-            if speculator_model is not None:
-                prepare_communication_buffer_for_model(speculator_model)
+        if self.speculator is not None:
+            prepare_communication_buffer_for_model(self.speculator)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -864,29 +859,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     @torch.inference_mode()
-    def propose_draft(
-        self,
-        input_batch: InputBatch,
-        last_hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-    ) -> torch.Tensor:
-        assert self.speculator is not None
-        draft_tokens = self.speculator.propose(
-            input_batch,
-            last_hidden_states,
-            aux_hidden_states,
-            num_sampled,
-            num_rejected,
-            self.req_states.last_sampled_tokens,
-            self.req_states.next_prefill_tokens,
-            self.sampler.sampling_states.temperature.gpu,
-            self.sampler.sampling_states.seeds.gpu,
-        )
-        return draft_tokens
-
-    @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -1118,12 +1090,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
         )
         if self.speculator is not None:
-            draft_tokens = self.propose_draft(
+            draft_tokens = self.speculator.propose(
                 input_batch,
                 hidden_states,
                 aux_hidden_states,
                 num_sampled,
                 num_rejected,
+                self.req_states.last_sampled_tokens,
+                self.req_states.next_prefill_tokens,
+                self.sampler.sampling_states.temperature.gpu,
+                self.sampler.sampling_states.seeds.gpu,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)
