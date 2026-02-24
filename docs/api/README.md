@@ -27,11 +27,9 @@ LLM Class.
 
 - [vllm.LLM][]
 
-LLM Inputs.
+Prompt schema for LLM APIs.
 
-- [vllm.inputs.PromptType][]
-- [vllm.inputs.TextPrompt][]
-- [vllm.inputs.TokensPrompt][]
+- [vllm.inputs.api][]
 
 ## vLLM Engines
 
