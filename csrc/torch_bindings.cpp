@@ -241,11 +241,11 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 #ifndef USE_ROCM
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   // Only available when the kernel is built for compatible architectures.
-#ifdef ENABLE_DSV3_FUSED_A_GEMM
+  #ifdef ENABLE_DSV3_FUSED_A_GEMM
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
   ops.impl("dsv3_fused_a_gemm", torch::kCUDA, &dsv3_fused_a_gemm);
-#endif
+  #endif
 
   // Quantized GEMM for AWQ.
   ops.def(
