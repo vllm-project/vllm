@@ -53,7 +53,7 @@ def _get_cfs_cpu_limit() -> int | None:
             if parts[0] != "max":
                 quota = int(parts[0])
                 period = int(parts[1])
-                return max(1, math.ceil(quota / period))
+                return max(1, math.floor(quota / period))
     except (FileNotFoundError, PermissionError, ValueError, IndexError, OSError):
         pass
 
@@ -82,7 +82,7 @@ def _get_cfs_cpu_limit() -> int | None:
         if quota > 0:
             with open(period_file) as f:
                 period = int(f.read().strip())
-            return max(1, math.ceil(quota / period))
+            return max(1, math.floor(quota / period))
     except (FileNotFoundError, PermissionError, ValueError, OSError):
         pass
 
