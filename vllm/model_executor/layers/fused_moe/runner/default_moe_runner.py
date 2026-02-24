@@ -58,6 +58,9 @@ def get_layer_from_name(layer_name: str) -> torch.nn.Module:
     return forward_context.no_compile_layers[layer_name]
 
 
+# Note: _moe_forward and _moe_forward_shared should not contain any
+# implementation details, They should merely pass along control to
+# the runner's 'forward_dispatch' method.
 def _moe_forward(
     hidden_states: torch.Tensor,
     router_logits: torch.Tensor,
