@@ -903,7 +903,13 @@ def test_nemotron_flashinfer_moe(model_name, flashinfer_backend, monkeypatch):
     if model_name.endswith("NVFP4"):
         monkeypatch.setenv("VLLM_USE_FLASHINFER_MOE_FP4", "1")
     monkeypatch.setenv("VLLM_FLASHINFER_MOE_BACKEND", flashinfer_backend)
-    init_distributed_environment(world_size=1, rank=0, local_rank=0)
+
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("WORLD_SIZE", "1")
+    monkeypatch.setenv("MASTER_ADDR", "localhost")
+    monkeypatch.setenv("MASTER_PORT", "12345")
+    init_distributed_environment()
     init_workspace_manager(torch.cuda.current_device())
     ensure_model_parallel_initialized(
         tensor_model_parallel_size=1, pipeline_model_parallel_size=1
