@@ -539,6 +539,7 @@ class CudaPlatformBase(Platform):
         return True
 
     @classmethod
+    @cache
     def num_compute_units(cls, device_id=0):
         return torch.cuda.get_device_properties(device_id).multi_processor_count
 

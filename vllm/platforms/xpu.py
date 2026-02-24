@@ -3,6 +3,7 @@
 
 import contextlib
 import os
+from functools import cache
 from typing import TYPE_CHECKING
 
 import torch
@@ -279,5 +280,6 @@ class XPUPlatform(Platform):
         dst_cache[:, dst_block_indices] = _src_cache.cpu()
 
     @classmethod
+    @cache
     def num_compute_units(cls, device_id: int = 0) -> int:
         return torch.xpu.get_device_properties(device_id).max_compute_units
