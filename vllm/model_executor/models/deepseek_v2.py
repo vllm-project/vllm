@@ -32,6 +32,7 @@ import torch
 from torch import nn
 from transformers import DeepseekV2Config, DeepseekV3Config
 
+import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
@@ -220,6 +221,73 @@ class DeepseekV2MLP(nn.Module):
         return x
 
 
+class DeepSeekV2Gate(ReplicatedLinear):
+    def __init__(
+        self,
+        hidden_size: int,
+        n_experts: int,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        assert quant_config is None
+        super().__init__(
+            hidden_size,
+            n_experts,
+            bias=False,
+            quant_config=quant_config,
+            prefix=f"{prefix}.gate",
+        )
+
+        # Unquantized only, will be called "weight".
+        assert hasattr(self, "weight")
+        is_hopper_or_blackwell = current_platform.is_device_capability(
+            (9, 0)
+        ) or current_platform.is_device_capability_family(100)
+        SUPPORTED_NUM_EXPERTS = [256, 384]
+        SUPPORTED_HIDDEN_SIZES = [7168]
+
+        self.allow_dsv3_router_gemm = (
+            current_platform.is_cuda()
+            and is_hopper_or_blackwell
+            and n_experts in SUPPORTED_NUM_EXPERTS
+            and hidden_size in SUPPORTED_HIDDEN_SIZES
+        )
+
+        self._out_dtype: torch.dtype | None = None
+
+    def set_out_dtype(self, out_dtype: torch.dtype) -> None:
+        """
+        Set out dtype for the router logits. This is needed after
+        __init__, b/c we need to check if the trtllm kernel is
+        selected before we decide between bf16 and fp32.
+        """
+
+        if self._out_dtype is not None:
+            raise ValueError("out_dtype has already been set")
+        else:
+            self._out_dtype = out_dtype
+
+    @property
+    def out_dtype(self) -> torch.dtype:
+        if self._out_dtype is None:
+            raise ValueError("out_dtype has not been set yet")
+        return self._out_dtype
+
+    def forward(
+        self,
+        x: torch.Tensor,
+    ) -> tuple[torch.Tensor, None]:
+        """
+        Use specialized GEMM for low batch size for DSV3 and KIMI.
+        """
+        if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
+            return ops.dsv3_router_gemm(
+                hidden_states=x, router_weight=self.weight, output_dtype=self.out_dtype
+            ), None
+        else:
+            return super().forward(x)
+
+
 class DeepseekV2MoE(nn.Module):
     def __init__(
         self,
@@ -248,10 +316,9 @@ class DeepseekV2MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
-        self.gate = ReplicatedLinear(
+        self.gate = DeepSeekV2Gate(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
@@ -322,6 +389,13 @@ class DeepseekV2MoE(nn.Module):
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
+        )
+
+        # NOTE(rob): this is a hack until we finish off the PR for
+        # merging TRTLLM kernels into the MK framework. Then we can
+        # query the MonolithicMK for the expected router logits.
+        self.gate.set_out_dtype(
+            torch.float32 if self.experts.quant_method.is_monolithic else torch.bfloat16
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -711,6 +785,64 @@ class Indexer(nn.Module):
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
+class DeepSeekV2FusedQkvAProj(MergedColumnParallelLinear):
+    def __init__(
+        self,
+        input_size: int,
+        output_size: list[int],
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+    ):
+        super().__init__(
+            input_size,
+            output_size,
+            bias=False,
+            quant_config=quant_config,
+            disable_tp=True,
+            prefix=prefix,
+        )
+
+        # Check if the DeepSeek V3 fused A GEMM kernel can be used.
+        # This kernel supports PDL and is optimized for low batch size.
+        self._use_min_latency_gemm = (
+            hasattr(self, "weight")
+            and self.weight.dtype == torch.bfloat16
+            and self.weight.shape[0] == 2112
+            and self.weight.shape[1] == 7168
+            and current_platform.is_cuda()
+            and (
+                current_platform.is_device_capability(90)
+                or current_platform.is_device_capability_family(100)
+            )
+        )
+
+    def forward(
+        self,
+        input_,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.nn.Parameter | None]:
+        num_tokens = input_.shape[0]
+        if self._use_min_latency_gemm and (0 < num_tokens <= 16):
+            output = torch.empty(
+                num_tokens,
+                2112,
+                dtype=torch.bfloat16,
+                device=input_.device,
+            )
+            ops.dsv3_fused_a_gemm(
+                output,
+                input_,
+                self.weight.T,
+            )
+            if not self.return_bias:
+                return output
+            output_bias = self.bias if self.skip_bias_add else None
+            return output, output_bias
+        else:
+            # Fallback to the standard forward method when
+            # the fused A GEMM kernel cannot be used.
+            return super().forward(input_)
+
+
 class DeepseekV2MLAAttention(nn.Module):
     """
     Main reference: DeepseekV2 paper, and FlashInfer Implementation
@@ -756,13 +888,11 @@ class DeepseekV2MLAAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         if self.q_lora_rank is not None:
-            self.fused_qkv_a_proj = MergedColumnParallelLinear(
+            self.fused_qkv_a_proj = DeepSeekV2FusedQkvAProj(
                 self.hidden_size,
                 [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
-                bias=False,
                 quant_config=quant_config,
                 prefix=f"{prefix}.fused_qkv_a_proj",
-                disable_tp=True,
             )
         else:
             self.kv_a_proj_with_mqa = ReplicatedLinear(
@@ -836,7 +966,7 @@ class DeepseekV2MLAAttention(nn.Module):
                 qk_rope_head_dim,
                 max_position=max_position_embeddings,
                 rope_parameters=config.rope_parameters,
-                is_neox_style=not getattr(config, "indexer_rope_interleave", True),
+                is_neox_style=not getattr(config, "indexer_rope_interleave", False),
             )
             self.indexer = Indexer(
                 vllm_config,
