@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import Any
 
 import numpy as np
 import torch
@@ -26,9 +25,10 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
     requests generating 1 token each.
     """
     prompt_token_ids = [0, 1]
+    prompt_len = len(prompt_token_ids)
     num_reqs = min(
         model_runner.scheduler_config.max_num_seqs,
-        model_runner.scheduler_config.max_num_batched_tokens // len(prompt_token_ids),
+        model_runner.scheduler_config.max_num_batched_tokens // prompt_len,
     )
 
     num_kv_cache_groups = len(model_runner.kv_cache_config.kv_cache_groups)
@@ -43,35 +43,21 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
         pooling_params = None
 
     # Step 1: Prefill all requests with 2 prompt tokens each.
-    new_reqs = []
-    num_scheduled_tokens: dict[str, int] = {}
-    for i in range(num_reqs):
-        # Each request uses a distinct block per KV cache group.
-        block_ids = tuple([i] for _ in range(num_kv_cache_groups))
-        new_reqs.append(
-            NewRequestData.from_request(
-                Request(req_ids[i], prompt_token_ids, sampling_params, pooling_params),
-                block_ids=block_ids,
-                prefill_token_ids=prompt_token_ids,
-            )
+    new_reqs = [
+        NewRequestData.from_request(
+            Request(req_ids[i], prompt_token_ids, sampling_params, pooling_params),
+            # Each request uses a distinct block per KV cache group.
+            block_ids=tuple([i] for _ in range(num_kv_cache_groups)),
+            prefill_token_ids=prompt_token_ids,
         )
-        num_scheduled_tokens[req_ids[i]] = len(prompt_token_ids)
+        for i in range(num_reqs)
+    ]
 
-    unused_scheduler_output_fields = dict[str, Any](
-        scheduled_spec_decode_tokens={},
-        scheduled_encoder_inputs={},
-        finished_req_ids=set(),
-        free_encoder_mm_hashes=[],
-    )
-
-    prefill_output = SchedulerOutput(
-        scheduled_new_reqs=new_reqs,
-        scheduled_cached_reqs=CachedRequestData.make_empty(),
-        num_scheduled_tokens=num_scheduled_tokens,
-        total_num_scheduled_tokens=len(prompt_token_ids) * num_reqs,
-        num_common_prefix_blocks=[0] * num_kv_cache_groups,
-        **unused_scheduler_output_fields,
-    )
+    prefill_output = SchedulerOutput.make_empty()
+    prefill_output.scheduled_new_reqs = new_reqs
+    prefill_output.num_scheduled_tokens = {rid: prompt_len for rid in req_ids}
+    prefill_output.total_num_scheduled_tokens = prompt_len * num_reqs
+    prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
     model_runner.execute_model(prefill_output)
 
@@ -96,18 +82,16 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
         cached_req_data = CachedRequestData.make_empty()
         cached_req_data.req_ids = list(req_ids)
         cached_req_data.new_block_ids = [None] * num_reqs
-        cached_req_data.num_computed_tokens = [len(prompt_token_ids)] * num_reqs
+        cached_req_data.num_computed_tokens = [prompt_len] * num_reqs
         cached_req_data.num_output_tokens = [1] * num_reqs
 
         # Step 2: Decode all requests with 1 token each.
-        decode_output = SchedulerOutput(
-            scheduled_new_reqs=[],
-            scheduled_cached_reqs=cached_req_data,
-            num_scheduled_tokens={rid: 1 for rid in req_ids},
-            total_num_scheduled_tokens=num_reqs,
-            num_common_prefix_blocks=[0] * num_kv_cache_groups,
-            **unused_scheduler_output_fields,
-        )
+        decode_output = SchedulerOutput.make_empty()
+        decode_output.scheduled_cached_reqs = cached_req_data
+        decode_output.num_scheduled_tokens = {rid: 1 for rid in req_ids}
+        decode_output.total_num_scheduled_tokens = num_reqs
+        decode_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
+
         model_runner.execute_model(decode_output)
         model_runner.sample_tokens(None)
 
