@@ -9,6 +9,9 @@ from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -44,9 +47,6 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
@@ -937,10 +937,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             )
         # TODO(rob): this validation should happen at kernel selection
         # time in the oracle rather than here.
-        assert layer.activation == MoEActivation.SILU, (
-            f"Expected 'silu' activation but got {layer.activation}"
+        SUPPORTED_ACTIVATIONS = [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert layer.activation in SUPPORTED_ACTIVATIONS, (
+            f"Only {SUPPORTED_ACTIVATIONS} activations are supported for FlashInfer "
+            f"TRTLLM FP4 MoE, {layer.activation} found instead."
         )
-        assert not layer.renormalize
         return apply_fi_trtllm_fp8_per_tensor_moe(
             layer=layer,
             hidden_states=x,
@@ -976,11 +977,11 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
 
         assert self.moe_mk is not None
         return self.moe_mk(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_weights,
-            topk_ids,
+            hidden_states=x,
+            w1=layer.w13_weight,
+            w2=layer.w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
@@ -1548,11 +1549,11 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         else:
             assert self.moe_mk is not None
             return self.moe_mk(
-                x,
-                layer.w13_weight,
-                layer.w2_weight,
-                topk_weights,
-                topk_ids,
+                hidden_states=x,
+                w1=layer.w13_weight,
+                w2=layer.w2_weight,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
                 activation=layer.activation,
                 global_num_experts=layer.global_num_experts,
                 expert_map=layer.expert_map,
