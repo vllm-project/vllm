@@ -1249,6 +1249,7 @@ def voxtral_patch_hf_runner(hf_model: "HfRunner") -> "HfRunner":
     import soundfile as sf
 
     processor = hf_model.processor
+    assert processor is not None
 
     def _audio_to_base64(audio_array, sample_rate: int) -> str:
         """Encode a numpy audio array as a base64 WAV string."""
