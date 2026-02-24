@@ -1366,18 +1366,20 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
 }
 
 // This version targets cases skinny where CUs are not filled
-// Wave-SplitK is used with reduction done via atomics.
+// Wave-SplitK is used with reduction done via deterministic store-then-reduce.
 #if defined(__gfx950__)
   #define WVSPLITKRC_1KPASS
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>
+          int UNRL, int N, int GrpsShrB, int CHUNKK>
 __global__ void __launch_bounds__(WvPrGrp* THRDS)
     __attribute__((amdgpu_waves_per_eu(1, 1)))
-    wvSplitKrc_(const int actlN, const int K, const int Kap, const int M,
-                const int Bx, const int By, const scalar_t* __restrict__ A,
-                const scalar_t* __restrict__ B,
-                const scalar_t* __restrict__ BIAS, float* glbl, scalar_t* C,
-                const int CuCount) {
+    wvSplitKrc_deterministic_(const int actlN, const int K, const int Kap,
+                              const int M, const int Bx, const int By,
+                              const scalar_t* __restrict__ A,
+                              const scalar_t* __restrict__ B,
+                              const scalar_t* __restrict__ BIAS, float* glbl,
+                              scalar_t* C, const int CuCount) {
+  constexpr int DTRMNSTC = 1;
   constexpr int NTILE = 16;
   constexpr int APAD = 1;
   constexpr int ASTRD = 64;
@@ -1802,21 +1804,467 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #endif
   }
 }
+
+// Wave-SplitK with fast non-deterministic atomicAdd reduction.
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GrpsShrB, int CHUNKK>
+__global__ void __launch_bounds__(WvPrGrp* THRDS)
+    __attribute__((amdgpu_waves_per_eu(1, 1)))
+    wvSplitKrc_fast_(const int actlN, const int K, const int Kap, const int M,
+                     const int Bx, const int By, const scalar_t* __restrict__ A,
+                     const scalar_t* __restrict__ B,
+                     const scalar_t* __restrict__ BIAS, float* glbl,
+                     scalar_t* C, const int CuCount) {
+  constexpr int DTRMNSTC = 0;
+  constexpr int NTILE = 16;
+  constexpr int APAD = 1;
+  constexpr int ASTRD = 64;
+  constexpr int BPAD = 1;
+  constexpr int WVLDS_ = THRDS * A_CHUNK / CHUNKK;
+  constexpr int WVLDS = ((WVLDS_ + A_CHUNK * BPAD)) * YTILE;
+
+  constexpr int max_lds_len = LDS_SIZE / 2;
+
+  using scalar16 =
+      __attribute__((__vector_size__((A_CHUNK * 2) * sizeof(float)))) float;
+  using scalar8 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(float)))) float;
+  using half4 =
+      __attribute__((__vector_size__((A_CHUNK / 2) * sizeof(__bf16)))) __bf16;
+  union bigType {
+    scalar_t h[A_CHUNK];
+    float f[A_CHUNK / 2];
+    unsigned int i[A_CHUNK / 2];
+    float2 f2[A_CHUNK / 4];
+    unsigned long l[A_CHUNK / 4];
+    double d[A_CHUNK / 4];
+    half4 h4[A_CHUNK / 4];
+    scalar8 h8;
+  };
+  using big4 = __attribute__((__vector_size__(4 * sizeof(bigType)))) __bf16;
+
+  __shared__ scalar_t stg[WvPrGrp * WVLDS / GrpsShrB];
+  unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
+  __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
+
+  #ifndef WVSPLITKRC_1KPASS
+  constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
+  // find biggest k size that fits padded into LDS
+  constexpr uint32_t kFit__ = (max_lds_len - WvPrGrp * WVLDS / GrpsShrB) / N;
+  constexpr uint32_t kFit_ = (kFit__ * ASTRD) / (APAD + ASTRD);
+  uint32_t kFit = kFit_ - (kFit_ % TUC_);
+  uint32_t kfitsPerRdc = (K + kFit - 1) / kFit;
+
+  // find best k split to fill the CUs
+  if (((K + kfitsPerRdc * kFit - 1) / (kfitsPerRdc * kFit)) * numCuWithFullK <=
+      CuCount)
+    while (true) {
+      while (kFit > TUC_) {
+        uint32_t kFit_ = kFit - TUC_;
+        if (((K + (kfitsPerRdc * kFit_ - 1)) / (kfitsPerRdc * kFit_)) *
+                numCuWithFullK >
+            CuCount)
+          break;
+        kFit = kFit_;
+      }
+      if (((K + ((kfitsPerRdc - 1) * kFit - 1)) / ((kfitsPerRdc - 1) * kFit)) *
+              numCuWithFullK <=
+          CuCount)
+        kfitsPerRdc--;
+      else
+        break;
+    }
+  #else
+  int constexpr kFit = 512 / CHUNKK;
+  int constexpr kfitsPerRdc = 1;
+  #endif
+
+  bool doRdc = true;  // Assuming (kfitsPerRdc * kFit < K) is always true
+  uint32_t numCuWithFullK =
+      ((M + (WvPrGrp * YTILE / GrpsShrB) - 1) / (WvPrGrp * YTILE / GrpsShrB));
+  uint32_t Mmod = numCuWithFullK * (WvPrGrp * YTILE / GrpsShrB);
+
+  // given above k-split, find this wave's position
+  uint32_t kFitPdd = kFit * CHUNKK + ((kFit * CHUNKK) / ASTRD) * APAD;
+  uint32_t m0 = (blockIdx.x * WvPrGrp / GrpsShrB) * YTILE;
+  uint32_t m1 = ((threadIdx.y % WvPrGrp) / GrpsShrB) * YTILE;
+  uint32_t m = (m0 + m1) % Mmod;
+  const uint32_t k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
+  uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
+  const uint32_t k_rnd = (K + kFit * kfitsPerRdc - 1) / (kFit * kfitsPerRdc);
+
+  int* cntr = DTRMNSTC ? (int*)(&glbl[M * N * k_rnd]) : (int*)(&glbl[M * N]);
+
+  scalar8 sum4[N / NTILE / GrpsShrB][1] = {0};
+  bigType bigB_[YTILE / GrpsShrB / CHUNKK][UNRL];
+  const uint32_t bLoader = (threadIdx.y % GrpsShrB);
+  uint32_t kBase = 0;
+  if (k_str >= K) return;
+  if (m >= Mmod) return;
+
+  bool noreloada = false;
+  constexpr bool FAST_UNSAFE_RDC_INIT = false;
+
+  #ifdef WVSPLITKRC_1KPASS
+  // Early glbl init, B[] loading, if 1KPASS
+  if constexpr (FAST_UNSAFE_RDC_INIT) {
+    if (m + (threadIdx.x % 16) < M)
+      if (doRdc)
+        if (k_str == 0) {
+          int mindx = m + (threadIdx.x % 16);
+          int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                       (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          int adr_ = mindx + M * nindx_ / 4;
+          __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
+                             __HIP_MEMORY_SCOPE_AGENT);
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              int adr = mindx + M * nindx;
+              __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
+                                 __HIP_MEMORY_SCOPE_AGENT);
+            }
+          }
+        }
+  }
+
+    // Load first B[] chunk
+    #pragma unroll
+  for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+    uint32_t k = k_str + k2 * THRDS * A_CHUNK;
+    uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
+    const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+    #pragma unroll
+    for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+      bigB_[y / CHUNKK][k2].h8 = (loadnt(
+          (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB +
+                                   bLoader + m,
+                               M - 1) *
+                         K])));
+  }
+  {
+  #else
+  while (m < Mmod) {
+  #endif
+
+  #ifndef WVSPLITKRC_1KPASS
+    if constexpr (FAST_UNSAFE_RDC_INIT) {
+      if (m + (threadIdx.x % 16) < M)
+        if (doRdc)
+          if (k_str == 0) {
+            int mindx = m + (threadIdx.x % 16);
+            int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                         (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            int adr_ = mindx + M * nindx_ / 4;
+            __hip_atomic_store(&cntr[adr_], 0, __ATOMIC_RELAXED,
+                               __HIP_MEMORY_SCOPE_AGENT);
+            for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+              for (uint32_t j = 0; j < 4; j++) {
+                int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                            (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+                int adr = mindx + M * nindx;
+                __hip_atomic_store(&glbl[adr], 0, __ATOMIC_RELAXED,
+                                   __HIP_MEMORY_SCOPE_AGENT);
+              }
+            }
+          }
+    }
+
+  #endif
+
+  #ifndef WVSPLITKRC_1KPASS
+    for (uint32_t k1 = k_str; k1 < k_end; k1 += THRDS * A_CHUNK * UNRL) {
+  #else
+    const uint32_t k1 = k_str;
+    {
+  #endif
+  #ifndef WVSPLITKRC_1KPASS
+      const bool reloada = (!noreloada) &&
+                           ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
+                           (k1 < k_end);
+      // load next chunk of A[] to LDS
+      if (reloada) {
+        if (k1 != k_str) kBase += kFit;
+        __syncthreads();
+  #else
+      const bool reloada = (!noreloada) &&
+                           ((k1 == k_str) || (k1 == k_str + kBase + kFit)) &&
+                           (k1 < k_end);
+      if (reloada) {
+  #endif
+        constexpr int sprdN = 4;
+        const uint32_t thrd = threadIdx.x % (THRDS / CHUNKK);
+
+  #ifndef WVSPLITKRC_1KPASS
+    #pragma unroll
+        for (int k = 0; k < kFit;
+             k += (THRDS * (WvPrGrp / sprdN) * A_CHUNK) / CHUNKK) {
+  #else
+        const unsigned int k = 0;
+        {
+  #endif
+          unsigned int kOff = k + (thrd * A_CHUNK);
+          unsigned int kOffcp = min__(K - A_CHUNK, k_str + kOff);
+          for (unsigned int n = 0; n < N; n += CHUNKK * sprdN) {
+            __builtin_amdgcn_global_load_lds(
+                (int*)(&A[min__(Kap * actlN - A_CHUNK,
+                                kOffcp + Kap * (n / CHUNKK +
+                                                (N / CHUNKK) * (threadIdx.x /
+                                                                (64 / CHUNKK)) +
+                                                (threadIdx.y % sprdN)))]),
+                (int*)(&s[(k +
+                           kFitPdd * ((n / CHUNKK) + (threadIdx.y % sprdN)))]),
+                16, 0, 0);
+          }
+
+          // Stage loaded B[] to LDS for MFMA swizzling...
+          for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+            uint32_t k = k1 + k2 * THRDS * A_CHUNK;
+            uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
+            const bool oob_k = (k_ >= K);
+            for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK) {
+              uint32_t idx =
+                  (threadIdx.x % (THRDS / CHUNKK)) * 4 +
+                  ((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB + bLoader) *
+                      ((THRDS / CHUNKK + BPAD) * 4);
+              // zero out if oob
+              *((scalar8*)&myStg[idx]) =
+                  (oob_k)  // TODO: ever necessary (y*GrpsShrB+bLoader+m>=M) ?
+                      ? 0
+                      : bigB_[y / CHUNKK][k2].h8;
+            }
+          }
+        }
+      }
+    }
+  #ifndef WVSPLITKRC_1KPASS
+    // Fire load of next B[] chunk...
+    if ((k1 + THRDS * A_CHUNK * UNRL < k_end) &&
+        (k1 + THRDS * A_CHUNK * UNRL < K))
+    #pragma unroll
+      for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+        uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
+        uint32_t k_ = k + threadIdx.x * A_CHUNK;
+        const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
+    #pragma unroll
+        for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+          bigB_[y / CHUNKK][k2].h8 = (loadnt(
+              (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) *
+                                           GrpsShrB +
+                                       bLoader + m,
+                                   M - 1) *
+                             K])));
+      }
+  #endif
+
+    // B[] staging is cooperative across GrpsShrB, so sync here before reading
+    // back. This wait is currently inserted by compiler, but not gauranteed.
+    asm volatile("s_waitcnt 0");
+    __syncthreads();
+
+    // read back B[] swizzled for MFMA...
+    bigType bigB[YTILE / CHUNKK][UNRL];
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+      for (uint32_t y = 0; y < YTILE / CHUNKK; y++) {
+        unsigned int idx =
+            (threadIdx.x % YTILE) * ((THRDS / CHUNKK + BPAD) * 4) +
+            (threadIdx.x / YTILE) * 4 + y * 16;
+        bigB[y][k2].h8 = *((scalar8*)&myStg[idx]);
+      }
+    }
+
+    // rReadback A[] swizzled for MFMA...
+    bigType bigA[N / GrpsShrB / CHUNKK][UNRL];
+  #pragma unroll
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+      uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
+  #pragma unroll
+      for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
+  #pragma unroll
+        for (uint32_t n = 0; n < NTILE / CHUNKK; n++) {
+          uint32_t idxa =
+              ((nt + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) % (N / CHUNKK) +
+               (threadIdx.x % NTILE)) *
+                  kFitPdd +
+              ((nt + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) /
+               (N / CHUNKK)) *
+                  A_CHUNK * (64 / CHUNKK) +
+              A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
+          bigA[nt / CHUNKK + n][k2] = *((const bigType*)(&(s[idxa])));
+        }
+    }
+
+    // Do the MFMAs
+  #pragma unroll
+    for (uint32_t k2 = 0; k2 < UNRL; k2++) {
+  #pragma unroll
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+  #pragma unroll
+        for (uint32_t j = 0; j < YTILE / CHUNKK; j++) {
+          if constexpr (std::is_same_v<scalar_t, half>) {
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x32_f16(
+                bigA[nt * (YTILE / CHUNKK) + j][k2].h8, bigB[j][k2].h8,
+                sum4[nt][0], 0, 0, 0);
+          } else {  // bf16
+            sum4[nt][0] = __builtin_amdgcn_mfma_f32_16x16x32_bf16(
+                bigA[nt * (YTILE / CHUNKK) + j][k2].h8, bigB[j][k2].h8,
+                sum4[nt][0], 0, 0, 0);
+          }
+        }
+      }
+    }
+  }
+
+  union flt4 {
+    scalar8 s8;
+    float2 f2[2];
+    float4 f4;
+  };
+  if (m + (threadIdx.x % 16) < M) {
+    int my_cntr;
+    int mindx = m + (threadIdx.x % 16);
+    int g_mindx = m * 4 + (threadIdx.x % 64);  // coalesced atomic reduction
+    scalar_t biases[N / NTILE / GrpsShrB][4] = {};
+    // Atomic add the output, read biases
+    for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+      int g_nindx =
+          (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+      int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+      if (DTRMNSTC) {
+        flt4 flt4_ = {.s8 = sum4[nt][0]};
+        __hip_atomic_store((float2*)&glbl[g_adr + M * N * (m0 / Mmod)],
+                           flt4_.f2[0], __ATOMIC_RELAXED,
+                           __HIP_MEMORY_SCOPE_AGENT);
+        __hip_atomic_store((float2*)&glbl[g_adr + 2 + M * N * (m0 / Mmod)],
+                           flt4_.f2[1], __ATOMIC_RELAXED,
+                           __HIP_MEMORY_SCOPE_AGENT);
+      } else {
+        for (uint32_t j = 0; j < 4; j++)
+          atomicAdd((&glbl[g_adr + j]), sum4[nt][0][j]);
+      }
+    }
+
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+    asm volatile("s_waitcnt vmcnt(0)" ::: "memory");
+    __atomic_signal_fence(__ATOMIC_SEQ_CST);
+
+    int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
+                 (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+    int adr_ = mindx + M * nindx_ / 4;
+    my_cntr = atomicAdd(&cntr[adr_], 1);
+
+    if (DTRMNSTC)
+      __syncthreads();  // make sure LDS is free for write out staging
+
+    // Update the complete counter
+    flt4 vals[N / NTILE / GrpsShrB] = {};
+    // If we're the last k-shard, read back the value and convert...
+    if (my_cntr + 1 == k_rnd) {
+      cntr[adr_] = 0;  // clear for next round
+      if (DTRMNSTC) {
+  #pragma unroll
+        for (int ks = 0; ks < k_rnd; ks++) {
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            int g_nindx =
+                (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+            int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+            __builtin_amdgcn_global_load_lds(
+                (float4*)(&glbl[g_adr + M * N * ks]),
+                &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
+                               nt * THRDS * 4 * k_rnd]),
+                16, 0, 0);
+            *(float4*)(&glbl[g_adr + M * N * ks]) =
+                {};  // clear out for next round
+          }
+        }
+        if (BIAS)
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
+            }
+          }
+        asm volatile("s_waitcnt 0");
+        for (int ks = 0; ks < k_rnd; ks++) {
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            float4 eval = ((float4*)s)[(threadIdx.x + threadIdx.y * THRDS) +
+                                       ks * THRDS * 4 + nt * THRDS * 4 * k_rnd];
+            vals[nt].f4 += eval;
+          }
+        }
+      } else {
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          int g_nindx =
+              (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+          int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+          vals[nt].f4 = *(float4*)(&glbl[g_adr]);
+          *(float4*)(&glbl[g_adr]) = {};  // clear out for next round
+        }
+        if (BIAS)
+          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+            for (uint32_t j = 0; j < 4; j++) {
+              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
+            }
+          }
+      }
+      __builtin_amdgcn_sched_barrier(0);
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        for (uint32_t j = 0; j < 4; j++) {
+          int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                      (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+          if (nindx < actlN) {
+            int adr = mindx + M * nindx;
+            if constexpr (std::is_same_v<scalar_t, __hip_bfloat16>) {
+              vals[nt].s8[j] += __bfloat162float(biases[nt][j]);
+              C[adr] = __float2bfloat16(vals[nt].s8[j]);
+            } else {
+              vals[nt].s8[j] += __half2float(biases[nt][j]);
+              C[adr] = __float2half(vals[nt].s8[j]);
+            }
+          }
+        }
+      }
+    }
+
+  #ifndef WVSPLITKRC_1KPASS
+    m0 += CuCount * WvPrGrp * YTILE / GrpsShrB;
+    m = (m0 + m1) % Mmod;
+    k_str = (m0 / Mmod) * kFit * kfitsPerRdc;
+    k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
+    if (k_str >= K) break;
+    kBase = 0;
+  #endif
+  }
+}
+
 #else   // !defined(__HIP__GFX9__) TODO: Add NAVI support
 template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
-          int UNRL, int N, int GrpsShrB, int CHUNKK, int DTRMNSTC>
-__global__ void wvSplitKrc_(const int actlN, const int K, const int Kap,
-                            const int M, const int Bx, const int By,
-                            const scalar_t* B, const scalar_t* __restrict__ A,
-                            const scalar_t* __restrict__ BIAS, float* glbl,
-                            scalar_t* C, const int CuCount){UNREACHABLE_CODE}
+          int UNRL, int N, int GrpsShrB, int CHUNKK>
+__global__ void wvSplitKrc_deterministic_(
+    const int actlN, const int K, const int Kap, const int M, const int Bx,
+    const int By, const scalar_t* B, const scalar_t* __restrict__ A,
+    const scalar_t* __restrict__ BIAS, float* glbl, scalar_t* C,
+    const int CuCount) {
+  UNREACHABLE_CODE
+}
+template <typename scalar_t, int THRDS, int YTILE, int WvPrGrp, int A_CHUNK,
+          int UNRL, int N, int GrpsShrB, int CHUNKK>
+__global__ void wvSplitKrc_fast_(const int actlN, const int K, const int Kap,
+                                 const int M, const int Bx, const int By,
+                                 const scalar_t* B,
+                                 const scalar_t* __restrict__ A,
+                                 const scalar_t* __restrict__ BIAS, float* glbl,
+                                 scalar_t* C,
+                                 const int CuCount){UNREACHABLE_CODE}
 #endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
-                         const int64_t CuCount) {
-  int constexpr _DTRMNSTC = 1;
-
+                         const int64_t CuCount, const bool fast_skinny_gemm) {
   auto M_in = in_b.size(0);
   auto N_in = in_a.size(0);
   auto K_in = in_b.size(1);
@@ -1871,12 +2319,19 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
           torch::TensorOptions().dtype(torch::kFloat32).device(in_a.device()))
           .detach();
   auto glbl = axl_glbl.data_ptr<float>();
-  // auto cntr = axl_cntr.data_ptr<int>();
 
-#define WVSPLITKrc(_N, _GrpsShrB, _CHUNKK)                                   \
+#define WVSPLITKrc_DET(_N, _GrpsShrB, _CHUNKK)                                 \
+  {                                                                            \
+    dim3 block(64, 4);                                                         \
+    wvSplitKrc_deterministic_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK> \
+        <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in,   \
+                                     af4, bf4, biasf4, glbl, c, CuCount);      \
+  }
+
+#define WVSPLITKrc_FAST(_N, _GrpsShrB, _CHUNKK)                              \
   {                                                                          \
     dim3 block(64, 4);                                                       \
-    wvSplitKrc_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK, _DTRMNSTC>  \
+    wvSplitKrc_fast_<fptype, 64, 16, 4, 8, 1, _N, _GrpsShrB, _CHUNKK>        \
         <<<grid, block, 0, stream>>>(N_in, K_in, Kap_in, M_in, Bx_in, By_in, \
                                      af4, bf4, biasf4, glbl, c, CuCount);    \
   }
@@ -1891,25 +2346,53 @@ torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
             : nullptr;
     fptype* c = reinterpret_cast<fptype*>(out_c.data_ptr());
 
-    switch (N_p2) {
-      case 16:
-        WVSPLITKrc(16, 1, 1) break;
-      case 32:
-        if (chunkk == 2)
-          WVSPLITKrc(32, 2, 2) else if (chunkk == 1) WVSPLITKrc(32, 2, 1) break;
-      case 64:
-        if (chunkk == 2)
-          WVSPLITKrc(64, 4, 2) else if (chunkk == 1) WVSPLITKrc(64, 4, 1) break;
-      case 128:
-        if (chunkk == 2)
-          WVSPLITKrc(128, 4, 2) else if (chunkk == 1)
-              WVSPLITKrc(128, 4, 1) break;
-      default:
-        throw std::runtime_error(
-            "Unsupported N value: " + std::to_string(M_in) + "," +
-            std::to_string(K_in) + "," + std::to_string(N_in));
+    if (fast_skinny_gemm) {
+      switch (N_p2) {
+        case 16:
+          WVSPLITKrc_FAST(16, 1, 1) break;
+        case 32:
+          if (chunkk == 2)
+            WVSPLITKrc_FAST(32, 2, 2) else if (chunkk == 1)
+                WVSPLITKrc_FAST(32, 2, 1) break;
+        case 64:
+          if (chunkk == 2)
+            WVSPLITKrc_FAST(64, 4, 2) else if (chunkk == 1)
+                WVSPLITKrc_FAST(64, 4, 1) break;
+        case 128:
+          if (chunkk == 2)
+            WVSPLITKrc_FAST(128, 4, 2) else if (chunkk == 1)
+                WVSPLITKrc_FAST(128, 4, 1) break;
+        default:
+          throw std::runtime_error(
+              "Unsupported N value: " + std::to_string(M_in) + "," +
+              std::to_string(K_in) + "," + std::to_string(N_in));
+      }
+    } else {
+      switch (N_p2) {
+        case 16:
+          WVSPLITKrc_DET(16, 1, 1) break;
+        case 32:
+          if (chunkk == 2)
+            WVSPLITKrc_DET(32, 2, 2) else if (chunkk == 1)
+                WVSPLITKrc_DET(32, 2, 1) break;
+        case 64:
+          if (chunkk == 2)
+            WVSPLITKrc_DET(64, 4, 2) else if (chunkk == 1)
+                WVSPLITKrc_DET(64, 4, 1) break;
+        case 128:
+          if (chunkk == 2)
+            WVSPLITKrc_DET(128, 4, 2) else if (chunkk == 1)
+                WVSPLITKrc_DET(128, 4, 1) break;
+        default:
+          throw std::runtime_error(
+              "Unsupported N value: " + std::to_string(M_in) + "," +
+              std::to_string(K_in) + "," + std::to_string(N_in));
+      }
     }
   });
+
+#undef WVSPLITKrc_DET
+#undef WVSPLITKrc_FAST
   return out_c;
 }
 

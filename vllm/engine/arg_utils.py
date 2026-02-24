@@ -547,6 +547,7 @@ class EngineArgs:
     enable_flashinfer_autotune: bool = get_field(
         KernelConfig, "enable_flashinfer_autotune"
     )
+    fast_skinny_gemm: bool = ModelConfig.fast_skinny_gemm
     worker_cls: str = ParallelConfig.worker_cls
     worker_extension_cls: str = ParallelConfig.worker_extension_cls
 
@@ -733,6 +734,9 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--io-processor-plugin", **model_kwargs["io_processor_plugin"]
+        )
+        model_group.add_argument(
+            "--fast-skinny-gemm", **model_kwargs["fast_skinny_gemm"]
         )
 
         # Model loading arguments
@@ -1333,6 +1337,7 @@ class EngineArgs:
             logits_processors=self.logits_processors,
             video_pruning_rate=self.video_pruning_rate,
             io_processor_plugin=self.io_processor_plugin,
+            fast_skinny_gemm=self.fast_skinny_gemm,
         )
 
     def validate_tensorizer_args(self):

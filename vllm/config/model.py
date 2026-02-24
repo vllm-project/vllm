@@ -283,6 +283,12 @@ class ModelConfig:
     definitions"""
     io_processor_plugin: str | None = None
     """IOProcessor plugin name to load at model startup"""
+    fast_skinny_gemm: bool = False
+    """When enabled on ROCm, uses the non-deterministic atomicAdd reduction
+    path in skinny GEMM kernels (wvSplitKrc) for higher throughput. The
+    default (False) uses a deterministic store-then-reduce path that
+    guarantees bitwise reproducibility across runs with different batch
+    dimensions, at a small cost in LDS pressure and an extra sync."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None

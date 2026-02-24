@@ -2058,9 +2058,13 @@ def wvSplitK(
 
 
 def wvSplitKrc(
-    a: torch.Tensor, b: torch.Tensor, cu_count: int, bias: torch.Tensor = None
+    a: torch.Tensor,
+    b: torch.Tensor,
+    cu_count: int,
+    bias: torch.Tensor = None,
+    fast_skinny_gemm: bool = False,
 ) -> torch.Tensor:
-    return torch.ops._rocm_C.wvSplitKrc(a, b, bias, cu_count)
+    return torch.ops._rocm_C.wvSplitKrc(a, b, bias, cu_count, fast_skinny_gemm)
 
 
 def wvSplitKQ(
