@@ -49,7 +49,6 @@ pytestmark = pytest.mark.skipif(
 def is_ibverbs_available():
     from shutil import which
 
-    print(f"which = {which('ibv_devices')}")
     if which("ibv_devices") is None:
         return False
     from subprocess import check_output
