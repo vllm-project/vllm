@@ -435,6 +435,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
 
+            # Write the latent and rope to kv cache
+            if self_kv_cache.numel() > 0:
+                self.impl.do_kv_cache_update(
+                    kv_c_normed,
+                    k_pe,
+                    self_kv_cache,
+                    attn_metadata.slot_mapping,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
+
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.forward_impl(
@@ -519,16 +530,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         q = q[:num_actual_toks, ...]
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
-
-        # write the latent and rope to kv cache
-        self.impl.do_kv_cache_update(
-            k_c_normed,
-            k_pe,
-            kv_cache,
-            attn_metadata.slot_mapping,
-            self.kv_cache_dtype,
-            self._k_scale,
-        )
 
         if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
