@@ -1219,13 +1219,27 @@ MM_PARSER_MAP: dict[
 # Fields already consumed by the content part parser. Any field NOT in this
 # set is treated as an extra field and passed through to the chat template
 # when using the OpenAI (wrap_dicts) content format.
-_KNOWN_CONTENT_PART_FIELDS: frozenset[str] = frozenset({
-    "type",
-    "text", "refusal", "thinking", "input_text", "output_text", "closed",
-    "image_url", "image_pil", "image_embeds", "detail",
-    "audio_url", "input_audio", "audio_embeds",
-    "video_url", "input_image", "uuid",
-})
+_KNOWN_CONTENT_PART_FIELDS: frozenset[str] = frozenset(
+    {
+        "type",
+        "text",
+        "refusal",
+        "thinking",
+        "input_text",
+        "output_text",
+        "closed",
+        "image_url",
+        "image_pil",
+        "image_embeds",
+        "detail",
+        "audio_url",
+        "input_audio",
+        "audio_embeds",
+        "video_url",
+        "input_image",
+        "uuid",
+    }
+)
 
 
 def _collect_extra_fields(part: dict[str, Any]) -> dict[str, Any]:
