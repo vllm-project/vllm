@@ -1138,6 +1138,7 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                    ? in_bias->size(0)
                    : 1;
 
+  // Bias uses (m % Bx) + (n % By) * M indexing; Bx/By must be 1 or divide M/N.
   TORCH_CHECK(Bx_in >= 1 && (Bx_in == 1 || M_in % Bx_in == 0),
               "bias Bx must be 1 or divide M");
   TORCH_CHECK(By_in >= 1 && (By_in == 1 || N_in % By_in == 0),
