@@ -275,7 +275,7 @@ steps:
   #
   # Environment variables for ROCm builds (set via Buildkite UI or schedule):
   #   ROCM_PYTHON_VERSION: Python version (default: 3.12)
-  #   PYTORCH_ROCM_ARCH: GPU architectures (default: gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151)
+  #   PYTORCH_ROCM_ARCH: GPU architectures (default: from docker/Dockerfile.rocm_base ARG PYTORCH_ROCM_ARCH)
   #   ROCM_UPLOAD_WHEELS: Upload to S3 (default: false for nightly, true for releases)
   #   ROCM_FORCE_REBUILD: Force rebuild base wheels, ignore S3 cache (default: false)
   #
@@ -297,7 +297,7 @@ steps:
       - text: "GPU Architectures"
         key: "rocm-pytorch-rocm-arch"
         default: "gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151"
-        hint: "Semicolon-separated GPU architectures"
+        hint: "Semicolon-separated GPU architectures (keep in sync with docker/Dockerfile.rocm_base ARG PYTORCH_ROCM_ARCH)"
       - select: "Upload Wheels to S3"
         key: "rocm-upload-wheels"
         default: "true"
@@ -334,7 +334,11 @@ steps:
         export PYTHON_VERSION="$${PYTHON_VERSION:-3.12}"
 
         PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
-        export PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+        if [ -z "$${PYTORCH_ROCM_ARCH}" ]; then
+          PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
+          echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
+        fi
+        export PYTORCH_ROCM_ARCH
 
         # Check for force rebuild flag
         ROCM_FORCE_REBUILD="$${ROCM_FORCE_REBUILD:-}"
@@ -511,7 +515,10 @@ steps:
 
         # Get GPU architectures from meta-data
         PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
-        PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+        if [ -z "$${PYTORCH_ROCM_ARCH}" ]; then
+          PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
+          echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
+        fi
 
         echo "========================================"
         echo "Building vLLM wheel with:"
@@ -660,7 +667,10 @@ steps:
 
         # Get GPU architectures from meta-data
         PYTORCH_ROCM_ARCH="$$(buildkite-agent meta-data get rocm-pytorch-rocm-arch 2>/dev/null || echo '')"
-        PYTORCH_ROCM_ARCH="$${PYTORCH_ROCM_ARCH:-gfx90a;gfx942;gfx950;gfx1100;gfx1101;gfx1200;gfx1201;gfx1150;gfx1151}"
+        if [ -z "$${PYTORCH_ROCM_ARCH}" ]; then
+          PYTORCH_ROCM_ARCH=$$(grep '^ARG PYTORCH_ROCM_ARCH=' docker/Dockerfile.rocm_base | sed 's/^ARG PYTORCH_ROCM_ARCH=//')
+          echo "Using PYTORCH_ROCM_ARCH from Dockerfile.rocm_base: $${PYTORCH_ROCM_ARCH}"
+        fi
 
         # Build vLLM ROCm release image using cached base
         DOCKER_BUILDKIT=1 docker build \
