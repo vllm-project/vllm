@@ -11,6 +11,7 @@ from typing import Final, Literal, TypeAlias, TypeVar, cast
 
 import numpy as np
 from fastapi import Request
+from soundfile import LibsndfileError
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
@@ -56,11 +57,6 @@ try:
     import librosa
 except ImportError:
     librosa = PlaceholderModule("librosa")  # type: ignore[assignment]
-
-try:
-    import soundfile as sf
-except ImportError:
-    sf = None
 
 # Public libsndfile error codes exposed via `soundfile.LibsndfileError.code`, soundfile
 # being librosa's main backend. Used to validate if an audio loading error is due to a
@@ -332,12 +328,9 @@ class OpenAISpeechToText(OpenAIServing):
                 # NOTE resample to model SR here for efficiency. This is also a
                 # pre-requisite for chunking, as it assumes Whisper SR.
                 y, sr = librosa.load(bytes_, sr=self.asr_config.sample_rate)
-            except Exception as exc:
-                if (
-                    sf is not None
-                    and isinstance(exc, sf.LibsndfileError)
-                    and exc.code in _BAD_SF_CODES
-                ):
+            except LibsndfileError as exc:
+                # Distinguish client errors (invalid audio) from server errors
+                if exc.code in _BAD_SF_CODES:
                     raise ValueError("Invalid or unsupported audio file.") from exc
                 raise
 
