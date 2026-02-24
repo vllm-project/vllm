@@ -8,6 +8,9 @@ from torch.nn.parameter import Parameter
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.linear import LinearBase, UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -16,9 +19,6 @@ from vllm.model_executor.layers.quantization.fp8 import (
     Fp8Config,
     Fp8KVCacheMethod,
     Fp8LinearMethod,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     is_layer_skipped,
