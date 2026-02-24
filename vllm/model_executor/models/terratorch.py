@@ -34,7 +34,7 @@ from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
-from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalInput
+from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
 from vllm.model_executor.layers.pooler import IdentityPooler
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader

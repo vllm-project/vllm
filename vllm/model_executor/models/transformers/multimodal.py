@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.config.utils import getattr_iter
-from vllm.inputs import MultiModalDataDict, MultiModalInput
+from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import SupportsMRoPE, SupportsMultiModal
 from vllm.model_executor.models.utils import WeightsMapper
