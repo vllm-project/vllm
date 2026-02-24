@@ -361,11 +361,11 @@ class FunASRFeatureExtractor(SequenceFeatureExtractor):
 
         input_features = padded_inputs.get("input_features").transpose(2, 0, 1)
 
-        self.frontend = WavFrontend(**self.frontend_conf)
+        frontend = WavFrontend(**self.frontend_conf, dither=self.dither)
         input_features, speech_lengths = self.extract_fbank(
             input_features[0],
             data_type=kwargs.get("data_type", "sound"),
-            frontend=self.frontend,
+            frontend=frontend,
             is_final=True,
         )
         olens = 1 + (speech_lengths - 3 + 2 * 1) // 2
