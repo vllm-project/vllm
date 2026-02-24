@@ -140,7 +140,7 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
 
-  int sf_n_unpadded = int(n / CVT_FP4_SF_VEC_SIZE);
+  int sf_n_unpadded = int(n / CVT_FP4_ELTS_PER_THREAD);
 
   int grid_y = vllm::div_round_up(sf_n_unpadded, static_cast<int>(block.x));
   int grid_x = std::min(
