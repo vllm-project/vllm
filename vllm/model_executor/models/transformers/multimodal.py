@@ -459,7 +459,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
-        mm_token_type_ids = kwargs.get("mm_token_type_ids", [])
+        mm_token_type_ids = kwargs.get("mm_token_type_ids")
 
         image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
             image_grid_thw
@@ -467,15 +467,17 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
         video_grid_thw = (torch.stack if video_grid_thw else torch.tensor)(
             video_grid_thw
         )
-        mm_token_type_ids = (torch.cat if mm_token_type_ids else torch.tensor)(
-            mm_token_type_ids
-        )
+
+        # In v4 this utility didn't accept any `kwargs`, thus we filter
+        kwargs = {}
+        if mm_token_type_ids:
+            kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),
             image_grid_thw=image_grid_thw,
             video_grid_thw=video_grid_thw,
-            mm_token_type_ids=mm_token_type_ids,
+            **kwargs,
         )
 
         mrope_positions = mrope_positions[:, 0]
