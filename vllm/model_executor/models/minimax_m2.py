@@ -135,8 +135,11 @@ class MiniMaxM2MoE(nn.Module):
         )
         final_hidden_states = final_hidden_states
         if self.tp_size > 1:
-            final_hidden_states = self.experts.runner.maybe_all_reduce_tensor_model_parallel(final_hidden_states)
-
+            final_hidden_states = (
+                self.experts.runner.maybe_all_reduce_tensor_model_parallel(
+                    final_hidden_states
+                )
+            )
         return final_hidden_states.view(num_tokens, hidden_dim)
 
 
