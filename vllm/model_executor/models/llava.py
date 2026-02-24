@@ -37,16 +37,17 @@ from vllm.multimodal.parse import (
     ImageProcessorItems,
     ImageSize,
     MultiModalDataItems,
-    MultiModalUUIDItems,
 )
 from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -232,14 +233,13 @@ class LlavaDummyInputsBuilder(BaseDummyInputsBuilder[_I]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -771,11 +771,8 @@ class MantisProcessingInfo(LlavaProcessingInfo):
 class MantisMultiModalProcessor(LlavaMultiModalProcessor):
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        mm_uuid_items: MultiModalUUIDItems | None = None,
-        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
-        tokenization_kwargs: Mapping[str, object] | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
@@ -786,15 +783,9 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             image_height=-1,
         )
 
-        result = super().apply(
-            prompt,
-            mm_items,
-            mm_uuid_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-        )
+        result = super().apply(inputs, timing_ctx)
 
-        mm_item_counts = mm_items.get_all_counts()
+        mm_item_counts = inputs.mm_data_items.get_all_counts()
         mm_kwargs = result["mm_kwargs"]
         mm_hashes = result["mm_hashes"]
 
@@ -826,8 +817,8 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         )
 
         orig_repls = self._get_mm_prompt_updates(
-            mm_items,
-            hf_processor_mm_kwargs,
+            inputs.mm_data_items,
+            inputs.hf_processor_mm_kwargs,
             mm_kwargs,
         )
         mm_placeholders = self._find_mm_placeholders(prompt_ids, orig_repls)

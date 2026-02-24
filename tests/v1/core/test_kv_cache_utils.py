@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import hashlib
 import importlib
 from collections.abc import Callable
 from typing import Any
@@ -498,14 +499,41 @@ def test_generate_block_hash_extra_keys_prompt_embeds():
     # Test with prompt embeds for the first block
     extra_keys, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
     expected_embeds = prompt_embeds[0:5]
-    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
-    assert extra_keys == (expected_bytes,)
+    expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
+    assert extra_keys == (expected_hash,)
 
     # Test with prompt embeds for the second block
     extra_keys, _ = generate_block_hash_extra_keys(request, 5, 10, 0)
     expected_embeds = prompt_embeds[5:10]
-    expected_bytes = kv_cache_utils.tensor_data(expected_embeds).tobytes()
-    assert extra_keys == (expected_bytes,)
+    expected_hash = hashlib.sha256(kv_cache_utils.tensor_data(expected_embeds)).digest()
+    assert extra_keys == (expected_hash,)
+
+
+def test_generate_block_hash_extra_keys_prompt_embeds_cached(monkeypatch):
+    prompt_embeds = torch.randn(10, 3)
+    request = make_request(
+        request_id="0",
+        prompt_token_ids=None,
+        mm_positions=None,
+        mm_hashes=None,
+        prompt_embeds=prompt_embeds,
+        block_size=20,
+    )
+
+    num_tensor_data_calls = 0
+    original_tensor_data = kv_cache_utils.tensor_data
+
+    def counting_tensor_data(tensor: torch.Tensor):
+        nonlocal num_tensor_data_calls
+        num_tensor_data_calls += 1
+        return original_tensor_data(tensor)
+
+    monkeypatch.setattr(kv_cache_utils, "tensor_data", counting_tensor_data)
+
+    extra_keys_1, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    extra_keys_2, _ = generate_block_hash_extra_keys(request, 0, 5, 0)
+    assert extra_keys_1 == extra_keys_2
+    assert num_tensor_data_calls == 1
 
 
 def test_generate_block_hash_extra_keys_different_prompt_embeds():
@@ -1858,22 +1886,26 @@ def test_request_block_hasher_with_prompt_embeds(hash_fn: Callable[[Any], bytes]
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    block1_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[:block_size])
+    ).digest()
     expected_hash1 = hash_fn(
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            (block1_embeds_bytes,),
+            (block1_embeds_hash,),
         )
     )
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    block2_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[block_size:num_tokens])
+    ).digest()
     expected_hash2 = hash_fn(
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            (block2_embeds_bytes,),
+            (block2_embeds_hash,),
         )
     )
     assert block_hashes[1] == expected_hash2
@@ -1903,22 +1935,26 @@ def test_request_with_prompt_embeds_and_mm_inputs(hash_fn: Callable[[Any], bytes
     block_hashes = request.block_hashes
     assert len(block_hashes) == 2
 
-    block1_embeds_bytes = tensor_data(prompt_embeds[:block_size]).tobytes()
+    block1_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[:block_size])
+    ).digest()
     expected_hash1 = hash_fn(
         (
             kv_cache_utils.NONE_HASH,
             tuple(prompt_token_ids[:block_size]),
-            ("hash1", block1_embeds_bytes),
+            ("hash1", block1_embeds_hash),
         )
     )
     assert block_hashes[0] == expected_hash1
 
-    block2_embeds_bytes = tensor_data(prompt_embeds[block_size:num_tokens]).tobytes()
+    block2_embeds_hash = hashlib.sha256(
+        tensor_data(prompt_embeds[block_size:num_tokens])
+    ).digest()
     expected_hash2 = hash_fn(
         (
             block_hashes[0],
             tuple(prompt_token_ids[block_size:num_tokens]),
-            ("hash2", block2_embeds_bytes),
+            ("hash2", block2_embeds_hash),
         )
     )
     assert block_hashes[1] == expected_hash2
