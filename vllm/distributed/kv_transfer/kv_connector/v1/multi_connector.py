@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     PromMetricT,
 )
 from vllm.logger import init_logger
-from vllm.v1.attention.backend import AttentionMetadata
+from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import KVConnectorOutput
 
@@ -172,6 +172,13 @@ class MultiConnector(KVConnectorBase_V1):
                 )
             )
         return ret
+
+    def register_cross_layers_kv_cache(
+        self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
+    ):
+        # Register on all connectors
+        for c in self._connectors:
+            c.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def register_kv_caches(
         self,
