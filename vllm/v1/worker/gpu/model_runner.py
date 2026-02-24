@@ -75,7 +75,6 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
 
 logger = init_logger(__name__)
 
@@ -916,6 +915,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if local_cudagraph_size is not None:
             local_cudagraph_size = self._get_num_input_tokens(local_cudagraph_size)
+        if self.compilation_config.pass_config.enable_sp:
+            # validate SP/TP alignment before DP sync.
+            tp_size = self.parallel_config.tensor_parallel_size
+            if tp_size > 1:
+                assert num_input_tokens % tp_size == 0, (
+                    f"num_input_tokens ({num_input_tokens}) must be a multiple "
+                    f"of tensor parallel size ({tp_size}) when SP is enabled."
+                )
+                if local_cudagraph_size is not None:
+                    assert local_cudagraph_size % tp_size == 0, (
+                        f"local_cudagraph_size ({local_cudagraph_size}) must be "
+                        f"a multiple of tensor parallel size ({tp_size}) when SP "
+                        "is enabled."
+                    )
 
         # DP sync: num_tokens + cudagraph_size + cudagraph_mode
         num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
@@ -927,9 +940,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.parallel_config.data_parallel_rank,
             )
         )
-        if self.compilation_config.pass_config.enable_sp:
-            # check num_tokens_after_padding is correctly padded
-            _ = is_residual_scattered_for_sp(self.vllm_config, num_tokens_after_padding)
         cudagraph_runtime_mode = CUDAGraphMode(synced_cudagraph_mode)
         if num_tokens_after_padding == 0:
             # All DP ranks have zero tokens to run.
