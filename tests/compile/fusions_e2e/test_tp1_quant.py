@@ -104,6 +104,13 @@ def test_tp1_fp8_fusions(
 
     use_aiter = current_platform.is_rocm() and ("qwen" in model_name.lower())
 
+    if not current_platform.is_cuda():
+        matches = matches._replace(ar_rms_fusion=0, sequence_parallel=0, async_tp=0)
+        if "qwen" in model_name.lower():
+            matches = matches._replace(
+                rms_quant_fusion=0, aiter_rms_quant_fusion=n_layers
+            )
+
     matches_check = [
         "rms_quant_fusion",
         "act_quant_fusion",
