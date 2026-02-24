@@ -34,6 +34,10 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, m) {
 
   // Quick GELU implementation.
   m.def("gelu_quick(Tensor! out, Tensor input) -> ()");
+
+#ifndef USE_ROCM
+  m.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
+#endif
 }
 
 STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
@@ -49,6 +53,11 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, m) {
   m.impl("gelu_new", TORCH_BOX(&gelu_new));
   m.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   m.impl("gelu_quick", TORCH_BOX(&gelu_quick));
+
+#ifndef USE_ROCM
+  // Utility ops
+  m.impl("permute_cols", TORCH_BOX(&permute_cols));
+#endif
 }
 
 REGISTER_EXTENSION(_C_stable_libtorch)
