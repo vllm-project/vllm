@@ -265,12 +265,16 @@ class StructuredOutputManager:
                         apply_bitmask = False
                     if apply_bitmask and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
-                        state_advancements += 1
+                        if not accepted:
+                            # Speculative token violates grammar constraint.
+                            # Dont crash: stop validating for remaining slots.
+                            apply_bitmask = False
+                        else:
+                            # Only increment state if token was accepted by grammar
+                            state_advancements += 1
                     cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
-
         bitmask_tensor = self._grammar_bitmask
         if cumulative_index < bitmask_tensor.shape[0]:
             bitmask_tensor = bitmask_tensor[:cumulative_index]
@@ -299,7 +303,7 @@ class StructuredOutputManager:
             return request.structured_output_request.reasoning_ended
         return True
 
-    def should_advance(self, request: "Request") -> bool:
+    def should_advance(self, request: "Request", new_token_ids=None) -> bool:
         if not request.use_structured_output:
             return False
 
@@ -322,10 +326,10 @@ class StructuredOutputManager:
             return True
 
         # Check if reasoning ends in *this* step
-        delta_from = request.num_computed_tokens - request.num_output_placeholders
         all_token_ids = request.all_token_ids
-        if self.reasoner.is_reasoning_end_streaming(
-            all_token_ids, all_token_ids[delta_from:]
+        delta_ids = new_token_ids or []
+        if delta_ids and self.reasoner.is_reasoning_end_streaming(
+            all_token_ids, delta_ids
         ):
             # Reasoning just ended, so we shouldn't advance til
             # next pass

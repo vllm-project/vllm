@@ -155,9 +155,11 @@ class XgrammarGrammar(StructuredOutputGrammar):
             return False
         for token in tokens:
             if not self.matcher.accept_token(token):
-                logger.error(
-                    "Failed to advance FSM for request %s "
-                    "for tokens %s. Please file an issue.",
+                # Under speculative decoding, the draft model may propose tokens
+                # that violate the grammar (e.g., "</think>" after reasoning ends).
+                # This is not fatal: treat as a rejected token sequence.
+                logger.debug(
+                    "Grammar rejected token req=%s token=%s",
                     request_id,
                     token,
                 )
