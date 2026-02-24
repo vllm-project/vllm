@@ -246,6 +246,8 @@ fsspec==2024.12.0
     #   torch
 ftfy==6.3.1
     # via open-clip-torch
+guidellm==0.3.1
+    # via -r requirements/test.in
 genai-perf==0.0.16
     # via -r requirements/test.in
 genson==1.3.0
