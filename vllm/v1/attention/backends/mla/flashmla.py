@@ -173,6 +173,31 @@ class FlashMLAMetadataBuilder(MLACommonMetadataBuilder[FlashMLAMetadata]):
                 num_q_tokens_per_head_k,
                 1,  # MQA for the decode path
             )
+
+            # Copy FP8 metadata into persistent CUDA graph buffers so the
+            # tensors passed to the kernel live at fixed addresses across
+            # graph replays. Without this, each call allocates fresh tensors
+            # whose addresses differ from those captured during recording.
+            if self.compilation_config.cudagraph_mode.has_full_cudagraphs():
+                assert self.cg_buf_tile_scheduler_metadata is not None
+                assert self.cg_buf_num_splits is not None
+
+                sm_parts = tile_scheduler_metadata.size(0)
+                assert sm_parts <= self.cg_buf_tile_scheduler_metadata.size(0)
+                self.cg_buf_tile_scheduler_metadata[:sm_parts].copy_(
+                    tile_scheduler_metadata
+                )
+                tile_scheduler_metadata = self.cg_buf_tile_scheduler_metadata[:sm_parts]
+
+                n = num_splits.size(0)
+                assert n <= self.cg_buf_num_splits.size(0)
+                self.cg_buf_num_splits[:n].copy_(num_splits)
+                # num_splits must be monotonically non-decreasing; fill
+                # the tail so out-of-bounds reads from padded CUDA graph
+                # batches see valid values.
+                self.cg_buf_num_splits[n:].fill_(num_splits[-1])
+                num_splits = self.cg_buf_num_splits[:n]
+
             scheduler_metadata.tile_scheduler_metadata = tile_scheduler_metadata
             scheduler_metadata.num_splits = num_splits
 
