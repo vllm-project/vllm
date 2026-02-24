@@ -246,7 +246,6 @@ class DefaultMoERunner(MoERunner):
             else torch.ops.vllm.moe_forward_shared
         )
 
-    # TODO(bnell): make this a member var?
     @property
     def use_dp_chunking(self) -> bool:
         return (
@@ -261,7 +260,7 @@ class DefaultMoERunner(MoERunner):
         hidden_states: torch.Tensor,
         shared_input: torch.Tensor | None,
     ) -> torch.Tensor | None:
-        hidden_states_clone: torch.Tensor | None = None
+        shared_experts_input: torch.Tensor | None = None
         if self.use_shared_experts_stream:
             assert self.shared_experts_stream is not None
             assert self.moe_config.disable_inplace
@@ -435,7 +434,11 @@ class DefaultMoERunner(MoERunner):
         original_hidden_states: torch.Tensor | None,
         hidden_states: torch.Tensor,
     ) -> tuple[torch.Tensor, list[int]]:
-        original_hidden_dim = original_hidden_states.shape[-1] if original_hidden_states is not None else 0
+        original_hidden_dim = (
+            original_hidden_states.shape[-1]
+            if original_hidden_states is not None
+            else 0
+        )
         transformed_hidden_dim = hidden_states.shape[-1]
         if self.moe_config.hidden_dim != transformed_hidden_dim:
             hidden_states = F.pad(
@@ -658,7 +661,10 @@ class DefaultMoERunner(MoERunner):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # For latent MoE: save ORIGINAL hidden_states before transform
         # (shared_experts need original dimension, routed experts use transformed)
-        original_hidden_states = hidden_states
+        if self.shared_experts is not None:
+            original_hidden_states = hidden_states
+        else:
+            original_hidden_states = None
 
         # Apply transform for routed experts (e.g., latent projection for latent MoE)
         hidden_states = self.apply_routed_input_transform(hidden_states)
@@ -677,7 +683,6 @@ class DefaultMoERunner(MoERunner):
 
         return self._maybe_reduce_output(fused_output, og_hidden_dims)
 
-    # TODO: avoid some of the copying by disabling inplace?
     def _slice_and_copy_input(
         self,
         out_slice: torch.Tensor,
@@ -790,7 +795,6 @@ class DefaultMoERunner(MoERunner):
         router_logits: torch.Tensor,
         shared_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # TODO(bnell): split this into runtime vs. static parts?
         self.use_shared_experts_stream = (
             current_platform.is_cuda()
             and self.has_separate_shared_experts
