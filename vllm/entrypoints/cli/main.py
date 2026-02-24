@@ -8,18 +8,13 @@ to avoid certain eager import breakage."""
 import importlib.metadata
 import sys
 
+from vllm.engine.arg_utils import needs_help
 from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
 
 def main():
-    # Check if help is requested before doing any heavy initialization
-    # This allows --help to be fast without CUDA init
-    # Note: We call needs_help() at runtime (not at import time) so that
-    # tests that patch sys.argv get the correct behavior.
-    from vllm.engine.arg_utils import needs_help
-
     showing_help = needs_help()
 
     import vllm.entrypoints.cli.benchmark.main

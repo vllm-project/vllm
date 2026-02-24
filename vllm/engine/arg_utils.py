@@ -235,7 +235,9 @@ def get_type_hints(type_hint: TypeHint) -> set[TypeHint]:
 def needs_help() -> bool:
     """Check if help is being requested via CLI flags or mkdocs."""
     return (
-        any(arg in {"--help", "-h"} for arg in sys.argv)  # vllm SUBCOMMAND --help/-h
+        any(
+            arg == "-h" or arg.startswith("--help") for arg in sys.argv
+        )  # vllm SUBCOMMAND --help/-h/--help=X
         or (argv0 := sys.argv[0]).endswith("mkdocs")  # mkdocs SUBCOMMAND
         or argv0.endswith("mkdocs/__main__.py")  # python -m mkdocs SUBCOMMAND
     )
@@ -2132,7 +2134,8 @@ class AsyncEngineArgs(EngineArgs):
             help="[DEPRECATED] Disable logging requests.",
             deprecated=True,
         )
-        current_platform.pre_register_and_update(parser)
+        if not NEEDS_HELP:
+            current_platform.pre_register_and_update(parser)
         return parser
 
 
