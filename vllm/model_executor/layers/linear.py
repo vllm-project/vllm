@@ -707,15 +707,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
                         f"Shard id index {idx} should be between 0 and "
                         f"{len(self.output_sizes) - 1}. Got shard id {loaded_shard_id}."
                     )
-            if len(loaded_shard_id) > 1:
-                diff = [
-                    b - a for a, b in zip(loaded_shard_id[:-1], loaded_shard_id[1:])
-                ]
-                if set(diff) != {1}:
-                    raise ValueError(
-                        "Shard id with multiple indices should be consecutive. "
-                        f"Got shard id {loaded_shard_id}."
-                    )
+            if len(loaded_shard_id) > 1 and any(
+                b - a != 1 for a, b in zip(loaded_shard_id[:-1], loaded_shard_id[1:])
+            ):
+                raise ValueError(
+                    "Shard id with multiple indices should be consecutive. "
+                    f"Got shard id {loaded_shard_id}."
+                )
             return
         elif isinstance(loaded_shard_id, int):
             if loaded_shard_id < 0 or loaded_shard_id >= len(self.output_sizes):
