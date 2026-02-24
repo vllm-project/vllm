@@ -104,9 +104,10 @@ def apply_rotary_emb(freqs, t, start_index=0, scale=1.0, seq_dim=-2):
 class MusicFlamingoRotaryEmbedding(nn.Module):
     freqs: torch.Tensor
 
-    def __init__(self, config: PretrainedConfig, device=None):
+    def __init__(self, config: MusicFlamingoConfig, device=None):
         super().__init__()
 
+        self.config = config
         self.dim = getattr(config, "rotary_dim", 256)
         self.max_time = getattr(config, "rotary_max_time", 1200.0)
 
@@ -118,7 +119,7 @@ class MusicFlamingoRotaryEmbedding(nn.Module):
 
     @staticmethod
     def compute_default_rote_parameters(
-        config: PretrainedConfig | None = None,
+        config: MusicFlamingoConfig | None = None,
         device=None,
     ):
         dim = getattr(config, "rotary_dim", 256)
@@ -245,6 +246,13 @@ class MusicFlamingoProcessingInfo(AudioFlamingo3ProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> MusicFlamingoProcessor:
         return self.ctx.get_hf_processor(MusicFlamingoProcessor, **kwargs)
 
+    def get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self.get_feature_extractor()
+        return MusicFlamingoMultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
 
 class MusicFlamingoDummyInputsBuilder(AudioFlamingo3DummyInputsBuilder):
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
@@ -306,12 +314,6 @@ class MusicFlamingoMultiModalDataParser(AudioFlamingo3MultiModalDataParser):
 
 
 class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return MusicFlamingoMultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -380,19 +382,13 @@ class MusicFlamingoMultiModalProcessor(AudioFlamingo3MultiModalProcessor):
         vocab = tokenizer.get_vocab()
 
         audio_token = processor.audio_token
-        audio_token_id = vocab.get(audio_token)
-        if audio_token_id is None:
-            audio_token_id = processor.audio_token_id
+        audio_token_id = vocab.get(audio_token, processor.audio_token_id)
 
         audio_bos_token = processor.audio_bos_token
-        audio_bos_token_id = vocab.get(audio_bos_token)
-        if audio_bos_token_id is None:
-            audio_bos_token_id = processor.audio_bos_token_id
+        audio_bos_token_id = vocab.get(audio_bos_token, processor.audio_bos_token_id)
 
         audio_eos_token = processor.audio_eos_token
-        audio_eos_token_id = vocab.get(audio_eos_token)
-        if audio_eos_token_id is None:
-            audio_eos_token_id = processor.audio_eos_token_id
+        audio_eos_token_id = vocab.get(audio_eos_token, processor.audio_eos_token_id)
 
         def get_replacement_musicflamingo(item_idx: int):
             base_replacement = base_update.replacement
