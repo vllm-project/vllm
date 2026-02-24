@@ -21,7 +21,7 @@ AITER_MODEL_LIST = [
     "meta-llama/Llama-3.2-1B-Instruct"
 ]
 
-MODEL_NAME = "openai/gpt-oss-120b"
+MODEL_NAME = "meta-llama/Llama-3.2-1B-Instruct"
 
 
 @pytest.fixture(scope="module")
