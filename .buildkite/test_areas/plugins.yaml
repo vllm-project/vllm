@@ -34,6 +34,6 @@ steps:
   - pytest -v -s plugins/lora_resolvers # unit tests for in-tree lora resolver plugins
   mirror:
     amd:
-      device: mi325
+      device: mi325_2
       depends_on:
       - image-build-amd
