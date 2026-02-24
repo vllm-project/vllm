@@ -686,6 +686,22 @@ def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem
     return output_items
 
 
+def _parse_message_no_recipient(
+    message: Message,
+) -> list[ResponseOutputItem]:
+    """Parse a Harmony message with no recipient based on its channel."""
+    if message.channel == "analysis":
+        return _parse_reasoning(message)
+
+    if message.channel in ("commentary", "final"):
+        # Per Harmony format, preambles (commentary with no recipient) and
+        # final channel content are both intended to be shown to end-users.
+        # See: https://cookbook.openai.com/articles/openai-harmony
+        return [_parse_final_message(message)]
+
+    raise ValueError(f"Unknown channel: {message.channel}")
+
+
 def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     """
     Parse a Harmony message into a list of output response items.
@@ -717,20 +733,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
             output_items.extend(_parse_mcp_call(message, recipient))
 
     # No recipient - handle based on channel for non-tool messages
-    elif message.channel == "analysis":
-        output_items.extend(_parse_reasoning(message))
-
-    elif message.channel == "commentary":
-        # Per Harmony format, preambles (commentary with no recipient) are
-        # intended to be shown to end-users, unlike analysis channel content.
-        # See: https://cookbook.openai.com/articles/openai-harmony
-        output_items.append(_parse_final_message(message))
-
-    elif message.channel == "final":
-        output_items.append(_parse_final_message(message))
-
     else:
-        raise ValueError(f"Unknown channel: {message.channel}")
+        output_items.extend(_parse_message_no_recipient(message))
 
     return output_items
 
