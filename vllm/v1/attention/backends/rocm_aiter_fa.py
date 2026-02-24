@@ -1224,7 +1224,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     )
                 elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
->>>>>>> main
                     x = 16 // key_cache.element_size()
                     k_cache_template = torch.empty(
                         [num_blocks, num_kv_heads, head_size // x, block_size, x],
