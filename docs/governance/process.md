@@ -84,9 +84,9 @@ For a full list of committers and their respective areas, see the [committers](.
 Any committer can nominate candidates via our private committer mailing list. The process runs as follows:
 
 1. **Nominate**: A committer sends email to the committer group to nominate a candidate, highlighting the candidate’s contributions (e.g., links to PRs, reviews, RFCs, issues, benchmarks, and adoption evidence) and how they map to the standards below.
-2. **Discuss and vote**: The committer group discusses the nomination, votes, and voices concerns if needed. Shared concerns can stop the process. For concerns, the group discusses clear criteria for the person to be nominated again. The lead maintainers make the final decision.
-3. **Feedback period**: After a two-week feedback period, if the group decides to move forward, the nominator sends an invitation to the candidate asking them to open a PR to update their code ownership (e.g., CODEOWNERS and committers list).
-4. **Permissions and onboarding**: In parallel, the lead maintainers assign the necessary permissions in GitHub and add the new member to the committer mailing list (and other communications channels as appropriate).
+2. **Discuss and vote**: The committer group discusses the nomination, votes, and voices concerns if needed. Shared concerns can stop the process. For concerns, the group discusses clear criteria for the person to be nominated again. Most cases are decided by consensus; in contentious cases, the lead maintainers resolve conflicts and make the decision.
+3. **Feedback period**: After a two-week feedback period (allowing time for any last input or concerns), if no blocking concerns arise and the group confirms to move forward, the nominator sends an invitation to the candidate asking them to open a PR to update their code ownership (e.g., CODEOWNERS and committers list).
+4. **Permissions and onboarding**: In parallel, the lead maintainers assign the necessary permissions in GitHub and add the new member to the committer mailing list, the committer-only Slack channel, and other communications channels as appropriate.
 5. **Finalize**: Once the CODEOWNERS/committer PR is ready and permissions are in place, the PR is merged and the new committer is welcomed.
 
 Committership is highly selective and merit based. The selection criteria requires:
