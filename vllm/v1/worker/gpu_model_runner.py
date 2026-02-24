@@ -95,7 +95,6 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
@@ -114,6 +113,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
@@ -268,6 +268,51 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         return output
 
 
+def _copy_pooler_output_to_cpu(
+    raw_pooler_output: PoolerOutput, finished_mask: list[bool]
+) -> list[torch.Tensor | None]:
+    num_reqs = len(finished_mask)
+
+    if isinstance(raw_pooler_output, torch.Tensor):
+        if raw_pooler_output.shape[0] != num_reqs:
+            raise ValueError(
+                "Pooler output batch size does not match finished mask size: "
+                f"{raw_pooler_output.shape[0]} != {num_reqs}."
+            )
+
+        num_finished = sum(finished_mask)
+        if num_finished == 0:
+            return [None] * num_reqs
+        if num_finished == num_reqs:
+            return list(raw_pooler_output.to("cpu", non_blocking=True))
+
+        # partial finished
+        finished_indices = [i for i, include in enumerate(finished_mask) if include]
+        index_tensor = torch.tensor(
+            finished_indices, device=raw_pooler_output.device, dtype=torch.long
+        )
+        finished_outputs = raw_pooler_output.index_select(0, index_tensor).to(
+            "cpu", non_blocking=True
+        )
+        partial_pooler_output: list[torch.Tensor | None] = [None] * num_reqs
+        for i, out in zip(finished_indices, finished_outputs):
+            partial_pooler_output[i] = out
+        return partial_pooler_output
+
+    assert isinstance(raw_pooler_output, list)
+    if len(raw_pooler_output) != num_reqs:
+        raise ValueError(
+            "Pooler output batch size does not match finished mask size: "
+            f"{len(raw_pooler_output)} != {num_reqs}."
+        )
+
+    pooler_output: list[torch.Tensor | None] = [None] * num_reqs
+    for i, (out, include) in enumerate(zip(raw_pooler_output, finished_mask)):
+        if include and out is not None:
+            pooler_output[i] = out.to("cpu", non_blocking=True)
+    return pooler_output
+
+
 class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
@@ -289,15 +334,11 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            raw_pooler_output_cpu = json_map_leaves(
-                lambda x: None if x is None else x.to("cpu", non_blocking=True),
-                self._raw_pooler_output,
+            self._model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
+                raw_pooler_output=self._raw_pooler_output,
+                finished_mask=finished_mask,
             )
             self.async_copy_ready_event.record()
-            self._model_runner_output.pooler_output = [
-                out if include else None
-                for out, include in zip(raw_pooler_output_cpu, finished_mask)
-            ]
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
@@ -345,9 +386,13 @@ class GPUModelRunner(
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
 
-        from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        from vllm.model_executor.models.utils import (
+            set_cpu_offload_max_bytes,
+            set_cpu_offload_params,
+        )
 
         set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
+        set_cpu_offload_params(self.cache_config.cpu_offload_params)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -1808,7 +1853,9 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
+            if use_spec_decode and isinstance(
+                builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
+            ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
@@ -2701,14 +2748,10 @@ class GPUModelRunner(
                 async_output_copy_stream=self.async_output_copy_stream,
             )
 
-        raw_pooler_output = json_map_leaves(
-            lambda x: None if x is None else x.to("cpu", non_blocking=True),
-            raw_pooler_output,
+        model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
+            raw_pooler_output=raw_pooler_output,
+            finished_mask=finished_mask,
         )
-        model_runner_output.pooler_output = [
-            out if include else None
-            for out, include in zip(raw_pooler_output, finished_mask)
-        ]
         self._sync_device()
 
         return model_runner_output
@@ -3520,6 +3563,9 @@ class GPUModelRunner(
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
+        # When spec decode is enabled, delay clearing connector metadata
+        # until after draft model runs in sample_tokens.
+        clear_kv_metadata = self.speculative_config is None
         with (
             set_forward_context(
                 attn_metadata,
@@ -3533,7 +3579,9 @@ class GPUModelRunner(
                 skip_compiled=has_encoder_input,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
-            self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
+            self.maybe_get_kv_connector_output(
+                scheduler_output, clear_metadata=clear_kv_metadata
+            ) as kv_connector_output,
         ):
             model_output = self._model_forward(
                 input_ids=input_ids,
@@ -3760,6 +3808,12 @@ class GPUModelRunner(
             # ngram and other speculative decoding methods use the sampled
             # tokens on the CPU, so they are run after bookkeeping.
             propose_draft_token_ids(valid_sampled_token_ids)
+
+        # Clear KV connector metadata after draft model runs (if spec decode).
+        # This was deferred from target model forward to allow draft model
+        # to also save its KV cache.
+        if self.speculative_config is not None:
+            self.clear_kv_connector_metadata()
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
@@ -4674,7 +4728,7 @@ class GPUModelRunner(
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
-        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+        assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
             assert not uniform_decode
@@ -4766,34 +4820,40 @@ class GPUModelRunner(
             ubatch_slices=ubatch_slices_padded,
         )
 
-        # If force_attention is True, we always capture attention. Otherwise,
-        # it only happens for cudagraph_runtime_mode=FULL.
-        if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
-            if create_mixed_batch:
-                # In the mixed batch mode (used for FI warmup), we use
-                # shorter sequence lengths to run faster.
-                # TODO(luka) better system for describing dummy batches
-                seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
-            else:
-                seq_lens = max_query_len  # type: ignore[assignment]
-            self.seq_lens.np[:num_reqs] = seq_lens
-            self.seq_lens.np[num_reqs:] = 0
-            self.seq_lens.copy_to_gpu()
+        # _dummy_run shares pinned CPU buffers (seq_lens, query_start_loc,
+        # etc.) with execute_model.  It must participate in the same event
+        # protocol so that back-to-back dummy/real steps don't overwrite
+        # pinned memory while a prior non_blocking H2D DMA is still reading.
+        with self.synchronize_input_prep():
+            # If force_attention is True, we always capture attention.
+            # Otherwise, it only happens for cudagraph_runtime_mode=FULL.
+            if force_attention or cudagraph_runtime_mode == CUDAGraphMode.FULL:
+                if create_mixed_batch:
+                    # In the mixed batch mode (used for FI warmup), we use
+                    # shorter sequence lengths to run faster.
+                    # TODO(luka) better system for describing dummy batches
+                    seq_lens = [1] * num_decode_tokens + [num_prefill_tokens + 1]
+                else:
+                    seq_lens = max_query_len  # type: ignore[assignment]
+                self.seq_lens.np[:num_reqs] = seq_lens
+                self.seq_lens.np[num_reqs:] = 0
+                self.seq_lens.copy_to_gpu()
 
-            cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
-            self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
-            self.query_start_loc.copy_to_gpu()
+                cum_num_tokens, _ = self._get_cumsum_and_arange(num_scheduled_tokens)
+                self.query_start_loc.np[1 : num_reqs + 1] = cum_num_tokens
+                self.query_start_loc.copy_to_gpu()
 
-            pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
-            attn_metadata, _ = self._build_attention_metadata(
-                num_tokens=num_tokens_unpadded,
-                num_tokens_padded=num_tokens_padded if pad_attn else None,
-                num_reqs=num_reqs_padded,
-                max_query_len=max_query_len,
-                ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
-                for_cudagraph_capture=is_graph_capturing,
-                slot_mappings=slot_mappings_by_group,
-            )
+                pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
+                attn_metadata, _ = self._build_attention_metadata(
+                    num_tokens=num_tokens_unpadded,
+                    num_tokens_padded=num_tokens_padded if pad_attn else None,
+                    num_reqs=num_reqs_padded,
+                    max_query_len=max_query_len,
+                    ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
+                    for_cudagraph_capture=is_graph_capturing,
+                    slot_mappings=slot_mappings_by_group,
+                    use_spec_decode=self.speculative_config is not None,
+                )
 
         with self.maybe_dummy_run_with_lora(
             self.lora_config,
@@ -5698,28 +5758,23 @@ class GPUModelRunner(
             kv_cache_config: The KV cache configuration.
             kernel_block_sizes: The kernel block sizes for each KV cache group.
         """
-        block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
-        ]
+        block_sizes = []
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
+            block_size = kv_cache_group.kv_cache_spec.block_size
+            block_sizes.append(block_size)
             max_num_blocks_per_req = cdiv(
-                max_model_len, block_sizes[i] * get_total_cp_world_size()
+                max_model_len, block_size * get_total_cp_world_size()
             )
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
-                mamba_blocks_per_req = (
+                max_num_blocks_per_req = (
                     max_num_blocks_per_req
                     if self.cache_config.enable_prefix_caching
                     else 1
                 ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
-                max_num_blocks_per_req = max(
-                    max_num_blocks_per_req, mamba_blocks_per_req
-                )
             max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
@@ -6257,7 +6312,7 @@ class GPUModelRunner(
                         self.encoder_timing_registry[req_id] = EncoderTimingStats()
 
                     stats = self.encoder_timing_registry[req_id]
-                    stats.encoder_forward_time += per_request_time
+                    stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
 
 
@@ -6265,7 +6320,7 @@ class GPUModelRunner(
 class EncoderTimingStats:
     """Per-request timing statistics for encoder forward pass."""
 
-    encoder_forward_time: float = 0.0
+    encoder_forward_secs: float = 0.0
     """Time spent in vision encoder forward pass (seconds)."""
 
     num_encoder_calls: int = 0
@@ -6273,6 +6328,6 @@ class EncoderTimingStats:
 
     def to_dict(self) -> dict[str, float | int]:
         return {
-            "encoder_forward_time": self.encoder_forward_time,
+            "encoder_forward_secs": self.encoder_forward_secs,
             "num_encoder_calls": self.num_encoder_calls,
         }

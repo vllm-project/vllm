@@ -85,11 +85,7 @@ class InternS1ProProcessingInfo(Qwen3VLProcessingInfo):
         return self.ctx.get_hf_config()
 
     def get_hf_processor(self, **kwargs: object) -> AutoProcessor:
-        return AutoProcessor.from_pretrained(
-            self.ctx.model_config.model,
-            trust_remote_code=True,
-            **kwargs,
-        )
+        return self.ctx.get_hf_processor(**kwargs)
 
 
 class InternS1ProMoeMLP(nn.Module):
@@ -497,7 +493,7 @@ class InternS1ProMoeLLMForCausalLM(Qwen3MoeForCausalLM):
         )
 
 
-class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
+class InternS1ProMoeMixtureOfExperts(MixtureOfExperts):
     def update_physical_experts_metadata(
         self,
         num_physical_experts: int,
@@ -547,7 +543,7 @@ class Qwen3VLMoeMixtureOfExperts(MixtureOfExperts):
     dummy_inputs=Qwen3VLDummyInputsBuilder,
 )
 class InternS1ProForConditionalGeneration(
-    Qwen3VLForConditionalGeneration, Qwen3VLMoeMixtureOfExperts
+    Qwen3VLForConditionalGeneration, InternS1ProMoeMixtureOfExperts
 ):
     is_3d_moe_weight: bool = True
     packed_modules_mapping = {

@@ -3,7 +3,7 @@
 """Sampling parameters for text generation."""
 
 import copy
-import json
+import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
@@ -16,6 +16,7 @@ from vllm.config import ModelConfig, SpeculativeConfig, StructuredOutputsConfig
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
+from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.v1.serial_utils import PydanticMsgspecMixin
 
 logger = init_logger(__name__)
@@ -223,6 +224,7 @@ class SamplingParams(
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
+    _eos_token_id: int | None = None
     _all_stop_token_ids: set[int] = msgspec.field(default_factory=set)
 
     # Fields used to construct logits processors
@@ -477,24 +479,26 @@ class SamplingParams(
     def update_from_generation_config(
         self,
         generation_config: dict[str, Any],
-        model_eos_token_id: int | None = None,
+        eos_token_id: int | None = None,
     ) -> None:
         """Update if there are non-default values from generation_config"""
+        if not self.ignore_eos:
+            self._eos_token_id = eos_token_id
 
-        if model_eos_token_id is not None:
+        if eos_token_id is not None:
             # Add the eos token id into the sampling_params to support
             # min_tokens processing.
-            self._all_stop_token_ids.add(model_eos_token_id)
+            self._all_stop_token_ids.add(eos_token_id)
 
         # Update eos_token_id for generation
         if (eos_ids := generation_config.get("eos_token_id")) is not None:
             # it can be either int or list of int
             eos_ids = {eos_ids} if isinstance(eos_ids, int) else set(eos_ids)
-            if model_eos_token_id is not None:
+            if eos_token_id is not None:
                 # We don't need to include the primary eos_token_id in
                 # stop_token_ids since it's handled separately for stopping
                 # purposes.
-                eos_ids.discard(model_eos_token_id)
+                eos_ids.discard(eos_token_id)
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
@@ -549,6 +553,10 @@ class SamplingParams(
         if self.seed is not None:
             return SamplingType.RANDOM_SEED
         return SamplingType.RANDOM
+
+    @property
+    def eos_token_id(self) -> int | None:
+        return self._eos_token_id
 
     @property
     def all_stop_token_ids(self) -> set[int]:
@@ -724,7 +732,6 @@ class SamplingParams(
         ):
             raise ValueError("structured_outputs.grammar cannot be an empty string")
 
-        from vllm.tokenizers.mistral import MistralTokenizer
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
             validate_guidance_grammar,
@@ -745,7 +752,7 @@ class SamplingParams(
             # allows <|special_token|> and similar, see
             # https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md#special-tokens
             # Without tokenizer these are disallowed in grammars.
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 raise ValueError(
                     "Mistral tokenizer is not supported for the 'guidance' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
@@ -757,7 +764,7 @@ class SamplingParams(
             validate_structured_output_request_outlines(self)
         elif backend == "lm-format-enforcer":
             # lm format enforcer backend
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 raise ValueError(
                     "Mistral tokenizer is not supported for the 'lm-format-enforcer' "
                     "structured output backend. Please use ['xgrammar', 'outlines'] "
@@ -784,12 +791,12 @@ class SamplingParams(
                 skip_guidance = False
                 if so_params.json:
                     if isinstance(so_params.json, str):
-                        schema = json.loads(so_params.json)
+                        schema = json_mod.loads(so_params.json)
                     else:
                         schema = so_params.json
                     skip_guidance = has_guidance_unsupported_json_features(schema)
 
-                if isinstance(tokenizer, MistralTokenizer) or skip_guidance:
+                if is_mistral_tokenizer(tokenizer) or skip_guidance:
                     # Fall back to outlines if the tokenizer is Mistral
                     # or if schema contains features unsupported by guidance
                     validate_structured_output_request_outlines(self)

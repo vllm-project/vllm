@@ -5,8 +5,7 @@ steps:
     depends_on: []
     timeout_in_minutes: 600
     commands:
-    - if [[ "$BUILDKITE_BRANCH" != "main" ]]; then .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG; fi
-    - if [[ "$BUILDKITE_BRANCH" == "main" ]]; then .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $VLLM_USE_PRECOMPILED $VLLM_MERGE_BASE_COMMIT $IMAGE_TAG $IMAGE_TAG_LATEST; fi
+    - if [[ "$BUILDKITE_BRANCH" == "main" ]]; then .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG $IMAGE_TAG_LATEST; else .buildkite/image_build/image_build.sh $REGISTRY $REPO $BUILDKITE_COMMIT $BRANCH $IMAGE_TAG; fi
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
