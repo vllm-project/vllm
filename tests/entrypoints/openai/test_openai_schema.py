@@ -122,19 +122,6 @@ def before_generate_case(context: schemathesis.hooks.HookContext, strategy):
                 # But skip empty strings
                 return False
 
-            # Check for negative token IDs in prompt
-            # Negative token IDs cause a server error (500) instead of
-            # being properly validated (400)
-            if "prompt" in case.body:
-                prompt = case.body["prompt"]
-                if isinstance(prompt, list):
-                    for item in prompt:
-                        if isinstance(item, list):
-                            if any(isinstance(t, int) and t < 0 for t in item):
-                                return False
-                        elif isinstance(item, int) and item < 0:
-                            return False
-
         return True
 
     return strategy.filter(no_invalid_types)

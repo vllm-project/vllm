@@ -382,6 +382,32 @@ class CompletionRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def validate_prompt_token_ids(cls, data):
+        prompt = data.get("prompt")
+        if prompt is None or isinstance(prompt, str):
+            return data
+
+        if isinstance(prompt, list):
+            for item in prompt:
+                if isinstance(item, str):
+                    continue
+                if isinstance(item, int):
+                    if item < 0:
+                        raise VLLMValidationError(
+                            "Token IDs in `prompt` must be non-negative.",
+                            parameter="prompt",
+                        )
+                elif isinstance(item, list):
+                    for token_id in item:
+                        if isinstance(token_id, int) and token_id < 0:
+                            raise VLLMValidationError(
+                                "Token IDs in `prompt` must be non-negative.",
+                                parameter="prompt",
+                            )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def check_cache_salt_support(cls, data):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
