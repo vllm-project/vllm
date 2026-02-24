@@ -1090,7 +1090,11 @@ class EngineCoreProc(EngineCore):
 
     def has_work(self) -> bool:
         """Returns true if the engine should be stepped."""
-        return self.engines_running or self.scheduler.has_requests() or self.batch_queue
+        return (
+            self.engines_running
+            or self.scheduler.has_requests()
+            or bool(self.batch_queue)
+        )
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
