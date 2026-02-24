@@ -20,7 +20,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 _LORA_SCALE_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
-def _get_lora_scale_ptr(lora_weights: list[torch.Tensor], device: torch.device):
+def _get_expand_lora_scale_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     """
     `_LORA_SCALE_PTR_DICT` collects the required information during `profile_run`,
     After this, it remains constant and subsequent usage is through LUT.
@@ -251,7 +251,7 @@ def _lora_expand_fp8(
 
     # Get scale pointers
     if b_scale is not None:
-        b_scale_ptr_tensor = _get_lora_scale_ptr(b_scale, inputs.device)
+        b_scale_ptr_tensor = _get_expand_lora_scale_ptr(b_scale, inputs.device)
     else:
         b_scale_ptr_tensor = None
 

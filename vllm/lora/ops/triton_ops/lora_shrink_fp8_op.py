@@ -17,7 +17,9 @@ from vllm.utils.torch_utils import direct_register_custom_op
 _LORA_SCALE_PTR_DICT: dict[tuple[int, ...], tuple] = {}
 
 
-def _get_lora_scale_ptr(lora_scale_weights: list[torch.Tensor], device: torch.device):
+def _get_shrink_lora_scale_ptr(
+    lora_scale_weights: list[torch.Tensor], device: torch.device
+):
     """
     `_LORA_SCALE_PTR_DICT` collects the required information during `profile_run`,
     After this, it remains constant and subsequent usage is through LUT.
@@ -278,7 +280,7 @@ def _lora_shrink_fp8(
         )
         assert b_scale is not None, "b_scale required for FP8/INT8"
 
-        b_scale_ptr_tensor = _get_lora_scale_ptr(b_scale, inputs.device)
+        b_scale_ptr_tensor = _get_shrink_lora_scale_ptr(b_scale, inputs.device)
         # Get strides from the first scale tensor
         b_scale_strides = (
             b_scale[0].stride(0),  # stride for lora dimension
