@@ -41,7 +41,7 @@ class SchedulerConfig:
 
     DEFAULT_MAX_NUM_BATCHED_TOKENS: ClassVar[int] = 2048
     DEFAULT_MAX_NUM_SEQS: ClassVar[int] = 128
-
+    DEFAULT_MAX_WAITING_QUEUE_LEN: ClassVar[int] = 4096
     runner_type: RunnerType = "generate"
     """The runner type to launch for the model."""
 
@@ -66,7 +66,7 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
-    max_waiting_queue_length: int = Field(default=4096, ge=1)
+    max_waiting_queue_length: int = Field(default=DEFAULT_MAX_WAITING_QUEUE_LEN, ge=1)
     """
     The maximum number of requests allowed in the waiting queue.
     If the waiting queue is full, new incoming requests will be rejected.
