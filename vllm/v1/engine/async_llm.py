@@ -752,6 +752,13 @@ class AsyncLLM(EngineClient):
             )
             mode = "wait"
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        # Small sleep to help ensure that final outputs from any in-flight requests are
+        # returned prior to this method returning. These outputs come out of the engine
+        # prior to the wait-for-idle completion event, but involve additional async
+        # tasks in output processing.
+        # Note that this is not required for correctness, just more intuitive ordering
+        # of events from caller's pov.
+        await asyncio.sleep(0.02)
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
