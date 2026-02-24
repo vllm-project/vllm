@@ -144,20 +144,31 @@ class MultiprocExecutor(Executor):
             global_start_rank = (
                 self.local_world_size * self.parallel_config.node_rank_within_dp
             )
+            # Keep track of socket file descriptors that are inherited by the
+            # worker when using fork, so that we can close them in subsequent
+            # workers
+            inherited_fds: list[int] = []
             for local_rank in range(self.local_world_size):
                 global_rank = global_start_rank + local_rank
                 is_driver_worker = self._is_driver_worker(global_rank)
-                unready_workers.append(
-                    WorkerProc.make_worker_process(
-                        vllm_config=self.vllm_config,
-                        local_rank=local_rank,
-                        rank=global_rank,
-                        distributed_init_method=distributed_init_method,
-                        input_shm_handle=scheduler_output_handle,
-                        shared_worker_lock=shared_worker_lock,
-                        is_driver_worker=is_driver_worker,
-                    )
+                unready_worker_handle = WorkerProc.make_worker_process(
+                    vllm_config=self.vllm_config,
+                    local_rank=local_rank,
+                    rank=global_rank,
+                    distributed_init_method=distributed_init_method,
+                    input_shm_handle=scheduler_output_handle,
+                    shared_worker_lock=shared_worker_lock,
+                    is_driver_worker=is_driver_worker,
+                    inherited_fds=inherited_fds,
                 )
+                unready_workers.append(unready_worker_handle)
+                if context.get_start_method() == "fork":
+                    inherited_fds.extend(
+                        [
+                            unready_worker_handle.death_writer.fileno(),
+                            unready_worker_handle.ready_pipe.fileno(),
+                        ]
+                    )
 
             # Workers must be created before wait_for_ready to avoid
             # deadlock, since worker.init_device() does a device sync.
@@ -589,24 +600,26 @@ class WorkerProc:
         input_shm_handle,  # Receive SchedulerOutput
         shared_worker_lock: LockType,
         is_driver_worker: bool,
+        inherited_fds: list[int],
     ) -> UnreadyWorkerProcHandle:
         context = get_mp_context()
-        # (reader, writer)
-        reader, writer = context.Pipe(duplex=False)
-
-        # Create death pipe to detect parent process exit
+        # Ready pipe to communicate readiness from child to parent
+        ready_reader, ready_writer = context.Pipe(duplex=False)
+        # Death pipe to let child detect parent process exit
         death_reader, death_writer = context.Pipe(duplex=False)
-
         process_kwargs = {
             "vllm_config": vllm_config,
             "local_rank": local_rank,
             "rank": rank,
             "distributed_init_method": distributed_init_method,
             "input_shm_handle": input_shm_handle,
-            "ready_pipe": (reader, writer),
+            "ready_pipe": ready_writer,
             "death_pipe": death_reader,
             "shared_worker_lock": shared_worker_lock,
             "is_driver_worker": is_driver_worker,
+            # Have the worker close parent end of this worker's pipes too
+            "inherited_fds": inherited_fds
+            + [ready_reader.fileno(), death_writer.fileno()],
         }
         # Run EngineCore busy loop in background process.
         proc = context.Process(
@@ -617,10 +630,12 @@ class WorkerProc:
         )
 
         proc.start()
-        writer.close()
+        # Close child ends of pipes here in the parent
+        ready_writer.close()
+        death_reader.close()
         # Keep death_writer open in parent - when parent exits,
         # death_reader in child will get EOFError
-        return UnreadyWorkerProcHandle(proc, rank, reader, death_writer)
+        return UnreadyWorkerProcHandle(proc, rank, ready_reader, death_writer)
 
     @staticmethod
     def wait_for_response_handle_ready(
@@ -742,13 +757,20 @@ class WorkerProc:
         signal.signal(signal.SIGINT, signal_handler)
 
         worker = None
-        # tuple[Connection, Connection]
-        reader, ready_writer = kwargs.pop("ready_pipe")
-        death_pipe: Connection | None = kwargs.pop("death_pipe", None)
+        ready_writer = kwargs.pop("ready_pipe")
+        death_pipe = kwargs.pop("death_pipe", None)
+
+        # Close inherited pipes from parent (incl. other worker pipes)
+        # Explicitly passing in existing pipes and closing them makes the pipe
+        # behave when using fork. Otherwise, a hidden reference to the pipes
+        # exist in the child process and prevents EOF closure.
+        for fd in kwargs.pop("inherited_fds", []):
+            try:
+                os.close(fd)
+            except Exception as e:
+                logger.warning("Exception closing inherited connection: %s", e)
 
         try:
-            reader.close()
-
             # Initialize tracer
             rank = kwargs.get("rank", 0)
             maybe_init_worker_tracer(
