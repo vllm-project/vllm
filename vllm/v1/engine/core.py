@@ -448,7 +448,7 @@ class EngineCore:
             if not self.is_ec_producer:
                 model_executed = scheduler_output.total_num_scheduled_tokens > 0
 
-            if not model_executed:
+            if self.is_pooling_model or not model_executed:
                 # No sampling required (no requests scheduled).
                 future = cast(Future[ModelRunnerOutput], exec_future)
             else:

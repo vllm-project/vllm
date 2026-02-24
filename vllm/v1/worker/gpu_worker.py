@@ -630,8 +630,6 @@ class Worker(WorkerBase):
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
-        if self.use_v2_model_runner and self.model_runner.is_pooling_model:
-            return self.model_runner.pool()  # type: ignore
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
@@ -698,6 +696,12 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
+            if (
+                self.use_v2_model_runner
+                and self.model_runner.is_pooling_model
+                and output is None
+            ):
+                output = self.model_runner.pool()  # type: ignore
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
