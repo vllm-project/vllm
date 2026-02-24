@@ -162,6 +162,24 @@ class FixFunctionalizationPass(VllmInductorPass):
                     "position_ids",
                 )
                 self.defunctionalize(graph, node, mutated_args=mutated_args, args=args)
+            elif (
+                hasattr(torch.ops.vllm, "fused_rope_and_unified_kv_cache_update")
+                and at_target
+                == torch.ops.vllm.fused_rope_and_unified_kv_cache_update.default
+            ):
+                mutated_args = {
+                    1: "query",
+                    2: "key",
+                }
+                self.defunctionalize(graph, node, mutated_args=mutated_args)
+            # only used for test_functionalization::TestFunctionWithMutatedArgsAndReturn
+            elif (
+                hasattr(torch.ops.vllm, "function_with_mutated_args_and_return")
+                and at_target
+                == torch.ops.vllm.function_with_mutated_args_and_return.default
+            ):
+                mutated_args = {1: "x"}
+                self.defunctionalize(graph, node, mutated_args=mutated_args)
             else:
                 continue  # skip the count
 
@@ -208,13 +226,20 @@ class FixFunctionalizationPass(VllmInductorPass):
         self, node: torch.fx.Node, mutated_args: dict[int, torch.fx.Node | str]
     ) -> None:
         """
-        Replace all getitem users of the auto-functionalized node with the
+        Replace mutated getitem users of the auto-functionalized node with the
         mutated arguments.
         :param node: The auto-functionalized node
         :param mutated_args: The mutated arguments, indexed by getitem index.
         If the value of an arg is a string, `node.kwargs[arg]` is used.
         """
         for idx, user in self.getitem_users(node).items():
+            # Some functionalized nodes may return both a result at getitem[0]
+            # as well as mutated args at getitem[1:...]
+            if idx == 0:
+                assert idx not in mutated_args, (
+                    f"result at getitem[0] should not be in mutated_args for {node}"
+                )
+                continue
             arg = mutated_args[idx]
             arg = node.kwargs[arg] if isinstance(arg, str) else arg
             user.replace_all_uses_with(arg)
@@ -257,10 +282,20 @@ class FixFunctionalizationPass(VllmInductorPass):
         with graph.inserting_before(node):
             function = node.args[0]
             if args is None:
-                graph.call_function(function, kwargs=node.kwargs)
+                fn_node = graph.call_function(function, kwargs=node.kwargs)
             else:
                 # Args passed as strings refer to items in node.kwargs
                 args = tuple(
                     node.kwargs[arg] if isinstance(arg, str) else arg for arg in args
                 )
-                graph.call_function(function, args=args)
+                fn_node = graph.call_function(function, args=args)
+
+        # If the function returns a value as well as mutating args inplace,
+        # the functionalized node will have a getitem[0] user that holds this value
+        # Replace getitem[0] user of the auto-functionalized node
+        # with the new defunctionalized node directly if it exists
+        users = self.getitem_users(node)
+        if 0 in users:
+            user = users[0]
+            user.replace_all_uses_with(fn_node)
+            self._remove(user)

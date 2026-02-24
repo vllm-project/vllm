@@ -1519,6 +1519,45 @@ class rocm_aiter_ops:
         key = key.view(key_shape)
 
     @staticmethod
+    def triton_rope_and_cache(
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        flash_layout: bool,
+        apply_scale: bool,
+    ):
+        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+
+        cos, sin = cos_sin_cache.chunk(2, dim=-1)
+        fused_qk_rope_reshape_and_cache(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            positions,
+            cos,
+            sin,
+            k_scale,
+            v_scale,
+            is_neox,
+            flash_layout=flash_layout,
+            apply_scale=apply_scale,
+            q_out=query,
+            k_out=key,
+            output_zeros=False,
+        )
+
+    @staticmethod
     def batched_gemm_a16wfp4(
         X: torch.Tensor,
         W: torch.Tensor,
