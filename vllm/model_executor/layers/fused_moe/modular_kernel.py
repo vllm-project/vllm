@@ -820,7 +820,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         self,
         prepare_finalize: FusedMoEPrepareAndFinalize,
         fused_experts: FusedMoEPermuteExpertsUnpermute,
-        shared_experts: SharedExperts | None,
+        shared_experts: SharedExperts | None = None,
         inplace: bool = False,
     ):
         super().__init__()
