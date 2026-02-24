@@ -676,9 +676,6 @@ def inference_receive_ipc_tensor(
             "ipc_handles": ipc_handles,
         }
     elif mode == "http":
-        import base64
-        import pickle
-
         pickled = base64.b64encode(pickle.dumps(ipc_handles)).decode("utf-8")
         update_dict = {
             "names": ["test.weight"],
@@ -735,10 +732,7 @@ def test_ipc_weight_transfer_between_processes(mode: str):
     from ray.util.placement_group import placement_group
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-    ray.init(
-        ignore_reinit_error=True,
-        runtime_env={"env_vars": {"_VLLM_TEST_FRESH_WORKERS": "1"}},
-    )
+    ray.init(ignore_reinit_error=True)
 
     # Create a placement group to ensure both processes are on the same GPU
     # Use fractional GPUs so both tasks can share the same GPU bundle
