@@ -434,9 +434,7 @@ class Idefics2VisionTransformer(nn.Module):
             # Additive mask: masked positions receive a large negative value.
             # Shape: (B, 1, 1, L) broadcastable to (B, H, Q, K).
             min_val = torch.finfo(hidden_states.dtype).min
-            attention_mask = (
-                (~flat_patch_mask).to(dtype=hidden_states.dtype) * min_val
-            )
+            attention_mask = (~flat_patch_mask).to(dtype=hidden_states.dtype) * min_val
             attention_mask = attention_mask[:, None, None, :]
 
         if self.use_data_parallel:
