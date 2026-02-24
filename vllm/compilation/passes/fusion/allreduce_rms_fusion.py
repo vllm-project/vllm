@@ -739,6 +739,8 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                 dtype=self.model_dtype,
             )
         except RuntimeError as e:
+            if "multicast" not in str(e).lower():
+                raise
             logger.warning_once(
                 "AllReduce fusion pass is disabled: flashinfer workspace "
                 "creation failed: %s. This is expected on GPUs without "
