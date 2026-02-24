@@ -66,7 +66,7 @@ This is for controlling general behavior of the API when serving your model:
 
 See [Audio preprocessing and chunking](#audio-preprocessing-and-chunking) for what each field controls.
 
-Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.api.PromptType]. There are two common patterns:
+Implement the prompt construction via [get_generation_prompt][vllm.model_executor.models.interfaces.SupportsTranscription.get_generation_prompt]. The server passes you the resampled waveform and task parameters; you return a valid [PromptType][vllm.inputs.llm.PromptType]. There are two common patterns:
 
 #### Multimodal LLM with audio embeddings (e.g., Voxtral, Gemma3n)
 

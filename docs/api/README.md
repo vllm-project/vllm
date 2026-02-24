@@ -29,7 +29,7 @@ LLM Class.
 
 Prompt schema for LLM APIs.
 
-- [vllm.inputs.api][]
+- [vllm.inputs.llm][]
 
 ## vLLM Engines
 

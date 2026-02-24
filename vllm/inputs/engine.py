@@ -198,28 +198,28 @@ def mm_enc_dec_input(
 
 DecoderOnlyEngineInput: TypeAlias = TokensInput | EmbedsInput | MultiModalInput
 """
-A rendered [`DecoderOnlyPrompt`][vllm.inputs.api.DecoderOnlyPrompt]
+A rendered [`DecoderOnlyPrompt`][vllm.inputs.llm.DecoderOnlyPrompt]
 which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 """
 
 
 EncoderInput: TypeAlias = TokensInput | MultiModalEncDecInput
 """
-A rendered [`EncoderPrompt`][vllm.inputs.api.EncoderPrompt]
+A rendered [`EncoderPrompt`][vllm.inputs.llm.EncoderPrompt]
 which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 """
 
 
 DecoderEngineInput: TypeAlias = TokensInput | MultiModalInput
 """
-A rendered [`DecoderPrompt`][vllm.inputs.api.DecoderPrompt]
+A rendered [`DecoderPrompt`][vllm.inputs.llm.DecoderPrompt]
 which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 """
 
 
 class EncoderDecoderInput(TypedDict):
     """
-    A rendered [`EncoderDecoderPrompt`][vllm.inputs.api.EncoderDecoderPrompt]
+    A rendered [`EncoderDecoderPrompt`][vllm.inputs.llm.EncoderDecoderPrompt]
     which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
     """
 
@@ -237,14 +237,14 @@ class EncoderDecoderInput(TypedDict):
 
 SingletonInput: TypeAlias = DecoderOnlyEngineInput | MultiModalEncDecInput
 """
-A rendered [`SingletonPrompt`][vllm.inputs.api.SingletonPrompt]
+A rendered [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt]
 which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 """
 
 
 EngineInput: TypeAlias = DecoderOnlyEngineInput | EncoderDecoderInput
 """
-A rendered [`PromptType`][vllm.inputs.api.PromptType]
+A rendered [`PromptType`][vllm.inputs.llm.PromptType]
 which can be passed to `LLMEngine.add_request` or `AsyncLLM.add_request`.
 """
 

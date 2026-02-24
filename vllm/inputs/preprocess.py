@@ -21,14 +21,6 @@ from vllm.renderers.inputs import (
 from vllm.renderers.inputs.preprocess import parse_dec_only_prompt, parse_enc_dec_prompt
 from vllm.tokenizers import TokenizerLike
 
-from .api import (
-    EmbedsPrompt,
-    MultiModalDataDict,
-    MultiModalUUIDDict,
-    PromptType,
-    TextPrompt,
-    TokensPrompt,
-)
 from .engine import (
     DecoderEngineInput,
     DecoderOnlyEngineInput,
@@ -40,6 +32,14 @@ from .engine import (
     SingletonInput,
     TokensInput,
     tokens_input,
+)
+from .llm import (
+    EmbedsPrompt,
+    MultiModalDataDict,
+    MultiModalUUIDDict,
+    PromptType,
+    TextPrompt,
+    TokensPrompt,
 )
 
 logger = init_logger(__name__)

@@ -1,19 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from .api import (
-    DataPrompt,
-    EmbedsPrompt,
-    ExplicitEncoderDecoderPrompt,
-    ModalityData,
-    MultiModalDataBuiltins,
-    MultiModalDataDict,
-    MultiModalUUIDDict,
-    PromptType,
-    SingletonPrompt,
-    TextPrompt,
-    TokensPrompt,
-)
 from .engine import (
     DecoderOnlyEngineInput,
     EmbedsInput,
@@ -31,6 +18,19 @@ from .engine import (
     mm_input,
     split_enc_dec_input,
     tokens_input,
+)
+from .llm import (
+    DataPrompt,
+    EmbedsPrompt,
+    ExplicitEncoderDecoderPrompt,
+    ModalityData,
+    MultiModalDataBuiltins,
+    MultiModalDataDict,
+    MultiModalUUIDDict,
+    PromptType,
+    SingletonPrompt,
+    TextPrompt,
+    TokensPrompt,
 )
 
 __all__ = [

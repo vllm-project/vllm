@@ -70,28 +70,28 @@ def conversation_to_seq(
 
 DecoderOnlyDictPrompt: TypeAlias = TextPrompt | TokensPrompt | EmbedsPrompt
 """
-A [`DecoderOnlyPrompt`][vllm.inputs.api.DecoderOnlyPrompt]
+A [`DecoderOnlyPrompt`][vllm.inputs.llm.DecoderOnlyPrompt]
 that has been standardized into a dictionary.
 """
 
 
 EncoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
 """
-A [`EncoderPrompt`][vllm.inputs.api.EncoderPrompt]
+A [`EncoderPrompt`][vllm.inputs.llm.EncoderPrompt]
 that has been standardized into a dictionary.
 """
 
 
 DecoderDictPrompt: TypeAlias = TextPrompt | TokensPrompt
 """
-A [`DecoderPrompt`][vllm.inputs.api.DecoderPrompt]
+A [`DecoderPrompt`][vllm.inputs.llm.DecoderPrompt]
 that has been standardized into a dictionary.
 """
 
 
 class EncoderDecoderDictPrompt(TypedDict):
     """
-    A [`EncoderDecoderPrompt`][vllm.inputs.api.EncoderDecoderPrompt]
+    A [`EncoderDecoderPrompt`][vllm.inputs.llm.EncoderDecoderPrompt]
     that has been standardized into a dictionary.
     """
 
@@ -104,14 +104,14 @@ SingletonDictPrompt: TypeAlias = (
     DecoderOnlyDictPrompt | EncoderDictPrompt | DecoderDictPrompt
 )
 """
-A [`SingletonPrompt`][vllm.inputs.api.SingletonPrompt]
+A [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt]
 that has been standardized into a dictionary.
 """
 
 
 DictPrompt: TypeAlias = DecoderOnlyDictPrompt | EncoderDecoderDictPrompt
 """
-A [`PromptType`][vllm.inputs.api.PromptType]
+A [`PromptType`][vllm.inputs.llm.PromptType]
 that has been standardized into a dictionary.
 """
 

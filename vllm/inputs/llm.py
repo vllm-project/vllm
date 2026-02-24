@@ -1,4 +1,4 @@
-"""Schema and utilities for input prompts to the top-level user API."""
+"""Schema and utilities for input prompts to the LLM API."""
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
@@ -47,7 +47,7 @@ MultiModalDataDict: TypeAlias = Mapping[str, ModalityData[Any]]
 A dictionary containing an entry for each modality type to input.
 
 The built-in modalities are defined by
-[`MultiModalDataBuiltins`][vllm.inputs.api.MultiModalDataBuiltins].
+[`MultiModalDataBuiltins`][vllm.inputs.llm.MultiModalDataBuiltins].
 """
 
 MultiModalUUIDDict: TypeAlias = Mapping[str, Sequence[str | None] | str]
@@ -64,7 +64,7 @@ The UUID will be used to identify the item for all caching purposes
 class _PromptOptions(TypedDict):
     """
     Additional options available to all
-    [`SingletonPrompt`][vllm.inputs.api.SingletonPrompt] types.
+    [`SingletonPrompt`][vllm.inputs.llm.SingletonPrompt] types.
     """
 
     multi_modal_data: NotRequired[MultiModalDataDict | None]
@@ -132,10 +132,10 @@ DecoderOnlyPrompt: TypeAlias = (
 """
 Schema of a prompt for a decoder-only model:
 
-- A text prompt (string or [`TextPrompt`][vllm.inputs.api.TextPrompt])
+- A text prompt (string or [`TextPrompt`][vllm.inputs.llm.TextPrompt])
 - A tokenized prompt (list of token IDs, or
-  [`TokensPrompt`][vllm.inputs.api.TokensPrompt])
-- An embeddings prompt ([`EmbedsPrompt`][vllm.inputs.api.EmbedsPrompt])
+  [`TokensPrompt`][vllm.inputs.llm.TokensPrompt])
+- An embeddings prompt ([`EmbedsPrompt`][vllm.inputs.llm.EmbedsPrompt])
 
 For encoder-decoder models, passing a singleton prompt is shorthand for passing
 `ExplicitEncoderDecoderPrompt(encoder_prompt=prompt, decoder_prompt=None)`.
@@ -146,9 +146,9 @@ EncoderPrompt: TypeAlias = str | TextPrompt | list[int] | TokensPrompt
 """
 Schema of a prompt for the encoder part of a encoder-decoder model:
 
-- A text prompt (string or [`TextPrompt`][vllm.inputs.api.TextPrompt])
+- A text prompt (string or [`TextPrompt`][vllm.inputs.llm.TextPrompt])
 - A tokenized prompt (list of token IDs, or
-  [`TokensPrompt`][vllm.inputs.api.TokensPrompt])
+  [`TokensPrompt`][vllm.inputs.llm.TokensPrompt])
 """
 
 
@@ -156,9 +156,9 @@ DecoderPrompt: TypeAlias = str | TextPrompt | list[int] | TokensPrompt
 """
 Schema of a prompt for the decoder part of an encoder-decoder model:
 
-- A text prompt (string or [`TextPrompt`][vllm.inputs.api.TextPrompt])
+- A text prompt (string or [`TextPrompt`][vllm.inputs.llm.TextPrompt])
 - A tokenized prompt (list of token IDs, or
-  [`TokensPrompt`][vllm.inputs.api.TokensPrompt])
+  [`TokensPrompt`][vllm.inputs.llm.TokensPrompt])
 
 Note:
     Multi-modal inputs are not supported for decoder prompts.
@@ -197,7 +197,7 @@ SingletonPrompt: TypeAlias = DecoderOnlyPrompt | EncoderPrompt | DecoderPrompt
 """
 Schema for a single prompt. This is as opposed to a data structure
 which encapsulates multiple prompts, such as
-[`ExplicitEncoderDecoderPrompt`][vllm.inputs.api.ExplicitEncoderDecoderPrompt].
+[`ExplicitEncoderDecoderPrompt`][vllm.inputs.llm.ExplicitEncoderDecoderPrompt].
 """
 
 
@@ -212,7 +212,7 @@ This is the input format accepted by most [`LLM`][vllm.entrypoints.llm.LLM] APIs
 class DataPrompt(_PromptOptions):
     """
     Represents generic inputs that are converted to
-    [`PromptType`][vllm.inputs.api.PromptType] by IO processor plugins.
+    [`PromptType`][vllm.inputs.llm.PromptType] by IO processor plugins.
     """
 
     data: Any
