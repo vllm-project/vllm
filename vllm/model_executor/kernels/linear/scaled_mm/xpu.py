@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 import torch
 
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+from vllm.model_executor.kernels.linear import (  # noqa: E501
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
 )
