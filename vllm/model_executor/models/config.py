@@ -657,11 +657,43 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
         model_config.hf_config.embedding_size = model_config.hf_config.num_labels
 
 
+class AnyModelForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Validate block_configs and normalize entries to namespace objects.
+
+        HuggingFace deserializes unknown nested fields as plain dicts.
+        Code in ``model.py`` (e.g. ``get_num_layers_by_block_type``)
+        accesses ``bc.attention.no_op`` via attribute access, so we
+        convert dicts to ``types.SimpleNamespace`` here.
+        """
+        import types
+
+        hf_config = model_config.hf_config
+        block_configs = getattr(hf_config, "block_configs", None)
+        if not block_configs:
+            return
+
+        assert len(block_configs) == hf_config.num_hidden_layers, (
+            f"block_configs length ({len(block_configs)}) must match "
+            f"num_hidden_layers ({hf_config.num_hidden_layers})"
+        )
+
+        def _to_ns(obj):
+            if isinstance(obj, dict):
+                return types.SimpleNamespace(**{k: _to_ns(v) for k, v in obj.items()})
+            if isinstance(obj, list):
+                return [_to_ns(item) for item in obj]
+            return obj
+
+        hf_config.block_configs = [_to_ns(bc) for bc in block_configs]
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
-    "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
-    "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
-    "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
-    "FalconMambaForCausalLM": MambaModelConfig,
+    "AnyModelForCausalLM": AnyModelForCausalLMConfig,
+    "GteModel": SnowflakeGteNewModelConfig,
+    "GteNewModel": GteNewModelConfig,
+    "GteNewForSequenceClassification": GteNewModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
     "GteModel": SnowflakeGteNewModelConfig,
