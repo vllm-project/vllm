@@ -99,7 +99,6 @@ is_multi_node() {
 # through untouched to avoid double-quoting values injected by
 # apply_rocm_test_overrides.
 ###############################################################################
-
 re_quote_pytest_markers() {
   local input="$1"
   local output=""
@@ -340,10 +339,7 @@ HF_MOUNT="/root/.cache/huggingface"
 commands="$*"
 echo "Raw commands: $commands"
 
-# Re-quote marker expressions before ROCm overrides (so overrides see correct
-# structure). apply_rocm_test_overrides injects its own properly-quoted -k
-# expressions which won't be double-processed because re_quote_pytest_markers
-# detects existing quotes and skips them.
+# Fix quoting before ROCm overrides (so overrides see correct structure)
 commands=$(re_quote_pytest_markers "$commands")
 echo "After re-quoting: $commands"
 
@@ -357,6 +353,18 @@ render_gid=$(getent group render | cut -d: -f3)
 if [[ -z "$render_gid" ]]; then
   echo "Error: 'render' group not found. This is required for GPU access." >&2
   exit 1
+fi
+
+# --- RDMA device passthrough (conditional) ---
+# If the host has RDMA devices, pass them through so tests like
+# test_moriio_connector can access ibverbs. On hosts without RDMA
+# hardware the tests will gracefully skip via _rdma_available().
+RDMA_FLAGS=""
+if [ -d /dev/infiniband ]; then
+  echo "RDMA devices detected on host, enabling passthrough"
+  RDMA_FLAGS="--device /dev/infiniband --cap-add=IPC_LOCK"
+else
+  echo "No RDMA devices found on host, RDMA tests will be skipped"
 fi
 
 # --- Route: multi-node vs single-node ---
@@ -406,6 +414,7 @@ else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+    $RDMA_FLAGS \
     --network=host \
     --shm-size=16gb \
     --group-add "$render_gid" \
