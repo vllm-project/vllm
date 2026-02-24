@@ -396,6 +396,15 @@ class VllmConfig:
         return hash_str
 
     @property
+    def num_speculative_tokens(self) -> int:
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.num_speculative_tokens is not None
+        ):
+            return self.speculative_config.num_speculative_tokens
+        return 0
+
+    @property
     def needs_dp_coordinator(self) -> bool:
         """
         Determine if the DPCoordinator process is needed.
@@ -1399,6 +1408,20 @@ class VllmConfig:
                     logger.debug(
                         "Max num batched tokens below allreduce-rms fusion threshold, "
                         "allreduce-rms fusion will be enabled for all num_tokens."
+                    )
+
+        if compilation_config.pass_config.fuse_rope_kvcache:
+            max_token_num = (
+                compilation_config.pass_config.rope_kvcache_fusion_max_token_num
+            )
+            if max_token_num is not None:
+                if compile_range_end is not None and max_token_num < compile_range_end:
+                    computed_compile_ranges_split_points.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below rope+kvcache fusion threshold, "
+                        "rope+kvcache fusion enabled for num_tokens <= %d.",
+                        compile_range_end,
                     )
 
         if compilation_config.compile_ranges_split_points is not None:
