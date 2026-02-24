@@ -3,11 +3,14 @@
 
 import asyncio
 import json
+import os
+import subprocess
+import tempfile
+import time
+
 import openai
 import pytest
 import pytest_asyncio
-import subprocess
-import time
 from typing import Dict, Any, Optional
 
 from vllm.platforms import current_platform
@@ -559,26 +562,34 @@ def test_run_guidellm_benchmark(
             - success_rate: Percentage of successful requests
             - raw_output: Raw guidellm output
     """
-    # Get server URL
+    # Get server URL (base URL for the API)
     server_url = server.url_for("v1")
 
-    # Build guidellm command
+    # Build guidellm benchmark command
     cmd = [
         "guidellm",
-        "--backend", "openai",
-        "--base-url", server_url,
+        "benchmark",
+        "--target", server_url,
         "--model", model_name,
-        "--num-requests", str(num_requests),
-        "--prompt-tokens", str(prompt_tokens),
-        "--output-tokens", str(output_tokens),
-        "--output-format", "json",
+        "--data", f"prompt_tokens={prompt_tokens},output_tokens={output_tokens}",
+        "--rate-type", "concurrent",
+        "--max-seconds", str(timeout),
+        "--max-requests", str(num_requests),
     ]
+
+    if request_rate is not None:
+        cmd.extend(["--rate", str(int(request_rate))])
+    else:
+        # Use a single high rate for max throughput when no rate specified
+        cmd.extend(["--rate", "100"])
 
     if max_concurrency is not None:
         cmd.extend(["--max-concurrency", str(max_concurrency)])
 
-    if request_rate is not None:
-        cmd.extend(["--request-rate", str(request_rate)])
+    # Use temp file for JSON output
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+        output_path = f.name
+    cmd.extend(["--output-path", output_path])
 
     print(f"\n{'='*60}")
     print(f"Running guidellm benchmark:")
@@ -598,13 +609,55 @@ def test_run_guidellm_benchmark(
             cmd,
             capture_output=True,
             text=True,
-            timeout=timeout,
+            timeout=timeout + 30,  # Slightly longer than max-seconds
             check=True,
         )
         elapsed = time.time() - start_time
 
-        # Print the raw JSON output
-        print(result.stdout)
+        # Read and print JSON output
+        with open(output_path, "r") as f:
+            raw_output = f.read()
+        print(raw_output)
+
+        # Clean up temp file
+        os.unlink(output_path)
+
+        # Parse JSON output
+        try:
+            benchmark_data = json.loads(raw_output)
+        except json.JSONDecodeError:
+            print("Warning: Could not parse guidellm JSON output, using raw output")
+            benchmark_data = {
+                "raw_output": raw_output,
+                "stderr": result.stderr,
+            }
+
+        # Extract key metrics (adjust keys based on actual guidellm output format)
+        metrics = {
+            "throughput": benchmark_data.get("throughput", benchmark_data.get("requests_per_second", 0.0)),
+            "mean_latency": benchmark_data.get("mean_latency", benchmark_data.get("latency_mean", 0.0)),
+            "p50_latency": benchmark_data.get("p50_latency", benchmark_data.get("latency_p50", 0.0)),
+            "p95_latency": benchmark_data.get("p95_latency", benchmark_data.get("latency_p95", 0.0)),
+            "p99_latency": benchmark_data.get("p99_latency", benchmark_data.get("latency_p99", 0.0)),
+            "total_tokens": benchmark_data.get("total_tokens", 0),
+            "tokens_per_second": benchmark_data.get("tokens_per_second", 0.0),
+            "success_rate": benchmark_data.get("success_rate", 1.0),
+            "total_time": elapsed,
+            "raw_output": raw_output,
+            "full_data": benchmark_data,
+        }
+
+        print(f"\n{'='*60}")
+        print(f"Guidellm benchmark completed in {elapsed:.2f}s")
+        print(f"  Throughput: {metrics['throughput']:.2f} req/s")
+        print(f"  Mean latency: {metrics['mean_latency']:.3f}s")
+        print(f"  P95 latency: {metrics['p95_latency']:.3f}s")
+        print(f"  P99 latency: {metrics['p99_latency']:.3f}s")
+        print(f"  Tokens/sec: {metrics['tokens_per_second']:.2f}")
+        print(f"  Success rate: {metrics['success_rate']:.1%}")
+        print(f"{'='*60}\n")
+
+        return metrics
 
     except subprocess.TimeoutExpired:
         raise RuntimeError(f"Guidellm benchmark timed out after {timeout} seconds")
