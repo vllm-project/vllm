@@ -429,15 +429,16 @@ class TTModelRunner:
         if mm_feature.modality != "image":
             raise NotImplementedError("Only images are supported for now")
 
-    def _gather_multi_modal_inputs(self, scheduler_output) -> dict[str, Any]:
+    def _gather_multi_modal_inputs(self) -> dict[str, Any]:
         """
-        Gather and batch multi-modal inputs from scheduled requests.
+        Gather and batch multi-modal inputs for the current persistent batch.
 
         Currently only supports image inputs in the "pixel_values" and
         "image_grid_thw" fields.
 
         Returns a dict with keys "pixel_values" and "image_grid_thw".
-        Each value is a list aligned with `scheduler_output.scheduled_new_reqs`.
+        Each value is a list aligned with the persistent batch order
+        (`self.input_batch.req_ids[:num_reqs]`).
 
         For request i:
         - If it has no `mm_features`, the entry is None.
@@ -465,8 +466,10 @@ class TTModelRunner:
             "image_grid_thw": [],
         }
 
-        for new_req_data in scheduler_output.scheduled_new_reqs:
-            req_id = new_req_data.req_id
+        num_reqs = self.input_batch.num_reqs
+        # The model input tensors are built in persistent batch order, so
+        # multi-modal inputs must follow the same order (not just new reqs).
+        for req_id in self.input_batch.req_ids[:num_reqs]:
             req_state = self.requests[req_id]
 
             if not req_state.mm_features:
@@ -525,29 +528,43 @@ class TTModelRunner:
 
         # NOTE: We assume that all sequences in the group are all prompts or
         # all decodes.
-        is_prompt = len(scheduler_output.scheduled_new_reqs) > 0
+        cached_reqs = scheduler_output.scheduled_cached_reqs
+        # A "prefill" step can contain:
+        # - brand new requests (scheduled_new_reqs), and/or
+        # - resumed-from-preemption requests (scheduled_cached_reqs with
+        #   resumed_req_ids set) that need to replay tokens to rebuild KV.
+        is_prompt = (len(scheduler_output.scheduled_new_reqs) > 0) or bool(
+            cached_reqs.resumed_req_ids
+        )
         sample_params = input_batch.sampling
         if is_prompt:
             # NOTE: In SchedulerOutput, "cached" means "request data already
             # cached on the worker", not necessarily "decode". During a prefill
             # step we can legitimately see cached requests if they are resumed
             # from preemption (still prefill work).
-            cached = scheduler_output.scheduled_cached_reqs
-            if cached.num_reqs > 0:
-                any_running = any(not x for x in cached.resumed_from_preemption)
+            if cached_reqs.num_reqs > 0:
+                any_running = any(
+                    req_id not in cached_reqs.resumed_req_ids
+                    for req_id in cached_reqs.req_ids
+                )
                 assert not any_running, (
                     "Prefill batch should not include decode/running cached "
-                    "requests (resumed_from_preemption=False)."
+                    "requests (req_id not in resumed_req_ids)."
                 )
 
             # num_computed_tokens for each request is the input position
             # (=computed previously and cached)
             input_positions = input_batch.num_computed_tokens_cpu[:num_reqs]
-            max_prompt_tokens = max(input_batch.num_prompt_tokens[:num_reqs])
+            # Prefill length in tokens for each request:
+            # - For new requests: equals prompt length.
+            # - For resumed-from-preemption requests: includes any generated
+            #   output tokens so far, so we can replay the full sequence to
+            #   rebuild KV after preemption freed the cache blocks.
+            prompt_lens = input_batch.num_tokens[:num_reqs]
+            max_prefill_tokens = max(prompt_lens)
             input_tokens = input_batch.token_ids_cpu_tensor[
-                :num_reqs, :max_prompt_tokens
+                :num_reqs, :max_prefill_tokens
             ]
-            prompt_lens = input_batch.num_prompt_tokens[:num_reqs]
             reset_batch = False
         else:
             input_positions = torch.from_numpy(input_batch.num_tokens[:num_reqs] - 1)
@@ -615,7 +632,7 @@ class TTModelRunner:
         )
 
         if self.model_config.is_multimodal_model and is_prompt:
-            multi_modal_kwargs = self._gather_multi_modal_inputs(scheduler_output)
+            multi_modal_kwargs = self._gather_multi_modal_inputs()
         else:
             multi_modal_kwargs = {}
 
@@ -1110,6 +1127,7 @@ class TTModelRunner:
                             dim=1,
                         )
                     input_tokens_list.append(toks)
+                    assert mi.prompt_lens is not None
                     prompt_lens_list.append(mi.prompt_lens)
                     block_tables_list.append(pad_block_tables(mi.block_tables))
                     input_positions_list.append(mi.input_positions)
