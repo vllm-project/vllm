@@ -263,9 +263,14 @@ class PrefetchOffloader(BaseOffloader):
             # Mark that this prefetch has been waited on (joined).
             offloader._prefetch_in_capture = False
         else:
-            # Outside capture: use wait_stream for robustness.
-            # Events used in previous captures can be in invalid state.
-            torch.cuda.current_stream().wait_stream(self.copy_stream)
+            if offloader._event_valid_for_eager:
+                # Use per-layer event to only wait for THIS layer's copy,
+                # allowing other layers' prefetches to run concurrently.
+                torch.cuda.current_stream().wait_event(offloader._copy_done_event)
+            else:
+                # Event not usable (unrecorded or recorded during capture).
+                # Fall back to wait_stream to drain all copy_stream work.
+                torch.cuda.current_stream().wait_stream(self.copy_stream)
 
     def sync_prev_onload(self):
         """Sync previous onload operations.
@@ -382,9 +387,14 @@ class _ModuleOffloader:
         self.offloaded_bytes = 0
 
         # Event to signal when H2D copy to static buffer is complete.
-        # Used for CUDA graph compatible synchronization during capture.
-        # Outside capture, we use wait_stream instead (more robust).
+        # Used for per-layer synchronization (both eager and capture modes).
         self._copy_done_event = torch.cuda.Event()
+
+        # Track whether _copy_done_event is valid for eager-mode wait_event.
+        # False when: (1) never recorded, or (2) last recorded during a
+        # cudagraph capture (events become invalid after capture ends).
+        # In these cases we fall back to wait_stream.
+        self._event_valid_for_eager = False
 
         # Track if last prefetch was started during CUDA graph capture.
         # Used to skip wait_event during capture for pre-capture prefetches.
@@ -506,6 +516,9 @@ class _ModuleOffloader:
 
         # Record completion event for _wait_for_layer to use
         self._copy_done_event.record(self.copy_stream)
+        # Event is only valid for eager wait_event if recorded outside capture.
+        # Events recorded during capture become invalid after capture ends.
+        self._event_valid_for_eager = not torch.cuda.is_current_stream_capturing()
 
 
 class _BaseParamOffloader(ABC):
