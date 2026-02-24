@@ -537,14 +537,14 @@ class BailingMoELinearAttention(nn.Module, MambaBase):
             self.hidden_inner_size,
             bias=False,
             quant_config=quant_config,
-            prefix=f"{prefix}.output_gate",
+            prefix=f"{prefix}.g_proj",
         )
         self.dense = RowParallelLinear(
             self.hidden_inner_size,
             self.hidden_size,
             bias=config.use_bias,
             quant_config=quant_config,
-            prefix=f"{prefix}.out_proj",
+            prefix=f"{prefix}.dense",
             reduce_results=True,
         )
 
@@ -802,7 +802,7 @@ class BailingMoeV25DecoderLayer(nn.Module):
                 config,
                 quant_config=quant_config,
                 layer_id=layer_id,
-                prefix=f"{prefix}.attention",
+                prefix=f"{prefix}.self_attn",
                 model_config=model_config,
                 cache_config=cache_config,
             )
@@ -811,7 +811,7 @@ class BailingMoeV25DecoderLayer(nn.Module):
                 config,
                 quant_config=quant_config,
                 layer_id=layer_id,
-                prefix=f"{prefix}.attention",
+                prefix=f"{prefix}.self_attn",
                 cache_config=cache_config,
             )
 
@@ -868,21 +868,11 @@ class BailingMoeV25DecoderLayer(nn.Module):
             # Full attention
             self_attention_output = self.self_attn(hidden_states, positions)
 
-        # Residual connection
-        hidden_states = residual + self_attention_output
-
-        residual = hidden_states
-
-        # Post attention layernorm
-        hidden_states = self.post_attention_layernorm(hidden_states)
-
-        # MLP
-        mlp_output = self.mlp(hidden_states)
-
-        # Residual connection
-        hidden_states = residual + mlp_output
-
-        return hidden_states, None
+        hidden_states, residual = self.post_attention_layernorm(
+            self_attention_output, residual
+        )
+        hidden_states = self.mlp(hidden_states)
+        return hidden_states, residual
 
 
 @support_torch_compile(
@@ -1014,80 +1004,6 @@ class BailingMoeV25Model(nn.Module):
             else:
                 hidden_states = self.norm(hidden_states)
         return hidden_states
-
-
-class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
-    """Bailing MoE v2.5 For CausalLM."""
-
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-
-        self.config = config
-        self.quant_config = quant_config
-
-        self.model = BailingMoeV25Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-        )
-
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-            )
-            self.logits_processor = LogitsProcessor(config.vocab_size)
-        else:
-            self.lm_head = PPMissingLayer()
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.logits_processor(self.lm_head, hidden_states)
-
-    def make_empty_intermediate_tensors(
-        self, batch_size: int, dtype: torch.dtype, device: torch.device
-    ) -> IntermediateTensors:
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-                "residual": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-            }
-        )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load checkpoint weights with simplified mapping."""
@@ -1221,6 +1137,80 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
             load_param(norm_name, weight)
 
         return loaded_params
+
+
+class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
+    """Bailing MoE v2.5 For CausalLM."""
+
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+
+        self.config = config
+        self.quant_config = quant_config
+
+        self.model = BailingMoeV25Model(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
+
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+            )
+            self.logits_processor = LogitsProcessor(config.vocab_size)
+        else:
+            self.lm_head = PPMissingLayer()
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states)
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+                "residual": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+            }
+        )
 
     @classmethod
     def get_mamba_state_shape_from_config(
