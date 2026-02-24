@@ -107,7 +107,9 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
               (uint64_t(out_val.hi) << 32) | uint64_t(out_val.lo);
           reinterpret_cast<uint64_t*>(out)[outOffset >> 1] = packed64;
         } else {
-          out[inOffset] = out_val;
+          int64_t outOffset =
+              rowIdx * (numCols / CVT_FP4_ELTS_PER_THREAD) + colIdx;
+          out[outOffset] = out_val;
         }
       }
     }
