@@ -538,6 +538,10 @@ class CudaPlatformBase(Platform):
     def support_static_graph_mode(cls) -> bool:
         return True
 
+    @classmethod
+    def num_compute_units(cls, device_id=0):
+        return torch.cuda.get_device_properties(device_id).multi_processor_count
+
 
 # NVML utils
 # Note that NVML is not affected by `CUDA_VISIBLE_DEVICES`,
