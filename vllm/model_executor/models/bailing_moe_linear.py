@@ -62,7 +62,13 @@ from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
-from .utils import PPMissingLayer, is_pp_missing_parameter, make_layers, maybe_prefix
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    is_pp_missing_parameter,
+    make_layers,
+    maybe_prefix,
+)
 
 logger = init_logger(__name__)
 
@@ -1233,25 +1239,8 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
         return MambaStateCopyFuncCalculator.linear_attention_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        """Load weights for the model."""
-        # Convert to list to allow multiple iterations
-        weights_list = list(weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights)
 
-        # Load model weights (BailingMoeV25Model handles the mapping)
-        loaded_params = self.model.load_weights(weights_list)
-
-        # Handle lm_head weights
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        for name, loaded_weight in weights_list:
-            if "lm_head" not in name:
-                continue
-            if self.config.tie_word_embeddings and "lm_head" in name:
-                continue
-            if name not in params_dict or is_pp_missing_parameter(name, self):
-                continue
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-
-        return loaded_params
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
