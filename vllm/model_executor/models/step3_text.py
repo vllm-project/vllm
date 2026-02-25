@@ -100,6 +100,7 @@ class FusedMoEBlock(nn.Module):
                     final_hidden_states
                 )
             )
+            
         return final_hidden_states.view(orig_shape)
 
 
