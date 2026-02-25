@@ -1390,7 +1390,7 @@ void concat_mla_q(torch::Tensor& ql_nope,  // [num_tokens, num_heads, nope_dim]
 
   if (num_tokens == 0) return;
 
-  constexpr int warps_per_block = 32;
+  constexpr int warps_per_block = 8;
   const int total_warps = num_tokens * num_heads;
   const int grid_size = (total_warps + warps_per_block - 1) / warps_per_block;
   const int block_size = warps_per_block * 32;
