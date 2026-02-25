@@ -188,7 +188,6 @@ class LlamaNemotronVLForEmbedding(LlamaNemotronVLChatModel, VllmModelForPooling)
             # Vision model mapping (SiglipVisionModel has nested vision_model)
             "vision_model.encoder.": "vision_model.vision_model.encoder.",
             "vision_model.embeddings.": "vision_model.vision_model.embeddings.",
-            "vision_model.pre_layrnorm.": "vision_model.vision_model.pre_layrnorm.",
             "vision_model.post_layernorm.": "vision_model.vision_model.post_layernorm.",
         }
     )
