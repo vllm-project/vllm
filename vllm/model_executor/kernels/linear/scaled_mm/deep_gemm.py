@@ -4,6 +4,9 @@
 import torch
 
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    deepgemm_post_process_fp8_weight_block,
+)
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -12,7 +15,6 @@ from vllm.utils.deep_gemm import (
     should_use_deepgemm_for_fp8_linear,
 )
 
-from ...utils.fp8_utils import deepgemm_post_process_fp8_weight_block
 from .BlockScaledMMLinearKernel import (
     Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
