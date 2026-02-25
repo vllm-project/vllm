@@ -371,15 +371,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     seq_lens - decode_lens, decode_lens
                 )
 
-                # [3, 1, 4, 0] -> [3, 4, 8, 8]
-                cumsum = torch.cumsum(decode_lens, dim=0, dtype=torch.int32)
-
-                # [3, 4, 8, 8] -> [0, 3, 4, 8]
-                starts = torch.zeros_like(cumsum)
-                starts[1:] = cumsum[:-1]
-
                 # [0, 3, 4, 8] -> [0, 0, 0, 3, 4, 4, 4, 4]
-                expanded_starts = torch.repeat_interleave(starts, decode_lens)
+                expanded_starts = torch.repeat_interleave(
+                    common_attn_metadata.query_start_loc[:num_decodes], decode_lens
+                )
 
                 # [0, 1, 2, 0, 0, 1, 2, 3]
                 positions_within = (
