@@ -75,7 +75,7 @@ class OptimizationLevel(IntEnum):
     """O3: Currently the same as -O2s."""
 
 
-PerformanceMode = Literal["balanced", "latency", "throughput"]
+PerformanceMode = Literal["balanced", "interactivity", "throughput"]
 
 IS_QUANTIZED = False
 IS_DENSE = False
@@ -296,8 +296,8 @@ class VllmConfig:
 
     performance_mode: PerformanceMode = "balanced"
     """Performance mode for runtime behavior, 'balanced' is the default.
-    'latency' favors low end-to-end per-request latency at small batch sizes
-    (fine-grained CUDA graphs, latency-oriented kernels). 
+    'interactivity' favors low end-to-end per-request latency at small batch
+    sizes (fine-grained CUDA graphs, latency-oriented kernels).
     'throughput' favors aggregate tokens/sec at high concurrency (larger CUDA
     graphs, more aggressive batching, throughput-oriented kernels)."""
 
@@ -1234,10 +1234,11 @@ class VllmConfig:
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
-                if self.performance_mode == "latency":
+                if self.performance_mode == "interactivity":
                     # Fine-grained CUDA graphs at small batch sizes
-                    latency_max = min(max_cudagraph_capture_size, 32)
-                    cudagraph_capture_sizes = list(range(1, latency_max + 1))
+                    # for minimal padding overhead
+                    interactivity_max = min(max_cudagraph_capture_size, 32)
+                    cudagraph_capture_sizes = list(range(1, interactivity_max + 1))
                 else:
                     cudagraph_capture_sizes = [
                         i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
