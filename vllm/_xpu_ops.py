@@ -105,15 +105,14 @@ class xpu_ops:
             assert len(window_size) == 2
             real_window_size = (window_size[0], window_size[1])  # noqa: F841
 
-        # In encode attention, v maybe not contiguous and current
+        # For MM models and Mamba models, k/v maybe not contiguous and current
         # kernel can't handle it
-        if block_table is None:
-            v = v.contiguous()
+
         return flash_attn_varlen_func(
             out=out,
             q=q.contiguous(),
-            k=k,
-            v=v,
+            k=k.contiguous(),
+            v=v.contiguous(),
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
             seqused_k=seqused_k,
