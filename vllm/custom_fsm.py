@@ -34,6 +34,10 @@ from typing import Any
 
 from tqdm import tqdm
 
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
+
 
 class CustomFSM:
     """
@@ -71,7 +75,7 @@ class CustomFSM:
         Returns:
             CustomFSM instance with loaded graph
         """
-        print(f"Loading FSM from {file_path}...")
+        logger.info("Loading FSM from %s...", file_path)
         with open(file_path) as f:
             graph_data = json.load(f)
 

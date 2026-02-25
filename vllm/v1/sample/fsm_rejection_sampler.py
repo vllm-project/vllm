@@ -55,14 +55,12 @@ class FSMRejectionSampler(RejectionSampler):
         # Handle logprobs if needed
         logprobs_tensors = None
         if sampling_metadata.max_num_logprobs is not None:
-            dummy_target_logits = torch.zeros_like(
-                logits[metadata.target_logits_indices], dtype=torch.float32
-            )
+            target_logits = logits[metadata.target_logits_indices].to(torch.float32)
             logprobs_tensors = self._get_logprobs_tensors(
                 sampling_metadata.max_num_logprobs,
                 metadata,
                 logits,
-                dummy_target_logits,
+                target_logits,
                 bonus_sampler_output.logprobs_tensors.logprobs,
                 output_token_ids,
             )

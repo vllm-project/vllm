@@ -68,8 +68,9 @@ def test_fsm_save_load():
     fsm = CustomFSM()
     fsm.graph = {0: {1: 1, 2: 2}, 1: {3: 2}}
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         fsm.save(f.name)
+        f.flush()
         loaded_fsm = CustomFSM.from_prebuilt(f.name)
 
     assert loaded_fsm.graph == fsm.graph
@@ -85,8 +86,9 @@ def test_fsm_proposer_basic():
         3: {4: 4},
     }
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         fsm.save(f.name)
+        f.flush()
 
         model_config = ModelConfig(model="facebook/opt-125m")
         proposer = FSMProposer(
@@ -118,8 +120,9 @@ def test_fsm_proposer_no_drafts():
         0: {1: 1, 2: 1},  # Multiple choices, not deterministic
     }
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         fsm.save(f.name)
+        f.flush()
 
         model_config = ModelConfig(model="facebook/opt-125m")
         proposer = FSMProposer(
@@ -152,8 +155,9 @@ def test_fsm_proposer_multibatch():
         2: {3: 3},
     }
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         fsm.save(f.name)
+        f.flush()
 
         model_config = ModelConfig(model="facebook/opt-125m")
         proposer = FSMProposer(
@@ -187,8 +191,9 @@ def test_fsm_proposer_state_tracking():
         3: {4: 4},
     }
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         fsm.save(f.name)
+        f.flush()
 
         model_config = ModelConfig(model="facebook/opt-125m")
         proposer = FSMProposer(
@@ -227,8 +232,9 @@ def test_fsm_proposer_cleanup():
     fsm = CustomFSM()
     fsm.graph = {0: {1: 1}}
 
-    with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=".json") as f:
         fsm.save(f.name)
+        f.flush()
 
         model_config = ModelConfig(model="facebook/opt-125m")
         proposer = FSMProposer(
