@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from abc import ABC, abstractmethod
-from collections.abc import AsyncGenerator, Iterable, Mapping
+from collections.abc import AsyncGenerator, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -145,6 +145,15 @@ class EngineClient(ABC):
         self, reset_running_requests: bool = False, reset_connector: bool = False
     ) -> bool:
         """Reset the prefix cache and optionally any configured connector cache"""
+        ...
+
+    @abstractmethod
+    async def drop_kv_checkpoints(self, checkpoint_ids: Sequence[str]) -> int:
+        """Drop saved KV checkpoints by ID.
+
+        Returns:
+            Number of checkpoints successfully dropped.
+        """
         ...
 
     @abstractmethod

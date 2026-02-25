@@ -163,6 +163,14 @@ class ResponsesRequest(OpenAIBaseModel):
     logit_bias: dict[str, float] | None = None
     parallel_tool_calls: bool | None = True
     previous_response_id: str | None = None
+    context_session_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional session key for context checkpoint/revert workflows. "
+            "When set, vLLM can resolve previous_response_id from the session "
+            "and apply queued rewind summaries automatically."
+        ),
+    )
     prompt: ResponsePrompt | None = None
     reasoning: Reasoning | None = None
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
@@ -554,6 +562,76 @@ class ResponsesResponse(OpenAIBaseModel):
             user=request.user,
             usage=usage,
         )
+
+
+class ResponsesContextCheckpointRequest(OpenAIBaseModel):
+    session_id: str = Field(
+        min_length=1,
+        description="Session identifier used to track response checkpoints.",
+    )
+    checkpoint_label: str = Field(
+        min_length=1,
+        description="Unique label for the checkpoint inside the session.",
+    )
+    response_id: str | None = Field(
+        default=None,
+        description=(
+            "Optional response ID to checkpoint. If omitted, the session's "
+            "latest completed response is used."
+        ),
+    )
+
+
+class ResponsesContextCheckpointResponse(OpenAIBaseModel):
+    session_id: str
+    checkpoint_label: str
+    response_id: str | None
+    engine_checkpoint_id: str | None
+
+
+class ResponsesContextCheckpointDeleteRequest(OpenAIBaseModel):
+    session_id: str = Field(
+        min_length=1,
+        description="Session identifier used to delete a checkpoint.",
+    )
+    checkpoint_label: str = Field(
+        min_length=1,
+        description="Checkpoint label to delete.",
+    )
+
+
+class ResponsesContextCheckpointDeleteResponse(OpenAIBaseModel):
+    session_id: str
+    checkpoint_label: str
+    response_id: str | None
+    engine_checkpoint_id: str | None
+    dropped_engine_checkpoints: int
+
+
+class ResponsesContextRevertRequest(OpenAIBaseModel):
+    session_id: str = Field(
+        min_length=1,
+        description="Session identifier used to restore a checkpoint.",
+    )
+    checkpoint_label: str = Field(
+        min_length=1,
+        description="Checkpoint label to restore.",
+    )
+    summary: str | None = Field(
+        default=None,
+        description=(
+            "Compressed summary of discarded loop context to queue after rewind. "
+            "If omitted, vLLM will create an automatic fallback summary."
+        ),
+    )
+
+
+class ResponsesContextRevertResponse(OpenAIBaseModel):
+    session_id: str
+    checkpoint_label: str
+    response_id: str | None
+    engine_checkpoint_id: str | None
+    queued_summaries: int
 
 
 # TODO: this code can be removed once

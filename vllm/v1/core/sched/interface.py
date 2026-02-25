@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import enum
 from abc import ABC, abstractmethod
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from typing import TYPE_CHECKING
 
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -219,6 +219,11 @@ class SchedulerInterface(ABC):
         This should be called when model weights are updated to ensure
         stale vision embeddings are not reused.
         """
+        raise NotImplementedError
+
+    @abstractmethod
+    def drop_kv_checkpoints(self, checkpoint_ids: Sequence[str]) -> int:
+        """Drop saved KV checkpoints by ID and return number dropped."""
         raise NotImplementedError
 
     @abstractmethod

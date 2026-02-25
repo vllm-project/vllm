@@ -21,6 +21,11 @@ from vllm.v1.engine import (
     EngineCoreRequest,
     FinishReason,
 )
+from vllm.v1.kv_checkpointing import (
+    KV_CHECKPOINT_RESTORE_ID_ARG,
+    KV_CHECKPOINT_SAVE_ID_ARG,
+    get_optional_str_arg,
+)
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -94,6 +99,9 @@ class Request:
 
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
+        # Optional KV checkpoint restore/save directives.
+        self.kv_checkpoint_restore_id: str | None = None
+        self.kv_checkpoint_save_id: str | None = None
 
         if pooling_params is not None:
             # Pooling models.
@@ -106,6 +114,14 @@ class Request:
                 self.status = RequestStatus.WAITING_FOR_FSM
 
             if sampling_params.extra_args is not None:
+                self.kv_checkpoint_restore_id = get_optional_str_arg(
+                    sampling_params.extra_args,
+                    KV_CHECKPOINT_RESTORE_ID_ARG,
+                )
+                self.kv_checkpoint_save_id = get_optional_str_arg(
+                    sampling_params.extra_args,
+                    KV_CHECKPOINT_SAVE_ID_ARG,
+                )
                 self.kv_transfer_params = sampling_params.extra_args.get(
                     "kv_transfer_params"
                 )

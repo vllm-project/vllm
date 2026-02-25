@@ -8,9 +8,11 @@ from typing import Literal, overload
 
 from vllm.distributed.kv_events import KVCacheEvent
 from vllm.logger import init_logger
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
+from vllm.v1.core.single_type_kv_cache_manager import CrossAttentionManager
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import PrefixCacheStats
 from vllm.v1.request import Request
@@ -91,6 +93,16 @@ class KVCacheBlocks:
         return KVCacheBlocks(tuple(() for _ in range(len(self.blocks))))
 
 
+@dataclass
+class KVRequestCheckpoint:
+    checkpoint_id: str
+    token_ids: tuple[int, ...]
+    num_computed_tokens: int
+    num_cached_tokens: int
+    blocks: tuple[tuple[KVCacheBlock, ...], ...]
+    num_cached_blocks: tuple[int, ...]
+
+
 class KVCacheManager:
     def __init__(
         self,
@@ -139,6 +151,7 @@ class KVCacheManager:
         self.empty_kv_cache_blocks = KVCacheBlocks(
             tuple(() for _ in range(self.num_kv_cache_groups))
         )
+        self.request_checkpoints: dict[str, KVRequestCheckpoint] = {}
 
     @property
     def usage(self) -> float:
@@ -385,6 +398,199 @@ class KVCacheManager:
         """
         self.coordinator.free(request.request_id)
 
+    def _release_checkpoint(self, checkpoint: KVRequestCheckpoint) -> None:
+        for blocks in checkpoint.blocks:
+            non_null_blocks = [block for block in blocks if not block.is_null]
+            if non_null_blocks:
+                self.block_pool.free_blocks(reversed(non_null_blocks))
+
+    def drop_request_checkpoint(self, checkpoint_id: str) -> bool:
+        checkpoint = self.request_checkpoints.pop(checkpoint_id, None)
+        if checkpoint is None:
+            return False
+        self._release_checkpoint(checkpoint)
+        return True
+
+    def clear_request_checkpoints(self) -> None:
+        for checkpoint in self.request_checkpoints.values():
+            self._release_checkpoint(checkpoint)
+        self.request_checkpoints.clear()
+
+    def _build_checkpoint_blocks(
+        self,
+        request_id: str,
+        num_computed_tokens: int,
+    ) -> tuple[tuple[tuple[KVCacheBlock, ...], ...], tuple[int, ...]]:
+        request_blocks = self.coordinator.get_blocks(request_id)
+        checkpoint_blocks: list[tuple[KVCacheBlock, ...]] = []
+        num_cached_blocks: list[int] = []
+        for idx, manager in enumerate(self.coordinator.single_type_managers):
+            manager_blocks = request_blocks[idx]
+            if isinstance(manager, CrossAttentionManager):
+                # Preserve the encoder-side cross-attention blocks in the
+                # checkpoint object. We do not currently restore them (see
+                # restore_request_from_checkpoint), but keeping them here makes
+                # checkpoint state self-contained and enables future multimodal
+                # restore support without changing the checkpoint format.
+                selected = tuple(manager_blocks)
+            else:
+                block_cap = cdiv(num_computed_tokens, manager.block_size)
+                selected = tuple(manager_blocks[:block_cap])
+            checkpoint_blocks.append(selected)
+            cached_blocks = min(
+                manager.num_cached_block.get(request_id, 0),
+                len(selected),
+            )
+            num_cached_blocks.append(cached_blocks)
+        checkpoint_blocks_tuple: tuple[tuple[KVCacheBlock, ...], ...] = tuple(
+            checkpoint_blocks
+        )
+        num_cached_blocks_tuple: tuple[int, ...] = tuple(num_cached_blocks)
+        return checkpoint_blocks_tuple, num_cached_blocks_tuple
+
+    def create_request_checkpoint(
+        self,
+        checkpoint_id: str,
+        request: Request,
+    ) -> KVRequestCheckpoint:
+        old_checkpoint = self.request_checkpoints.pop(checkpoint_id, None)
+        if old_checkpoint is not None:
+            self._release_checkpoint(old_checkpoint)
+
+        num_computed_tokens = min(request.num_computed_tokens, request.num_tokens)
+        token_ids = tuple(request.all_token_ids)
+        blocks, num_cached_blocks = self._build_checkpoint_blocks(
+            request.request_id,
+            num_computed_tokens,
+        )
+
+        for manager_blocks in blocks:
+            non_null_blocks = [block for block in manager_blocks if not block.is_null]
+            if non_null_blocks:
+                self.block_pool.touch(non_null_blocks)
+
+        num_cached_tokens = request.num_cached_tokens
+        if num_cached_tokens < 0:
+            num_cached_tokens = num_computed_tokens
+        num_cached_tokens = min(num_cached_tokens, num_computed_tokens)
+
+        checkpoint = KVRequestCheckpoint(
+            checkpoint_id=checkpoint_id,
+            token_ids=token_ids,
+            num_computed_tokens=num_computed_tokens,
+            num_cached_tokens=num_cached_tokens,
+            blocks=blocks,
+            num_cached_blocks=num_cached_blocks,
+        )
+        self.request_checkpoints[checkpoint_id] = checkpoint
+        return checkpoint
+
+    def fork_request_checkpoint(
+        self,
+        source_checkpoint_id: str,
+        target_checkpoint_id: str,
+    ) -> KVRequestCheckpoint:
+        source = self.request_checkpoints.get(source_checkpoint_id)
+        if source is None:
+            raise KeyError(source_checkpoint_id)
+
+        if source_checkpoint_id == target_checkpoint_id:
+            return source
+
+        old_checkpoint = self.request_checkpoints.pop(target_checkpoint_id, None)
+        if old_checkpoint is not None:
+            self._release_checkpoint(old_checkpoint)
+
+        for manager_blocks in source.blocks:
+            non_null_blocks = [block for block in manager_blocks if not block.is_null]
+            if non_null_blocks:
+                self.block_pool.touch(non_null_blocks)
+
+        checkpoint = KVRequestCheckpoint(
+            checkpoint_id=target_checkpoint_id,
+            token_ids=source.token_ids,
+            num_computed_tokens=source.num_computed_tokens,
+            num_cached_tokens=source.num_cached_tokens,
+            blocks=source.blocks,
+            num_cached_blocks=source.num_cached_blocks,
+        )
+        self.request_checkpoints[target_checkpoint_id] = checkpoint
+        return checkpoint
+
+    def _get_common_prefix_length(
+        self,
+        lhs: tuple[int, ...],
+        rhs: Sequence[int],
+    ) -> int:
+        max_len = min(len(lhs), len(rhs))
+        for idx in range(max_len):
+            if lhs[idx] != rhs[idx]:
+                return idx
+        return max_len
+
+    def restore_request_from_checkpoint(
+        self,
+        request: Request,
+        checkpoint_id: str,
+    ) -> int:
+        checkpoint = self.request_checkpoints.get(checkpoint_id)
+        if checkpoint is None:
+            raise KeyError(checkpoint_id)
+
+        if request.has_encoder_inputs:
+            # TODO: Support restoring cross-attention / encoder-side KV for
+            # multimodal and encoder-decoder requests.
+            return 0
+
+        max_restore_tokens = min(
+            checkpoint.num_computed_tokens,
+            max(request.num_tokens - 1, 0),
+        )
+        if max_restore_tokens <= 0:
+            return 0
+
+        common_prefix = self._get_common_prefix_length(
+            checkpoint.token_ids,
+            request.all_token_ids,
+        )
+        restore_tokens = min(common_prefix, max_restore_tokens)
+        if restore_tokens <= 0:
+            return 0
+
+        for idx, manager in enumerate(self.coordinator.single_type_managers):
+            if manager.req_to_blocks.get(request.request_id):
+                raise ValueError(
+                    f"Request {request.request_id} already has allocated KV blocks"
+                )
+
+            checkpoint_blocks = checkpoint.blocks[idx]
+            if isinstance(manager, CrossAttentionManager):
+                # Cross-attention blocks are checkpointed for completeness, but
+                # the current restore path only supports decoder-only prefix KV
+                # replay. We leave the request's cross-attention state empty.
+                blocks_to_attach = []
+            else:
+                num_blocks = min(
+                    len(checkpoint_blocks),
+                    cdiv(restore_tokens, manager.block_size),
+                )
+                blocks_to_attach = list(checkpoint_blocks[:num_blocks])
+
+            non_null_blocks = [block for block in blocks_to_attach if not block.is_null]
+            if non_null_blocks:
+                self.block_pool.touch(non_null_blocks)
+
+            manager.req_to_blocks[request.request_id] = blocks_to_attach
+            manager.num_cached_block[request.request_id] = min(
+                checkpoint.num_cached_blocks[idx],
+                len(blocks_to_attach),
+            )
+
+        request.num_computed_tokens = restore_tokens
+        request.num_cached_tokens = min(checkpoint.num_cached_tokens, restore_tokens)
+        request.num_external_computed_tokens = 0
+        return restore_tokens
+
     def remove_skipped_blocks(
         self, request_id: str, total_computed_tokens: int
     ) -> None:
@@ -415,6 +621,7 @@ class KVCacheManager:
             bool: True if the prefix cache is successfully reset,
             False otherwise.
         """
+        self.clear_request_checkpoints()
         if not self.block_pool.reset_prefix_cache():
             return False
         if self.log_stats:
