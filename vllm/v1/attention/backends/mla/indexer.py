@@ -239,7 +239,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             self.vllm_config.model_config.max_model_len,
             self.kv_cache_spec.block_size * get_total_cp_world_size(),
         )
-        self._expanded_block_table_buffer = torch.zeros(
+        self.expanded_block_table_buffer = torch.zeros(
             (
                 scheduler_config.max_num_batched_tokens,
                 max_num_blocks_per_req,
@@ -395,14 +395,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
                 # Give each of the flattened entries the same block table row as the
                 # original request.
-                self._expanded_block_table_buffer[:actual_expanded] = (
+                self.expanded_block_table_buffer[:actual_expanded] = (
                     torch.repeat_interleave(block_table, decode_lens, dim=0)
                 )
                 if actual_expanded < num_decode_tokens:
-                    self._expanded_block_table_buffer[
+                    self.expanded_block_table_buffer[
                         actual_expanded:num_decode_tokens
                     ] = 0
-                block_table = self._expanded_block_table_buffer[:num_decode_tokens]
+                block_table = self.expanded_block_table_buffer[:num_decode_tokens]
 
                 # All reqs now have decode_len=1
                 self.decode_lens_buffer[:num_decode_tokens] = 1
