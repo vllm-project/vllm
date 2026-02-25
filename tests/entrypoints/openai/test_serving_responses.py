@@ -26,6 +26,9 @@ from vllm.entrypoints.openai.responses.serving import (
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
+from vllm.entrypoints.openai.responses.streaming_events import (
+    StreamingState,
+)
 from vllm.inputs.data import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
@@ -439,3 +442,115 @@ class TestExtractAllowedToolsFromMcpRequests:
             "server1": ["tool1"],
             "server2": ["tool2"],
         }
+
+
+class TestHarmonyPreambleStreaming:
+    """Tests for preamble (commentary with no recipient) streaming events."""
+
+    @staticmethod
+    def _make_ctx(*, channel, recipient, delta="hello"):
+        """Build a lightweight mock StreamingHarmonyContext."""
+        ctx = MagicMock()
+        ctx.last_content_delta = delta
+        ctx.parser.current_channel = channel
+        ctx.parser.current_recipient = recipient
+        return ctx
+
+    @staticmethod
+    def _make_previous_item(*, channel, recipient, text="preamble text"):
+        """Build a lightweight mock previous_item (openai_harmony Message)."""
+        content_part = MagicMock()
+        content_part.text = text
+        item = MagicMock()
+        item.channel = channel
+        item.recipient = recipient
+        item.content = [content_part]
+        return item
+
+    def test_preamble_delta_emits_text_events(self) -> None:
+        """commentary + recipient=None should emit output_text.delta events."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(channel="commentary", recipient=None)
+        state = StreamingState()
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" in type_names
+        assert "response.output_item.added" in type_names
+
+    def test_preamble_delta_second_token_no_added(self) -> None:
+        """Second preamble token should emit delta only, not added again."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(channel="commentary", recipient=None, delta="w")
+        state = StreamingState()
+        state.sent_output_item_added = True
+        state.current_item_id = "msg_test"
+        state.current_content_index = 0
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" in type_names
+        assert "response.output_item.added" not in type_names
+
+    def test_commentary_with_function_recipient_not_preamble(self) -> None:
+        """commentary + recipient='functions.X' must NOT use preamble path."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(
+            channel="commentary",
+            recipient="functions.get_weather",
+        )
+        state = StreamingState()
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" not in type_names
+
+    def test_preamble_done_emits_text_done_events(self) -> None:
+        """Completed preamble should emit text done + content_part done +
+        output_item done, same shape as final channel."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        previous = self._make_previous_item(channel="commentary", recipient=None)
+        state = StreamingState()
+        state.current_item_id = "msg_test"
+        state.current_output_index = 0
+        state.current_content_index = 0
+
+        events = emit_previous_item_done_events(previous, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.done" in type_names
+        assert "response.content_part.done" in type_names
+        assert "response.output_item.done" in type_names
+
+    def test_commentary_with_recipient_no_preamble_done(self) -> None:
+        """commentary + recipient='functions.X' should route to function call
+        done, not preamble done."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        previous = self._make_previous_item(
+            channel="commentary", recipient="functions.get_weather"
+        )
+        state = StreamingState()
+        state.current_item_id = "fc_test"
+
+        events = emit_previous_item_done_events(previous, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.done" not in type_names
