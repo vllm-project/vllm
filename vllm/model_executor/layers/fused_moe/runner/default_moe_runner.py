@@ -27,24 +27,29 @@ logger = init_logger(__name__)
 
 class DefaultMoERunner(MoERunnerBase):
     """
-    Default implementation of the MoE runner for executing Mixture of Experts layers.
+    Standard MoE runner implementation for executing Mixture of Experts layers.
 
-    This class provides a comprehensive implementation for running MoE computations
-    with support for:
-    - Expert routing and token dispatching
+    This is the primary concrete implementation of MoE execution logic, providing
+    comprehensive support for standard MoE operations. It handles:
+    - Expert routing and token dispatching using various routing strategies
     - Shared experts computation with optional parallel execution using CUDA streams
-    - Data parallel (DP) chunking for large batch processing
     - Tensor model parallel and expert parallel operations
-    - Various quantization methods and custom operators
+    - Multiple quantization methods and optimized kernel selection
     - Both monolithic and decomposed expert execution paths
+    - Integration with various parallel execution modes (TP, EP, DP)
 
-    The runner handles the complete MoE forward pass including routing tokens to
-    experts, executing expert computations, and combining results. It supports
-    advanced features like overlapped execution of shared experts and optimized
-    kernels for different parallel execution modes.
+    The runner orchestrates the complete MoE forward pass including routing tokens
+    to experts, executing expert computations in parallel, and combining results.
+    It supports advanced features like overlapped execution of shared experts,
+    optimized kernels for different parallel configurations, and seamless
+    integration with vLLM's distributed execution framework.
 
-    Eventually, this class will be split up and specialized for different
-    configurations, e.g. the presence or absence of shared experts, a gate, etc.
+    This implementation is suitable for most standard MoE use cases. For specialized
+    scenarios like large batch chunking, alternative runners like ChunkingMoERunner
+    may be more appropriate.
+
+    Eventually, this class may be split into more specialized implementations
+    for different configurations (e.g., with/without shared experts, gates, etc.).
     """
 
     def __init__(

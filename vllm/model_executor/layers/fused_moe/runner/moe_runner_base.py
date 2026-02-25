@@ -138,24 +138,23 @@ direct_register_custom_op(
 
 class MoERunnerBase(MoERunner):
     """
-    Default implementation of the MoE runner for executing Mixture of Experts layers.
+    Abstract base class providing common functionality for MoE runner implementations.
 
-    This class provides a comprehensive implementation for running MoE computations
-    with support for:
-    - Expert routing and token dispatching
-    - Shared experts computation with optional parallel execution using CUDA streams
-    - Data parallel (DP) chunking for large batch processing
-    - Tensor model parallel and expert parallel operations
-    - Various quantization methods and custom operators
-    - Both monolithic and decomposed expert execution paths
+    This class serves as the foundation for concrete MoE runner implementations by
+    providing shared state management and common utilities. It handles:
+    - Common initialization and configuration management
+    - Shared expert output reduction logic for tensor parallel scenarios
+    - Base methods for tensor model parallel reductions
+    - Common properties and utility functions used across different runner types
 
-    The runner handles the complete MoE forward pass including routing tokens to
-    experts, executing expert computations, and combining results. It supports
-    advanced features like overlapped execution of shared experts and optimized
-    kernels for different parallel execution modes.
+    Concrete subclasses must implement the abstract methods to define their specific
+    execution strategies, such as standard execution, chunked processing, or other
+    specialized approaches. The base class provides the infrastructure while
+    allowing flexibility in the actual MoE computation implementation.
 
-    Eventually, this class will be split up and specialized for different
-    configurations, e.g. the presence or absence of shared experts, a gate, etc.
+    Key abstract methods that subclasses must implement:
+    - reduce_results: Determines whether results should be reduced across ranks
+    - forward_impl: The core MoE computation logic specific to each runner type
     """
 
     def __init__(

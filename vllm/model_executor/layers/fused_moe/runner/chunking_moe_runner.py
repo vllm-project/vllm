@@ -29,24 +29,27 @@ logger = init_logger(__name__)
 
 class ChunkingMoERunner(MoERunnerBase):
     """
-    Default implementation of the MoE runner for executing Mixture of Experts layers.
+    Specialized MoE runner that processes large batches by breaking them into smaller
+    chunks.
 
-    This class provides a comprehensive implementation for running MoE computations
-    with support for:
-    - Expert routing and token dispatching
-    - Shared experts computation with optional parallel execution using CUDA streams
-    - Data parallel (DP) chunking for large batch processing
-    - Tensor model parallel and expert parallel operations
-    - Various quantization methods and custom operators
-    - Both monolithic and decomposed expert execution paths
+    This runner is designed for scenarios where the input batch is too large to process
+    in a single pass, typically due to memory constraints or when using data parallel
+    (DP) chunking strategies. It provides:
+    - Automatic chunking of large input batches into manageable sizes
+    - Memory-efficient processing by reusing pre-allocated workspace tensors
+    - Support for both hidden states and router logits chunking
+    - Slice-and-copy operations to handle input/output tensor management
+    - Integration with workspace managers for optimal memory utilization
 
-    The runner handles the complete MoE forward pass including routing tokens to
-    experts, executing expert computations, and combining results. It supports
-    advanced features like overlapped execution of shared experts and optimized
-    kernels for different parallel execution modes.
+    The chunking strategy allows processing of arbitrarily large batches by dividing
+    the computation across multiple smaller chunks, then combining the results.
+    This approach is particularly beneficial in distributed settings where memory
+    per rank is limited or when the batch size exceeds hardware capabilities.
 
-    Eventually, this class will be split up and specialized for different
-    configurations, e.g. the presence or absence of shared experts, a gate, etc.
+    Key differences from DefaultMoERunner:
+    - Uses pre-allocated workspace tensors for intermediate computations
+    - Implements chunked processing logic in forward_impl
+    - Never reduces results (reduce_results always returns False)
     """
 
     def __init__(
