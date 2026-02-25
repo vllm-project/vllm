@@ -386,12 +386,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // YTILE represents how many column of weight matrix
     // are being worked on by each wave.
     //----------------------------------------------------
-    for (int i = 0; i < YTILE; i++)
-      for (int n = 0; n < N; n++)
+    for (int i = 0; i < YTILE; i++) {
+      for (int n = 0; n < N; n++) {
         if constexpr (!use_mfma)
           sum[n][i] = 0;
         else
           sum4[n][i] = {0, 0, 0, 0};
+      }
+    }
 
     bigType bigA[N][UNRL];
     bigType bigB[YTILE][UNRL];
@@ -412,7 +414,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     //
     // TODO: Logic below will only work when K is multiple of 8
     //----------------------------------------------------
-    // for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
     for (uint32_t k1 = 0; k1 < K; k1 += THRDS * A_CHUNK * UNRL) {
       // Fetch the weight matrix from memory!
   #pragma unroll
@@ -452,16 +453,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         for (uint32_t n = 0; n < N; n++) {
   #pragma unroll
           for (int y = 0; y < YTILE; y++) {
-            if constexpr (!use_mfma)
+            if constexpr (!use_mfma) {
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
               }
-            else
+            } else {
   #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
+              for (uint32_t b = 0; b < A_CHUNK / 4; b++) {
                 sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
                     bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+              }
+            }
           }
         }
       }
@@ -514,9 +517,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
   #pragma unroll
         for (int y = 0; y < YTILE; y++) {
-          // float accm1 = 0;
-          // for (int i=0; i<64; i++)
-          //    accm1 += __shfl(sum4[n][y][i%4], i);
           float accm = sum4[n][y][0];
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
               : "=v"(accm)
@@ -684,12 +684,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // YTILE represents how many column of weight matrix
     // are being worked on by each wave.
     //----------------------------------------------------
-    for (int i = 0; i < YTILE; i++)
-      for (int n = 0; n < N; n++)
+    for (int i = 0; i < YTILE; i++) {
+      for (int n = 0; n < N; n++) {
         if constexpr (!use_mfma)
           sum[n][i] = 0;
         else
           sum4[n][i] = {0, 0, 0, 0};
+      }
+    }
 
     bigType bigA[N][UNRL];
     bigType bigB[YTILE][UNRL];
@@ -752,16 +754,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (int y = 0; y < YTILE; y++) {
-            if constexpr (!use_mfma)
+            if constexpr (!use_mfma) {
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
               }
-            else
+            } else {
   #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
+              for (uint32_t b = 0; b < A_CHUNK / 4; b++) {
                 sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
                     bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+              }
+            }
           }
         }
       }
@@ -816,10 +820,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       for (int n = 0; n < N; n++) {
   #pragma unroll
         for (int y = 0; y < YTILE; y++) {
-          // float accm1 = 0;
-          // for (int i=0; i<64; i++)
-          //    accm1 += __shfl(sum4[n][y][i%4], i);
-
           float accm = sum4[n][y][0];
           asm("s_nop 0\n\tv_add_f32 %0, %2, %3 row_shl:1 bound_ctrl:0 "
               : "=v"(accm)
@@ -1021,12 +1021,14 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     // YTILE represents how many column of weight matrix
     // are being worked on by each wave.
     //----------------------------------------------------
-    for (int i = 0; i < YTILE; i++)
-      for (int n = 0; n < N; n++)
+    for (int i = 0; i < YTILE; i++) {
+      for (int n = 0; n < N; n++) {
         if constexpr (!use_mfma)
           sum[n][i] = 0;
         else
           sum4[n][i] = {0, 0, 0, 0};
+      }
+    }
 
     bigType bigA[N][UNRL];
     bigType bigB[YTILE][UNRL];
@@ -1112,16 +1114,18 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (int y = 0; y < YTILE; y++) {
-            if constexpr (!use_mfma)
+            if constexpr (!use_mfma) {
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
               }
-            else
+            } else {
   #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
+              for (uint32_t b = 0; b < A_CHUNK / 4; b++) {
                 sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
                     bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+              }
+            }
           }
         }
       }
@@ -1261,8 +1265,9 @@ int mindiv(int N, int div1, int div2) {
     rnds[i] = (N + nPrRnd - 1) / nPrRnd;
     nPrRnd -= div1;
   }
-  for (int i = 12; i >= 0; i--)
+  for (int i = 12; i >= 0; i--) {
     if (rnds[0] == rnds[i]) return (div2 - i);
+  }
   return 0;
 }
 
@@ -1379,7 +1384,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                               const scalar_t* __restrict__ B,
                               const scalar_t* __restrict__ BIAS, float* glbl,
                               scalar_t* C, const int CuCount) {
-  constexpr int DTRMNSTC = 1;
   constexpr int NTILE = 16;
   constexpr int APAD = 1;
   constexpr int ASTRD = 64;
@@ -1411,7 +1415,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
   __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
 
-  #ifndef WVSPLITKRC_1KPASS
+  #ifdef WVSPLITKRC_1KPASS
+  int constexpr kFit = 512 / CHUNKK;
+  int constexpr kfitsPerRdc = 1;
+  #else
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
   // find biggest k size that fits padded into LDS
   constexpr uint32_t kFit__ = (max_lds_len - WvPrGrp * WVLDS / GrpsShrB) / N;
@@ -1421,7 +1428,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   // find best k split to fill the CUs
   if (((K + kfitsPerRdc * kFit - 1) / (kfitsPerRdc * kFit)) * numCuWithFullK <=
-      CuCount)
+      CuCount) {
     while (true) {
       while (kFit > TUC_) {
         uint32_t kFit_ = kFit - TUC_;
@@ -1438,9 +1445,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       else
         break;
     }
-  #else
-  int constexpr kFit = 512 / CHUNKK;
-  int constexpr kfitsPerRdc = 1;
+  }
   #endif
 
   bool doRdc = true;  // Assuming (kfitsPerRdc * kFit < K) is always true
@@ -1457,7 +1462,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
   const uint32_t k_rnd = (K + kFit * kfitsPerRdc - 1) / (kFit * kfitsPerRdc);
 
-  int* cntr = DTRMNSTC ? (int*)(&glbl[M * N * k_rnd]) : (int*)(&glbl[M * N]);
+  int* cntr = (int*)(&glbl[M * N * k_rnd]);
 
   scalar8 sum4[N / NTILE / GrpsShrB][1] = {0};
   bigType bigB_[YTILE / GrpsShrB / CHUNKK][UNRL];
@@ -1472,8 +1477,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #ifdef WVSPLITKRC_1KPASS
   // Early glbl init, B[] loading, if 1KPASS
   if constexpr (FAST_UNSAFE_RDC_INIT) {
-    if (m + (threadIdx.x % 16) < M)
-      if (doRdc)
+    if (m + (threadIdx.x % 16) < M) {
+      if (doRdc) {
         if (k_str == 0) {
           int mindx = m + (threadIdx.x % 16);
           int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
@@ -1491,6 +1496,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             }
           }
         }
+      }
+    }
   }
 
     // Load first B[] chunk
@@ -1500,22 +1507,20 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
     const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
     #pragma unroll
-    for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+    for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK) {
       bigB_[y / CHUNKK][k2].h8 = (loadnt(
           (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB +
                                    bLoader + m,
                                M - 1) *
                          K])));
+    }
   }
   {
   #else
   while (m < Mmod) {
-  #endif
-
-  #ifndef WVSPLITKRC_1KPASS
     if constexpr (FAST_UNSAFE_RDC_INIT) {
-      if (m + (threadIdx.x % 16) < M)
-        if (doRdc)
+      if (m + (threadIdx.x % 16) < M) {
+        if (doRdc) {
           if (k_str == 0) {
             int mindx = m + (threadIdx.x % 16);
             int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
@@ -1533,6 +1538,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
               }
             }
           }
+        }
+      }
     }
 
   #endif
@@ -1605,21 +1612,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #ifndef WVSPLITKRC_1KPASS
     // Fire load of next B[] chunk...
     if ((k1 + THRDS * A_CHUNK * UNRL < k_end) &&
-        (k1 + THRDS * A_CHUNK * UNRL < K))
+        (k1 + THRDS * A_CHUNK * UNRL < K)) {
     #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
     #pragma unroll
-        for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+        for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK) {
           bigB_[y / CHUNKK][k2].h8 = (loadnt(
               (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) *
                                            GrpsShrB +
                                        bLoader + m,
                                    M - 1) *
                              K])));
+        }
       }
+    }
   #endif
 
     // B[] staging is cooperative across GrpsShrB, so sync here before reading
@@ -1644,7 +1653,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     for (uint32_t k2 = 0; k2 < UNRL; k2++) {
       uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
   #pragma unroll
-      for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
+      for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE) {
   #pragma unroll
         for (uint32_t n = 0; n < NTILE / CHUNKK; n++) {
           uint32_t idxa =
@@ -1657,6 +1666,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
               A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
           bigA[nt / CHUNKK + n][k2] = *((const bigType*)(&(s[idxa])));
         }
+      }
     }
 
     // Do the MFMAs
@@ -1695,18 +1705,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       int g_nindx =
           (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
       int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
-      if (DTRMNSTC) {
-        flt4 flt4_ = {.s8 = sum4[nt][0]};
-        __hip_atomic_store((float2*)&glbl[g_adr + M * N * (m0 / Mmod)],
-                           flt4_.f2[0], __ATOMIC_RELAXED,
-                           __HIP_MEMORY_SCOPE_AGENT);
-        __hip_atomic_store((float2*)&glbl[g_adr + 2 + M * N * (m0 / Mmod)],
-                           flt4_.f2[1], __ATOMIC_RELAXED,
-                           __HIP_MEMORY_SCOPE_AGENT);
-      } else {
-        for (uint32_t j = 0; j < 4; j++)
-          atomicAdd((&glbl[g_adr + j]), sum4[nt][0][j]);
-      }
+      flt4 flt4_ = {.s8 = sum4[nt][0]};
+      __hip_atomic_store((float2*)&glbl[g_adr + M * N * (m0 / Mmod)],
+                         flt4_.f2[0], __ATOMIC_RELAXED,
+                         __HIP_MEMORY_SCOPE_AGENT);
+      __hip_atomic_store((float2*)&glbl[g_adr + 2 + M * N * (m0 / Mmod)],
+                         flt4_.f2[1], __ATOMIC_RELAXED,
+                         __HIP_MEMORY_SCOPE_AGENT);
     }
 
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
@@ -1718,62 +1723,45 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     int adr_ = mindx + M * nindx_ / 4;
     my_cntr = atomicAdd(&cntr[adr_], 1);
 
-    if (DTRMNSTC)
-      __syncthreads();  // make sure LDS is free for write out staging
+    __syncthreads();  // make sure LDS is free for write out staging
 
     // Update the complete counter
     flt4 vals[N / NTILE / GrpsShrB] = {};
     // If we're the last k-shard, read back the value and convert...
     if (my_cntr + 1 == k_rnd) {
       cntr[adr_] = 0;  // clear for next round
-      if (DTRMNSTC) {
+
   #pragma unroll
-        for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            int g_nindx =
-                (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
-            int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
-            __builtin_amdgcn_global_load_lds(
-                (float4*)(&glbl[g_adr + M * N * ks]),
-                &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
-                               nt * THRDS * 4 * k_rnd]),
-                16, 0, 0);
-            *(float4*)(&glbl[g_adr + M * N * ks]) =
-                {};  // clear out for next round
-          }
-        }
-        if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
-            }
-          }
-        asm volatile("s_waitcnt 0");
-        for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            float4 eval = ((float4*)s)[(threadIdx.x + threadIdx.y * THRDS) +
-                                       ks * THRDS * 4 + nt * THRDS * 4 * k_rnd];
-            vals[nt].f4 += eval;
-          }
-        }
-      } else {
+      for (int ks = 0; ks < k_rnd; ks++) {
         for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
           int g_nindx =
               (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
           int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
-          vals[nt].f4 = *(float4*)(&glbl[g_adr]);
-          *(float4*)(&glbl[g_adr]) = {};  // clear out for next round
+          __builtin_amdgcn_global_load_lds(
+              (float4*)(&glbl[g_adr + M * N * ks]),
+              &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
+                             nt * THRDS * 4 * k_rnd]),
+              16, 0, 0);
+          *(float4*)(&glbl[g_adr + M * N * ks]) =
+              {};  // clear out for next round
         }
-        if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
-            }
+      }
+      if (BIAS) {
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          for (uint32_t j = 0; j < 4; j++) {
+            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
           }
+        }
+      }
+      asm volatile("s_waitcnt 0");
+      for (int ks = 0; ks < k_rnd; ks++) {
+        for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+          float4 eval = ((float4*)s)[(threadIdx.x + threadIdx.y * THRDS) +
+                                     ks * THRDS * 4 + nt * THRDS * 4 * k_rnd];
+          vals[nt].f4 += eval;
+        }
       }
       __builtin_amdgcn_sched_barrier(0);
       for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
@@ -1815,7 +1803,6 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                      const scalar_t* __restrict__ B,
                      const scalar_t* __restrict__ BIAS, float* glbl,
                      scalar_t* C, const int CuCount) {
-  constexpr int DTRMNSTC = 0;
   constexpr int NTILE = 16;
   constexpr int APAD = 1;
   constexpr int ASTRD = 64;
@@ -1847,7 +1834,10 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   unsigned int* myStg = (unsigned int*)(&stg[WVLDS * (threadIdx.y / GrpsShrB)]);
   __shared__ scalar_t s[max_lds_len - WvPrGrp * WVLDS / GrpsShrB];
 
-  #ifndef WVSPLITKRC_1KPASS
+  #ifdef WVSPLITKRC_1KPASS
+  int constexpr kFit = 512 / CHUNKK;
+  int constexpr kfitsPerRdc = 1;
+  #else
   constexpr int TUC_ = (THRDS * UNRL * A_CHUNK);
   // find biggest k size that fits padded into LDS
   constexpr uint32_t kFit__ = (max_lds_len - WvPrGrp * WVLDS / GrpsShrB) / N;
@@ -1857,7 +1847,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
   // find best k split to fill the CUs
   if (((K + kfitsPerRdc * kFit - 1) / (kfitsPerRdc * kFit)) * numCuWithFullK <=
-      CuCount)
+      CuCount) {
     while (true) {
       while (kFit > TUC_) {
         uint32_t kFit_ = kFit - TUC_;
@@ -1874,9 +1864,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       else
         break;
     }
-  #else
-  int constexpr kFit = 512 / CHUNKK;
-  int constexpr kfitsPerRdc = 1;
+  }
   #endif
 
   bool doRdc = true;  // Assuming (kfitsPerRdc * kFit < K) is always true
@@ -1893,7 +1881,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   uint32_t k_end = (m0 / Mmod + 1) * kFit * kfitsPerRdc;
   const uint32_t k_rnd = (K + kFit * kfitsPerRdc - 1) / (kFit * kfitsPerRdc);
 
-  int* cntr = DTRMNSTC ? (int*)(&glbl[M * N * k_rnd]) : (int*)(&glbl[M * N]);
+  // Fast: counter lives right after a single M*N slab.
+  int* cntr = (int*)(&glbl[M * N]);
 
   scalar8 sum4[N / NTILE / GrpsShrB][1] = {0};
   bigType bigB_[YTILE / GrpsShrB / CHUNKK][UNRL];
@@ -1908,8 +1897,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #ifdef WVSPLITKRC_1KPASS
   // Early glbl init, B[] loading, if 1KPASS
   if constexpr (FAST_UNSAFE_RDC_INIT) {
-    if (m + (threadIdx.x % 16) < M)
-      if (doRdc)
+    if (m + (threadIdx.x % 16) < M) {
+      if (doRdc) {
         if (k_str == 0) {
           int mindx = m + (threadIdx.x % 16);
           int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
@@ -1927,6 +1916,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             }
           }
         }
+      }
+    }
   }
 
     // Load first B[] chunk
@@ -1936,22 +1927,21 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     uint32_t k_ = k + (threadIdx.x % (THRDS / CHUNKK)) * A_CHUNK;
     const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
     #pragma unroll
-    for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+    for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK) {
       bigB_[y / CHUNKK][k2].h8 = (loadnt(
           (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) * GrpsShrB +
                                    bLoader + m,
                                M - 1) *
                          K])));
+    }
   }
+
   {
   #else
   while (m < Mmod) {
-  #endif
-
-  #ifndef WVSPLITKRC_1KPASS
     if constexpr (FAST_UNSAFE_RDC_INIT) {
-      if (m + (threadIdx.x % 16) < M)
-        if (doRdc)
+      if (m + (threadIdx.x % 16) < M) {
+        if (doRdc) {
           if (k_str == 0) {
             int mindx = m + (threadIdx.x % 16);
             int nindx_ = (0 + (threadIdx.x / 16) * 4) + 0 * NTILE +
@@ -1969,8 +1959,9 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
               }
             }
           }
+        }
+      }
     }
-
   #endif
 
   #ifndef WVSPLITKRC_1KPASS
@@ -2041,21 +2032,23 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
   #ifndef WVSPLITKRC_1KPASS
     // Fire load of next B[] chunk...
     if ((k1 + THRDS * A_CHUNK * UNRL < k_end) &&
-        (k1 + THRDS * A_CHUNK * UNRL < K))
+        (k1 + THRDS * A_CHUNK * UNRL < K)) {
     #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + THRDS * A_CHUNK * UNRL + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         const scalar_t* B_ = &B[min__(k_, K - A_CHUNK)];
     #pragma unroll
-        for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK)
+        for (uint32_t y = 0; y < YTILE / GrpsShrB; y += CHUNKK) {
           bigB_[y / CHUNKK][k2].h8 = (loadnt(
               (scalar8*)(&B_[min__((y + threadIdx.x / (THRDS / CHUNKK)) *
                                            GrpsShrB +
                                        bLoader + m,
                                    M - 1) *
                              K])));
+        }
       }
+    }
   #endif
 
     // B[] staging is cooperative across GrpsShrB, so sync here before reading
@@ -2080,7 +2073,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     for (uint32_t k2 = 0; k2 < UNRL; k2++) {
       uint32_t k = k1 + k2 * THRDS * A_CHUNK - kBase - k_str;
   #pragma unroll
-      for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE)
+      for (uint32_t nt = 0; nt < N / GrpsShrB; nt += NTILE) {
   #pragma unroll
         for (uint32_t n = 0; n < NTILE / CHUNKK; n++) {
           uint32_t idxa =
@@ -2093,6 +2086,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
               A_CHUNK * ((threadIdx.x / NTILE) + n * 4) + k;
           bigA[nt / CHUNKK + n][k2] = *((const bigType*)(&(s[idxa])));
         }
+      }
     }
 
     // Do the MFMAs
@@ -2121,6 +2115,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     float2 f2[2];
     float4 f4;
   };
+
   if (m + (threadIdx.x % 16) < M) {
     int my_cntr;
     int mindx = m + (threadIdx.x % 16);
@@ -2131,18 +2126,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       int g_nindx =
           (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
       int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
-      if (DTRMNSTC) {
-        flt4 flt4_ = {.s8 = sum4[nt][0]};
-        __hip_atomic_store((float2*)&glbl[g_adr + M * N * (m0 / Mmod)],
-                           flt4_.f2[0], __ATOMIC_RELAXED,
-                           __HIP_MEMORY_SCOPE_AGENT);
-        __hip_atomic_store((float2*)&glbl[g_adr + 2 + M * N * (m0 / Mmod)],
-                           flt4_.f2[1], __ATOMIC_RELAXED,
-                           __HIP_MEMORY_SCOPE_AGENT);
-      } else {
-        for (uint32_t j = 0; j < 4; j++)
-          atomicAdd((&glbl[g_adr + j]), sum4[nt][0][j]);
-      }
+      for (uint32_t j = 0; j < 4; j++)
+        atomicAdd((&glbl[g_adr + j]), sum4[nt][0][j]);
     }
 
     __atomic_signal_fence(__ATOMIC_SEQ_CST);
@@ -2154,62 +2139,26 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
     int adr_ = mindx + M * nindx_ / 4;
     my_cntr = atomicAdd(&cntr[adr_], 1);
 
-    if (DTRMNSTC)
-      __syncthreads();  // make sure LDS is free for write out staging
-
     // Update the complete counter
     flt4 vals[N / NTILE / GrpsShrB] = {};
     // If we're the last k-shard, read back the value and convert...
     if (my_cntr + 1 == k_rnd) {
       cntr[adr_] = 0;  // clear for next round
-      if (DTRMNSTC) {
-  #pragma unroll
-        for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            int g_nindx =
-                (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
-            int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
-            __builtin_amdgcn_global_load_lds(
-                (float4*)(&glbl[g_adr + M * N * ks]),
-                &(((float4*)s)[(threadIdx.y * THRDS) + ks * THRDS * 4 +
-                               nt * THRDS * 4 * k_rnd]),
-                16, 0, 0);
-            *(float4*)(&glbl[g_adr + M * N * ks]) =
-                {};  // clear out for next round
-          }
-        }
-        if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
-            }
-          }
-        asm volatile("s_waitcnt 0");
-        for (int ks = 0; ks < k_rnd; ks++) {
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            float4 eval = ((float4*)s)[(threadIdx.x + threadIdx.y * THRDS) +
-                                       ks * THRDS * 4 + nt * THRDS * 4 * k_rnd];
-            vals[nt].f4 += eval;
-          }
-        }
-      } else {
+      for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
+        int g_nindx =
+            (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
+        int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
+        vals[nt].f4 = *(float4*)(&glbl[g_adr]);
+        *(float4*)(&glbl[g_adr]) = {};  // clear out for next round
+      }
+      if (BIAS) {
         for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-          int g_nindx =
-              (nt * NTILE + (N / GrpsShrB) * (threadIdx.y % GrpsShrB)) / 4;
-          int g_adr = g_mindx * 4 + 0 + M * g_nindx * 4;
-          vals[nt].f4 = *(float4*)(&glbl[g_adr]);
-          *(float4*)(&glbl[g_adr]) = {};  // clear out for next round
-        }
-        if (BIAS)
-          for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
-            for (uint32_t j = 0; j < 4; j++) {
-              int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
-                          (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
-              biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
-            }
+          for (uint32_t j = 0; j < 4; j++) {
+            int nindx = (j + (threadIdx.x / 16) * 4) + nt * NTILE +
+                        (N / GrpsShrB) * (threadIdx.y % GrpsShrB);
+            biases[nt][j] = BIAS[(mindx % Bx) + (nindx % By) * Bx];
           }
+        }
       }
       __builtin_amdgcn_sched_barrier(0);
       for (uint32_t nt = 0; nt < N / NTILE / GrpsShrB; nt++) {
@@ -2260,7 +2209,7 @@ __global__ void wvSplitKrc_fast_(const int actlN, const int K, const int Kap,
                                  const scalar_t* __restrict__ BIAS, float* glbl,
                                  scalar_t* C,
                                  const int CuCount){UNREACHABLE_CODE}
-#endif  // defined(__HIP__GFX9__) TODO: Add NAVI support
+#endif  // defined(__gfx950__)
 
 torch::Tensor wvSplitKrc(const at::Tensor& in_a, const at::Tensor& in_b,
                          const std::optional<at::Tensor>& in_bias,
@@ -2462,7 +2411,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
 
-  // Fetch activation matrix from either just LDS or from both LDS / memory
+      // Fetch activation matrix from either just LDS or from both LDS / memory
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
@@ -2473,7 +2422,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
 
-  // Do the matrix multiplication in interleaved manner
+      // Do the matrix multiplication in interleaved manner
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         for (uint32_t n = 0; n < N; n++) {
@@ -2506,12 +2455,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
     if (threadIdx.x == 0) {
       scalar_t biases[N][YTILE] = {};
-      if (BIAS)
+      if (BIAS) {
         for (int n = 0; n < N; n++) {
           for (int y = 0; y < YTILE; y++) {
             biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
           }
         }
+      }
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
@@ -2607,7 +2557,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
 
-  // Fetch activation matrix from either just LDS or from both LDS / memory
+      // Fetch activation matrix from either just LDS or from both LDS / memory
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
@@ -2621,7 +2571,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         }
       }
 
-  // Do the matrix multiplication in interleaved manner
+      // Do the matrix multiplication in interleaved manner
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         for (uint32_t n = 0; n < N; n++) {
@@ -2654,12 +2604,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
 
     if (threadIdx.x == 0) {
       scalar_t biases[N][YTILE] = {};
-      if (BIAS)
+      if (BIAS) {
         for (int n = 0; n < N; n++) {
           for (int y = 0; y < YTILE; y++) {
             biases[n][y] = BIAS[(m + y) % Bx + (n % By) * Bx];
           }
         }
+      }
       for (int n = 0; n < N; n++) {
         for (int y = 0; y < YTILE; y++) {
           if (y + m >= M) break;  // To avoid mem access fault.
