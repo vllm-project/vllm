@@ -222,7 +222,7 @@ def triton_kernel_moe_forward(
             quant_config if quant_config is not None else FUSED_MOE_UNQUANTIZED_CONFIG
         )
 
-        return triton_kernel_fused_mxfp4_w4a16_experts(
+        return triton_kernel_fused_experts(
             output,
             hidden_states,
             w1,
@@ -240,7 +240,7 @@ def triton_kernel_moe_forward(
 
 
 # This is a triton implementation of the fused_experts function
-def triton_kernel_fused_mxfp4_w4a16_experts(
+def triton_kernel_fused_experts(
     output_tensor: torch.Tensor,
     hidden_states: torch.Tensor,
     w1,  # Tensor or triton_kernels.Tensor
@@ -637,7 +637,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         )
 
         topk = topk_ids.size(1)
-        triton_kernel_fused_mxfp4_w4a16_experts(
+        triton_kernel_fused_experts(
             output,
             hidden_states,
             w1,
