@@ -17,28 +17,34 @@ from vllm.lora.ops.triton_ops.utils import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
+_EXPAND_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
 def _get_expand_lora_scale_ptr(lora_weights: list[torch.Tensor], device: torch.device):
     """
-    `_LORA_SCALE_PTR_DICT` collects the required information during `profile_run`,
+    `_EXPAND_LORA_SCALE_PTR_DICT` collects the required information during
+    `profile_run`,
     After this, it remains constant and subsequent usage is through LUT.
     Refer to:
     https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
     """
     key = tuple(lora_weight.data_ptr() for lora_weight in lora_weights)
 
-    if (ptr_tensor := _LORA_SCALE_PTR_DICT.get(key)) is not None:
+    if (ptr_tensor := _EXPAND_LORA_SCALE_PTR_DICT.get(key)) is not None:
         return ptr_tensor
 
-    tensor_ptrs = []
-    for lora_weight in lora_weights:
-        tensor_ptrs.append(lora_weight.data_ptr())
-    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+    if len(lora_weights) > 1:
+        tensor_ptrs = []
+        for lora_weight in lora_weights:
+            tensor_ptrs.append(lora_weight.data_ptr())
+        ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+    else:
+        # Single slice: return the actual tensor so the kernel can use it
+        # directly without pointer indirection (matches SLICE_NUM == 1 path).
+        ptr_tensor = lora_weights[0]
 
-    _LORA_SCALE_PTR_DICT[key] = ptr_tensor
-    return _LORA_SCALE_PTR_DICT.get(key)
+    _EXPAND_LORA_SCALE_PTR_DICT[key] = ptr_tensor
+    return _EXPAND_LORA_SCALE_PTR_DICT.get(key)
 
 
 @triton.jit
@@ -224,10 +230,20 @@ def _lora_expand_fp8(
         # None of the inputs require LoRA.
         return
 
-    assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
-    for weight in lora_b_weights:
-        assert weight.dtype in [torch.float16, torch.bfloat16]
-
+    if use_fp8_w8a8:
+        assert inputs.dtype in [
+            torch.float8_e4m3fn,
+            torch.float8_e5m2,
+        ]
+        for weight in lora_b_weights:
+            assert weight.dtype in [
+                torch.float8_e5m2,
+                torch.float8_e4m3fn,
+            ]
+    else:
+        assert inputs.dtype in [torch.float16, torch.bfloat16, torch.float32]
+        for weight in lora_b_weights:
+            assert weight.dtype in [torch.float16, torch.bfloat16]
     assert inputs.size(0) == len(lora_b_weights)
     assert output_tensor.is_contiguous()
 
@@ -254,10 +270,10 @@ def _lora_expand_fp8(
         b_scale_ptr_tensor = _get_expand_lora_scale_ptr(b_scale, inputs.device)
     else:
         b_scale_ptr_tensor = None
-
     K = lora_b_weights[0].shape[-1]
     ADD_INPUTS = add_inputs
     MAX_LORAS = lora_ids.size(0)
+
     CAST_TYPE = False
     NUM_SLICES = len(lora_b_weights)
 

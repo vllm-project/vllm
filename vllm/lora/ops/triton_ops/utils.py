@@ -252,7 +252,7 @@ def get_lora_op_configs(
         default = {
             "block_m": 64,
             "block_n": 64 if num_slices > 1 else 128,
-            "block_k": 16,
+            "block_k": 32,
             "num_warps": 4,
             "num_ctas": 1,
             "num_stages": 2,

@@ -14,57 +14,72 @@ from vllm.lora.ops.triton_ops.utils import _get_lora_a_ptr, get_lora_op_configs
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], tuple] = {}
+_SHRINK_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], tuple] = {}
 
 
 def _get_shrink_lora_scale_ptr(
     lora_scale_weights: list[torch.Tensor], device: torch.device
 ):
     """
-    `_LORA_SCALE_PTR_DICT` collects the required information during `profile_run`,
-    After this, it remains constant and subsequent usage is through LUT.
+    `_SHRINK_LORA_SCALE_PTR_DICT` collects the required information during
+    `profile_run`. After this, it remains constant and subsequent usage is
+    through LUT.
+
+    Returns a tuple of (scale_ptr_tensor, l_stride, n_stride, k_stride).
+
+    Supports scale tensors of varying dimensionality:
+    - 1D: (lora_num,) — tensor-wise quantization
+    - 2D: (lora_num, N) — per-channel quantization
+    - 3D: (lora_num, N, K) — block-wise quantization
+    - 4D: (lora_num, 1, N, K) — block-wise with extra dim (squeezed to 3D)
+
     Refer to:
     https://github.com/triton-lang/triton/blob/release/3.1.x/python/tutorials/08-grouped-gemm.py
     """
     key = tuple(lora_weight.data_ptr() for lora_weight in lora_scale_weights)
 
-    if values := _LORA_SCALE_PTR_DICT.get(key):
+    if values := _SHRINK_LORA_SCALE_PTR_DICT.get(key):
         return values
 
-    scale_strides_d0 = []
-    scale_strides_d1 = []
-    scale_strides_d2 = []
     tensor_ptrs = []
+    scale_l_strides = []
+    scale_n_strides = []
+    scale_k_strides = []
     for lora_scale_weight in lora_scale_weights:
         if lora_scale_weight.ndim == 4:  # shape:(lora_num,1,size,rank)
             assert lora_scale_weight.size(1) == 1
             lora_scale_weight = lora_scale_weight.squeeze(dim=1)
-        else:
-            assert lora_scale_weight.ndim == 3  # shape:(lora_num,size,rank)
+        assert 1 <= lora_scale_weight.ndim <= 3
         assert lora_scale_weight.is_contiguous()
         tensor_ptrs.append(lora_scale_weight.data_ptr())
-        scale_strides_d0.append(lora_scale_weight.stride(0))
-        scale_strides_d1.append(lora_scale_weight.stride(1))
-        scale_strides_d2.append(lora_scale_weight.stride(2))
+        scale_l_strides.append(
+            lora_scale_weight.stride(0) if lora_scale_weight.ndim > 0 else 0
+        )
+        scale_n_strides.append(
+            lora_scale_weight.stride(-1) if lora_scale_weight.ndim > 1 else 1
+        )
+        scale_k_strides.append(
+            lora_scale_weight.stride(-2) if lora_scale_weight.ndim > 2 else 0
+        )
     if len(lora_scale_weights) > 1:
         scale_ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
     else:
         scale_ptr_tensor = lora_scale_weights[0]
 
     if (
-        len(set(scale_strides_d0)) > 1
-        or len(set(scale_strides_d1)) > 1
-        or len(set(scale_strides_d2)) > 1
+        len(set(scale_l_strides)) > 1
+        or len(set(scale_n_strides)) > 1
+        or len(set(scale_k_strides)) > 1
     ):
         raise ValueError("All LoRA scale weights must have the same stride.")
 
-    _LORA_SCALE_PTR_DICT[key] = (
+    _SHRINK_LORA_SCALE_PTR_DICT[key] = (
         scale_ptr_tensor,
-        scale_strides_d0[0],
-        scale_strides_d1[0],
-        scale_strides_d2[0],
+        scale_l_strides[0],
+        scale_n_strides[0],
+        scale_k_strides[0],
     )
-    return _LORA_SCALE_PTR_DICT.get(key)
+    return _SHRINK_LORA_SCALE_PTR_DICT.get(key)
 
 
 @triton.jit
@@ -280,22 +295,27 @@ def _lora_shrink_fp8(
         )
         assert b_scale is not None, "b_scale required for FP8/INT8"
 
-        b_scale_ptr_tensor = _get_shrink_lora_scale_ptr(b_scale, inputs.device)
-        # Get strides from the first scale tensor
-        b_scale_strides = (
-            b_scale[0].stride(0),  # stride for lora dimension
-            b_scale[0].stride(-1)
-            if b_scale[0].ndim > 1
-            else 1,  # stride for n dimension
-            0,  # Not used for 2D scale tensors
+        b_scale_ptr_tensor, b_scale_l_stride, b_scale_n_stride, b_scale_k_stride = (
+            _get_shrink_lora_scale_ptr(b_scale, inputs.device)
         )
+        # Get strides from the first scale tensor
+        # b_scale_strides = (
+        #     b_scale[0].stride(0),  # stride for lora dimension
+        #     b_scale[0].stride(-1)
+        #     if b_scale[0].ndim > 1
+        #     else 1,  # stride for n dimension
+        #     0,  # Not used for 2D scale tensors
+        # )
         a_scale_ptr = (
             a_scale if a_scale is not None else torch.tensor(1.0, device=inputs.device)
         )
     else:
         b_scale_ptr_tensor = torch.tensor(0, device=inputs.device)
+        b_scale_l_stride = 0
+        b_scale_n_stride = 0
+        b_scale_k_stride = 0
         a_scale_ptr = torch.tensor(0, device=inputs.device)
-        b_scale_strides = (0, 0, 0)
+        # b_scale_strides = (0, 0, 0)
 
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size, N=rank
     NUM_SLICES = len(lora_a_weights)
@@ -364,9 +384,9 @@ def _lora_shrink_fp8(
         lora_strides_d2,
         a_scale_m_stride,
         a_scale_k_stride,
-        b_scale_strides[0],
-        b_scale_strides[1],
-        b_scale_strides[2] if len(b_scale_strides) > 2 else 0,
+        b_scale_l_stride,
+        b_scale_n_stride,
+        b_scale_k_stride,
         output_tensor.stride(0),
         output_tensor.stride(1),
         output_tensor.stride(2),
