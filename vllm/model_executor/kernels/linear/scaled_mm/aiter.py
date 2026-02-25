@@ -132,11 +132,11 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return can_implement_base, reason
 
         act_quant_desc = config.activation_quant_key.scale
-        if act_quant_desc.group_shape != GroupShape(1, 12):
+        if act_quant_desc.group_shape != GroupShape(1, 128):
             return (
                 False,
                 "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,12).",
+                "quantization with group_shape=(1,128).",
             )
         return True, None
 

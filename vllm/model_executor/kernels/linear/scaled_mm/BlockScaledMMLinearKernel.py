@@ -50,6 +50,7 @@ class Fp8BlockScaledMMLinearKernel(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
             num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
         )
 
     @classmethod

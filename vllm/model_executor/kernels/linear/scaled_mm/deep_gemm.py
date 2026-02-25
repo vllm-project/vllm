@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
@@ -29,10 +30,12 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
         self.use_deep_gemm_e8m0 = is_deep_gemm_e8m0_used()
         act_scale_descriptor = config.activation_quant_key.scale
         self.is_deep_gemm_supported = is_deep_gemm_supported()
-        self.input_quant_op = QuantFP8(
+        self.quant_fp8 = QuantFP8(
             static=False,
             group_shape=act_scale_descriptor.group_shape,
             use_ue8m0=is_deep_gemm_e8m0_used(),
+            tma_aligned_scales=envs.VLLM_USE_DEEP_GEMM_TMA_ALIGNED_SCALES,
+            column_major_scales=True,
         )
 
     @classmethod
@@ -48,7 +51,15 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return False, "DeepGEMM is only supported on cuda platform"
         if not is_deep_gemm_supported():
             return False, "Currently, only Hopper and Blackwell GPUs are supported."
+        return True, None
 
+    @classmethod
+    def can_implement(cls, config):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+        if config.out_dtype != torch.bfloat16:
+            return (False, "Supports only output dtype of bfloat16")
         return True, None
 
     def process_weights_after_loading(self, layer):
