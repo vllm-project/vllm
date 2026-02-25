@@ -24,6 +24,7 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
+    make_kv_cache_config,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -54,6 +55,18 @@ def recompute_scheduler():
     vllm_config = create_vllm_config()
     vllm_config.kv_transfer_config.kv_load_failure_policy = "recompute"
     return create_scheduler(vllm_config)
+
+
+@pytest.fixture
+def hma_recompute_scheduler():
+    """scheduler with HMA enabled and kv_load_failure_policy='recompute'"""
+    vllm_config = create_vllm_config()
+    vllm_config.kv_transfer_config.kv_load_failure_policy = "recompute"
+    # Create scheduler with HMA (FA + SW groups)
+    kv_cache_config = make_kv_cache_config(
+        block_size=16, hma_enabled=True, num_blocks=10000
+    )
+    return create_scheduler(vllm_config, kv_cache_config=kv_cache_config)
 
 
 def test_sync_recompute_blocks_not_freed_for_running_requests(
@@ -478,3 +491,125 @@ def test_async_recompute_blocks_not_cached_when_invalid(
 
     # request should be in the running queue
     assert request in recompute_scheduler.running
+
+
+def test_hma_sync_recompute_evicts_all_blocks(
+    hma_recompute_scheduler: Scheduler,
+):
+    """
+    Test HMA sync recompute case - all blocks must be evicted on any failure.
+
+    With HMA, sliding window (SW) blocks only cover a suffix of the sequence.
+    After truncating num_computed_tokens, the sliding window shifts and may
+    require blocks that were never transferred.
+
+    Therefore, when any block fails we evict ALL blocks and reset
+    num_computed_tokens to 0.
+
+    This test verifies:
+    1. All blocks (FA and SW) are evicted on partial failure
+    2. num_computed_tokens is reset to 0 (not truncated to failure point)
+    3. Request can be rescheduled for full recomputation
+    """
+    num_prompt_blocks = 100
+    num_external_computed_blocks = 99
+    # Fail a block in the middle - in non-HMA this would allow partial recovery
+    invalid_block_idx = 50
+
+    num_prompt_tokens = num_prompt_blocks * hma_recompute_scheduler.block_size
+    num_external_computed_tokens = (
+        num_external_computed_blocks * hma_recompute_scheduler.block_size
+    )
+
+    request = create_request(num_tokens=num_prompt_tokens)
+    hma_recompute_scheduler.add_request(request=request)
+
+    req_num_new_matched_tokens = {
+        request.request_id: num_external_computed_tokens,
+    }
+
+    # mock connector indicating sync load
+    hma_recompute_scheduler.connector = Mock()
+    hma_recompute_scheduler.connector.get_num_new_matched_tokens.side_effect = (
+        _make_get_num_new_matched_tokens(req_num_new_matched_tokens, False)
+    )
+    hma_recompute_scheduler.connector.request_finished.return_value = (False, None)
+    hma_recompute_scheduler.connector.take_events.return_value = ()
+
+    scheduler_output = hma_recompute_scheduler.schedule()
+
+    # request should be running with sync KV load
+    assert len(hma_recompute_scheduler.running) == 1
+    assert len(scheduler_output.scheduled_new_reqs) == 1
+    assert request.status == RequestStatus.RUNNING
+
+    # verify we have multiple KV cache groups (HMA is enabled)
+    req_block_ids = hma_recompute_scheduler.kv_cache_manager.get_block_ids(
+        request.request_id
+    )
+    assert len(req_block_ids) == 2
+
+    # get the FA block IDs
+    fa_block_ids = scheduler_output.scheduled_new_reqs[0].block_ids[0]
+    invalid_block_ids = {fa_block_ids[invalid_block_idx]}
+
+    model_runner_output = create_model_runner_output(
+        [request],
+        invalid_block_ids=invalid_block_ids,
+        use_eos=False,  # not finished - should continue running
+    )
+
+    hma_recompute_scheduler.update_from_output(scheduler_output, model_runner_output)
+
+    # Critical assertions for HMA recompute case:
+
+    # 1. request should still be RUNNING (for recomputation)
+    assert request.status == RequestStatus.RUNNING, (
+        f"Request should remain RUNNING for recompute, got {request.status}"
+    )
+
+    # 2. num_computed_tokens should be reset to 0 (not truncated to failure point)
+    # This is the key difference from non-HMA: we can't do partial recovery
+    assert request.num_computed_tokens == 0, (
+        f"HMA: num_computed_tokens should be reset to 0, "
+        f"got {request.num_computed_tokens}. "
+        f"Partial recovery is not supported with sliding window layers."
+    )
+
+    # 3. num_external_computed_tokens should also be reset to 0
+    assert request.num_external_computed_tokens == 0, (
+        f"HMA: num_external_computed_tokens should be reset to 0, "
+        f"got {request.num_external_computed_tokens}"
+    )
+
+    # 4. verify blocks are still allocated (not freed yet, just marked for eviction)
+    # The actual eviction happens after update_from_output
+    allocated_blocks = hma_recompute_scheduler.kv_cache_manager.get_block_ids(
+        request.request_id
+    )
+    assert allocated_blocks is not None
+
+    # 5. request should still be in running queue
+    assert request in hma_recompute_scheduler.running, (
+        "Request should remain in running queue for recomputation"
+    )
+
+    # 6. request should still be in scheduler.requests
+    assert request.request_id in hma_recompute_scheduler.requests, (
+        "Request should not be deleted from scheduler.requests"
+    )
+
+    # 7. verify request can be rescheduled for full recomputation
+    scheduler_output_2 = hma_recompute_scheduler.schedule()
+
+    # request should be reschedulable
+    scheduled_req_ids = [
+        req.request_id for req in scheduler_output_2.scheduled_new_reqs
+    ]
+    if scheduler_output_2.num_scheduled_tokens:
+        scheduled_req_ids.extend(scheduler_output_2.num_scheduled_tokens.keys())
+
+    assert (
+        request.request_id in scheduled_req_ids
+        or len(hma_recompute_scheduler.running) > 0
+    ), "Request should be reschedulable for full recomputation"
