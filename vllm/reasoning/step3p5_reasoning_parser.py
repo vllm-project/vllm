@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -47,7 +47,7 @@ class Step3p5ReasoningParser(BaseThinkingReasoningParser):
         return self._is_reasoning_end_from_ids(input_ids)
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         # Only examine newly generated tokens; they may contain multiple ids.
         return self._is_reasoning_end_from_ids(delta_ids)
