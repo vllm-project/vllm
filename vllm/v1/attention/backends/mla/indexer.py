@@ -225,6 +225,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         # Pre-allocated buffers for the flattening path (max_decode_len > 2).
+        self.arange_buffer = torch.arange(
+            scheduler_config.max_num_seqs * (1 + self.num_speculative_tokens),
+            dtype=torch.int32,
+            device=self.device,
+        )
         self.expanded_seq_lens_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -378,12 +383,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
                 # [0, 1, 2, 0, 0, 1, 2, 3]
                 positions_within = (
-                    torch.arange(
-                        actual_expanded,
-                        device=self.device,
-                        dtype=torch.int32,
-                    )
-                    - expanded_starts
+                    self.arange_buffer[:actual_expanded] - expanded_starts
                 )
 
                 # [8, 9, 10, 7, 9, 10, 11, 12, ...] where ... is unused buffer space
