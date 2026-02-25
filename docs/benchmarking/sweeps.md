@@ -102,9 +102,9 @@ By default, each parameter combination is benchmarked 3 times to make the result
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
 
-### SLA Finder
+### SLA Scanner
 
-`vllm bench sweep serve_sla` is a variant of `vllm bench sweep serve` that explores different values of request rate or concurrency (choose using `--sla-variable`) in order to find the tradeoff between latency and throughput. The results can then be [visualized](#visualization) to determine the feasible SLAs.
+`vllm bench sweep serve_sla` is a variant of `vllm bench sweep serve` that scans through values of request rate or concurrency (choose using `--sla-variable`) in order to find the tradeoff between latency and throughput. The results can then be [visualized](#visualization) to determine the feasible SLAs.
 
 Example command:
 
@@ -118,7 +118,7 @@ vllm bench sweep serve_sla \
     -o benchmarks/results
 ```
 
-The algorithm for exploring different values of `sla_variable` can be summarized as follows:
+The algorithm for scanning through different values of `sla_variable` can be summarized as follows:
 
 1. Run the benchmark once with `sla_variable = 1` to simulate serial inference. This results in the lowest possible latency and throughput.
 2. Run the benchmark once with `sla_variable = num_prompts` to simulate batch inference over the whole dataset. This results in the highest possible latency and throughput.
