@@ -1,10 +1,15 @@
 # Parameter Sweeps
 
+`vllm bench sweep` is a suite of commands designed to run benchmarks across vLLM configurations and visualize the results for easy comparison.
+
 ## Online Benchmark
 
 ### Basic
 
 `vllm bench sweep serve` automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
+
+!!! tip
+    If you only need to run benchmarks for a single vLLM configuration, consider using [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
 
 Follow these steps to run the script:
 
@@ -86,60 +91,40 @@ vllm bench sweep serve \
     In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
 
 !!! note
-    By default, each parameter combination is run 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
+    By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of trials by setting `--num-trials`.
 
 !!! tip
-    You can use the `--resume` option to continue the parameter sweep if one of the runs failed.
-  
-### SLA auto-tuner
+    You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
 
-`vllm bench sweep serve_sla` is a wrapper over `vllm bench sweep serve` that tunes either the request rate or concurrency (choose using `--sla-variable`) in order to satisfy the SLA constraints given by `--sla-params`.
+### SLA Finder
 
-For example, to ensure E2E latency within different target values for 99% of requests:
-
-```json
-[
-    {
-        "p99_e2el_ms": "<=200"
-    },
-    {
-        "p99_e2el_ms": "<=500"
-    },
-    {
-        "p99_e2el_ms": "<=1000"
-    },
-    {
-        "p99_e2el_ms": "<=2000"
-    }
-]
-```
+`vllm bench sweep serve_sla` is a wrapper over `vllm bench sweep serve` that explores different values of request rate or concurrency (choose using `--sla-variable`) in order to find the tradeoff between latency and throughput. The results can then be [visualized](#visualization) to determine the feasible SLAs.
 
 Example command:
 
 ```bash
 vllm bench sweep serve_sla \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
-    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json' \
+    --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 100' \
     --serve-params benchmarks/serve_hparams.json \
     --bench-params benchmarks/bench_hparams.json \
-    --sla-params benchmarks/sla_hparams.json \
     --sla-variable max_concurrency \
     -o benchmarks/results
 ```
 
-The algorithm for adjusting the SLA variable is as follows:
+The algorithm for exploring different values of `sla_variable` can be summarized as follows:
 
-1. Run the benchmark once with maximum possible QPS, and once with minimum possible QPS. For each run, calculate the distance of the SLA metrics from their targets, resulting in data points of QPS vs SLA distance.
-2. Perform spline interpolation between the data points to estimate the QPS that results in zero SLA distance.
-3. Run the benchmark with the estimated QPS and add the resulting data point to the history.
-4. Repeat Steps 2 and 3 until the maximum QPS that passes SLA and the minimum QPS that fails SLA in the history are close enough to each other.
+1. Run the benchmark once with `sla_variable = 1` to simulate serial inference. This results in the lowest possible latency and throughput.
+2. Run the benchmark once with `sla_variable = num_prompts` to simulate batch inference over the whole dataset. This results in the highest possible latency and throughput.
+3. Estimate the maximum value of `sla_variable` that can be supported by the server without oversaturating it.
+4. Run the benchmark over intermediate values of `sla_variable` uniformly using the remaining iterations.
 
-!!! important
-    SLA tuning is applied over each combination of `--serve-params`, `--bench-params`, and `--sla-params`.
+You can override the number of iterations in the algorithm by setting `--sla-iters`.
 
-    For a given combination of `--serve-params` and `--bench-params`, we share the benchmark results across `--sla-params` to avoid rerunning benchmarks with the same SLA variable value.
+!!! tip
+    This is our equivalent of [GuideLLM's `--profile sweep`](https://github.com/vllm-project/guidellm/blob/v0.5.3/src/guidellm/benchmark/profiles.py#L575).
 
-### Startup
+## Startup Benchmark
 
 `vllm bench sweep startup` runs `vllm bench startup` across parameter combinations to compare cold/warm startup time for different engine settings.
 
@@ -209,8 +194,8 @@ vllm bench sweep plot benchmarks/results/<timestamp> \
     --var-x max_concurrency \
     --row-by random_input_len \
     --col-by random_output_len \
-    --curve-by api_server_count,max_num_batched_tokens \
-    --filter-by 'max_concurrency<=1024'
+    --curve-by max_num_seqs,max_num_batched_tokens \
+    --filter-by 'max_concurrency<=128'
 ```
 
 !!! tip
