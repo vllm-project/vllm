@@ -203,7 +203,7 @@ steps:
 
 - label: Model strategy test
   device: h100
-  num_gpus: 4
+  num_devices: 2
   source_file_dependencies: []
   commands:
     - pytest -v -s models/nightly/gptoss.py
