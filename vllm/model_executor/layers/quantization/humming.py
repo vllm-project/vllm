@@ -98,7 +98,7 @@ def parse_single_config(config):
             "b_dtype": dtypes.uint2,
         }
     else:
-        raise AssertionError(f"Invalid quant_method: {quant_method}")
+        raise ValueError(f"Invalid quant_method: {quant_method}")
 
     result_dict["weight_scale_group_size_n"] = result_dict["block_shape"][0]
     result_dict["weight_scale_group_size_k"] = result_dict["block_shape"][1]
