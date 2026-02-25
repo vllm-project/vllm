@@ -1443,13 +1443,10 @@ class NanoNemotronVLMultiModalProcessor(
         )
 
         hf_processor_mm_kwargs = {
-            k: v for k, v in hf_processor_mm_kwargs.items()
-            if k != "use_audio_in_video"
+            k: v for k, v in hf_processor_mm_kwargs.items() if k != "use_audio_in_video"
         }
 
-        if not (use_audio_in_video
-                and "video" in mm_items
-                and "audio" not in mm_items):
+        if not (use_audio_in_video and "video" in mm_items and "audio" not in mm_items):
             return super().apply(
                 prompt,
                 mm_items,
