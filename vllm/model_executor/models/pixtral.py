@@ -417,10 +417,6 @@ class PixtralForConditionalGeneration(
         # attributes via @property (see below).
         self._is_moe = is_mixture_of_experts(self.language_model)
 
-    # -- Dynamic MoE attribute proxying via properties --
-    # Using properties instead of copying attributes avoids stale state when
-    # the language model's attributes are mutated after initialization.
-
     @property
     def num_moe_layers(self) -> int:  # type: ignore[override]
         if self._is_moe:
