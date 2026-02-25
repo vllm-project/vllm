@@ -33,7 +33,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import BatchFeature
+from transformers import BatchFeature, PreTrainedTokenizerBase
 from transformers.models.qwen2_vl import Qwen2VLImageProcessorFast
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize as image_smart_resize,
@@ -88,6 +88,10 @@ from vllm.multimodal.processing import (
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
+)
+from vllm.multimodal.processing.processor import (
+    MultiModalPromptUpdates,
+    PlaceholderFeaturesInfo,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.collection_utils import is_list_of
@@ -920,6 +924,29 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         return video_items
 
 
+@lru_cache
+def _get_merged_lt_splits(
+    tokenizer: PreTrainedTokenizerBase,
+) -> dict[int, list[int]]:
+    """Pre-compute split mappings for vocab tokens that end with ``<``.
+
+    The Qwen3-VL tokenizer may merge preceding punctuation with ``<``
+    (e.g. ``.<`` → single token 15757).  This function scans the vocab
+    once and returns a dict mapping each such merged token ID to its
+    split form ``[*prefix_ids, lt_id]``.
+    """
+    vocab = tokenizer.get_vocab()
+    lt_id = vocab["<"]
+    splits: dict[int, list[int]] = {}
+    for tid in vocab.values():
+        if tid != lt_id:
+            decoded = tokenizer.decode([tid])
+            if decoded.endswith("<"):
+                prefix_ids = tokenizer.encode(decoded[:-1], add_special_tokens=False)
+                splits[tid] = prefix_ids + [lt_id]
+    return splits
+
+
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
     def _call_hf_processor(
         self,
@@ -1006,6 +1033,45 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         return _create_qwen2vl_field_factory(
             self.info.get_hf_config().vision_config.spatial_merge_size
         )(hf_inputs)
+
+    def _find_mm_placeholders(
+        self,
+        new_token_ids: list[int],
+        mm_prompt_updates: MultiModalPromptUpdates,
+    ) -> Mapping[str, list[PlaceholderFeaturesInfo]]:
+        # Qwen3-VL inserts timestamp text starting with "<" before vision
+        # tokens. The "<" may merge with preceding punctuation (e.g. ".<"
+        # becomes a single token), breaking exact token matching.
+        # Split merged tokens so exact matching works.
+        tokenizer = self.info.get_tokenizer()
+        merged_lt_splits = _get_merged_lt_splits(tokenizer)
+
+        # Fast path: no merged tokens in this tokenizer's vocab.
+        if not merged_lt_splits:
+            return super()._find_mm_placeholders(new_token_ids, mm_prompt_updates)
+
+        repl_token_ids = list[int]()
+        repl_orig_idxs = list[int]()
+        for orig_idx, tok in enumerate(new_token_ids):
+            repl_toks = merged_lt_splits.get(tok, [tok])
+            repl_token_ids.extend(repl_toks)
+            repl_orig_idxs.extend(orig_idx for _ in range(len(repl_toks)))
+
+        repls = super()._find_mm_placeholders(repl_token_ids, mm_prompt_updates)
+
+        return {
+            modality: [
+                PlaceholderFeaturesInfo(
+                    modality=p.modality,
+                    item_idx=p.item_idx,
+                    start_idx=repl_orig_idxs[p.start_idx],
+                    tokens=p.tokens,
+                    is_embed=p.is_embed,
+                )
+                for p in placeholders
+            ]
+            for modality, placeholders in repls.items()
+        }
 
     def _get_prompt_updates(
         self,
