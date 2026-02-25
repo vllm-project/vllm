@@ -17,7 +17,6 @@ from transformers import BatchFeature, PretrainedConfig, ProcessorMixin, TensorT
 from transformers.image_utils import ImageInput
 from transformers.tokenization_utils_base import TextInput
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -29,7 +28,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
 )
 from vllm.model_executor.layers.activation import MulAndSilu, QuickGELU, SiluAndMul
-from vllm.model_executor.layers.attention.mm_encoder_attention import MMEncoderAttention
+from vllm.model_executor.layers.attention import Attention, MMEncoderAttention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -232,7 +231,11 @@ class MultiHeadDotProductAttention(nn.Module):
 
         self.scale = self.head_dim**-0.5
         self.attn = MMEncoderAttention(
-            self.num_heads, self.head_dim, self.scale, num_kv_heads=self.num_kv_heads
+            self.num_heads,
+            self.head_dim,
+            self.scale,
+            num_kv_heads=self.num_kv_heads,
+            prefix=f"{prefix}.attn",
         )
 
     def forward(
@@ -1221,11 +1224,8 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: MolmoProcessorWrapper | None,
+        processor: MolmoProcessorWrapper,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         ncols, nrows = processor.get_patches_grid_size(
             image_width=image_width,
             image_height=image_height,
@@ -1274,12 +1274,12 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

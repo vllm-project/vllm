@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -72,8 +73,7 @@ class SMControlContextManager:
             "SM control is currently only supported on CUDA"
         )
 
-        props = torch.cuda.get_device_properties(torch.cuda.current_device())
-        total_sms = props.multi_processor_count
+        total_sms = num_compute_units(torch.cuda.current_device().index)
 
         assert comm_sms < total_sms
         self.total_sms = total_sms
@@ -412,9 +412,7 @@ class UBatchWrapper:
 
         attn_metadata = forward_context.attn_metadata
         slot_mapping = forward_context.slot_mapping
-        num_tokens = (
-            ubatch_slices[0].token_slice.stop - ubatch_slices[0].token_slice.start
-        ) * 2
+        num_tokens = sum(ubatch_slice.num_tokens for ubatch_slice in ubatch_slices)
         input_ids = kwargs["input_ids"]
         positions = kwargs["positions"]
         intermediate_tensors = kwargs["intermediate_tensors"]

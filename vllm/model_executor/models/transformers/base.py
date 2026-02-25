@@ -27,12 +27,12 @@ from torch import nn
 from transformers import AutoModel
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
-from vllm.attention.layer import Attention
 from vllm.config.utils import getattr_iter
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.utils import get_pp_indices
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.encoder_only_attention import (
+from vllm.model_executor.layers.attention import (
+    Attention,
     EncoderOnlyAttention,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
@@ -191,6 +191,7 @@ class Base(
         self.attention_instances = self.create_attention_instances()
 
         # Input embeddings
+        self.embed_scale = None
         input_embeddings = self.model.get_input_embeddings()
         if not isinstance(input_embeddings, PPMissingLayer):
             # Some models scale embeddings inside the input embedding layer
@@ -249,7 +250,8 @@ class Base(
         # Layers before module list
         for name in pp_plan[:module_list_idx]:
             if self.pp_group.is_first_rank or (
-                self.text_config.tie_word_embeddings and self.pp_group.is_last_rank
+                getattr(self.text_config, "tie_word_embeddings", False)
+                and self.pp_group.is_last_rank
             ):
                 continue
             setattr(self.model, name, PPMissingLayer())

@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from typing import Any
+
 import torch.distributed as dist
 from flashinfer.comm.mnnvl import CommBackend as CommBackend
 
@@ -22,6 +24,15 @@ class CustomCommunicator(CommBackend):
         gathered = [None] * self.Get_size()
         dist.all_gather_object(gathered, data, group=self._group)
         return gathered
+
+    # NOTE(rob): CommBackend is an abstract class, and bcast/barrier
+    # are unimplemented on vLLM side. If we need to utilize these
+    # methods in the future, can create a concrete implementation.
+    def bcast(self, data: Any, root: int) -> Any:
+        raise NotImplementedError
+
+    def barrier(self) -> None:
+        raise NotImplementedError
 
     def Split(self, color: int, key: int) -> "CustomCommunicator":
         return self

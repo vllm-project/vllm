@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import huggingface_hub
 from huggingface_hub.utils import HfHubHTTPError, HFValidationError
@@ -43,6 +43,25 @@ if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
 
 logger = init_logger(__name__)
+
+
+def get_captured_lora_counts(max_loras: int, specialize: bool) -> list[int]:
+    """
+    Returns num_active_loras values for cudagraph capture.
+
+    When specialize=True: powers of 2 up to max_loras, plus max_loras + 1.
+    When specialize=False: just [max_loras + 1].
+
+    This is the single source of truth for LoRA capture cases, used by both
+    CudagraphDispatcher and PunicaWrapperGPU.
+    """
+    if not specialize:
+        return [max_loras + 1]
+
+    return [
+        n for n in range(1, max_loras + 2) if (n & (n - 1)) == 0 or n == max_loras + 1
+    ]
+
 
 _GLOBAL_LORA_ID = 0
 
@@ -131,7 +150,7 @@ def replace_submodule(
 
 
 def parse_fine_tuned_lora_name(
-    name: str, weights_mapper: Optional["WeightsMapper"] = None
+    name: str, weights_mapper: "WeightsMapper | None" = None
 ) -> tuple[str, bool]:
     """Parse the name of lora weights.
 

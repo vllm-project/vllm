@@ -233,8 +233,8 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
 
-        if pooler_config.softmax is None:
-            pooler_config.softmax = False
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
 
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -353,10 +353,6 @@ class MambaModelConfig(VerifyAndUpdateConfig):
             if cache_config.mamba_cache_mode == "align":
                 assert vllm_config.scheduler_config.enable_chunked_prefill, (
                     "Chunked prefill is required for mamba cache mode 'align'."
-                )
-                assert not vllm_config.speculative_config, (
-                    "Mamba cache mode 'align' is currently not compatible "
-                    "with speculative decoding."
                 )
             logger.info(
                 "Warning: Prefix caching in Mamba cache '%s' "
@@ -582,6 +578,40 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
 
+class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Update mamba_ssm_cache_dtype for Qwen3.5 models when set to 'auto'
+        (or not explicitly set), to the value specified in the HF config's
+        mamba_ssm_dtype field. Warn if the user explicitly overrides it to a
+        different value.
+        """
+        cache_config = vllm_config.cache_config
+        hf_text_config = vllm_config.model_config.hf_text_config
+        mamba_ssm_dtype = getattr(hf_text_config, "mamba_ssm_dtype", None)
+        if cache_config.mamba_ssm_cache_dtype == "auto":
+            if mamba_ssm_dtype is not None:
+                cache_config.mamba_ssm_cache_dtype = mamba_ssm_dtype
+        elif (
+            mamba_ssm_dtype is not None
+            and cache_config.mamba_ssm_cache_dtype != mamba_ssm_dtype
+        ):
+            logger.warning(
+                "Qwen3.5 model specifies mamba_ssm_dtype='%s' in its config, "
+                "but --mamba-ssm-cache-dtype='%s' was passed. "
+                "Using the user-specified value.",
+                mamba_ssm_dtype,
+                cache_config.mamba_ssm_cache_dtype,
+            )
+
+
+class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.is_causal = False
+        model_config.hf_config.embedding_size = model_config.hf_config.num_labels
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -595,6 +625,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
+    "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
@@ -603,4 +634,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
+    "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
+    "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
 }

@@ -6,9 +6,9 @@ from copy import copy
 import numpy as np
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import CacheConfig, VllmConfig
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -136,6 +136,9 @@ def create_cross_attention_backend(
             if (
                 not underlying_attn_backend.forward_includes_kv_cache_update
                 and attn_metadata is not None
+                and layer.kv_sharing_target_layer_name is None
+                and key is not None
+                and value is not None
             ):
                 self.do_kv_cache_update(
                     layer, key, value, kv_cache, attn_metadata.slot_mapping
