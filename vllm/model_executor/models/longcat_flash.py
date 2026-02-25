@@ -236,9 +236,9 @@ class FlashMLP(nn.Module):
 class LongcatRouter(nn.Module):
     def __init__(
         self,
-        config,
-        zero_expert_num=0,
-        rounter_params_dtype=torch.bfloat16,
+        config: FlashConfig,
+        zero_expert_num: int,
+        rounter_params_dtype: torch.dtype,
         prefix: str = "",
     ):
         super().__init__()
@@ -309,6 +309,7 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.experts",
             enable_eplb=enable_eplb,
             routed_scaling_factor=config.routed_scaling_factor,
+            router_logits_dtype=self.rounter_params_dtype,
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -485,7 +486,6 @@ class FlashModel(nn.Module):
         quant_config = vllm_config.quant_config
         self.config = config
 
-        self.padding_idx = getattr(config, "pad_token_id", None)
         self.vocab_size = config.vocab_size
 
         if get_pp_group().is_first_rank:

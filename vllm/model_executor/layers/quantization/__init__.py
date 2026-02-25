@@ -17,6 +17,7 @@ QuantizationMethods = Literal[
     "fp_quant",
     "modelopt",
     "modelopt_fp4",
+    "modelopt_mxfp8",
     "gguf",
     "gptq_marlin",
     "awq_marlin",
@@ -24,7 +25,6 @@ QuantizationMethods = Literal[
     "compressed-tensors",
     "bitsandbytes",
     "experts_int8",
-    "ipex",
     "quark",
     "moe_wna16",
     "torchao",
@@ -41,7 +41,6 @@ DEPRECATED_QUANTIZATION_METHODS = [
     "fbgemm_fp8",
     "fp_quant",
     "experts_int8",
-    "ipex",
     "petit_nvfp4",
 ]
 
@@ -121,8 +120,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .gptq import GPTQConfig
     from .gptq_marlin import GPTQMarlinConfig
     from .inc import INCConfig
-    from .ipex_quant import IPEXConfig
-    from .modelopt import ModelOptFp8Config, ModelOptNvFp4Config
+    from .modelopt import ModelOptFp8Config, ModelOptMxFp8Config, ModelOptNvFp4Config
     from .moe_wna16 import MoeWNA16Config
     from .mxfp4 import Mxfp4Config
     from .petit import PetitNvFp4Config
@@ -136,6 +134,7 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "fp_quant": FPQuantConfig,
         "modelopt": ModelOptFp8Config,
         "modelopt_fp4": ModelOptNvFp4Config,
+        "modelopt_mxfp8": ModelOptMxFp8Config,
         "gguf": GGUFConfig,
         "gptq_marlin": GPTQMarlinConfig,
         "awq_marlin": AWQMarlinConfig,
@@ -144,7 +143,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "bitsandbytes": BitsAndBytesConfig,
         "ptpc_fp8": PTPCFp8Config,
         "experts_int8": ExpertsInt8Config,
-        "ipex": IPEXConfig,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
