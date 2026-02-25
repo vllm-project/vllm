@@ -347,3 +347,99 @@ def test_symint_crosses_split_boundary():
     assert len(split_items) >= 6, (
         f"Expected at least 6 total subgraphs, got {len(split_items)}"
     )
+
+
+def test_unused_subgraph_inputs_removed():
+    """
+    Test that unused inputs threaded by split_module are removed from subgraphs.
+
+    split_module threads values (e.g., SymInt) to all subgraphs in the chain,
+    even those that don't reference them. This test verifies that the cleanup
+    pass removes these unnecessary inputs, keeping subgraph signatures clean.
+    """
+
+    def model_fn(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        batch_size = x.shape[0]
+        hidden_size = x.shape[1]
+
+        z = torch.sigmoid(x)
+
+        reshaped_y = y.view(batch_size, hidden_size)
+        return z + reshaped_y
+
+    x = torch.randn(4, 8)
+    y = torch.randn(32)
+    gm = make_fx(model_fn, tracing_mode="symbolic")(x, y)
+
+    split_gm, split_items = split_graph(gm, ["aten::sigmoid"])
+
+    # Every subgraph should only have inputs it actually uses
+    for item in split_items:
+        for node in item.graph.graph.nodes:
+            if node.op == "placeholder":
+                assert len(node.users) > 0, (
+                    f"Subgraph {item.submod_name} has unused input '{node.name}'. "
+                    "Unused inputs should be removed by the cleanup pass."
+                )
+
+    # Verify functional correctness
+    output_original = gm(x, y)
+    output_split = split_gm(x, y)
+    assert torch.allclose(output_original, output_split), "Output mismatch after split"
+
+
+def test_unused_symint_inputs_removed_multi_split():
+    """
+    Test that with torch.compile + mark_dynamic and multiple split points,
+    SymInt inputs are removed from subgraphs that don't use them.
+
+    split_module threads SymInt (e.g., s77) to every subgraph in the chain.
+    Splitting subgraphs (sigmoid) don't reference the SymInt, so it should
+    be stripped from their inputs.
+    """
+    captured_graph = None
+
+    def capturing_backend(gm: fx.GraphModule, example_inputs: list) -> fx.GraphModule:
+        nonlocal captured_graph
+        captured_graph = gm
+        return gm
+
+    def model_fn(x: torch.Tensor) -> torch.Tensor:
+        batch_size = x.shape[0]
+        hidden_size = x.shape[1]
+        x = torch.ops.aten.sigmoid.default(x)
+        x = x.clone().view(batch_size, hidden_size)
+        x = torch.ops.aten.sigmoid.default(x)
+        x = x.clone().view(batch_size, hidden_size)
+        return x
+
+    x = torch.randn(4, 8)
+    torch._dynamo.mark_dynamic(x, 0)
+
+    compiled_fn = torch.compile(model_fn, backend=capturing_backend)
+    compiled_fn(x)
+
+    assert captured_graph is not None
+
+    split_gm, split_items = split_graph(captured_graph, ["aten::sigmoid"])
+
+    # Splitting subgraphs (sigmoid) should NOT have SymInt inputs
+    for item in split_items:
+        if not item.is_splitting_graph:
+            continue
+        for node in item.graph.graph.nodes:
+            if node.op == "placeholder":
+                ev = node.meta.get("example_value")
+                assert not isinstance(ev, torch.SymInt), (
+                    f"Splitting subgraph {item.submod_name} has unused SymInt "
+                    f"input '{node.name}'. SymInt should only appear in "
+                    "subgraphs that reference it."
+                )
+
+    # All subgraphs: no unused inputs
+    for item in split_items:
+        for node in item.graph.graph.nodes:
+            if node.op == "placeholder":
+                assert len(node.users) > 0, (
+                    f"Subgraph {item.submod_name} has unused input '{node.name}'."
+                )

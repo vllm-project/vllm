@@ -394,18 +394,36 @@ def split_graph(
     )
 
     outputs = []
+    parent_modified = False
 
-    names = [name for (name, module) in split_gm.named_modules()]
-
-    for name in names:
-        if "." in name or name == "":
-            # recursive child module or the root module
+    for node in split_gm.graph.nodes:
+        if node.op != "call_module":
             continue
 
+        name = node.target
         module = getattr(split_gm, name)
-
         graph_id = int(name.replace("submod_", ""))
+
+        # Remove unused inputs that split_module may have threaded through
+        # unnecessarily (e.g., SymInt values passed to subgraphs that
+        # don't reference them).
+        placeholders = [n for n in module.graph.nodes if n.op == "placeholder"]
+        unused_indices = [i for i, ph in enumerate(placeholders) if not ph.users]
+        if unused_indices:
+            for i in reversed(unused_indices):
+                module.graph.erase_node(placeholders[i])
+            node.args = tuple(
+                arg for i, arg in enumerate(node.args) if i not in unused_indices
+            )
+            module.graph.lint()
+            module.recompile()
+            parent_modified = True
+
         outputs.append(SplitItem(name, graph_id, (graph_id in split_op_graphs), module))
+
+    if parent_modified:
+        split_gm.graph.lint()
+        split_gm.recompile()
 
     # sort by integer graph_id, rather than string name
     outputs.sort(key=lambda x: x.graph_id)
