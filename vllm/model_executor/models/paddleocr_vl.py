@@ -162,8 +162,8 @@ class PaddleOCRVLProcessingInfo(BaseProcessingInfo):
             height=image_height,
             width=image_width,
             factor=patch_size * merge_size,
-            min_pixels=size["min_pixels"],
-            max_pixels=size["max_pixels"],
+            min_pixels=size.get("shortest_edge") or size.get("min_pixels"),
+            max_pixels=size.get("longest_edge") or size.get("max_pixels"),
         )
         preprocessed_size = ImageSize(width=resized_width, height=resized_height)
 
