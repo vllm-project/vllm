@@ -1730,7 +1730,11 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
 
         ray.shutdown()
     gc.collect()
-    torch.accelerator.empty_cache()
+
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cpu():
+        torch.accelerator.empty_cache()
 
 
 def in_the_same_node_as(
