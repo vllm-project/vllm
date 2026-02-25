@@ -109,21 +109,23 @@ def is_supported_config_trtllm(
         return f"kernel does not support {reason}"
 
     if not _supports_current_device():
-        return False, _make_reason("current device")
+        return False, _make_reason(f"current device {current_platform.device_name}")
     elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
         return False, _make_reason("no act_and_mul MLP layer")
     elif not _supports_activation(moe_config.activation):
         return False, _make_reason(f"{moe_config.activation} activation")
     elif not _supports_quant_scheme(weight_key, activation_key):
-        return False, _make_reason("quantization scheme")
+        return False, _make_reason(f"quantization scheme {weight_key}x{activation_key}")
     elif not _supports_parallel_config(moe_config.moe_parallel_config):
-        return False, _make_reason("parallel config")
+        return False, _make_reason(f"parallel config {moe_config.moe_parallel_config}")
     elif not _supports_routing_method(moe_config.routing_method):
-        return False, _make_reason("routing method")
+        return False, _make_reason(f"routing method {moe_config.routing_method}")
     elif activation_format != mk.FusedMoEActivationFormat.Standard:
-        return False, _make_reason("activation format")
+        return False, _make_reason(f"activation format {activation_format}")
     elif moe_config.hidden_dim % 512 != 0:
-        return False, _make_reason("hidden_dim must be divisible by 512")
+        return False, _make_reason(
+            f"hidden_dim must be divisible by 512, found {moe_config.hidden_dim}"
+        )
 
     return True, None
 
@@ -346,7 +348,7 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states=hidden_states_fp4,
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
-        ).flatten(),
+        ).reshape(*hidden_states_fp4.shape[:-1], -1),
         gemm1_weights=layer.w13_weight.data,
         gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
@@ -430,7 +432,7 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states=hidden_states_fp4,
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
-        ).flatten(),
+        ).reshape(*hidden_states_fp4.shape[:-1], -1),
         gemm1_weights=layer.w13_weight.data,
         gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
