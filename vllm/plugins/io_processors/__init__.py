@@ -69,12 +69,14 @@ def get_io_processor(
 
     activated_plugin_cls = loadable_plugins[model_plugin]
 
+    activated_plugin_typ = resolve_obj_by_qualname(activated_plugin_cls)
+
     # for backward compatibility, the plugin does not have a renderer argument
-    if "renderer" not in inspect.signature(activated_plugin_cls.__init__).parameters:
+    if "renderer" not in inspect.signature(activated_plugin_typ.__init__).parameters:
         logger.warning(
             "The renderer argument will be required in v0.18, "
             "please update your IOProcessor plugin: %s",
             activated_plugin_cls,
         )
-        return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config)
-    return resolve_obj_by_qualname(activated_plugin_cls)(vllm_config, renderer)
+        return activated_plugin_typ(vllm_config)
+    return activated_plugin_typ(vllm_config, renderer)
