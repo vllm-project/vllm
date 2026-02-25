@@ -50,6 +50,18 @@ class CudaGraphManager:
 
         self.compilation_config = vllm_config.compilation_config
         assert self.compilation_config is not None
+        # cudagraph mode and sizes will be set in set_cudagraph_mode_and_sizes
+        self.cudagraph_mode = CUDAGraphMode.NONE
+        self.cudagraph_sizes: dict[int, int] = {}
+
+        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
+        self.pool = None
+        if self.cudagraph_mode != CUDAGraphMode.NONE:
+            self.pool = torch.cuda.graph_pool_handle()
+        self.hidden_states: torch.Tensor | None = None
+        self.aux_hidden_states: list[torch.Tensor] = []
+
+    def set_cudagraph_mode_and_sizes(self) -> None:
         self.cudagraph_mode = self.compilation_config.cudagraph_mode
 
         use_uniform_decode_cudagraph = (
@@ -64,13 +76,6 @@ class CudaGraphManager:
             self.uniform_decode_query_len,
             use_uniform_decode_cudagraph,
         )
-
-        self.graphs: dict[int, torch.cuda.CUDAGraph] = {}
-        self.pool = None
-        if self.cudagraph_mode != CUDAGraphMode.NONE:
-            self.pool = torch.cuda.graph_pool_handle()
-        self.hidden_states: torch.Tensor | None = None
-        self.aux_hidden_states: list[torch.Tensor] = []
 
     def needs_capture(self) -> bool:
         return len(self.cudagraph_sizes) > 0
