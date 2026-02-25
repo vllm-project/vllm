@@ -172,13 +172,13 @@ class TestMCPEnabled:
             recipient = message.get("recipient")
             if recipient and recipient.startswith("python"):
                 tool_call_found = True
-                assert message.get("channel") == "analysis"
+                assert message.get("channel") == "commentary"
             author = message.get("author", {})
             if author.get("role") == "tool" and (author.get("name") or "").startswith(
                 "python"
             ):
                 tool_response_found = True
-                assert message.get("channel") == "analysis"
+                assert message.get("channel") == "commentary"
 
         assert tool_call_found, (
             f"No Python tool call found. "
