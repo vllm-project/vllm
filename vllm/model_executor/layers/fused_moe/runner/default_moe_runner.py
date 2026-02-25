@@ -17,6 +17,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
 )
@@ -26,7 +27,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
-from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
@@ -132,6 +132,7 @@ direct_register_custom_op(
     tags=(torch.Tag.needs_fixed_stride_order,),
 )
 
+
 # --8<-- [start:default_moe_runner]
 @PluggableLayer.register("default_moe_runner")
 class DefaultMoERunner(MoERunner):
@@ -155,7 +156,7 @@ class DefaultMoERunner(MoERunner):
     Eventually, this class will be split up and specialized for different
     configurations, e.g. the presense or absence of shared experts, a gate, etc.
     """
-    
+
     # --8<-- [end:default_moe_runner]
 
     def __init__(
