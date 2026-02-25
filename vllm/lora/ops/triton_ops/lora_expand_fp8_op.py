@@ -314,8 +314,12 @@ def _lora_expand_fp8(
 
     if b_scale is not None and b_scale[0].dim() > 0:
         b_scale_l_stride = b_scale[0].stride(0) if b_scale[0].dim() > 0 else 0
-        b_scale_n_stride = b_scale[0].stride(-1) if b_scale[0].dim() > 1 else 1
-        b_scale_k_stride = b_scale[0].stride(-2) if b_scale[0].dim() > 2 else 0
+        b_scale_n_stride = (
+            b_scale[0].stride(-2)
+            if b_scale[0].dim() > 2
+            else (b_scale[0].stride(-1) if b_scale[0].dim() > 1 else 1)
+        )
+        b_scale_k_stride = b_scale[0].stride(-1) if b_scale[0].dim() > 2 else 0
     else:
         b_scale_l_stride = 1
         b_scale_n_stride = 0

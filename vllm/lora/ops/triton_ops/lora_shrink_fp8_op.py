@@ -56,10 +56,12 @@ def _get_shrink_lora_scale_ptr(
             lora_scale_weight.stride(0) if lora_scale_weight.ndim > 0 else 0
         )
         scale_n_strides.append(
-            lora_scale_weight.stride(-1) if lora_scale_weight.ndim > 1 else 1
+            lora_scale_weight.stride(-2)
+            if lora_scale_weight.ndim > 2
+            else (lora_scale_weight.stride(-1) if lora_scale_weight.ndim > 1 else 1)
         )
         scale_k_strides.append(
-            lora_scale_weight.stride(-2) if lora_scale_weight.ndim > 2 else 0
+            lora_scale_weight.stride(-1) if lora_scale_weight.ndim > 2 else 0
         )
     if len(lora_scale_weights) > 1:
         scale_ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
