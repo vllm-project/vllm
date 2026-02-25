@@ -212,7 +212,7 @@ def run_comb(
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
     base_path: Path,
-    num_trials: int,
+    num_runs: int,
     dry_run: bool,
     link_vars: list[tuple[str, str]],
 ):
@@ -221,7 +221,7 @@ def run_comb(
 
     comb_data = list[dict[str, object]]()
 
-    for run_number in range(num_trials):
+    for run_number in range(num_runs):
         run_data = run_benchmark(
             server,
             bench_cmd,
@@ -254,7 +254,7 @@ def run_combs(
     serve_params: ParameterSweep,
     bench_params: ParameterSweep,
     output_dir: Path,
-    num_trials: int,
+    num_runs: int,
     dry_run: bool,
     link_vars: list[tuple[str, str]],
 ):
@@ -279,7 +279,7 @@ def run_combs(
                     serve_comb=serve_comb,
                     bench_comb=bench_comb,
                     base_path=base_path,
-                    num_trials=num_trials,
+                    num_runs=num_runs,
                     dry_run=dry_run,
                     link_vars=link_vars,
                 )
@@ -306,7 +306,7 @@ class SweepServeArgs:
     serve_params: ParameterSweep
     bench_params: ParameterSweep
     output_dir: Path
-    num_trials: int
+    num_runs: int
     dry_run: bool
     resume: str | None
     link_vars: list[tuple[str, str]]
@@ -336,12 +336,9 @@ class SweepServeArgs:
 
         link_vars = cls.parse_link_vars(args.link_vars)
 
-        if args.num_runs is not None:
-            raise ValueError("`--num-runs` has been renamed to `--num-trials`.")
-
-        num_trials = args.num_trials
-        if num_trials < 1:
-            raise ValueError("`num_trials` should be at least 1.")
+        num_runs = args.num_runs
+        if num_runs < 1:
+            raise ValueError("`num_runs` should be at least 1.")
 
         return cls(
             serve_cmd=serve_cmd,
@@ -351,7 +348,7 @@ class SweepServeArgs:
             serve_params=serve_params,
             bench_params=bench_params,
             output_dir=Path(args.output_dir),
-            num_trials=num_trials,
+            num_runs=num_runs,
             dry_run=args.dry_run,
             resume=args.resume,
             link_vars=link_vars,
@@ -421,14 +418,8 @@ class SweepServeArgs:
         parser.add_argument(
             "--num-runs",
             type=int,
-            default=None,
-            help="Deprecated, please use `--num-trials` instead",
-        )
-        parser.add_argument(
-            "--num-trials",
-            type=int,
             default=3,
-            help="Number of trials per parameter combination.",
+            help="Number of runs per parameter combination.",
         )
         parser.add_argument(
             "--dry-run",
@@ -485,7 +476,7 @@ def run_main(args: SweepServeArgs):
             serve_params=args.serve_params,
             bench_params=args.bench_params,
             output_dir=output_dir,
-            num_trials=args.num_trials,
+            num_runs=args.num_runs,
             dry_run=args.dry_run,
             link_vars=args.link_vars,
         )

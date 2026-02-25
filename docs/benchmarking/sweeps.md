@@ -91,7 +91,7 @@ vllm bench sweep serve \
     In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
 
 !!! note
-    By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of trials by setting `--num-trials`.
+    By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
 
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
