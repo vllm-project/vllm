@@ -292,7 +292,7 @@ def _make_dsl_proposer_for_unit_test(
     proposer.dsl_last_reported_exits = 0
     proposer.dsl_last_reported_generated = 0
     proposer.dsl_last_reported_requested = 0
-    proposer.spec_confidence_threshold = threshold
+    proposer.draft_confidence_threshold = threshold
     return proposer
 
 

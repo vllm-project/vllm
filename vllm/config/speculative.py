@@ -66,7 +66,7 @@ class SpeculativeConfig:
     num_speculative_tokens: int = Field(default=None, gt=0)
     """The number of speculative tokens, if provided. It will default to the
     number in the draft model config if present, otherwise, it is required."""
-    spec_confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
+    draft_confidence_threshold: float = Field(default=0.0, ge=0.0, le=1.0)
     """Dynamic Speculative Length (DSL) confidence threshold for early exit.
     
     When enabled (> 0), stops generating additional speculative tokens if the
@@ -729,10 +729,10 @@ class SpeculativeConfig:
             )
 
         # Note: threshold = 0.0 is valid and disables DSL early exit
-        if self.spec_confidence_threshold < 0:
+        if self.draft_confidence_threshold < 0:
             raise ValueError(
-                "Expected spec_confidence_threshold to be >= 0 "
-                f"({self.spec_confidence_threshold}). Set to 0.0 to disable "
+                "Expected draft_confidence_threshold to be >= 0 "
+                f"({self.draft_confidence_threshold}). Set to 0.0 to disable "
                 "confidence-based early exit."
             )
         if self.draft_model_config:

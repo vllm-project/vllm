@@ -3826,7 +3826,7 @@ class GPUModelRunner(
         if (
             hasattr(self, "drafter")
             and hasattr(self.drafter, "get_dsl_metrics_delta")
-            and self.drafter.spec_confidence_threshold > 0
+            and self.drafter.draft_confidence_threshold > 0
         ):
             (
                 dsl_total_proposals,

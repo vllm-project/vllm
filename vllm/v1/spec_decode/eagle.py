@@ -78,10 +78,10 @@ class SpecDecodeBaseProposer:
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
-        self.spec_confidence_threshold = self.speculative_config.spec_confidence_threshold
+        self.draft_confidence_threshold = self.speculative_config.draft_confidence_threshold
 
         # DSL (Dynamic Speculative Length) metrics tracking
-        # These track early exit behavior when spec_confidence_threshold > 0
+        # These track early exit behavior when draft_confidence_threshold > 0
         self.dsl_total_proposals = 0  # Total number of proposal calls
         self.dsl_early_exits = 0  # Times we exited early
         self.dsl_tokens_generated = 0  # Total draft tokens generated
@@ -453,7 +453,7 @@ class SpecDecodeBaseProposer:
     
     def log_dsl_metrics(self) -> None:
         """Log DSL metrics at INFO level."""
-        if self.spec_confidence_threshold <= 0:
+        if self.draft_confidence_threshold <= 0:
             logger.info("[DSL] Dynamic Speculative Length disabled (threshold=0)")
             return
         
@@ -463,7 +463,7 @@ class SpecDecodeBaseProposer:
             return
         
         logger.info(
-            f"[DSL] Metrics (threshold={self.spec_confidence_threshold:.3f}): "
+            f"[DSL] Metrics (threshold={self.draft_confidence_threshold:.3f}): "
             f"early_exit_rate={metrics['early_exit_rate']:.1%}, "
             f"avg_tokens={metrics['avg_tokens_generated']:.1f}/"
             f"{metrics['avg_tokens_requested']:.1f}, "
@@ -647,7 +647,7 @@ class SpecDecodeBaseProposer:
         # This saves computation while maintaining quality.
         # Policy: Conservative - exits if ANY request in batch is low confidence.
         # Rationale: Synchronous generation requires all requests to proceed together.
-        dsl_enabled = self.spec_confidence_threshold > 0
+        dsl_enabled = self.draft_confidence_threshold > 0
         initial_tokens_requested = self.num_speculative_tokens - 1
         dsl_did_early_exit = False  # Tracks whether early exit fired this proposal
         
@@ -827,7 +827,7 @@ class SpecDecodeBaseProposer:
                 # falls below the threshold. More robust than 'any' under mixed
                 # workloads — a single low-confidence request does not penalise
                 # high-confidence ones.
-                should_exit_gpu = draft_token_ids_probs.mean() < self.spec_confidence_threshold
+                should_exit_gpu = draft_token_ids_probs.mean() < self.draft_confidence_threshold
 
                 if should_exit_gpu.item():
                     self.dsl_early_exits += 1
@@ -836,7 +836,7 @@ class SpecDecodeBaseProposer:
 
                     logger.debug(
                         f"[SpecDecode] Early exit at token {token_index + 1}/{self.num_speculative_tokens - 1}: "
-                        f"confidence below threshold {self.spec_confidence_threshold:.3f}, "
+                        f"confidence below threshold {self.draft_confidence_threshold:.3f}, "
                         f"generated {token_index + 1} tokens instead of {self.num_speculative_tokens - 1}"
                     )
                     break
