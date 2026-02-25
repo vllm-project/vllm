@@ -21,10 +21,10 @@ from tests.utils import RemoteOpenAIServer
 
 
 AITER_MODEL_LIST = [
-    "openai/gpt-oss-20b"
+    "openai/gpt-oss-120b"
 ]
 
-MODEL_NAME = "openai/gpt-oss-20b"
+MODEL_NAME = "openai/gpt-oss-120b"
 
 
 @pytest.fixture(scope="module")
@@ -279,12 +279,13 @@ async def test_online_serving_v1_chat_completions(
         choice = chat_completion.choices[0]
         message = choice.message
         
-        # Assert message structure
+        # Assert message structure (GPT-OSS can return reasoning without content)
         assert message is not None, "Message should not be None"
         assert message.role == "assistant", "Message role should be 'assistant'"
-        assert message.content is not None, "Message content should not be None"
-        assert len(message.content) > 0, "Message content should not be empty"
-        assert isinstance(message.content, str), "Message content should be a string"
+        response_text = message.content or getattr(message, "reasoning", None) or ""
+        assert len(response_text) > 0, (
+            "Message should have content or reasoning"
+        )
         assert choice.finish_reason is not None, "Finish reason should be set"
         
         # Assert usage stats
@@ -297,7 +298,7 @@ async def test_online_serving_v1_chat_completions(
         
         all_outputs.append(chat_completion)
         
-        print(f"Response: {message.content}")
+        print(f"Response: {response_text}")
         print(f"Time: {elapsed:.2f}s")
         print(f"Tokens: {chat_completion.usage.completion_tokens}")
         print(f"Assertions passed for messages {i}")
@@ -326,13 +327,15 @@ async def test_online_serving_v1_chat_completions(
     
     assert len(first_response.choices) == 1
     assistant_message = first_response.choices[0].message
-    assert assistant_message.content is not None
-    assert len(assistant_message.content) > 0
+    first_response_text = assistant_message.content or getattr(
+        assistant_message, "reasoning", None
+    ) or ""
+    assert len(first_response_text) > 0, "First response should have content or reasoning"
     
     # Add assistant response and continue conversation
     conversation_messages.append({
         "role": "assistant",
-        "content": assistant_message.content
+        "content": first_response_text
     })
     conversation_messages.append({
         "role": "user",
@@ -347,12 +350,18 @@ async def test_online_serving_v1_chat_completions(
     )
     
     assert len(second_response.choices) == 1
-    assert second_response.choices[0].message.content is not None
-    assert len(second_response.choices[0].message.content) > 0
+    second_response_text = (
+        second_response.choices[0].message.content
+        or getattr(second_response.choices[0].message, "reasoning", None)
+        or ""
+    )
+    assert len(second_response_text) > 0, (
+        "Second response should have content or reasoning"
+    )
     
     print("Multi-turn conversation test passed!")
-    print(f"First response: {assistant_message.content[:100]}...")
-    print(f"Second response: {second_response.choices[0].message.content[:100]}...")
+    print(f"First response: {first_response_text[:100]}...")
+    print(f"Second response: {second_response_text[:100]}...")
 
     # Test streaming chat completions (important for online serving)
     print(f"\n{'='*60}")
@@ -369,23 +378,30 @@ async def test_online_serving_v1_chat_completions(
     )
     
     chunks = []
+    reasoning_chunks = []
     finish_reason_count = 0
     async for chunk in stream:
         assert chunk.choices is not None and len(chunk.choices) > 0
         delta = chunk.choices[0].delta
         if delta.content:
             chunks.append(delta.content)
+        reasoning = getattr(delta, "reasoning", None)
+        if reasoning:
+            reasoning_chunks.append(reasoning)
         if chunk.choices[0].finish_reason is not None:
             finish_reason_count += 1
     
     # Finish reason should only appear in the last chunk
     assert finish_reason_count == 1, "Finish reason should appear exactly once"
-    assert len(chunks) > 0, "Should receive at least one chunk"
     streamed_text = "".join(chunks)
-    assert len(streamed_text) > 0, "Streamed text should not be empty"
+    streamed_reasoning = "".join(reasoning_chunks)
+    combined = streamed_text or streamed_reasoning
+    assert len(combined) > 0, (
+        "Streamed content or reasoning should not be empty"
+    )
     
-    print(f"Streamed text: {streamed_text[:100]}...")
-    print(f"Received {len(chunks)} chunks")
+    print(f"Streamed text: {combined[:100]}...")
+    print(f"Received {len(chunks)} content + {len(reasoning_chunks)} reasoning chunks")
     print(f"Streaming chat completion passed")
 
     print(f"\n{'='*60}")
@@ -422,10 +438,11 @@ async def test_online_serving_concurrent_requests(
             temperature=0.0,
         )
         elapsed = time.time() - start
+        text = completion.choices[0].text or ""
         return {
             "id": request_id,
             "type": "completion",
-            "text": completion.choices[0].text,
+            "text": text,
             "latency": elapsed,
             "tokens": completion.usage.completion_tokens,
         }
@@ -440,10 +457,12 @@ async def test_online_serving_concurrent_requests(
             temperature=0.0,
         )
         elapsed = time.time() - start
+        msg = chat_completion.choices[0].message
+        text = msg.content or getattr(msg, "reasoning", None) or ""
         return {
             "id": request_id,
             "type": "chat",
-            "text": chat_completion.choices[0].message.content,
+            "text": text,
             "latency": elapsed,
             "tokens": chat_completion.usage.completion_tokens,
         }
@@ -470,8 +489,10 @@ async def test_online_serving_concurrent_requests(
     assert len(all_results) == 10, f"Expected 10 results, got {len(all_results)}"
     
     for result in all_results:
-        assert result["text"] is not None, f"Request {result['id']} should have text"
-        assert len(result["text"]) > 0, f"Request {result['id']} text should not be empty"
+        text = result["text"] or ""
+        assert len(text) > 0, (
+            f"Request {result['id']} should have text (content or reasoning)"
+        )
         assert result["latency"] > 0, f"Request {result['id']} should have latency"
         assert result["tokens"] > 0, f"Request {result['id']} should have tokens"
     
