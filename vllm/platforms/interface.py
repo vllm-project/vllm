@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import VllmConfig
-    from vllm.inputs import ProcessorInputs, PromptType
+    from vllm.inputs import ProcessorInputs
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -568,9 +568,8 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        prompt: "PromptType | ProcessorInputs",
-        params: "SamplingParams | PoolingParams",
         processed_inputs: "ProcessorInputs",
+        params: "SamplingParams | PoolingParams",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
@@ -692,6 +691,16 @@ class Platform:
         Set some additional forward context for the current platform if needs.
         """
         return {}
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """
+        Get the number of compute units for the current platform.
+        (NVIDIA SM / AMD CU / Intel EU)
+        """
+        raise NotImplementedError(
+            "num_compute_units is not implemented for the current platform."
+        )
 
 
 class UnspecifiedPlatform(Platform):

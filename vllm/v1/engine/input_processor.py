@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import time
+import warnings
 from collections.abc import Mapping
 from typing import Any, Literal
 
@@ -25,9 +26,10 @@ from vllm.multimodal.utils import argsort_mm_positions
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer, renderer_from_config
 from vllm.sampling_params import SamplingParams
-from vllm.tasks import POOLING_TASKS, SupportedTask
+from vllm.tasks import GENERATION_TASKS, POOLING_TASKS, SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.utils import length_from_prompt_token_ids_or_embeds, random_uuid
+from vllm.utils.func_utils import supports_kw
 from vllm.utils.jsontree import json_iter_leaves
 from vllm.v1.engine import EngineCoreRequest
 
@@ -72,6 +74,33 @@ class InputProcessor:
             mm_registry=mm_registry,
         )
 
+        from vllm.platforms import current_platform
+
+        platform_validate_request = current_platform.validate_request
+        if supports_kw(platform_validate_request, "prompt"):
+            logger.warning_once(
+                "The signature of Platform.validate_request has changed from "
+                "`(cls, prompt, params, processed_inputs) -> None` to "
+                "`(cls, processed_inputs, params) -> None`. The old signature "
+                "will no longer be supported starting from v0.18."
+            )
+
+            orig_validate_request = platform_validate_request
+
+            def compat_validate_request(
+                processed_inputs: ProcessorInputs,
+                params: SamplingParams | PoolingParams,
+            ):
+                return orig_validate_request(
+                    processed_inputs,
+                    params,
+                    processed_inputs,  # type: ignore
+                )  # type: ignore
+
+            platform_validate_request = compat_validate_request
+
+        self._platform_validate_request = platform_validate_request
+
     @property
     def tokenizer(self) -> TokenizerLike | None:
         return self.renderer.tokenizer
@@ -82,12 +111,26 @@ class InputProcessor:
     def _validate_params(
         self,
         params: SamplingParams | PoolingParams,
-        # TODO: Validate generation tasks as well once `supported_tasks`
-        # is passed to all `process_inputs` calls
-        supported_tasks: tuple[SupportedTask, ...] | None,
-    ):
+        supported_tasks: tuple[SupportedTask, ...],
+    ) -> None:
         """Raise `ValueError` if SamplingParams or PoolingParams is not valid."""
+        if params.truncate_prompt_tokens is not None:
+            params_type = type(params).__name__
+            warnings.warn(
+                f"The `truncate_prompt_tokens` parameter in `{params_type}` "
+                "is deprecated and will be removed in v0.17. "
+                "Please pass it via `tokenization_kwargs` instead.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
         if isinstance(params, SamplingParams):
+            supported_generation_tasks = [
+                task for task in supported_tasks if task in GENERATION_TASKS
+            ]
+            if not supported_generation_tasks:
+                raise ValueError("This model does not support generation")
+
             params.verify(
                 self.model_config,
                 self.speculative_config,
@@ -95,17 +138,13 @@ class InputProcessor:
                 self.tokenizer,
             )
         elif isinstance(params, PoolingParams):
-            if supported_tasks is None:
-                raise RuntimeError("`supported_tasks` must be passed for pooling")
-
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
             ]
+            if not supported_pooling_tasks:
+                raise ValueError("This model does not support pooling")
 
             if params.task is None:
-                if not supported_pooling_tasks:
-                    raise ValueError("Pooling tasks are not supported")
-
                 if "token_embed" in supported_pooling_tasks:
                     params.task = "token_embed"
                 elif "token_classify" in supported_pooling_tasks:
@@ -188,17 +227,17 @@ class InputProcessor:
         request_id: str,
         prompt: PromptType | ProcessorInputs,
         params: SamplingParams | PoolingParams,
+        supported_tasks: tuple[SupportedTask, ...],
         arrival_time: float | None = None,
         lora_request: LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         priority: int = 0,
         data_parallel_rank: int | None = None,
-        supported_tasks: tuple[SupportedTask, ...] | None = None,
         resumable: bool = False,
     ) -> EngineCoreRequest:
-        self._validate_lora(lora_request)
         self._validate_params(params, supported_tasks)
+        self._validate_lora(lora_request)
 
         parallel_config = self.vllm_config.parallel_config
         dp_size = parallel_config.data_parallel_size
@@ -211,11 +250,24 @@ class InputProcessor:
             )
 
         if isinstance(prompt, dict) and "type" in prompt:
+            if tokenization_kwargs:
+                logger.warning_once(
+                    "Passing tokenization_kwargs to InputProcessor is deprecated "
+                    "and will be removed in v0.18. You should instead pass "
+                    "them to Renderer.render_cmpl() or Renderer.render_chat()."
+                )
+
             if arrival_time is None:
                 arrival_time = prompt.get("arrival_time", time.time())  # type: ignore[assignment]
 
             processed_inputs: ProcessorInputs = prompt  # type: ignore[assignment]
         else:
+            logger.warning_once(
+                "Passing raw prompts to InputProcessor is deprecated "
+                "and will be removed in v0.18. You should instead pass "
+                "the outputs of Renderer.render_cmpl() or Renderer.render_chat()."
+            )
+
             if arrival_time is None:
                 arrival_time = time.time()
 
@@ -224,13 +276,7 @@ class InputProcessor:
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        from vllm.platforms import current_platform
-
-        current_platform.validate_request(
-            prompt=prompt,
-            params=params,
-            processed_inputs=processed_inputs,
-        )
+        self._platform_validate_request(processed_inputs, params)
 
         encoder_inputs, decoder_inputs = split_enc_dec_inputs(processed_inputs)
         self._validate_model_inputs(encoder_inputs, decoder_inputs)
