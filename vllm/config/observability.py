@@ -150,3 +150,10 @@ class ObservabilityConfig:
                 "collect_detailed_traces requires `--otlp-traces-endpoint` to be set."
             )
         return self
+
+    @model_validator(mode="after")
+    def _apply_env_layerwise_nvtx_override(self):
+        from vllm import envs
+        if envs.VLLM_ENABLE_LAYERWISE_NVTX_TRACING:
+            self.enable_layerwise_nvtx_tracing = True
+        return self

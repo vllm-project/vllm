@@ -27,6 +27,10 @@
 # source_file_dependencies(list): the list of prefixes to opt-in the test for, if empty, the test will always run.
 # autorun_on_main (bool): default to false, if true, the test will run automatically when commit is pushed to main branch.
 
+# Profiling with nsys: wrap commands with .buildkite/scripts/run-with-profiling.sh
+# and trigger with VLLM_ENABLE_PROFILING=1. Use NSYS_PROFILED_TESTS (semicolon-separated
+# step labels) to control which steps are profiled.
+
 # When adding a test
 # - If the test belongs to an existing group, add it there
 # - If the test is short, add to any existing step

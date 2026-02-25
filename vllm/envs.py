@@ -212,6 +212,7 @@ if TYPE_CHECKING:
     VLLM_TOOL_JSON_ERROR_AUTOMATIC_RETRY: bool = False
     VLLM_CUSTOM_SCOPES_FOR_PROFILING: bool = False
     VLLM_NVTX_SCOPES_FOR_PROFILING: bool = False
+    VLLM_ENABLE_LAYERWISE_NVTX_TRACING: bool = False
     VLLM_KV_EVENTS_USE_INT_BLOCK_HASHES: bool = True
     VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME: str = "VLLM_OBJECT_STORAGE_SHM_BUFFER"
     VLLM_DEEPEP_BUFFER_SIZE_MB: int = 1024
@@ -1471,6 +1472,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Add optional nvtx scopes for profiling, disable to avoid overheads
     "VLLM_NVTX_SCOPES_FOR_PROFILING": lambda: bool(
         int(os.getenv("VLLM_NVTX_SCOPES_FOR_PROFILING", "0"))
+    ),
+    # Enable layerwise NVTX tracing via env var, disable to avoid overheads
+    "VLLM_ENABLE_LAYERWISE_NVTX_TRACING": lambda: bool(
+        int(os.getenv("VLLM_ENABLE_LAYERWISE_NVTX_TRACING", "0"))
     ),
     # Represent block hashes in KV cache events as 64-bit integers instead of
     # raw bytes. Defaults to True for backward compatibility.
