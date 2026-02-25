@@ -2,7 +2,9 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
+import copy
 import signal
+import socket
 
 import uvloop
 
@@ -10,11 +12,13 @@ import vllm
 import vllm.envs as envs
 from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.openai.api_server import (
+    create_server_socket,
     run_server,
     run_server_worker,
     setup_server,
 )
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
+from vllm.entrypoints.openai.frontend import main_frontend
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext
@@ -26,7 +30,11 @@ from vllm.v1.engine.utils import CoreEngineProcManager, launch_core_engines
 from vllm.v1.executor import Executor
 from vllm.v1.executor.multiproc_executor import MultiprocExecutor
 from vllm.v1.metrics.prometheus import setup_multiprocess_prometheus
-from vllm.v1.utils import APIServerProcessManager, wait_for_completion_or_failure
+from vllm.v1.utils import (
+    APIServerProcessManager,
+    shutdown,
+    wait_for_completion_or_failure,
+)
 
 logger = init_logger(__name__)
 
@@ -105,7 +113,10 @@ class ServeSubcommand(CLISubcommand):
         if args.api_server_count < 1:
             run_headless(args)
         elif args.api_server_count > 1:
-            run_multi_api_server(args)
+            if args.multi_server_frontend:
+                run_multi_api_server_with_frontend(args)
+            else:
+                run_multi_api_server(args)
         else:
             # Single API server (this process).
             args.api_server_count = None
@@ -301,3 +312,231 @@ def run_api_server_worker_proc(
     uvloop.run(
         run_server_worker(listen_address, sock, args, client_config, **uvicorn_kwargs)
     )
+
+
+def run_multi_api_server_with_frontend(args: argparse.Namespace) -> None:
+    """Launch N backend vLLM API servers each on their own port, plus a
+    lightweight frontend process on the main port (``args.port``) that:
+
+      1. Exposes ``/health`` by aggregating the ``/health`` endpoints of all
+         N backends.  K8s liveness and startup probes should be aimed at
+         the frontend port so that the pod is only considered live once every
+         backend has finished loading the model.
+
+      2. Monitors the N backend processes and triggers a pod-level shutdown
+         (exits with code 1) if any backend crashes, ensuring K8s will
+         restart the pod rather than leaving it in a partially-healthy state.
+
+    Port layout
+    -----------
+    * Frontend  →  ``args.port``          (the K8s-facing port)
+    * Backend i →  ``args.port + i + 1``  (internal to the pod)
+
+    This is different from the default multi-server mode (``--api-server-count
+    > 1`` without ``--multi-server-frontend``) where all N servers share the
+    same port via ``SO_REUSEPORT``.  Here each server gets its own dedicated
+    port and only the frontend is externally visible.
+    """
+    assert not args.headless
+    num_api_servers: int = args.api_server_count
+    assert num_api_servers > 1, (
+        "run_multi_api_server_with_frontend requires api_server_count > 1"
+    )
+
+    if num_api_servers > 1:
+        setup_multiprocess_prometheus()
+
+    host = args.host or ""
+
+    # ------------------------------------------------------------------
+    # Pre-bind all sockets in the parent process to avoid race conditions
+    # with Ray / torch.distributed (same pattern as the existing code).
+    # ------------------------------------------------------------------
+
+    # Frontend socket: the pod-level port that K8s probes.
+    frontend_port = args.port
+    frontend_sock = create_server_socket((host, frontend_port))
+    logger.info("Frontend will listen on %s:%d", host or "0.0.0.0", frontend_port)
+
+    # Backend sockets: one dedicated port per backend.
+    backend_base_port = args.port + 1
+    backend_socks: list[socket.socket] = []
+    backend_ports: list[int] = []
+    for i in range(num_api_servers):
+        bp = backend_base_port + i
+        backend_socks.append(create_server_socket((host, bp)))
+        backend_ports.append(bp)
+    logger.info(
+        "Backends will listen on ports %s",
+        ", ".join(str(p) for p in backend_ports),
+    )
+
+    # ------------------------------------------------------------------
+    # Build VllmConfig (needed for engine launch + executor selection).
+    # ------------------------------------------------------------------
+    engine_args = vllm.AsyncEngineArgs.from_cli_args(args)
+    engine_args._api_process_count = num_api_servers
+    engine_args._api_process_rank = -1
+
+    usage_context = UsageContext.OPENAI_API_SERVER
+    vllm_config = engine_args.create_engine_config(usage_context=usage_context)
+
+    if num_api_servers > 1 and envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING:
+        raise ValueError(
+            "VLLM_ALLOW_RUNTIME_LORA_UPDATING cannot be used with api_server_count > 1"
+        )
+
+    executor_class = Executor.get_class(vllm_config)
+    log_stats = not engine_args.disable_log_stats
+
+    parallel_config = vllm_config.parallel_config
+    dp_rank = parallel_config.data_parallel_rank
+    assert parallel_config.local_engines_only or dp_rank == 0
+
+    # ------------------------------------------------------------------
+    # Spawn core engine(s) and then the per-port backend API servers.
+    # ------------------------------------------------------------------
+    api_server_manager: APIServerProcessManager | None = None
+
+    # local_engine_manager / coordinator / addresses are set inside the
+    # `with` block; capture them so the finally clause can clean up.
+    local_engine_manager = None
+    coordinator = None
+    addresses = None
+
+    with launch_core_engines(
+        vllm_config, executor_class, log_stats, num_api_servers
+    ) as (_lem, _coord, _addrs):
+        local_engine_manager = _lem
+        coordinator = _coord
+        addresses = _addrs
+
+        stats_addr = coordinator.get_stats_publish_address() if coordinator else None
+
+        if dp_rank == 0 or not parallel_config.local_engines_only:
+            api_server_manager = _start_per_port_backends(
+                args=args,
+                backend_ports=backend_ports,
+                backend_socks=backend_socks,
+                addresses=addresses,
+                num_api_servers=num_api_servers,
+                stats_update_address=stats_addr,
+            )
+
+    # For external/hybrid DP where dp_rank > 0 we need to wait until the
+    # local engine has started before we can get the stats address.
+    if api_server_manager is None:
+        assert addresses is not None
+        api_server_manager = _start_per_port_backends(
+            args=args,
+            backend_ports=backend_ports,
+            backend_socks=backend_socks,
+            addresses=addresses,
+            num_api_servers=num_api_servers,
+            stats_update_address=addresses.frontend_stats_publish_address,
+        )
+
+    # ------------------------------------------------------------------
+    # Run the frontend in this (main) process.
+    # Blocks until shutdown (clean or crash-triggered).
+    # ------------------------------------------------------------------
+    backend_urls = [f"http://127.0.0.1:{p}" for p in backend_ports]
+    try:
+        main_frontend(
+            host=args.host or "0.0.0.0",
+            port=frontend_port,
+            sock=frontend_sock,
+            backend_urls=backend_urls,
+            processes=api_server_manager.processes,
+            log_level=args.uvicorn_log_level,
+        )
+    finally:
+        # Always clean up backends on exit.
+        frontend_sock.close()
+        for s in backend_socks:
+            s.close()
+        api_server_manager.close()
+        if local_engine_manager is not None:
+            local_engine_manager.close()
+        if coordinator is not None:
+            coordinator.close()
+
+
+def _start_per_port_backends(
+    args: argparse.Namespace,
+    backend_ports: list[int],
+    backend_socks: list[socket.socket],
+    addresses,
+    num_api_servers: int,
+    stats_update_address: str | None,
+) -> APIServerProcessManager:
+    """Spawn N backend API server processes, each on its own port.
+
+    We reuse :class:`~vllm.v1.utils.APIServerProcessManager` for process
+    lifecycle management, but each backend gets a *unique* socket/port
+    instead of sharing one via ``SO_REUSEPORT``.
+
+    Args:
+        args: Parsed CLI arguments (``port`` will be overridden per-backend).
+        backend_ports: Port numbers for each backend (len == num_api_servers).
+        backend_socks: Pre-bound sockets for each backend.
+        addresses: ZMQ addresses returned by :func:`launch_core_engines`.
+        num_api_servers: Total number of backend servers to spawn.
+        stats_update_address: Optional ZMQ stats address for DP coordinator.
+
+    Returns:
+        An :class:`~vllm.v1.utils.APIServerProcessManager` whose
+        ``processes`` list holds the N spawned backend processes.
+    """
+    from multiprocessing import get_context as mp_get_context
+
+    spawn_context = mp_get_context("spawn")
+    processes = []
+
+    for i, in_addr, out_addr in zip(
+        range(num_api_servers), addresses.inputs, addresses.outputs
+    ):
+        backend_port = backend_ports[i]
+        backend_sock = backend_socks[i]
+
+        # Give each backend its own port so it doesn't clash with the frontend
+        # or the other backends.
+        backend_args = copy.copy(args)
+        backend_args.port = backend_port
+
+        client_config: dict = {
+            "input_address": in_addr,
+            "output_address": out_addr,
+            "client_count": num_api_servers,
+            "client_index": i,
+        }
+        if stats_update_address is not None:
+            client_config["stats_update_address"] = stats_update_address
+
+        listen_address = f"http://{backend_args.host or '0.0.0.0'}:{backend_port}"
+
+        proc = spawn_context.Process(
+            target=run_api_server_worker_proc,
+            name=f"ApiServer_{i}",
+            args=(listen_address, backend_sock, backend_args, client_config),
+        )
+        proc.start()
+        processes.append(proc)
+        logger.info(
+            "Started backend API server %d (PID %d) on port %d",
+            i,
+            proc.pid,
+            backend_port,
+        )
+
+    logger.info("Started %d backend API server processes", len(processes))
+
+    # Wrap in APIServerProcessManager for shutdown / finalization.
+    # We construct it manually here because its __init__ creates *and starts*
+    # processes; we've already started them above.
+    import weakref
+
+    manager = object.__new__(APIServerProcessManager)
+    manager.processes = processes
+    manager._finalizer = weakref.finalize(manager, shutdown, processes)
+    return manager
