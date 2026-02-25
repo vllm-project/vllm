@@ -84,6 +84,7 @@ from .interfaces import (
     IsHybrid,
     MixtureOfExperts,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsPP,
 )
 from .utils import (
@@ -960,6 +961,70 @@ class Qwen3NextDecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+def _interleave_qkvz(
+    config,
+    qkv: "torch.Tensor",
+    z: "torch.Tensor",
+) -> "torch.Tensor":
+    """Interleave block-format checkpoint in_proj_qkv + in_proj_z into the
+    head-interleaved format expected by vLLM's in_proj_qkvz.
+
+    Checkpoint block format:
+        in_proj_qkv: [key_dim + key_dim + value_dim, hidden]
+                   = [all_q, all_k, all_v]
+        in_proj_z:  [value_dim, hidden]
+    vLLM head-interleaved format (required by fix_query_key_value_ordering):
+        in_proj_qkvz: [num_k_heads * (head_k_dim + head_k_dim +
+                       vk_ratio*head_v_dim + vk_ratio*head_v_dim), hidden]
+                    = [q_h0, k_h0, v_h0, z_h0, q_h1, k_h1, v_h1, z_h1, ...]
+    """
+    num_k_heads = config.linear_num_key_heads
+    head_k_dim = config.linear_key_head_dim
+    num_v_heads = config.linear_num_value_heads
+    head_v_dim = config.linear_value_head_dim
+    vk_ratio = num_v_heads // num_k_heads
+    key_dim = num_k_heads * head_k_dim    # 2048
+    h = qkv.shape[1]                      # hidden_size
+
+    q_block = qkv[:key_dim]               # [key_dim, h]
+    k_block = qkv[key_dim:2 * key_dim]    # [key_dim, h]
+    v_block = qkv[2 * key_dim:]           # [value_dim, h]
+
+    q_h = q_block.view(num_k_heads, head_k_dim, h)
+    k_h = k_block.view(num_k_heads, head_k_dim, h)
+    v_h = v_block.view(num_k_heads, vk_ratio * head_v_dim, h)
+    z_h = z.view(num_k_heads, vk_ratio * head_v_dim, h)
+
+    # cat along head-internal dim → [num_k_heads, q+k+v+z, h] → flatten
+    return torch.cat([q_h, k_h, v_h, z_h], dim=1).reshape(-1, h)
+
+
+def _interleave_ba(
+    config,
+    b: "torch.Tensor",
+    a: "torch.Tensor",
+) -> "torch.Tensor":
+    """Interleave block-format in_proj_b + in_proj_a into the
+    head-interleaved format expected by vLLM's in_proj_ba.
+
+    Checkpoint:
+        in_proj_b: [num_v_heads, hidden]
+        in_proj_a: [num_v_heads, hidden]
+    vLLM head-interleaved (fix_query_key_value_ordering view+split [b,a]):
+        in_proj_ba: [num_k_heads * vk_ratio * 2, hidden]
+                  = [b_h0, a_h0, b_h1, a_h1, ...]  per k-head
+    """
+    num_k_heads = config.linear_num_key_heads
+    num_v_heads = config.linear_num_value_heads
+    vk_ratio = num_v_heads // num_k_heads
+    h = b.shape[1]
+
+    b_h = b.view(num_k_heads, vk_ratio, h)
+    a_h = a.view(num_k_heads, vk_ratio, h)
+
+    return torch.cat([b_h, a_h], dim=1).reshape(-1, h)
+
+
 @support_torch_compile
 class Qwen3NextModel(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1059,12 +1124,132 @@ class Qwen3NextModel(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         expert_params_mapping = self.get_expert_mapping()
+        # Buffer for Qwen3.5-MoE split linear_attn projections that need
+        # to be concatenated before loading (qkv+z → qkvz, b+a → ba).
+        _split_attn_buf: dict[str, dict[str, torch.Tensor]] = {}
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
 
+            # Qwen3.5-MoE (ForConditionalGeneration) stores LLM weights under
+            # "model.language_model.*"; remap to "model.*" so they match the
+            # Qwen3NextForCausalLM parameter names.  AutoWeightsLoader strips
+            # the outer "model." prefix before calling this method, so we only
+            # need to strip the "language_model." infix.
+            if "language_model." in name:
+                name = name.replace("language_model.", "")
+
+            # Skip vision encoder weights (not part of LLM).
+            if name.startswith("visual."):
+                continue
+
             if name.startswith("mtp."):
                 continue
+
+            # --- Qwen3.5-MoE weight format adaptations ---
+            # Bulk expert tensors: checkpoint stores all experts stacked as
+            # [num_experts, intermediate, hidden]; vLLM FusedMoE expects
+            # individual expert weights loaded via weight_loader.
+            if "mlp.experts.gate_up_proj" in name:
+                w13_n = name.replace("mlp.experts.gate_up_proj",
+                                     "mlp.experts.w13_weight")
+                if w13_n in params_dict:
+                    param = params_dict[w13_n]
+                    wl = param.weight_loader
+                    n_exp = loaded_weight.shape[0]
+                    half = loaded_weight.shape[1] // 2
+                    for eid in range(n_exp):
+                        wl(param, loaded_weight[eid, :half].contiguous(),
+                           w13_n, shard_id="w1", expert_id=eid)
+                        wl(param, loaded_weight[eid, half:].contiguous(),
+                           w13_n, shard_id="w3", expert_id=eid)
+                    loaded_params.add(w13_n)
+                continue
+
+            if "mlp.experts.down_proj" in name:
+                w2_n = name.replace("mlp.experts.down_proj",
+                                    "mlp.experts.w2_weight")
+                if w2_n in params_dict:
+                    param = params_dict[w2_n]
+                    wl = param.weight_loader
+                    n_exp = loaded_weight.shape[0]
+                    for eid in range(n_exp):
+                        wl(param, loaded_weight[eid].contiguous(),
+                           w2_n, shard_id="w2", expert_id=eid)
+                    loaded_params.add(w2_n)
+                continue
+
+            # Split linear_attn projections: checkpoint stores qkv and z
+            # separately; vLLM expects them fused as in_proj_qkvz/in_proj_ba.
+            #
+            # IMPORTANT: The checkpoint stores in_proj_qkv in "block" format:
+            #   [all_q (key_dim), all_k (key_dim), all_v (value_dim)]
+            # But vLLM's in_proj_qkvz uses "head-interleaved" format required
+            # by fix_query_key_value_ordering's view+split:
+            #   [q_h0, k_h0, v_h0, z_h0, q_h1, k_h1, v_h1, z_h1, ...]
+            # So we must interleave per k-head, not simply concatenate.
+            if "linear_attn.in_proj_qkv.weight" in name:
+                buf_key = name.replace(".in_proj_qkv.weight", "")
+                _split_attn_buf.setdefault(buf_key, {})["qkv"] = loaded_weight
+                if "z" in _split_attn_buf[buf_key]:
+                    qkv = _split_attn_buf[buf_key].pop("qkv")
+                    z = _split_attn_buf[buf_key].pop("z")
+                    combined = _interleave_qkvz(self.config, qkv, z)
+                    qkvz_n = name.replace("in_proj_qkv.weight",
+                                          "in_proj_qkvz.weight")
+                    if qkvz_n in params_dict:
+                        p = params_dict[qkvz_n]
+                        getattr(p, "weight_loader", default_weight_loader)(
+                            p, combined)
+                        loaded_params.add(qkvz_n)
+                continue
+
+            if "linear_attn.in_proj_z.weight" in name:
+                buf_key = name.replace(".in_proj_z.weight", "")
+                _split_attn_buf.setdefault(buf_key, {})["z"] = loaded_weight
+                if "qkv" in _split_attn_buf[buf_key]:
+                    qkv = _split_attn_buf[buf_key].pop("qkv")
+                    z = _split_attn_buf[buf_key].pop("z")
+                    combined = _interleave_qkvz(self.config, qkv, z)
+                    qkvz_n = name.replace("in_proj_z.weight",
+                                          "in_proj_qkvz.weight")
+                    if qkvz_n in params_dict:
+                        p = params_dict[qkvz_n]
+                        getattr(p, "weight_loader", default_weight_loader)(
+                            p, combined)
+                        loaded_params.add(qkvz_n)
+                continue
+
+            if "linear_attn.in_proj_b.weight" in name:
+                buf_key = name.replace(".in_proj_b.weight", "")
+                _split_attn_buf.setdefault(buf_key, {})["b"] = loaded_weight
+                if "a" in _split_attn_buf[buf_key]:
+                    b = _split_attn_buf[buf_key].pop("b")
+                    a = _split_attn_buf[buf_key].pop("a")
+                    combined = _interleave_ba(self.config, b, a)
+                    ba_n = name.replace("in_proj_b.weight", "in_proj_ba.weight")
+                    if ba_n in params_dict:
+                        p = params_dict[ba_n]
+                        getattr(p, "weight_loader", default_weight_loader)(
+                            p, combined)
+                        loaded_params.add(ba_n)
+                continue
+
+            if "linear_attn.in_proj_a.weight" in name:
+                buf_key = name.replace(".in_proj_a.weight", "")
+                _split_attn_buf.setdefault(buf_key, {})["a"] = loaded_weight
+                if "b" in _split_attn_buf[buf_key]:
+                    b = _split_attn_buf[buf_key].pop("b")
+                    a = _split_attn_buf[buf_key].pop("a")
+                    combined = _interleave_ba(self.config, b, a)
+                    ba_n = name.replace("in_proj_a.weight", "in_proj_ba.weight")
+                    if ba_n in params_dict:
+                        p = params_dict[ba_n]
+                        getattr(p, "weight_loader", default_weight_loader)(
+                            p, combined)
+                        loaded_params.add(ba_n)
+                continue
+            # --- End Qwen3.5-MoE weight format adaptations ---
 
             # Remapping the name of FP8 kv-scale.
             if name.endswith("scale"):
@@ -1187,6 +1372,7 @@ class Qwen3NextForCausalLM(
     nn.Module,
     HasInnerState,
     SupportsLoRA,
+    SupportsMRoPE,
     SupportsPP,
     QwenNextMixtureOfExperts,
     IsHybrid,
@@ -1291,6 +1477,22 @@ class Qwen3NextForCausalLM(
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
+
+    def get_mrope_input_positions(
+        self,
+        input_tokens: list[int],
+        mm_features: list,
+    ) -> tuple[torch.Tensor, int]:
+        """M-RoPE positions for text-only inference.
+
+        For text tokens, all three M-RoPE dimensions (temporal, height, width)
+        use the same sequential position index, which is equivalent to standard
+        RoPE but compatible with models trained with mrope_section.
+        """
+        seq_len = len(input_tokens)
+        positions = torch.arange(seq_len, dtype=torch.long)
+        llm_positions = positions.unsqueeze(0).expand(3, -1)  # [3, seq_len]
+        return llm_positions, 0
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
