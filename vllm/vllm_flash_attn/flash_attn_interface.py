@@ -6,8 +6,6 @@
 
 import torch
 
-from vllm.platforms import current_platform
-
 # isort: off
 # We need to import the CUDA kernels after importing torch
 # Use relative import to support build-from-source installation in vLLM
@@ -53,6 +51,8 @@ DEFAULT_FA_VERSION = 2
 def _is_fa2_supported() -> tuple[bool, str | None]:
     if not FA2_AVAILABLE:
         return False, f"FA2 is unavailable due to: {FA2_UNAVAILABLE_REASON}"
+    from vllm.platforms import current_platform
+
     if not current_platform.has_device_capability(80):
         return False, "FA2 is only supported on devices with compute capability >= 8"
     return True, None
@@ -61,6 +61,8 @@ def _is_fa2_supported() -> tuple[bool, str | None]:
 def _is_fa3_supported() -> tuple[bool, str | None]:
     if not FA3_AVAILABLE:
         return False, f"FA3 is unavailable due to: {FA3_UNAVAILABLE_REASON}"
+    from vllm.platforms import current_platform
+
     if not current_platform.is_device_capability_family(90):
         return False, "FA3 is only supported on devices with compute capability 9.x"
     return True, None
@@ -69,6 +71,8 @@ def _is_fa3_supported() -> tuple[bool, str | None]:
 def _is_fa4_supported() -> tuple[bool, str | None]:
     if not FA4_AVAILABLE:
         return False, f"FA4 is unavailable due to: {FA4_UNAVAILABLE_REASON}"
+    from vllm.platforms import current_platform
+
     if not (
         current_platform.is_device_capability_family(90)
         or current_platform.is_device_capability_family(100)
@@ -362,6 +366,8 @@ def flash_attn_varlen_func(
     elif fa_version == 4:
         assert alibi_slopes is None, "Alibi is not supported in FA4"
         # FA4 on SM90 doesn't support paged KV; SM100+ does
+        from vllm.platforms import current_platform
+
         if block_table is not None and current_platform.is_device_capability_family(90):
             raise NotImplementedError(
                 "FA4 with paged KV is not supported on SM90 (Hopper). "
