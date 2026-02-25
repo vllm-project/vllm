@@ -3139,7 +3139,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
 
-  - label: Attention Benchmarks Smoke Test (B200/MI355)
+- label: Attention Benchmarks Smoke Test (B200/MI355)
   device: b200
   mirror_hardwares: [amdexperimental, amdmi355]
   agent_pool: mi355_2
