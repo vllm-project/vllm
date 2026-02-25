@@ -1961,12 +1961,6 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return UnquantizedLinearMethod()
             return None
 
-        # Legacy vision exclusion
-        if "vision_tower" in prefix or "vision_model" in prefix:
-            if isinstance(layer, LinearBase):
-                return UnquantizedLinearMethod()
-            return None
-
         quant_algo = self._resolve_quant_algo(prefix)
 
         if isinstance(layer, LinearBase):
