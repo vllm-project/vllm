@@ -747,6 +747,12 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=False,
         help="Use vLLM async engine rather than LLM class.",
     )
+    parser.add_argument(
+        "--disable-frontend-multiprocessing",
+        action="store_true",
+        default=False,
+        help="Disable decoupled async engine frontend.",
+    )
 
     parser.add_argument(
         "--disable-detokenize",
