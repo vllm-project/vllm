@@ -304,8 +304,10 @@ class DefaultModelLoader(BaseModelLoader):
         if loaded_weights is not None:
             for name, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
-                # ignore kv_cache scale, which can be missing in checkpoints
-                if isinstance(quant_method, BaseKVCacheMethod):
+                has_online_quant = getattr(quant_method, "uses_meta_device", False)
+                # ignore kv_cache scale and online quant scale,
+                # which can be missing in checkpoints
+                if isinstance(quant_method, BaseKVCacheMethod) or has_online_quant:
                     for param_name, _ in module.named_parameters():
                         full_name = f"{name}.{param_name}" if name else param_name
                         loaded_weights.add(full_name)
