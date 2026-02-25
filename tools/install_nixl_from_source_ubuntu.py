@@ -139,7 +139,8 @@ def build_and_install_prerequisites(args):
     if not os.path.exists(UCX_DIR):
         run_command(["git", "clone", UCX_REPO_URL, UCX_DIR])
     ucx_source_path = os.path.abspath(UCX_DIR)
-    run_command(["git", "checkout", "v1.19.x"], cwd=ucx_source_path)
+    # Pin UCX to commit e5d9887 for XPU GDR support until a release includes it.
+    run_command(["git", "checkout", "e5d9887"], cwd=ucx_source_path)
     run_command(["./autogen.sh"], cwd=ucx_source_path)
     configure_command = [
         "./configure",
@@ -152,7 +153,7 @@ def build_and_install_prerequisites(args):
         "--enable-devel-headers",
         "--with-verbs",
         "--enable-mt",
-        "--with-ze=no",
+        "--with-ze=yes",
     ]
     run_command(configure_command, cwd=ucx_source_path)
     run_command(["make", "-j", str(os.cpu_count() or 1)], cwd=ucx_source_path)
