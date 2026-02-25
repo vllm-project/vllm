@@ -3,6 +3,7 @@
 
 import torch
 
+from vllm.v1.core.kv_cache_utils import DRAFT_MODEL_PREFIX
 from vllm.v1.worker.utils import bind_kv_cache
 
 
@@ -63,8 +64,8 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
     layer_names = [
         "model.layers.0.attn",
         "model.layers.1.attn",
-        "draft_model.layers.0.attn",
-        "draft_model.layers.1.attn",
+        f"{DRAFT_MODEL_PREFIX}.layers.0.attn",
+        f"{DRAFT_MODEL_PREFIX}.layers.1.attn",
     ]
     ctx = {
         layer_name: Attention(32, 128, 0.1, prefix=layer_name)
@@ -76,17 +77,13 @@ def test_bind_kv_cache_draft_model(default_vllm_config):
 
     assert ctx["model.layers.0.attn"].kv_cache[0] is kv_cache["model.layers.0.attn"]
     assert ctx["model.layers.1.attn"].kv_cache[0] is kv_cache["model.layers.1.attn"]
-    assert (
-        ctx["draft_model.layers.0.attn"].kv_cache[0]
-        is kv_cache["draft_model.layers.0.attn"]
-    )
-    assert (
-        ctx["draft_model.layers.1.attn"].kv_cache[0]
-        is kv_cache["draft_model.layers.1.attn"]
-    )
+    draft_layer_0 = f"{DRAFT_MODEL_PREFIX}.layers.0.attn"
+    draft_layer_1 = f"{DRAFT_MODEL_PREFIX}.layers.1.attn"
+    assert ctx[draft_layer_0].kv_cache[0] is kv_cache[draft_layer_0]
+    assert ctx[draft_layer_1].kv_cache[0] is kv_cache[draft_layer_1]
 
     # caches are ordered by layer_index, interleaving target and draft model
     assert runner_kv_caches[0] is kv_cache["model.layers.0.attn"]
-    assert runner_kv_caches[1] is kv_cache["draft_model.layers.0.attn"]
+    assert runner_kv_caches[1] is kv_cache[draft_layer_0]
     assert runner_kv_caches[2] is kv_cache["model.layers.1.attn"]
-    assert runner_kv_caches[3] is kv_cache["draft_model.layers.1.attn"]
+    assert runner_kv_caches[3] is kv_cache[draft_layer_1]

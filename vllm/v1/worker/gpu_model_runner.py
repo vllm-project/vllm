@@ -110,6 +110,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     AttentionType,
     CommonAttentionMetadata,
+    CommonAttnMetadataByGid,
     MultipleOf,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
@@ -119,6 +120,7 @@ from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     reorder_batch_to_split_decodes_and_prefills,
 )
+from vllm.v1.core.kv_cache_utils import get_slot_mappings_by_layer
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.cudagraph_dispatcher import CudagraphDispatcher
 from vllm.v1.kv_cache_interface import (
@@ -358,13 +360,13 @@ class ExecuteModelState(NamedTuple):
     scheduler_output: "SchedulerOutput"
     logits: torch.Tensor
     spec_decode_metadata: SpecDecodeMetadata | None
-    spec_decode_common_attn_metadata: CommonAttentionMetadata | None
     hidden_states: torch.Tensor
     sample_hidden_states: torch.Tensor
     aux_hidden_states: list[torch.Tensor] | None
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+    cm_by_gid: CommonAttnMetadataByGid
 
 
 class GPUModelRunner(
@@ -1729,13 +1731,10 @@ class GPUModelRunner(
         num_scheduled_tokens: dict[str, int] | None = None,
         cascade_attn_prefix_lens: list[list[int]] | None = None,
         slot_mappings: dict[int, torch.Tensor] | None = None,
-    ) -> tuple[PerLayerAttnMetadata, CommonAttentionMetadata | None]:
-        """
-        :return: tuple[attn_metadata, spec_decode_common_attn_metadata]
-        """
+    ) -> tuple[PerLayerAttnMetadata, CommonAttnMetadataByGid]:
         # Attention metadata is not needed for attention free models
         if len(self.kv_cache_config.kv_cache_groups) == 0:
-            return {}, None
+            return {}, dict()
 
         num_tokens_padded = num_tokens_padded or num_tokens
         num_reqs_padded = num_reqs_padded or num_reqs
@@ -1833,6 +1832,10 @@ class GPUModelRunner(
             tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata
         ] = {}
 
+        # CommonAttentionMetadata objects for each KV cache group.
+        # These are passed to the drafter to support multi-group KV cache in drafters.
+        cm_by_gid: CommonAttnMetadataByGid = {}
+
         def _build_attn_group_metadata(
             kv_cache_gid: int,
             attn_gid: int,
@@ -1898,7 +1901,6 @@ class GPUModelRunner(
 
         # Prepare the attention metadata for each KV cache group and make layers
         # in the same group share the same metadata.
-        spec_decode_common_attn_metadata = None
         for kv_cache_gid, kv_cache_group in enumerate(kv_cache_groups):
             cm = copy(cm_base)  # shallow copy
 
@@ -1910,16 +1912,10 @@ class GPUModelRunner(
                 num_reqs_padded,
                 for_cudagraph_capture=for_cudagraph_capture,
             )
-            if kv_cache_gid > 0:
-                cm.block_table_tensor = _get_block_table(kv_cache_gid)
-                cm.slot_mapping = slot_mappings[kv_cache_gid]
+            cm.block_table_tensor = _get_block_table(kv_cache_gid)
+            cm.slot_mapping = slot_mappings[kv_cache_gid]
 
-            if self.speculative_config and spec_decode_common_attn_metadata is None:
-                if isinstance(self.drafter, EagleProposer):
-                    if self.drafter.attn_layer_names[0] in kv_cache_group.layer_names:
-                        spec_decode_common_attn_metadata = cm
-                else:
-                    spec_decode_common_attn_metadata = cm
+            cm_by_gid[kv_cache_gid] = cm
 
             for attn_gid in range(len(self.attn_groups[kv_cache_gid])):
                 if ubatch_slices is not None:
@@ -1949,17 +1945,17 @@ class GPUModelRunner(
                 for _metadata in attn_metadata.values():
                     _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
 
-        if spec_decode_common_attn_metadata is not None and (
+        if cm_by_gid and (
             num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
         ):
             # Currently the drafter still only uses piecewise cudagraphs (and modifies
             # the attention metadata in directly), and therefore does not want to use
             # padded attention metadata.
-            spec_decode_common_attn_metadata = (
-                spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
-            )
+            cm_by_gid = {
+                gid: cm.unpadded(num_tokens, num_reqs) for gid, cm in cm_by_gid.items()
+            }
 
-        return attn_metadata, spec_decode_common_attn_metadata
+        return attn_metadata, cm_by_gid
 
     def _compute_cascade_attn_prefix_lens(
         self,
@@ -3160,8 +3156,8 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3300,6 +3296,7 @@ class GPUModelRunner(
             A tuple of:
             - slot_mappings_by_gid: dict[int, torch.Tensor] for attention metadata
             - slot_mappings_by_layer: dict[str, torch.Tensor] or list for ForwardContext
+            Or None if KV cache config is not available.
         """
         if not (
             hasattr(self, "kv_cache_config")
@@ -3333,22 +3330,9 @@ class GPUModelRunner(
             gid: _get_slot_mapping(gid)
             for gid, _ in enumerate(self.kv_cache_config.kv_cache_groups)
         }
-
-        slot_mappings_by_layer: dict[str, torch.Tensor] = {}
-        for gid, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups):
-            slot_mapping = slot_mappings_by_gid[gid]
-            for layer_name in kv_cache_group.layer_names:
-                slot_mappings_by_layer[layer_name] = slot_mapping
-
-        if ubatch_slices is not None:
-            result: list[dict[str, torch.Tensor]] = []
-            for ubatch in ubatch_slices:
-                sliced_mappings: dict[str, torch.Tensor] = {}
-                for layer_name, slot_mapping in slot_mappings_by_layer.items():
-                    sliced_mappings[layer_name] = slot_mapping[ubatch.token_slice]
-                result.append(sliced_mappings)
-            return slot_mappings_by_gid, result
-
+        slot_mappings_by_layer = get_slot_mappings_by_layer(
+            self.kv_cache_config, slot_mappings_by_gid, ubatch_slices
+        )
         return slot_mappings_by_gid, slot_mappings_by_layer
 
     @torch.inference_mode()
@@ -3519,20 +3503,18 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
             )
 
-            attn_metadata, spec_decode_common_attn_metadata = (
-                self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded,
-                    num_tokens_padded=num_tokens_padded if pad_attn else None,
-                    num_reqs=num_reqs,
-                    num_reqs_padded=num_reqs_padded if pad_attn else None,
-                    max_query_len=max_num_scheduled_tokens,
-                    ubatch_slices=ubatch_slices_attn,
-                    logits_indices=logits_indices,
-                    use_spec_decode=use_spec_decode,
-                    num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
-                    cascade_attn_prefix_lens=cascade_attn_prefix_lens,
-                    slot_mappings=slot_mappings_by_group,
-                )
+            attn_metadata, cm_by_gid = self._build_attention_metadata(
+                num_tokens=num_tokens_unpadded,
+                num_tokens_padded=num_tokens_padded if pad_attn else None,
+                num_reqs=num_reqs,
+                num_reqs_padded=num_reqs_padded if pad_attn else None,
+                max_query_len=max_num_scheduled_tokens,
+                ubatch_slices=ubatch_slices_attn,
+                logits_indices=logits_indices,
+                use_spec_decode=use_spec_decode,
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+                cascade_attn_prefix_lens=cascade_attn_prefix_lens,
+                slot_mappings=slot_mappings_by_group,
             )
 
             (
@@ -3654,13 +3636,13 @@ class GPUModelRunner(
             scheduler_output,
             logits,
             spec_decode_metadata,
-            spec_decode_common_attn_metadata,
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            cm_by_gid,
         )
         self.kv_connector_output = kv_connector_output
         return None
@@ -3693,13 +3675,13 @@ class GPUModelRunner(
             scheduler_output,
             logits,
             spec_decode_metadata,
-            spec_decode_common_attn_metadata,
             hidden_states,
             sample_hidden_states,
             aux_hidden_states,
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            cm_by_gid,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -3731,7 +3713,7 @@ class GPUModelRunner(
         self.input_batch.prev_sampled_token_ids = None
 
         def propose_draft_token_ids(sampled_token_ids):
-            assert spec_decode_common_attn_metadata is not None
+            assert cm_by_gid is not None
             with record_function_or_nullcontext("gpu_model_runner: draft"):
                 self._draft_token_ids = self.propose_draft_token_ids(
                     scheduler_output,
@@ -3741,16 +3723,19 @@ class GPUModelRunner(
                     sample_hidden_states,
                     aux_hidden_states,
                     spec_decode_metadata,
-                    spec_decode_common_attn_metadata,
                     slot_mappings,
+                    cm_by_gid,
                 )
                 self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
         propose_drafts_after_bookkeeping = False
         if spec_config is not None:
-            input_fits_in_drafter = spec_decode_common_attn_metadata is not None and (
-                spec_decode_common_attn_metadata.max_seq_len + self.num_spec_tokens
+            # Use any CAM from cm_by_gid for the max_seq_len check (it's a global
+            # batch property shared across all KV cache groups).
+            any_cm = next(iter(cm_by_gid.values()), None) if cm_by_gid else None
+            input_fits_in_drafter = any_cm is not None and (
+                any_cm.max_seq_len + self.num_spec_tokens
                 <= self.effective_drafter_max_model_len
             )
             use_gpu_toks = (
@@ -3764,10 +3749,9 @@ class GPUModelRunner(
                 if input_fits_in_drafter:
                     propose_draft_token_ids(sampled_token_ids)
                 elif self.valid_sampled_token_count_event is not None:
-                    assert spec_decode_common_attn_metadata is not None
                     next_token_ids, valid_sampled_tokens_count = (
                         self.drafter.prepare_next_token_ids_padded(
-                            spec_decode_common_attn_metadata,
+                            cm_by_gid,
                             sampled_token_ids,
                             self.requests,
                             self.input_batch,
@@ -3995,8 +3979,8 @@ class GPUModelRunner(
         sample_hidden_states: torch.Tensor,
         aux_hidden_states: list[torch.Tensor] | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
-        common_attn_metadata: CommonAttentionMetadata,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
+        cm_by_gid: CommonAttnMetadataByGid,
     ) -> list[list[int]] | torch.Tensor:
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
@@ -4072,7 +4056,7 @@ class GPUModelRunner(
                 )
                 next_token_ids, valid_sampled_tokens_count = (
                     self.drafter.prepare_next_token_ids_padded(
-                        common_attn_metadata,
+                        cm_by_gid,
                         sampled_token_ids,
                         self.requests,
                         self.input_batch,
@@ -4099,8 +4083,8 @@ class GPUModelRunner(
             else:
                 if spec_config.disable_padded_drafter_batch:
                     token_indices_to_sample = None
-                    common_attn_metadata, token_indices = self.drafter.prepare_inputs(
-                        common_attn_metadata,
+                    cm_by_gid, token_indices = self.drafter.prepare_inputs(
+                        cm_by_gid,
                         sampled_token_ids,
                         spec_decode_metadata.num_draft_tokens,
                     )
@@ -4115,15 +4099,18 @@ class GPUModelRunner(
                         target_hidden_states = hidden_states[token_indices]
                 else:
                     (
-                        common_attn_metadata,
+                        cm_by_gid,
                         token_indices_to_sample,
                         num_rejected_tokens_gpu,
                     ) = self.drafter.prepare_inputs_padded(
-                        common_attn_metadata,
+                        cm_by_gid,
                         spec_decode_metadata,
                         valid_sampled_tokens_count,
                     )
-                    total_num_tokens = common_attn_metadata.num_actual_tokens
+
+                    # Get any CAM to access the shared num_actual_tokens
+                    any_cm = next(iter(cm_by_gid.values()))
+                    total_num_tokens = any_cm.num_actual_tokens
                     # When padding the batch, token_indices is just a range
                     target_token_ids = self.input_ids.gpu[:total_num_tokens]
                     target_positions = self._get_positions(total_num_tokens)
@@ -4150,10 +4137,10 @@ class GPUModelRunner(
                 next_token_ids=next_token_ids,
                 token_indices_to_sample=token_indices_to_sample,
                 sampling_metadata=sampling_metadata,
-                common_attn_metadata=common_attn_metadata,
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
                 slot_mappings=slot_mappings,
+                cm_by_gid=cm_by_gid,
             )
 
         return draft_token_ids
@@ -6126,15 +6113,6 @@ class GPUModelRunner(
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
-
-        if self.speculative_config and (
-            self.speculative_config.use_eagle()
-            or self.speculative_config.uses_draft_model()
-        ):
-            assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
-            # validate all draft model layers belong to the same kv cache
-            # group
-            self.drafter.validate_same_kv_cache_group(kv_cache_config)
 
         if has_kv_transfer_group():
             kv_transfer_group = get_kv_transfer_group()

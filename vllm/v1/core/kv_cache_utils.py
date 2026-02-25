@@ -9,7 +9,12 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NewType, TypeAlias, overload
+from typing import TYPE_CHECKING, Any, NewType, TypeAlias, overload
+
+import torch
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.ubatch_utils import UBatchSlices
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -75,6 +80,10 @@ def maybe_convert_block_hash(hash_bytes: BlockHash) -> ExternalBlockHash:
 
 
 logger = init_logger(__name__)
+
+# Prefix for draft model layer names in the KV cache (e.g. "draft_model.layers.0.attn").
+# Must match the prefix passed to get_model() when loading the draft model.
+DRAFT_MODEL_PREFIX = "draft_model"
 
 # The hash seed for the first block of any prefix block sequence.
 #
@@ -1018,12 +1027,15 @@ def _get_kv_cache_groups_uniform_page_size(
     Returns:
         The generated KVCacheGroupSpecs
     """
-    # Group all layers by kv_cache_spec.
+    # Group all layers by kv_cache_spec AND whether it's a draft or target layer.
     # E.g., 2 full attention layers and 3 sliding window attention layers,
     # -> (full.0, full.1), (sw.0, sw.1, sw.2).
-    same_type_layers: dict[KVCacheSpec, list[str]] = defaultdict(list)
+    # Draft and target layers are kept in separate groups to prevent KV cache
+    # cross-contamination during speculative decoding.
+    same_type_layers: dict[tuple[KVCacheSpec, bool], list[str]] = defaultdict(list)
     for layer_name, layer_spec in kv_cache_spec.items():
-        same_type_layers[layer_spec].append(layer_name)
+        is_draft_layer = layer_name.startswith(DRAFT_MODEL_PREFIX)
+        same_type_layers[(layer_spec, is_draft_layer)].append(layer_name)
 
     # Split each group into smaller groups, to make the number of layers in each
     # group identical. Add padding to the last group of each type if necessary.
@@ -1684,3 +1696,49 @@ class BlockHashListWithBlockSize:
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+
+
+def get_slot_mappings_by_layer(
+    kv_cache_config: KVCacheConfig,
+    slot_mappings_by_gid: dict[int, torch.Tensor],
+    ubatch_slices: "UBatchSlices | None" = None,
+) -> dict[str, torch.Tensor] | list[dict[str, torch.Tensor]]:
+    """
+    Convert slot mappings from group ID indexing to layer name indexing.
+
+    Args:
+        kv_cache_config: KV cache configuration containing group-to-layer mappings.
+        slot_mappings_by_gid: Slot mappings keyed by KV cache group ID.
+        ubatch_slices: Optional ubatch slicing info for DBO (Disaggregated
+            Block Orchestrator). When provided, returns a list of sliced
+            mappings per ubatch.
+
+    Returns:
+        dict[str, torch.Tensor]: Slot mappings keyed by layer name for
+            ForwardContext, or list[dict[str, torch.Tensor]] when ubatch_slices
+            is provided.
+    """
+    slot_mappings_by_layer: dict[str, torch.Tensor] = {
+        layer_name: slot_mappings_by_gid[gid]
+        for layer_name, gid in kv_cache_group_id_by_layer(kv_cache_config).items()
+    }
+
+    if ubatch_slices is not None:
+        result: list[dict[str, torch.Tensor]] = []
+        for ubatch in ubatch_slices:
+            sliced_mappings: dict[str, torch.Tensor] = {}
+            for layer_name, slot_mapping in slot_mappings_by_layer.items():
+                sliced_mappings[layer_name] = slot_mapping[ubatch.token_slice]
+            result.append(sliced_mappings)
+        return result
+
+    return slot_mappings_by_layer
+
+
+def kv_cache_group_id_by_layer(kv_cache_config: KVCacheConfig) -> dict[str, int]:
+    """Return a mapping from layer_name -> KV cache group ID."""
+    gid_by_layer: dict[str, int] = {}
+    for gid, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        for layer_name in kv_cache_group.layer_names:
+            gid_by_layer[layer_name] = gid
+    return gid_by_layer
