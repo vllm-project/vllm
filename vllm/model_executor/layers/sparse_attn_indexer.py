@@ -14,6 +14,7 @@ from vllm.utils.deep_gemm import (
     fp8_mqa_logits_torch,
     fp8_paged_mqa_logits,
     fp8_paged_mqa_logits_torch,
+    is_deep_gemm_supported,
 )
 from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -299,6 +300,12 @@ class SparseAttnIndexer(CustomOp):
         self.max_model_len = max_model_len
         self.max_total_seq_len = max_total_seq_len
         self.topk_indices_buffer = topk_indices_buffer
+        if current_platform.is_cuda() and not is_deep_gemm_supported():
+            logger.warning_once(
+                "DeepGEMM is not available. SparseAttnIndexer will use PyTorch "
+                "fallback which may have performance issues. For better performance, "
+                "please install DeepGEMM: pip install deep_gemm"
+            )
 
     def forward_native(
         self,
