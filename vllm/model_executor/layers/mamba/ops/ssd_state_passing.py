@@ -10,9 +10,7 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
-# exp(x) = exp2(x * log2(e)). tl.math.exp2 maps directly to the hardware
-# ex2.approx.f32 PTX instruction, avoiding the libdevice __nv_expf overhead.
-LOG2E: float = 1.4426950408889634
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 
 
 @triton.autotune(
@@ -101,7 +99,7 @@ def _state_passing_fwd_kernel(
                 states = tl.zeros((BLOCK_SIZE,), dtype=tl.float32)
 
         prev_seq_idx = seq_idx
-        states = tl.math.exp2(dA_cs * LOG2E) * states + new_states
+        states = fast_exp(dA_cs) * states + new_states
         tl.store(out_ptrs, states, mask=offs_m < dim)
 
         states_ptrs += stride_states_chunk

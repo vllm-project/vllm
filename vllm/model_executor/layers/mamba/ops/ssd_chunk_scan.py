@@ -12,9 +12,7 @@ from vllm.triton_utils import tl, triton
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
 
-# exp(x) = exp2(x * log2(e)). tl.math.exp2 maps directly to the hardware
-# ex2.approx.f32 PTX instruction, avoiding the libdevice __nv_expf overhead.
-LOG2E: float = 1.4426950408889634
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 
 from vllm.logger import init_logger
 
@@ -291,7 +289,7 @@ def _chunk_scan_fwd_kernel(
         offs_m[:, None] * stride_C_seqlen + offs_k_dstate[None, :] * stride_C_dstate
     )
 
-    scale_m = tl.math.exp2(dA_cs_m * LOG2E)
+    scale_m = fast_exp(dA_cs_m)
     if BLOCK_SIZE_DSTATE <= 128:
         C = tl.load(
             C_ptrs,
@@ -376,7 +374,7 @@ def _chunk_scan_fwd_kernel(
         )
         # If there's seq_idx, we already set cb[i, j] = 0 for seq_idx[i] != seq_idx[j].
         # So we don't need masking wrt seq_idx here.
-        cb *= tl.math.exp2((dA_cs_m[:, None] - dA_cs_k[None, :]) * LOG2E)
+        cb *= fast_exp(dA_cs_m[:, None] - dA_cs_k[None, :])
         dt_k = tl.load(dt_ptrs, mask=offs_k < chunk_size - k, other=0.0).to(tl.float32)
         cb *= dt_k
         if IS_CAUSAL:
