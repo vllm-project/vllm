@@ -5,7 +5,6 @@ from collections.abc import Sequence
 
 from vllm.config import VllmConfig
 from vllm.entrypoints.openai.engine.protocol import UsageInfo
-from vllm.entrypoints.pooling.pooling.protocol import IOProcessorRequest
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
@@ -38,16 +37,11 @@ class BgeM3SparseEmbeddingsProcessor(
     def merge_pooling_params(
         self,
         params: PoolingParams | None = None,
-        request: object = None,
     ) -> PoolingParams:
         if params is None:
             params = PoolingParams()
         # refer to PoolingCompletionRequest.to_pooling_params
-        if isinstance(request, IOProcessorRequest):
-            if params.task is None:
-                params.task = request.task
-            if params.truncate_prompt_tokens is None:
-                params.truncate_prompt_tokens = request.truncate_prompt_tokens
+        params.task = "token_classify"
         return params
 
     def parse_request(

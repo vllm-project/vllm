@@ -63,7 +63,6 @@ class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
     def merge_pooling_params(
         self,
         params: PoolingParams | None = None,
-        request: object = None,
     ) -> PoolingParams:
         if callable(
             validate_or_generate_params := getattr(
