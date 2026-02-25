@@ -16,6 +16,7 @@ steps:
     - pytest -v -s v1/sample
     - pytest -v -s v1/logits_processors
     - pytest -v -s v1/worker
+    # TODO: create another `optional` test group for slow tests
     - pytest -v -s -m 'not slow_test' v1/spec_decode
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
@@ -25,6 +26,11 @@ steps:
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: V1 Others (CPU)
   depends_on:
@@ -146,6 +152,19 @@ steps:
   - pytest -v -s tool_parsers
   - pytest -v -s transformers_utils
   - pytest -v -s config
+
+- label: GPT-OSS Eval (H100)
+  timeout_in_minutes: 60
+  working_dir: "/vllm-workspace/"
+  device: h100
+  optional: true
+  source_file_dependencies:
+  - tests/evals/gpt_oss
+  - vllm/model_executor/models/gpt_oss.py
+  - vllm/model_executor/layers/quantization/mxfp4.py
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
 
 - label: GPT-OSS Eval (B200)
   timeout_in_minutes: 60
