@@ -463,6 +463,7 @@ class GPUModelRunner(
 
         # Sampler - use FSMSampler if FSM method is enabled
         if self.speculative_config and self.speculative_config.method == "fsm":
+            assert self.speculative_config.fsm_path is not None
             self.sampler = FSMComponentFactory.create_sampler(
                 self.speculative_config.fsm_path, self.model_config.logprobs_mode
             )

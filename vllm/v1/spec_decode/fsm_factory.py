@@ -3,6 +3,7 @@
 """Factory for creating FSM-specific components."""
 
 from vllm.config import VllmConfig
+from vllm.config.model import LogprobsMode
 from vllm.custom_fsm import CustomFSM
 
 
@@ -10,7 +11,7 @@ class FSMComponentFactory:
     """Factory for creating FSM-specific sampler, proposer, and rejection sampler."""
 
     @staticmethod
-    def create_sampler(fsm_path: str, logprobs_mode: str):
+    def create_sampler(fsm_path: str, logprobs_mode: LogprobsMode):
         """Create FSM sampler."""
         from vllm.v1.sample.fsm_sampler import FSMSampler
 
