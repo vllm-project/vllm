@@ -212,31 +212,57 @@ def triton_kernel_moe_forward(
             unpadded_N_w2=unpadded_N_w2,
             unpadded_K_w2=unpadded_K_w2,
         )
+
+    if expert_map is not None:
+        # With expert parallelism, legacy_routing produces routing data
+        # using global expert IDs which don't correspond to local weight
+        # indices.  Split the routing into topk selection + expert_map
+        # remapping + local routing data construction (matching the
+        # approach used by OAITritonExperts.apply).
+        from triton_kernels.topk import topk as topk_fn
+
+        sm_first = not renormalize
+        logits = gating_output
+        if sm_first:
+            logits = torch.softmax(logits, dim=-1)
+        sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
+        # sparse_logits.indx contains global expert IDs – remap to local.
+        topk_ids = expert_map[sparse_logits.indx.to(torch.long)]
+        topk_weights = sparse_logits.vals
+        local_num_experts = w1.size(0)
+        routing_data, gather_idx, scatter_idx = make_routing_data(
+            topk_ids, topk_weights, local_num_experts
+        )
+        # expert_map already applied; pass None downstream.
+        effective_expert_map = None
+        effective_global_num_experts = local_num_experts
     else:
         routing_data, gather_idx, scatter_idx = legacy_routing(
             gating_output, topk, sm_first=not renormalize
         )
+        effective_expert_map = expert_map
+        effective_global_num_experts = global_num_experts
 
-        output = torch.empty_like(hidden_states)
-        effective_quant_config = (
-            quant_config if quant_config is not None else FUSED_MOE_UNQUANTIZED_CONFIG
-        )
+    output = torch.empty_like(hidden_states)
+    effective_quant_config = (
+        quant_config if quant_config is not None else FUSED_MOE_UNQUANTIZED_CONFIG
+    )
 
-        return triton_kernel_fused_experts(
-            output,
-            hidden_states,
-            w1,
-            w2,
-            routing_data,
-            gather_idx,
-            scatter_idx,
-            topk=topk,
-            activation=activation,
-            quant_config=effective_quant_config,
-            apply_router_weight_on_input=apply_router_weight_on_input,
-            global_num_experts=global_num_experts,
-            expert_map=expert_map,
-        )
+    return triton_kernel_fused_experts(
+        output,
+        hidden_states,
+        w1,
+        w2,
+        routing_data,
+        gather_idx,
+        scatter_idx,
+        topk=topk,
+        activation=activation,
+        quant_config=effective_quant_config,
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        global_num_experts=effective_global_num_experts,
+        expert_map=effective_expert_map,
+    )
 
 
 # This is a triton implementation of the fused_experts function
