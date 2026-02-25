@@ -30,6 +30,7 @@ from vllm.model_executor.layers.pooler import DispatchPooler
 from vllm.model_executor.models.siglip import SiglipVisionModel
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.tokenizers import TokenizerLike
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 
 from .interfaces_base import VllmModelForPooling
 from .internvl import (
@@ -81,11 +82,27 @@ class LlamaNemotronVLEmbedProcessor(NemotronVLProcessor):
         self,
         config: PretrainedConfig,
         tokenizer: TokenizerLike,
+        processor_config: dict,
         *,
         min_dynamic_patch: int | None = None,
         max_dynamic_patch: int | None = None,
         dynamic_image_size: bool | None = None,
     ) -> None:
+        if min_dynamic_patch is None:
+            min_dynamic_patch = processor_config.get(
+                "min_input_tiles",
+                getattr(config, "min_dynamic_patch", 1),
+            )
+        if max_dynamic_patch is None:
+            max_dynamic_patch = processor_config.get(
+                "max_input_tiles",
+                getattr(config, "max_dynamic_patch", 1),
+            )
+        if dynamic_image_size is None:
+            dynamic_image_size = processor_config.get(
+                "dynamic_image_size",
+                getattr(config, "dynamic_image_size", True),
+            )
         super().__init__(
             config=config,
             tokenizer=tokenizer,
@@ -122,10 +139,23 @@ class LlamaNemotronVLEmbedProcessingInfo(NemotronVLProcessingInfo):
 
     def get_hf_processor(self, **kwargs: object) -> LlamaNemotronVLEmbedProcessor:
         """Override to create embedding-specific processor without image_processor."""
+        model_config = self.ctx.model_config
+        processor_config = {}
+        if model_config.model is not None:
+            processor_config = (
+                get_hf_file_to_dict(
+                    "processor_config.json",
+                    model_config.model,
+                    model_config.revision,
+                )
+                or {}
+            )
+
         return self.ctx.init_processor(
             LlamaNemotronVLEmbedProcessor,
             config=self.get_hf_config(),
             tokenizer=self.get_tokenizer(),
+            processor_config=processor_config,
             **kwargs,
         )
 
