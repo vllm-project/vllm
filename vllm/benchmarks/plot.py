@@ -5,17 +5,21 @@
 from pathlib import Path
 from typing import Any
 
+from vllm.utils.import_utils import PlaceholderModule
+
 try:
     import plotly.express as px
     import plotly.io as pio
 except ImportError:
-    px = None
-    pio = None
+    _plotly = PlaceholderModule("plotly")
+    px = _plotly.placeholder_attr("express")
+    pio = _plotly.placeholder_attr("io")
 
 try:
     import matplotlib.pyplot as plt
 except ImportError:
-    plt = None
+    _matplotlib = PlaceholderModule("matplotlib")
+    plt = _matplotlib.placeholder_attr("pyplot")
 
 
 def generate_timeline_plot(
@@ -41,11 +45,6 @@ def generate_timeline_plot(
         itl_thresholds: ITL thresholds in seconds (default: [1.0, 4.0, 6.0])
         labels: Labels for ITL categories (default based on thresholds)
     """
-    if px is None or pio is None:
-        raise ImportError(
-            "plotly is required for timeline plotting. "
-            "Install it with: pip install plotly"
-        )
 
     # Set defaults
     if colors is None:
@@ -245,12 +244,6 @@ def generate_dataset_stats_plot(
             - output_tokens: Number of output tokens
         output_path: Path where the figure will be saved
     """
-    if plt is None:
-        raise ImportError(
-            "matplotlib is required for dataset statistics plotting. "
-            "Install it with: pip install matplotlib"
-        )
-
     # Extract data
     prompt_tokens = []
     output_tokens = []
