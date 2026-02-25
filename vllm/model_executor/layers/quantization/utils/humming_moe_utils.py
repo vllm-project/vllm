@@ -23,6 +23,8 @@ def humming_moe_align(
         if shape_m >= configs[i * 3] and shape_m <= configs[i * 3 + 1]:
             block_size = configs[i * 3 + 2]
             break
+    else:
+        raise ValueError(f"Could not find a matching block_size for shape_m={shape_m}")
 
     def make_empty_tensor(size):
         return torch.empty((size,), dtype=torch.int32, device=topk_ids.device)
