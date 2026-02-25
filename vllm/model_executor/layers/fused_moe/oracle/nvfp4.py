@@ -217,7 +217,7 @@ def select_nvfp4_moe_backend(
                     )
                 if supported:
                     logger.info_once(_make_log_backend(backend), scope="local")
-                    return backend, None
+                    return backend, k_cls
                 else:
                     logger.debug_once(
                         _make_log_unsupported(backend, reason), scope="local"
