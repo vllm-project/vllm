@@ -1111,6 +1111,11 @@ class SupportsTranscription(Protocol):
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
 
+    supports_diarization: ClassVar[bool] = False
+    """
+    Enables native speaker diarization for supported models by setting this to `True`.
+    """
+
     supports_explicit_language_detection: ClassVar[bool] = False
     """
     Transcription models that require an explicit language detection step

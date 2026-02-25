@@ -148,6 +148,32 @@ async def test_streaming_response(winning_call, whisper_client):
 
 
 @pytest.mark.asyncio
+async def test_diarized_json_response(mary_had_lamb, whisper_client):
+    with pytest.raises(openai.BadRequestError):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=mary_had_lamb,
+            language="en",
+            response_format="diarized_json",
+            temperature=0.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_diarized_json_streaming_response(winning_call, whisper_client):
+    with pytest.raises(openai.BadRequestError):
+        await whisper_client.audio.transcriptions.create(
+            model=MODEL_NAME,
+            file=winning_call,
+            language="en",
+            response_format="diarized_json",
+            temperature=0.0,
+            stream=True,
+            timeout=30,
+        )
+
+
+@pytest.mark.asyncio
 async def test_stream_options(winning_call, whisper_client):
     res = await whisper_client.audio.transcriptions.create(
         model=MODEL_NAME,
