@@ -10,7 +10,6 @@ import regex as re
 _TORCH_CUDA_PATTERNS = [
     r"\btorch\.cuda\.empty_cache\b",
 ]
-_TORCH_CUDA_PATTERN = "|".join(_TORCH_CUDA_PATTERNS)
 
 ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}
 
@@ -18,15 +17,16 @@ ALLOWED_FILES = {"vllm/platforms/", "vllm/device_allocator/"}
 def scan_file(path: str) -> int:
     with open(path, encoding="utf-8") as f:
         content = f.read()
-    for match in re.finditer(_TORCH_CUDA_PATTERN, content, re.MULTILINE):
-        # Calculate line number from match position
-        line_num = content[: match.start() + 1].count("\n") + 1
-        print(
-            f"{path}:{line_num}: "
-            "\033[91merror:\033[0m "  # red color
-            "Found torch.cuda API call"
-        )
-        return 1
+    for pattern in _TORCH_CUDA_PATTERNS:
+        for match in re.finditer(pattern, content, re.MULTILINE):
+            # Calculate line number from match position
+            line_num = content[: match.start() + 1].count("\n") + 1
+            print(
+                f"{path}:{line_num}: "
+                "\033[91merror:\033[0m "  # red color
+                "Found torch.cuda API call"
+            )
+            return 1
     return 0
 
 
