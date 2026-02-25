@@ -3,6 +3,7 @@
 
 import asyncio
 import base64
+import sys
 import tempfile
 from argparse import Namespace
 from collections.abc import Awaitable, Callable
@@ -17,23 +18,23 @@ from fastapi import UploadFile
 from prometheus_client import start_http_server
 from pydantic import Field, TypeAdapter, field_validator, model_validator
 from pydantic_core.core_schema import ValidationInfo
+from starlette.datastructures import State
 from tqdm import tqdm
 
-from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
+from vllm.config import config
+from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.api_server import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
 )
-from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
+from vllm.entrypoints.openai.cli_args import BaseFrontendArgs
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
     OpenAIBaseModel,
 )
-from vllm.entrypoints.openai.models.protocol import BaseModelPath
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranscriptionRequest,
     TranscriptionResponse,
@@ -42,25 +43,18 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
     TranslationResponse,
     TranslationResponseVerbose,
 )
-from vllm.entrypoints.openai.speech_to_text.serving import (
-    OpenAIServingTranscription,
-    OpenAIServingTranslation,
-)
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingRequest,
     EmbeddingResponse,
 )
-from vllm.entrypoints.pooling.embed.serving import OpenAIServingEmbedding
 from vllm.entrypoints.pooling.score.protocol import (
     RerankRequest,
     RerankResponse,
     ScoreRequest,
     ScoreResponse,
 )
-from vllm.entrypoints.pooling.score.serving import ServingScores
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
-from vllm.tasks import SupportedTask
 from vllm.utils import random_uuid
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.version import __version__ as VLLM_VERSION
@@ -219,87 +213,73 @@ class BatchRequestOutput(OpenAIBaseModel):
     error: Any | None
 
 
+@config
+class BatchFrontendArgs(BaseFrontendArgs):
+    """Arguments for the batch runner frontend."""
+
+    input_file: str | None = None
+    """The path or url to a single input file. Currently supports local file
+    paths, or the http protocol (http or https). If a URL is specified,
+    the file should be available via HTTP GET."""
+    output_file: str | None = None
+    """The path or url to a single output file. Currently supports
+    local file paths, or web (http or https) urls. If a URL is specified,
+    the file should be available via HTTP PUT."""
+    output_tmp_dir: str | None = None
+    """The directory to store the output file before uploading it
+    to the output URL."""
+    enable_metrics: bool = False
+    """Enable Prometheus metrics"""
+    host: str | None = None
+    """Host name for the Prometheus metrics server
+    (only needed if enable-metrics is set)."""
+    port: int = 8000
+    """Port number for the Prometheus metrics server
+    (only needed if enable-metrics is set)."""
+    url: str = "0.0.0.0"
+    """[DEPRECATED] Host name for the Prometheus metrics server
+    (only needed if enable-metrics is set). Use --host instead."""
+
+    @classmethod
+    def _customize_cli_kwargs(
+        cls,
+        frontend_kwargs: dict[str, Any],
+    ) -> dict[str, Any]:
+        frontend_kwargs = super()._customize_cli_kwargs(frontend_kwargs)
+
+        frontend_kwargs["input_file"]["flags"] = ["-i"]
+        frontend_kwargs["input_file"]["required"] = True
+        frontend_kwargs["output_file"]["flags"] = ["-o"]
+        frontend_kwargs["output_file"]["required"] = True
+
+        frontend_kwargs["enable_metrics"]["action"] = "store_true"
+
+        frontend_kwargs["url"]["deprecated"] = True
+        return frontend_kwargs
+
+
 def make_arg_parser(parser: FlexibleArgumentParser):
-    parser.add_argument(
-        "-i",
-        "--input-file",
-        required=True,
-        type=str,
-        help="The path or url to a single input file. Currently supports local file "
-        "paths, or the http protocol (http or https). If a URL is specified, "
-        "the file should be available via HTTP GET.",
-    )
-    parser.add_argument(
-        "-o",
-        "--output-file",
-        required=True,
-        type=str,
-        help="The path or url to a single output file. Currently supports "
-        "local file paths, or web (http or https) urls. If a URL is specified,"
-        " the file should be available via HTTP PUT.",
-    )
-    parser.add_argument(
-        "--output-tmp-dir",
-        type=str,
-        default=None,
-        help="The directory to store the output file before uploading it "
-        "to the output URL.",
-    )
-    parser.add_argument(
-        "--response-role",
-        type=optional_type(str),
-        default="assistant",
-        help="The role name to return if `request.add_generation_prompt=True`.",
-    )
-
+    parser = BatchFrontendArgs.add_cli_args(parser)
     parser = AsyncEngineArgs.add_cli_args(parser)
-
-    parser.add_argument(
-        "--max-log-len",
-        type=int,
-        default=None,
-        help="Max number of prompt characters or prompt "
-        "ID numbers being printed in log."
-        "\n\nDefault: Unlimited",
-    )
-
-    parser.add_argument(
-        "--enable-metrics", action="store_true", help="Enable Prometheus metrics"
-    )
-    parser.add_argument(
-        "--url",
-        type=str,
-        default="0.0.0.0",
-        help="URL to the Prometheus metrics server "
-        "(only needed if enable-metrics is set).",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8000,
-        help="Port number for the Prometheus metrics server "
-        "(only needed if enable-metrics is set).",
-    )
-    parser.add_argument(
-        "--enable-prompt-tokens-details",
-        action="store_true",
-        default=False,
-        help="If set to True, enable prompt_tokens_details in usage.",
-    )
-    parser.add_argument(
-        "--enable-force-include-usage",
-        action="store_true",
-        default=False,
-        help="If set to True, include usage on every request "
-        "(even when stream_options is not specified)",
-    )
-
     return parser
 
 
 def parse_args():
     parser = FlexibleArgumentParser(description="vLLM OpenAI-Compatible batch runner.")
-    return make_arg_parser(parser).parse_args()
+    args = make_arg_parser(parser).parse_args()
+
+    # Backward compatibility: If --url is set, use it for host
+    url_explicit = any(arg == "--url" or arg.startswith("--url=") for arg in sys.argv)
+    host_explicit = any(
+        arg == "--host" or arg.startswith("--host=") for arg in sys.argv
+    )
+    if url_explicit and hasattr(args, "url") and not host_explicit:
+        args.host = args.url
+        logger.warning_once(
+            "Using --url for metrics is deprecated. Please use --host instead."
+        )
+
+    return args
 
 
 # explicitly use pure text format, with a newline at the end
@@ -671,12 +651,9 @@ def make_transcription_wrapper(is_translation: bool) -> WrapperFn:
     return wrapper
 
 
-def build_endpoint_registry(
+async def build_endpoint_registry(
     engine_client: EngineClient,
     args: Namespace,
-    base_model_paths: list[BaseModelPath],
-    request_logger: RequestLogger | None,
-    supported_tasks: tuple[SupportedTask, ...],
 ) -> dict[str, dict[str, Any]]:
     """
     Build the endpoint registry with all serving objects and handler configurations.
@@ -684,90 +661,27 @@ def build_endpoint_registry(
     Args:
         engine_client: The engine client
         args: Command line arguments
-        base_model_paths: List of base model paths
-        request_logger: Optional request logger
-        supported_tasks: Tuple of supported tasks
 
     Returns:
         Dictionary mapping endpoint keys to their configurations
     """
-    model_config = engine_client.model_config
+    supported_tasks = await engine_client.get_supported_tasks()
+    logger.info("Supported tasks: %s", supported_tasks)
 
-    # Create the openai serving objects.
-    openai_serving_models = OpenAIServingModels(
-        engine_client=engine_client,
-        base_model_paths=base_model_paths,
-        lora_modules=None,
-    )
+    # Create a state object to hold serving objects
+    state = State()
 
-    openai_serving_chat = (
-        OpenAIServingChat(
-            engine_client,
-            openai_serving_models,
-            args.response_role,
-            request_logger=request_logger,
-            chat_template=None,
-            chat_template_content_format="auto",
-            reasoning_parser=args.structured_outputs_config.reasoning_parser,
-            enable_prompt_tokens_details=args.enable_prompt_tokens_details,
-            enable_force_include_usage=args.enable_force_include_usage,
-            default_chat_template_kwargs=getattr(
-                args, "default_chat_template_kwargs", None
-            ),
-        )
-        if "generate" in supported_tasks
-        else None
-    )
+    # Initialize all serving objects using init_app_state
+    # This provides full functionality including chat template processing,
+    # LoRA support, tool servers, etc.
+    await init_app_state(engine_client, state, args, supported_tasks)
 
-    openai_serving_embedding = (
-        OpenAIServingEmbedding(
-            engine_client,
-            openai_serving_models,
-            request_logger=request_logger,
-            chat_template=None,
-            chat_template_content_format="auto",
-        )
-        if "embed" in supported_tasks
-        else None
-    )
-
-    enable_serving_reranking = (
-        "classify" in supported_tasks
-        and getattr(model_config.hf_config, "num_labels", 0) == 1
-    )
-
-    openai_serving_scores = (
-        ServingScores(
-            engine_client,
-            openai_serving_models,
-            request_logger=request_logger,
-            score_template=None,
-        )
-        if ("embed" in supported_tasks or enable_serving_reranking)
-        else None
-    )
-
-    openai_serving_transcription = (
-        OpenAIServingTranscription(
-            engine_client,
-            openai_serving_models,
-            request_logger=request_logger,
-            enable_force_include_usage=args.enable_force_include_usage,
-        )
-        if "transcription" in supported_tasks
-        else None
-    )
-
-    openai_serving_translation = (
-        OpenAIServingTranslation(
-            engine_client,
-            openai_serving_models,
-            request_logger=request_logger,
-            enable_force_include_usage=args.enable_force_include_usage,
-        )
-        if "transcription" in supported_tasks
-        else None
-    )
+    # Get serving objects from state (defaulting to None if not set)
+    openai_serving_chat = getattr(state, "openai_serving_chat", None)
+    openai_serving_embedding = getattr(state, "openai_serving_embedding", None)
+    openai_serving_scores = getattr(state, "openai_serving_scores", None)
+    openai_serving_transcription = getattr(state, "openai_serving_transcription", None)
+    openai_serving_translation = getattr(state, "openai_serving_translation", None)
 
     # Registry of endpoint configurations
     endpoint_registry: dict[str, dict[str, Any]] = {
@@ -845,29 +759,9 @@ async def run_batch(
     engine_client: EngineClient,
     args: Namespace,
 ) -> None:
-    if args.served_model_name is not None:
-        served_model_names = args.served_model_name
-    else:
-        served_model_names = [args.model]
-
-    if args.enable_log_requests:
-        request_logger = RequestLogger(max_log_len=args.max_log_len)
-    else:
-        request_logger = None
-
-    base_model_paths = [
-        BaseModelPath(name=name, model_path=args.model) for name in served_model_names
-    ]
-
-    supported_tasks = await engine_client.get_supported_tasks()
-    logger.info("Supported tasks: %s", supported_tasks)
-
-    endpoint_registry = build_endpoint_registry(
+    endpoint_registry = await build_endpoint_registry(
         engine_client=engine_client,
         args=args,
-        base_model_paths=base_model_paths,
-        request_logger=request_logger,
-        supported_tasks=supported_tasks,
     )
 
     tracker = BatchProgressTracker()
@@ -942,7 +836,7 @@ if __name__ == "__main__":
     # to publish metrics at the /metrics endpoint.
     if args.enable_metrics:
         logger.info("Prometheus metrics enabled")
-        start_http_server(port=args.port, addr=args.url)
+        start_http_server(port=args.port, addr=args.host)
     else:
         logger.info("Prometheus metrics disabled")
 
