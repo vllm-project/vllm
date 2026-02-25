@@ -5,6 +5,7 @@
 import torch
 
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     CUTLASS_BLOCK_FP8_SUPPORTED,
@@ -177,6 +178,18 @@ class CutlassFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
 
 class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     is_hopper: bool = current_platform.is_device_capability(90)
+
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig) -> None:
+        super().__init__(config)
+        act_scale_descriptor = config.activation_quant_key.scale
+        self.weight_group_shape = config.weight_quant_key.scale.group_shape
+        self.quant_fp8 = QuantFP8(
+            static=act_scale_descriptor.static,
+            group_shape=act_scale_descriptor.group_shape,
+            num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
+            column_major_scales=True,
+        )
 
     @classmethod
     def is_supported(cls, compute_capability=None):

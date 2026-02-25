@@ -46,10 +46,11 @@ class Fp8BlockScaledMMLinearKernel(
         super().__init__(config)
         act_scale_descriptor = config.activation_quant_key.scale
         self.weight_group_shape = config.weight_quant_key.scale.group_shape
-        self.input_quant_op = QuantFP8(
+        self.quant_fp8 = QuantFP8(
             static=act_scale_descriptor.static,
             group_shape=act_scale_descriptor.group_shape,
             num_token_padding=self.get_output_padding(),
+            use_ue8m0=False,
         )
 
     @classmethod
@@ -129,7 +130,7 @@ class Fp8BlockScaledMMLinearKernel(
         output_shape = [*x.shape[:-1], weight.shape[0]]
         out_dtype = input_2d.dtype if maybe_out_dtype is None else maybe_out_dtype
 
-        q_input, input_scale = self.input_quant_op(input_2d, input_scale, scale_up)
+        q_input, input_scale = self.quant_fp8(input_2d, input_scale, scale_up)
 
         output = self.apply_block_scaled_mm(
             A=q_input,
