@@ -358,7 +358,7 @@ class HummingLinearMethod(LinearMethodBase):
         )
         self.use_f16_accum = is_f16_accum_supported and envs.VLLM_HUMMING_USE_F16_ACCUM
 
-        shape_n, pad_shape_n = prepare_padded_shape(output_size, 256)
+        shape_n, pad_shape_n = prepare_padded_shape(output_size_per_partition, 256)
         shape_k, pad_shape_k = prepare_padded_shape(input_size, 128)
         meta = HummingLayerMeta(
             a_dtype=self.quant_config.a_dtype,
