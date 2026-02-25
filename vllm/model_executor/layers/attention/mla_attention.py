@@ -452,15 +452,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             if self.attn_backend.accept_output_buffer:
-                kv_cache_dummy_dep = None
-                if not self.attn_backend.forward_includes_kv_cache_update:
-                    kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                        kv_c_normed,
-                        k_pe,
-                        self.layer_name,
-                        self.kv_cache_dtype,
-                        self._k_scale,
-                    )
+                kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                    kv_c_normed,
+                    k_pe,
+                    self.layer_name,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
@@ -1079,8 +1077,6 @@ class MLACommonBackend(AttentionBackend):
     @classmethod
     def is_mla(cls) -> bool:
         return True
-
-    forward_includes_kv_cache_update: bool = True
 
 
 @dataclass
