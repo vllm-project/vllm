@@ -184,6 +184,13 @@ def register_tt_test_models():
         "models.vllm_test_utils.no_op_test.test_model:DummyNoOpModel",
     )
 
+    # Fake model for testing multi-host inference on dual Galaxy
+    _register_model_if_missing(
+        ModelRegistry,
+        "TTDummyDualGlxModel",
+        "models.vllm_test_utils.dual_glx_ccl_test.test_model:DummyDualGlxModel",
+    )
+
 
 class TTPlatform(Platform):
     _enum = PlatformEnum.TT
