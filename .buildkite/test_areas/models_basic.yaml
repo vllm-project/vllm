@@ -57,10 +57,11 @@ steps:
 
 
 - label: Model strategy test
+  num_devices: 2
   source_file_dependencies: []
   commands:
     - pytest -v -s models/nightly/gptoss.py
-    
+
 
 - label: Transformers Nightly Models
   working_dir: "/vllm-workspace/"
