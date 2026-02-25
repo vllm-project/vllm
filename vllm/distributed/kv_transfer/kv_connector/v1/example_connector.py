@@ -17,7 +17,6 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import MLACommonMetadata
 from vllm.utils.hashing import safe_hash
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.triton_attn import TritonAttentionMetadata
 from vllm.v1.core.sched.output import SchedulerOutput
 
@@ -120,13 +119,12 @@ class ExampleConnector(KVConnectorBase_V1):
             The number of elements in kv_caches and layer_names should be
             the same.
         """
-        attn_metadata = forward_context.attn_metadata
 
         def inject_kv_into_layer(
             dst_kv_cache_layer: torch.Tensor,
             src_kv_cache: torch.Tensor,
             slot_mapping: torch.Tensor,
-            backend: AttentionBackendEnum,
+            attn_metadata: AttentionMetadata,
         ) -> None:
             """Inject the KV cache into the layer.
 
@@ -140,11 +138,6 @@ class ExampleConnector(KVConnectorBase_V1):
                 slot_mapping (torch.Tensor): the slot mapping. In shape
                     [num_tokens].
             """
-            if backend == AttentionBackendEnum.TRITON_ATTN:
-                block_idxs = slot_mapping // self._block_size
-                offsets = slot_mapping % self._block_size
-                dst_kv_cache_layer[block_idxs, :, offsets] = src_kv_cache
-                return
             dst_kv_cache_layer_shape = dst_kv_cache_layer.shape
             if isinstance(attn_metadata, MLACommonMetadata):
                 num_pages = dst_kv_cache_layer_shape[0]
@@ -153,6 +146,10 @@ class ExampleConnector(KVConnectorBase_V1):
                     num_pages * page_size, -1
                 )
                 dst_kv_cache_layer[slot_mapping, ...] = src_kv_cache
+            elif isinstance(attn_metadata, TritonAttentionMetadata):
+                block_idxs = slot_mapping // self._block_size
+                offsets = slot_mapping % self._block_size
+                dst_kv_cache_layer[block_idxs, :, offsets] = src_kv_cache
             else:
                 num_pages = dst_kv_cache_layer_shape[1]
                 page_size = dst_kv_cache_layer_shape[2]
@@ -195,7 +192,10 @@ class ExampleConnector(KVConnectorBase_V1):
                 )
                 kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
                 inject_kv_into_layer(
-                    kv_cache_layer, kv_cache, request.slot_mapping, layer.backend
+                    kv_cache_layer,
+                    kv_cache,
+                    request.slot_mapping,
+                    attn_metadata[layer_name],
                 )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
