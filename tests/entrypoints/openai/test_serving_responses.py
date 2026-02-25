@@ -13,16 +13,25 @@ from openai.types.responses.tool import (
     Tool,
 )
 
+import vllm.envs as envs
 from vllm.entrypoints.mcp.tool_server import ToolServer
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
-from vllm.entrypoints.openai.responses.context import ConversationContext
+from vllm.entrypoints.openai.engine.protocol import (
+    ErrorResponse,
+    RequestResponseMetadata,
+)
+from vllm.entrypoints.openai.responses.context import ConversationContext, SimpleContext
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.entrypoints.openai.responses.serving import (
     OpenAIServingResponses,
     _extract_allowed_tools_from_mcp_requests,
     extract_tool_types,
 )
+from vllm.entrypoints.openai.responses.streaming_events import (
+    StreamingState,
+)
 from vllm.inputs.data import TokensPrompt
+from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.sampling_params import SamplingParams
 
 
 class MockConversationContext(ConversationContext):
@@ -259,6 +268,87 @@ class TestValidateGeneratorInput:
         assert isinstance(result, ErrorResponse)
 
 
+@pytest.mark.asyncio
+async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
+    """Ensure reasoning_tokens usage is derived from thinking token spans."""
+
+    class FakeTokenizer:
+        def __init__(self):
+            self._vocab = {"<think>": 1, "</think>": 2, "reason": 3, "final": 4}
+
+        def get_vocab(self):
+            return self._vocab
+
+    # Force non-harmony, SimpleContext path
+    monkeypatch.setattr(envs, "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT", False)
+
+    engine_client = MagicMock()
+    model_config = MagicMock()
+    model_config.hf_config.model_type = "test"
+    model_config.hf_text_config = MagicMock()
+    model_config.get_diff_sampling_param.return_value = {}
+    engine_client.model_config = model_config
+    engine_client.input_processor = MagicMock()
+    engine_client.io_processor = MagicMock()
+    engine_client.renderer = MagicMock()
+
+    tokenizer = FakeTokenizer()
+    engine_client.renderer.get_tokenizer.return_value = tokenizer
+
+    models = MagicMock()
+
+    serving = OpenAIServingResponses(
+        engine_client=engine_client,
+        models=models,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+        reasoning_parser="qwen3",
+    )
+
+    # Build a SimpleContext with thinking tokens in the output.
+    context = SimpleContext()
+    token_ids = [1, 10, 2, 20]  # <think> 10 </think> 20 -> reasoning token count = 1
+    completion = CompletionOutput(
+        index=0,
+        text="<think>reason</think>final",
+        token_ids=token_ids,
+        cumulative_logprob=0.0,
+        logprobs=None,
+        finish_reason="stop",
+        stop_reason=None,
+    )
+    req_output = RequestOutput(
+        request_id="req",
+        prompt="hi",
+        prompt_token_ids=[7, 8],
+        prompt_logprobs=None,
+        outputs=[completion],
+        finished=True,
+        num_cached_tokens=0,
+    )
+    context.append_output(req_output)
+
+    async def dummy_result_generator():
+        yield None
+
+    request = ResponsesRequest(input="hi", tools=[], stream=False)
+    sampling_params = SamplingParams(max_tokens=16)
+    metadata = RequestResponseMetadata(request_id="req")
+
+    response = await serving.responses_full_generator(
+        request=request,
+        sampling_params=sampling_params,
+        result_generator=dummy_result_generator(),
+        context=context,
+        model_name="test-model",
+        tokenizer=tokenizer,
+        request_metadata=metadata,
+    )
+
+    assert response.usage.output_tokens_details.reasoning_tokens == 1
+
+
 class TestExtractAllowedToolsFromMcpRequests:
     """Test class for _extract_allowed_tools_from_mcp_requests function"""
 
@@ -352,3 +442,115 @@ class TestExtractAllowedToolsFromMcpRequests:
             "server1": ["tool1"],
             "server2": ["tool2"],
         }
+
+
+class TestHarmonyPreambleStreaming:
+    """Tests for preamble (commentary with no recipient) streaming events."""
+
+    @staticmethod
+    def _make_ctx(*, channel, recipient, delta="hello"):
+        """Build a lightweight mock StreamingHarmonyContext."""
+        ctx = MagicMock()
+        ctx.last_content_delta = delta
+        ctx.parser.current_channel = channel
+        ctx.parser.current_recipient = recipient
+        return ctx
+
+    @staticmethod
+    def _make_previous_item(*, channel, recipient, text="preamble text"):
+        """Build a lightweight mock previous_item (openai_harmony Message)."""
+        content_part = MagicMock()
+        content_part.text = text
+        item = MagicMock()
+        item.channel = channel
+        item.recipient = recipient
+        item.content = [content_part]
+        return item
+
+    def test_preamble_delta_emits_text_events(self) -> None:
+        """commentary + recipient=None should emit output_text.delta events."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(channel="commentary", recipient=None)
+        state = StreamingState()
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" in type_names
+        assert "response.output_item.added" in type_names
+
+    def test_preamble_delta_second_token_no_added(self) -> None:
+        """Second preamble token should emit delta only, not added again."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(channel="commentary", recipient=None, delta="w")
+        state = StreamingState()
+        state.sent_output_item_added = True
+        state.current_item_id = "msg_test"
+        state.current_content_index = 0
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" in type_names
+        assert "response.output_item.added" not in type_names
+
+    def test_commentary_with_function_recipient_not_preamble(self) -> None:
+        """commentary + recipient='functions.X' must NOT use preamble path."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_content_delta_events,
+        )
+
+        ctx = self._make_ctx(
+            channel="commentary",
+            recipient="functions.get_weather",
+        )
+        state = StreamingState()
+
+        events = emit_content_delta_events(ctx, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.delta" not in type_names
+
+    def test_preamble_done_emits_text_done_events(self) -> None:
+        """Completed preamble should emit text done + content_part done +
+        output_item done, same shape as final channel."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        previous = self._make_previous_item(channel="commentary", recipient=None)
+        state = StreamingState()
+        state.current_item_id = "msg_test"
+        state.current_output_index = 0
+        state.current_content_index = 0
+
+        events = emit_previous_item_done_events(previous, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.done" in type_names
+        assert "response.content_part.done" in type_names
+        assert "response.output_item.done" in type_names
+
+    def test_commentary_with_recipient_no_preamble_done(self) -> None:
+        """commentary + recipient='functions.X' should route to function call
+        done, not preamble done."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        previous = self._make_previous_item(
+            channel="commentary", recipient="functions.get_weather"
+        )
+        state = StreamingState()
+        state.current_item_id = "fc_test"
+
+        events = emit_previous_item_done_events(previous, state)
+
+        type_names = [e.type for e in events]
+        assert "response.output_text.done" not in type_names
