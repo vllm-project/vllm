@@ -985,14 +985,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 self.quant_config.kv_cache_scheme["strategy"]
             )
 
-        if strategy == QuantizationStrategy.ATTN_HEAD:
-            assert layer.impl.supports_per_head_quant_scales, (
-                f"Layer {layer.__class__.__name__} with implementation "
-                f"{layer.impl.__class__.__name__} does not support per-head scales."
-            )
-            n_scales = int(layer.num_kv_heads)
-        else:
-            n_scales = 1
+        n_scales = int(layer.num_kv_heads) if strategy == "attn_head" else 1
 
         layer.k_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)

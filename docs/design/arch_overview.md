@@ -208,9 +208,7 @@ configurations affect the class we ultimately get.
 
 The following figure shows the class hierarchy of vLLM:
 
-> <figure markdown="span">
->   ![](../assets/design/hierarchy.png){ align="center" alt="query" width="100%" }
-> </figure>
+![Class Hierarchy](../assets/design/hierarchy.png)
 
 There are several important design choices behind this class hierarchy:
 

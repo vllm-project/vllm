@@ -19,7 +19,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.perf import PerfMetricsLogging
+from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     CachingMetrics,
@@ -392,6 +392,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _histogram_cls = Histogram
     _spec_decoding_cls = SpecDecodingProm
     _kv_connector_cls = KVConnectorPrometheus
+    _perf_metrics_cls = PerfMetricsProm
 
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
@@ -422,6 +423,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             vllm_config.speculative_config, labelnames, per_engine_labelvalues
         )
         self.kv_connector_prom = self._kv_connector_cls(
+            vllm_config, labelnames, per_engine_labelvalues
+        )
+        self.perf_metrics_prom = self._perf_metrics_cls(
             vllm_config, labelnames, per_engine_labelvalues
         )
 
@@ -1064,6 +1068,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 self.kv_connector_prom.observe(
                     scheduler_stats.kv_connector_stats, engine_idx
                 )
+
+            if scheduler_stats.perf_stats is not None:
+                self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
 
             if (
                 self.kv_cache_metrics_enabled

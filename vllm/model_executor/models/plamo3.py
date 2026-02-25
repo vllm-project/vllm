@@ -317,7 +317,6 @@ class Plamo3Model(nn.Module):
         config = vllm_config.model_config.hf_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
         self.org_vocab_size = config.vocab_size
 

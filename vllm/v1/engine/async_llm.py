@@ -356,13 +356,13 @@ class AsyncLLM(EngineClient):
                 request_id,
                 prompt,
                 params,
+                supported_tasks=await self.get_supported_tasks(),
                 arrival_time=arrival_time,
                 lora_request=lora_request,
                 tokenization_kwargs=tokenization_kwargs,
                 trace_headers=trace_headers,
                 priority=priority,
                 data_parallel_rank=data_parallel_rank,
-                supported_tasks=await self.get_supported_tasks(),
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -433,6 +433,7 @@ class AsyncLLM(EngineClient):
         self._validate_streaming_input_sampling_params(sampling_params)
 
         inputs = dict(
+            supported_tasks=await self.get_supported_tasks(),
             arrival_time=arrival_time,
             lora_request=lora_request,
             tokenization_kwargs=tokenization_kwargs,
@@ -752,6 +753,13 @@ class AsyncLLM(EngineClient):
             )
             mode = "wait"
         await self.engine_core.pause_scheduler_async(mode=mode, clear_cache=clear_cache)
+        # Small sleep to help ensure that final outputs from any in-flight requests are
+        # returned prior to this method returning. These outputs come out of the engine
+        # prior to the wait-for-idle completion event, but involve additional async
+        # tasks in output processing.
+        # Note that this is not required for correctness, just more intuitive ordering
+        # of events from caller's pov.
+        await asyncio.sleep(0.02)
 
     async def resume_generation(self) -> None:
         """Resume generation after :meth:`pause_generation`."""
@@ -889,10 +897,8 @@ class AsyncLLM(EngineClient):
     async def reset_encoder_cache(self) -> None:
         await self.engine_core.reset_encoder_cache_async()
 
-    async def sleep(self, level: int = 1) -> None:
-        if level > 0:
-            await self.reset_prefix_cache()
-        await self.engine_core.sleep_async(level)
+    async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        await self.engine_core.sleep_async(level, mode)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)

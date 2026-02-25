@@ -80,7 +80,18 @@ def enable_hf_transfer():
             pass
 
 
-enable_hf_transfer()
+def enable_xet_high_performance():
+    """automatically activates xet high performance mode"""
+    if "HF_XET_HIGH_PERFORMANCE" not in os.environ:
+        huggingface_hub.constants.HF_XET_HIGH_PERFORMANCE = True
+
+
+if hasattr(huggingface_hub.constants, "HF_XET_HIGH_PERFORMANCE"):
+    # Transformers v5
+    enable_xet_high_performance()
+else:
+    # Transformers v4
+    enable_hf_transfer()
 
 
 class DisabledTqdm(tqdm):

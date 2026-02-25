@@ -89,10 +89,13 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         num_heads: int,
         num_kv_heads: int,
         use_flashinfer: bool = False,
+        match_rocm_aiter: bool | None = None,
         enabled: bool | None = None,
     ) -> None:
         if enabled is None:
             enabled = RotaryEmbedding.enabled()
+        if match_rocm_aiter is None:
+            match_rocm_aiter = rocm_aiter_ops.is_triton_rotary_embed_enabled()
 
         super().__init__(enabled)
         self.is_neox = is_neox
@@ -104,6 +107,8 @@ class MatcherRotaryEmbedding(MatcherCustomOp):
         self.rotary_dim = head_size
         if use_flashinfer:
             self.rotary_op = FLASHINFER_ROTARY_OP
+        elif match_rocm_aiter:
+            self.rotary_op = rocm_aiter_ops.get_triton_rotary_embedding_op()
         else:
             self.rotary_op = ROTARY_OP
 

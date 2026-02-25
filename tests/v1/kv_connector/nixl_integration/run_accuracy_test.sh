@@ -95,18 +95,6 @@ cleanup_instances() {
   sleep 2
 }
 
-# Handle to get model-specific arguments for deepseek
-get_model_args() {
-  local model_name=$1
-  local extra_args=""
-
-  if [[ "$model_name" == "deepseek-ai/deepseek-vl2-tiny" ]]; then
-    extra_args="--hf_overrides '{\"architectures\": [\"DeepseekVLV2ForCausalLM\"]}' --trust-remote-code"
-  fi
-
-  echo "$extra_args"
-}
-
 get_num_gpus() {
   if [[ "$SMI_BIN" == *"nvidia"* ]]; then
     $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
@@ -126,9 +114,6 @@ run_tests_for_model() {
   echo "================================"
   echo "Testing model: $model_name"
   echo "================================"
-
-  # Get model-specific arguments
-  local model_args=$(get_model_args "$model_name")
 
   # Arrays to store all hosts and ports
   PREFILL_HOSTS=()
@@ -172,11 +157,7 @@ run_tests_for_model() {
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
-    if [ -n "$model_args" ]; then
-    FULL_CMD="$BASE_CMD $model_args"
-    else
     FULL_CMD="$BASE_CMD"
-    fi
 
     eval "$FULL_CMD &"
 
@@ -227,11 +208,7 @@ run_tests_for_model() {
     --tensor-parallel-size 1 --enable-expert-parallel"
   fi
 
-    if [ -n "$model_args" ]; then
-    FULL_CMD="$BASE_CMD $model_args"
-    else
     FULL_CMD="$BASE_CMD"
-    fi
 
     eval "$FULL_CMD &"
 
