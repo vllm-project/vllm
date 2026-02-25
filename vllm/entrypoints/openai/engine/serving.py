@@ -21,7 +21,7 @@ from starlette.datastructures import Headers
 import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
-from vllm.engine.protocol import BaseEngineClient, EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -229,7 +229,7 @@ class OpenAIServing:
 
     def __init__(
         self,
-        engine_client: BaseEngineClient,
+        engine_client: RendererClient,
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
@@ -357,26 +357,12 @@ class OpenAIServing:
         self,
         request: AnyRequest,
     ) -> ErrorResponse | None:
-        error_response = None
-
         if self._is_model_supported(request.model):
             return None
         if request.model in self.models.lora_requests:
             return None
-        if (
-            envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING
-            and request.model
-            and (load_result := await self.models.resolve_lora(request.model))
-        ):
-            if isinstance(load_result, LoRARequest):
-                return None
-            if (
-                isinstance(load_result, ErrorResponse)
-                and load_result.error.code == HTTPStatus.BAD_REQUEST.value
-            ):
-                error_response = load_result
 
-        return error_response or self.create_error_response(
+        return self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
             err_type="NotFoundError",
             status_code=HTTPStatus.NOT_FOUND,
@@ -868,7 +854,7 @@ class OpenAIServingInference(OpenAIServing):
     """OpenAIServing subclass for endpoints that require inference.
 
     Extends :class:`OpenAIServing` by narrowing ``engine_client`` from
-    :class:`BaseEngineClient` to :class:`EngineClient` and adding methods
+    :class:`RendererClient` to :class:`EngineClient` and adding methods
     that call ``generate()`` / ``encode()`` on the engine.
     """
 
@@ -890,6 +876,36 @@ class OpenAIServingInference(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             log_error_stack=log_error_stack,
         )
+
+    async def _check_model(
+        self,
+        request: AnyRequest,
+    ) -> ErrorResponse | None:
+        """Extend base model check with runtime LoRA resolution.
+
+        Runtime LoRA loading requires :meth:`EngineClient.add_lora`,
+        which is only available on the full inference engine.
+        """
+        # Check known models/LoRAs first (base class)
+        error_response = await super()._check_model(request)
+        if error_response is None:
+            return None
+
+        # Attempt runtime LoRA resolution (needs inference engine)
+        if (
+            envs.VLLM_ALLOW_RUNTIME_LORA_UPDATING
+            and request.model
+            and (load_result := await self.models.resolve_lora(request.model))
+        ):
+            if isinstance(load_result, LoRARequest):
+                return None
+            if (
+                isinstance(load_result, ErrorResponse)
+                and load_result.error.code == HTTPStatus.BAD_REQUEST.value
+            ):
+                return load_result
+
+        return error_response
 
     async def _preprocess(
         self,

@@ -38,8 +38,8 @@ class StreamingInput:
     sampling_params: SamplingParams | None = None
 
 
-class BaseEngineClient(ABC):
-    """Engine client interface for non-inference operations.
+class RendererClient(ABC):
+    """Client interface for the renderer layer (CPU-only operations).
 
     Contains only methods and attributes that don't require a running
     inference engine: configuration, tokenization, health checks, and
@@ -86,10 +86,10 @@ class BaseEngineClient(ABC):
         raise NotImplementedError
 
 
-class EngineClient(BaseEngineClient):
+class EngineClient(RendererClient):
     """Full engine client interface including inference operations.
 
-    Extends :class:`BaseEngineClient` with methods that require a running
+    Extends :class:`RendererClient` with methods that require a running
     inference engine: generation, encoding, profiling, cache management,
     scheduler control, and weight transfer.
     """
