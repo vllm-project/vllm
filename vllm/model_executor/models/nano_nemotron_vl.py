@@ -1239,6 +1239,20 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
     def audio_extractor(self) -> ParakeetExtractor | None:
         return self.get_hf_processor().audio_extractor
 
+    def get_data_parser(self):
+        target_sr = None
+        target_channels = None
+        if extractor := self.audio_extractor:
+            target_sr = extractor.sampling_rate
+            target_channels = 1
+
+        return MultiModalDataParser(
+            video_needs_metadata=True,
+            target_sr=target_sr,
+            target_channels=target_channels,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self):
         video_limit = {"video": None} if self.supports_video else {}
         audio_limit = {"audio": None} if self.audio_extractor is not None else {}
@@ -1373,18 +1387,6 @@ class NanoNemotronVLMultiModalProcessor(
 ):
     """MultiModalProcessor extended for video support"""
 
-    def _get_data_parser(self) -> MultiModalDataParser:
-        target_sr = None
-        target_channels = None
-        if extractor := self.info.audio_extractor:
-            target_sr = extractor.sampling_rate
-            target_channels = 1
-        return MultiModalDataParser(
-            video_needs_metadata=True,
-            target_sr=target_sr,
-            target_channels=target_channels,
-        )
-
     def _extract_audio_from_videos(
         self,
         mm_data: MultiModalDataDict,
@@ -1395,7 +1397,7 @@ class NanoNemotronVLMultiModalProcessor(
             The (possibly augmented) *mm_data* and the list of
             extracted audio items.
         """
-        video_items = self._get_data_parser().parse_mm_data({"video": mm_data["video"]})
+        video_items = self.data_parser.parse_mm_data({"video": mm_data["video"]})
         videos = video_items.get_items("video", VideoProcessorItems)
         assert isinstance(videos.metadata, list)
         metadata_list = videos.metadata
