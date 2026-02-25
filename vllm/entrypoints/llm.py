@@ -87,6 +87,7 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.utils.counter import Counter
 from vllm.utils.mistral import is_mistral_tokenizer
 from vllm.utils.tqdm_utils import maybe_tqdm
+from vllm.v1.engine import PauseMode
 from vllm.v1.engine.llm_engine import LLMEngine
 from vllm.v1.sample.logits_processor import LogitsProcessor
 
@@ -441,8 +442,7 @@ class LLM:
             A list of `RequestOutput` objects containing the
             generated completions in the same order as the input prompts.
         """
-        model_config = self.model_config
-        runner_type = model_config.runner_type
+        runner_type = self.model_config.runner_type
         if runner_type != "generate":
             raise ValueError(
                 "LLM.generate() is only supported for generative models. "
@@ -489,45 +489,21 @@ class LLM:
         Returns:
             A list of request IDs for the enqueued requests.
         """
-        model_config = self.model_config
-        runner_type = model_config.runner_type
+        runner_type = self.model_config.runner_type
         if runner_type != "generate":
             raise ValueError("LLM.enqueue() is only supported for generative models.")
 
         if sampling_params is None:
             sampling_params = self.get_default_sampling_params()
 
-        # Use the same preprocessing as _run_completion
-        seq_prompts = prompt_to_seq(prompts)
-        seq_params = self._params_to_seq(sampling_params, len(seq_prompts))
-        seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
-        seq_tok_kwargs = [
-            merge_kwargs(
-                tokenization_kwargs,
-                dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
-            )
-            for param in seq_params
-        ]
-        seq_priority = self._priority_to_seq(priority, len(prompts))
-
-        request_ids = self._render_and_add_requests(
-            prompts=(
-                self._preprocess_cmpl_one(prompt, tok_kwargs)
-                for prompt, tok_kwargs in zip(
-                    maybe_tqdm(
-                        seq_prompts,
-                        use_tqdm=use_tqdm,
-                        desc="Rendering prompts",
-                    ),
-                    seq_tok_kwargs,
-                )
-            ),
-            params=seq_params,
-            lora_requests=seq_lora_requests,
-            priorities=seq_priority,
+        return self._add_completion_requests(
+            prompts=prompts,
+            params=sampling_params,
+            use_tqdm=use_tqdm,
+            lora_request=lora_request,
+            priority=priority,
+            tokenization_kwargs=tokenization_kwargs,
         )
-
-        return request_ids
 
     @overload
     def wait_for_completion(
@@ -1659,7 +1635,7 @@ class LLM:
             reset_running_requests, reset_connector
         )
 
-    def sleep(self, level: int = 1):
+    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
         """
         Put the engine to sleep. The engine should not process any requests.
         The caller should guarantee that no requests are being processed
@@ -1679,10 +1655,10 @@ class LLM:
                            a different model or update the model, where
                            previous model weights are not needed. It reduces
                            CPU memory pressure.
+            mode: How to handle any existing requests, can be "abort", "wait",
+                or "keep".
         """
-        if level > 0:
-            self.reset_prefix_cache()
-        self.llm_engine.sleep(level=level)
+        self.llm_engine.sleep(level=level, mode=mode)
 
     def wake_up(self, tags: list[str] | None = None):
         """
@@ -1759,6 +1735,45 @@ class LLM:
 
         return [0] * num_requests
 
+    def _add_completion_requests(
+        self,
+        prompts: PromptType | Sequence[PromptType],
+        params: SamplingParams
+        | PoolingParams
+        | Sequence[SamplingParams | PoolingParams],
+        *,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+        lora_request: Sequence[LoRARequest] | LoRARequest | None = None,
+        priority: list[int] | None = None,
+        tokenization_kwargs: dict[str, Any] | None = None,
+    ) -> list[str]:
+        seq_prompts = prompt_to_seq(prompts)
+        seq_params = self._params_to_seq(params, len(seq_prompts))
+        seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
+        seq_tok_kwargs = [
+            merge_kwargs(
+                tokenization_kwargs,
+                dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
+            )
+            for param in seq_params
+        ]
+        seq_priority = self._priority_to_seq(priority, len(prompts))
+
+        return self._render_and_add_requests(
+            prompts=(
+                self._preprocess_cmpl_one(prompt, tok_kwargs)
+                for prompt, tok_kwargs in zip(
+                    maybe_tqdm(
+                        seq_prompts, use_tqdm=use_tqdm, desc="Rendering prompts"
+                    ),
+                    seq_tok_kwargs,
+                )
+            ),
+            params=seq_params,
+            lora_requests=seq_lora_requests,
+            priorities=seq_priority,
+        )
+
     def _run_completion(
         self,
         prompts: PromptType | Sequence[PromptType],
@@ -1772,36 +1787,15 @@ class LLM:
         priority: list[int] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
-        seq_prompts = prompt_to_seq(prompts)
-        seq_params = self._params_to_seq(params, len(seq_prompts))
-        seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
-        seq_tok_kwargs = [
-            merge_kwargs(
-                tokenization_kwargs,
-                dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
-            )
-            for param in seq_params
-        ]
-        seq_priority = self._priority_to_seq(priority, len(prompts))
-
-        return self._render_and_run_requests(
-            prompts=(
-                self._preprocess_cmpl_one(prompt, tok_kwargs)
-                for prompt, tok_kwargs in zip(
-                    maybe_tqdm(
-                        seq_prompts,
-                        use_tqdm=use_tqdm,
-                        desc="Rendering prompts",
-                    ),
-                    seq_tok_kwargs,
-                )
-            ),
-            params=seq_params,
-            output_type=output_type,
+        self._add_completion_requests(
+            prompts=prompts,
+            params=params,
             use_tqdm=use_tqdm,
-            lora_requests=seq_lora_requests,
-            priorities=seq_priority,
+            lora_request=lora_request,
+            priority=priority,
+            tokenization_kwargs=tokenization_kwargs,
         )
+        return self._run_engine(use_tqdm=use_tqdm, output_type=output_type)
 
     def _run_chat(
         self,
