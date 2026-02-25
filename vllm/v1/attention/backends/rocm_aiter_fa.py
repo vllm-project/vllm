@@ -1135,25 +1135,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
                     from aiter.ops.triton.unified_attention import (
                         unified_attention,
                     )
-                _, num_heads, head_size = query.shape
-                num_seqs = attn_metadata.seq_lens.shape[0]
 
-                if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-                    max_num_partitions = (
-                        attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
-                    ) // _PARTITION_SIZE_ROCM
-                    tmp_out = torch.empty(
-                        (num_seqs, num_heads, max_num_partitions, head_size),
-                        dtype=query.dtype,
-                        device=query.device,
-                    )
-                    exp_sums = torch.empty(
-                        (num_seqs, num_heads, max_num_partitions),
-                        dtype=torch.float32,
-                        device=query.device,
-                    )
-                    max_logits = torch.empty_like(exp_sums)
-                    num_blocks, block_size, num_kv_heads, _ = key_cache.shape
                     descale_shape = (
                         attn_metadata.query_start_loc[:num_decodes].shape[0] - 1,
                         key_cache.shape[2],
@@ -1223,7 +1205,23 @@ class AiterFlashAttentionImpl(AttentionImpl):
                         v_descale=layer._v_scale.expand(descale_shape),
                     )
                 elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
-                    num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
+                    _, num_heads, head_size = query.shape
+                    num_seqs = attn_metadata.seq_lens.shape[0]
+                    max_num_partitions = (
+                        attn_metadata.max_seq_len + _PARTITION_SIZE_ROCM - 1
+                    ) // _PARTITION_SIZE_ROCM
+                    tmp_out = torch.empty(
+                        (num_seqs, num_heads, max_num_partitions, head_size),
+                        dtype=query.dtype,
+                        device=query.device,
+                    )
+                    exp_sums = torch.empty(
+                        (num_seqs, num_heads, max_num_partitions),
+                        dtype=torch.float32,
+                        device=query.device,
+                    )
+                    max_logits = torch.empty_like(exp_sums)
+                    num_blocks, block_size, num_kv_heads, _ = key_cache.shape
                     x = 16 // key_cache.element_size()
                     k_cache_template = torch.empty(
                         [num_blocks, num_kv_heads, head_size // x, block_size, x],
