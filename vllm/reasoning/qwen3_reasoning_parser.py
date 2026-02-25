@@ -3,6 +3,8 @@
 
 from collections.abc import Sequence
 
+from transformers import PreTrainedTokenizerBase
+
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
@@ -32,6 +34,15 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     This parser handles both styles: if <think> appears in the generated output
     it is stripped before extraction (non-streaming) or skipped (streaming).
     """
+
+    def __init__(
+        self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs
+    ):
+        super().__init__(tokenizer, *args, **kwargs)
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        self._thinking_enabled = bool(
+            chat_kwargs.get("enable_thinking", True)
+        )
 
     @property
     def start_token(self) -> str:
@@ -68,8 +79,13 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         )
 
         if self.end_token not in model_output:
-            # No end token means thinking is disabled or the model
-            # did not produce reasoning. Treat everything as content.
+            if self._thinking_enabled:
+                # Thinking is enabled but output was truncated before
+                # </think> was generated (e.g. max_completion_tokens).
+                # The tokens are reasoning, not content.
+                return model_output, None
+            # Thinking is explicitly disabled — treat everything as
+            # content.
             return None, model_output
 
         # Extract reasoning content from the model output.
