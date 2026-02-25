@@ -145,9 +145,7 @@ class OpenAIServingPooling(OpenAIServing):
             if use_io_processor:
                 assert self.io_processor is not None
 
-                pooling_params = self.io_processor.merge_pooling_params(
-                    params=None, request=request
-                )
+                pooling_params = self.io_processor.merge_pooling_params()
                 if pooling_params.task is None:
                     pooling_params.task = "plugin"
             else:
