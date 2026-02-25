@@ -244,10 +244,8 @@ class RocmPlatform(Platform):
         "mxfp4",
         "petit_nvfp4",
         "torchao",
+        "bitsandbytes",
     ]
-    # bitsandbytes not supported on gfx9 (warp size 64 limitation)
-    if not on_gfx9():
-        supported_quantization += ["bitsandbytes"]
 
     @classmethod
     def import_kernels(cls) -> None:
@@ -496,6 +494,7 @@ class RocmPlatform(Platform):
         use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+        use_aiter_triton_rope = rocm_aiter_ops.is_triton_rotary_embed_enabled()
 
         if compilation_config.cudagraph_mode.has_full_cudagraphs():
             # decode context parallel does not support full cudagraphs
@@ -560,6 +559,13 @@ class RocmPlatform(Platform):
             and "-grouped_topk" not in compilation_config.custom_ops
         ):
             compilation_config.custom_ops.append("+grouped_topk")
+        # Enable rotary embedding when using AITER if its not disabled by user
+        if (
+            use_aiter_triton_rope
+            and "+rotary_embedding" not in compilation_config.custom_ops
+            and "-rotary_embedding" not in compilation_config.custom_ops
+        ):
+            compilation_config.custom_ops.append("+rotary_embedding")
 
         # Default dispatch to rocm's sparse_attn_indexer implementation
         compilation_config.custom_ops.append("+sparse_attn_indexer")
@@ -676,3 +682,7 @@ class RocmPlatform(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def num_compute_units(cls, device_id=0):
+        return torch.cuda.get_device_properties(device_id).multi_processor_count
