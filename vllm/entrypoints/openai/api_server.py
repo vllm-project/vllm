@@ -22,7 +22,7 @@ from starlette.datastructures import State
 
 import vllm.envs as envs
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import load_chat_template
 from vllm.entrypoints.launcher import serve_http
 from vllm.entrypoints.logger import RequestLogger
@@ -289,12 +289,13 @@ def build_app(
 
 
 async def init_app_state(
+    renderer_client: RendererClient,
     engine_client: EngineClient,
     state: State,
     args: Namespace,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
 ) -> None:
-    vllm_config = engine_client.vllm_config
+    vllm_config = renderer_client.vllm_config
     if supported_tasks is None:
         warnings.warn(
             "The 'supported_tasks' parameter was not provided to "
@@ -319,6 +320,7 @@ async def init_app_state(
         BaseModelPath(name=name, model_path=args.model) for name in served_model_names
     ]
 
+    state.renderer_client = renderer_client
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
@@ -334,14 +336,16 @@ async def init_app_state(
     lora_modules = process_lora_modules(args.lora_modules, default_mm_loras)
 
     state.openai_serving_models = OpenAIServingModels(
+        renderer_client=renderer_client,
         engine_client=engine_client,
         base_model_paths=base_model_paths,
         lora_modules=lora_modules,
     )
     await state.openai_serving_models.init_static_loras()
     state.openai_serving_tokenization = OpenAIServingTokenization(
-        engine_client,
-        state.openai_serving_models,
+        renderer_client=renderer_client,
+        engine_client=engine_client,
+        models=state.openai_serving_models,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -353,7 +357,12 @@ async def init_app_state(
         from vllm.entrypoints.openai.generate.api_router import init_generate_state
 
         await init_generate_state(
-            engine_client, state, args, request_logger, supported_tasks
+            renderer_client,
+            engine_client,
+            state,
+            args,
+            request_logger,
+            supported_tasks,
         )
 
     if "transcription" in supported_tasks:
@@ -362,18 +371,37 @@ async def init_app_state(
         )
 
         init_transcription_state(
-            engine_client, state, args, request_logger, supported_tasks
+            renderer_client,
+            engine_client,
+            state,
+            args,
+            request_logger,
+            supported_tasks,
         )
 
     if "realtime" in supported_tasks:
         from vllm.entrypoints.openai.realtime.api_router import init_realtime_state
 
-        init_realtime_state(engine_client, state, args, request_logger, supported_tasks)
+        init_realtime_state(
+            renderer_client,
+            engine_client,
+            state,
+            args,
+            request_logger,
+            supported_tasks,
+        )
 
     if any(task in POOLING_TASKS for task in supported_tasks):
         from vllm.entrypoints.pooling import init_pooling_state
 
-        init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
+        init_pooling_state(
+            renderer_client,
+            engine_client,
+            state,
+            args,
+            request_logger,
+            supported_tasks,
+        )
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -491,11 +519,16 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
-        supported_tasks = await engine_client.get_supported_tasks()
+        # In co-located mode, AsyncLLM implements both RendererClient
+        # (CPU ops) and EngineClient (inference ops).
+        renderer_client = engine_client
+        supported_tasks = await renderer_client.get_supported_tasks()
         logger.info("Supported tasks: %s", supported_tasks)
 
         app = build_app(args, supported_tasks)
-        await init_app_state(engine_client, app.state, args, supported_tasks)
+        await init_app_state(
+            renderer_client, engine_client, app.state, args, supported_tasks
+        )
 
         logger.info(
             "Starting vLLM API server %d on %s",
