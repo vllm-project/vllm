@@ -191,12 +191,13 @@ class ExampleConnector(KVConnectorBase_V1):
                     layer_name, request.token_ids, request.mm_hashes
                 )
                 kv_cache = safetensors.torch.load_file(filename)["kv_cache"].cuda()
-                inject_kv_into_layer(
-                    kv_cache_layer,
-                    kv_cache,
-                    request.slot_mapping,
-                    attn_metadata[layer_name],
-                )
+                if isinstance(attn_metadata, dict):
+                    inject_kv_into_layer(
+                        kv_cache_layer,
+                        kv_cache,
+                        request.slot_mapping,
+                        attn_metadata[layer_name],
+                    )
 
     def wait_for_layer_load(self, layer_name: str) -> None:
         """Blocking until the KV for a specific layer is loaded into vLLM's
