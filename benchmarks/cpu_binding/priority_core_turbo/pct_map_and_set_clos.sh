@@ -172,7 +172,8 @@ apply_assoc() {
     $ISS -c "$cpu_list" core-power assoc --clos "$clos"
     return 0
   fi
-
+  ## IMPORTANT: need to enable CLOS feature first in OS before assoc
+  $ISS core-power enable --clos
   out="$($ISS -c "$cpu_list" core-power assoc --clos "$clos" 2>&1 >/dev/null)" || rc=$?
   rc="${rc:-0}"
 
