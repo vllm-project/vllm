@@ -1056,7 +1056,7 @@ class EngineArgs:
             "--fully-sharded-loras", **lora_kwargs["fully_sharded_loras"]
         )
         lora_group.add_argument(
-            "--lora-target-modules", **lora_kwargs["lora_target_modules"]
+            "--lora-target-modules", **lora_kwargs["target_modules"]
         )
         lora_group.add_argument("--default-mm-loras", **lora_kwargs["default_mm_loras"])
         lora_group.add_argument(
