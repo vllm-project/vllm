@@ -1128,6 +1128,12 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
   TORCH_CHECK(
       in_a.dtype() == torch::kFloat16 || in_a.dtype() == torch::kBFloat16,
       "wvSplitK supports only float16 and bfloat16; got ", in_a.scalar_type());
+  if (in_bias.has_value() && in_bias->numel() > 0) {
+    TORCH_CHECK(in_bias->dtype() == in_a.dtype(),
+                "in_bias must have the same dtype as in_a and in_b (float16 or "
+                "bfloat16); got ",
+                in_bias->scalar_type());
+  }
   TORCH_CHECK(in_a.size(1) % 8 == 0, "k % 8 == 0");
   TORCH_CHECK(in_a.size(1) == in_b.size(1),
               "K dimension (inner) must match: in_a has ", in_a.size(1),
@@ -1149,13 +1155,6 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
       (in_bias.has_value() && in_bias->numel() > 0 && in_bias->dim() == 2)
           ? in_bias->size(0)
           : 1;
-
-  if (in_bias.has_value() && in_bias->numel() > 0) {
-    TORCH_CHECK(in_bias->dtype() == in_a.dtype(),
-                "in_bias must have the same dtype as in_a and in_b (float16 or "
-                "bfloat16); got ",
-                in_bias->scalar_type());
-  }
 
   // Bias uses (m % Bx) + (n % By) * M indexing; Bx/By must be 1 or divide M/N.
   TORCH_CHECK(Bx_in >= 1 && (Bx_in == 1 || M_in % Bx_in == 0),
