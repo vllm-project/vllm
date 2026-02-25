@@ -242,20 +242,27 @@ def _helion_all_gather_fp8_gemm_runtime(
         "SPLITS_PER_RANK":SPLITS_PER_RANK,
     }
 
-    a_shared_symm = dist._symmetric_memory.empty(
-        a_shared.shape,
-        dtype=a_shared.dtype,
-        device=a_shared.device
-    )
-    a_shared_symm.copy_(a_shared)
 
-    # Determine group size and rank
     symm_mem_group = group_name
-    if symm_mem_group is None:
-        raise RuntimeError("No symmetric memory group available")
-    symm_mem_hdl = dist._symmetric_memory.rendezvous(a_shared_symm, group=symm_mem_group)
-        
-    a_shape = list(a_shared.shape)
+    symm_mem_hdl = dist._symmetric_memory.rendezvous(a_shared, group=group_name)
+
+    if symm_mem_hdl is None:
+        a_shared_symm = dist._symmetric_memory.empty(
+            a_shared.shape,
+            dtype=a_shared.dtype,
+            device=a_shared.device
+        )
+        a_shared_symm.copy_(a_shared)
+        a_shared_symm._is_symmetric_memory = True
+
+        # Try rendezvous again with the symmetric copy
+        symm_mem_hdl = dist._symmetric_memory.rendezvous(a_shared_symm, group=group_name)
+        if symm_mem_hdl is None:
+            raise RuntimeError("Failed to get symmetric memory handle after copy")
+    else:
+        a_shared_symm = a_shared  # already usable
+
+    a_shape = list(a_shared_symm.shape)
     a_shape[0] *= symm_mem_hdl.world_size
     configs["RANK"] = symm_mem_hdl.rank
     configs["WORLD_SIZE"] = symm_mem_hdl.world_size

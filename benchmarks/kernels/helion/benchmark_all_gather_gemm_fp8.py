@@ -139,9 +139,7 @@ def do_bench_distributed(
     else:
         raise ValueError(f"Unknown return_mode: {return_mode}")
 
-# TODO: This currently fails because the CUDA graph cannot capture ops
-# that trigger memory reallocation. Preallocate the necessary tensors
-# in the Helion kernel and pass them to fn() during capture.
+
 def do_bench_distributed_graph(
     fn: Callable,
     repeat: int = 50,
@@ -213,10 +211,17 @@ def setup_distributed():
 
     torch.manual_seed(42 + rank)
     device = torch.device(f"cuda:{local_rank}")
-    torch.cuda.set_device(device)
+    torch.cuda.set_device(local_rank)
 
     if not dist.is_initialized():
-        dist.init_process_group("nccl")
+        
+        dist.init_process_group(
+            backend="nccl",
+            init_method="env://",
+            rank=rank,
+            world_size=world_size,
+            device_id=device
+        )
 
     # minimal GroupCoordinator wrapping WORLD
     world_group = GroupCoordinator(
@@ -249,15 +254,26 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
         #adding clamping to avoid nan, inf (overflow)
         min_val=1e-3 
         max_val = 0.02 * (1024 / max(K, N))
-        candidate_splits = [1, 2, 4]  
 
         scale_a = scale_a.clamp(min=min_val, max=max_val)
         scale_b = scale_b.clamp(min=min_val, max=max_val)
+        # preallocation for cuda graph capture
+        
+        a_shared_symm = dist._symmetric_memory.empty(
+            a_shared.shape,
+            dtype=a_shared.dtype,
+            device=a_shared.device
+        )
+        a_shared_symm.copy_(a_shared)
+        
+        candidate_splits = [1, 2, 4]  
+
         for sp in candidate_splits:
             if M_per_rank % sp != 0:
                 continue  # skip invalid splits
+
             helion_kernel = lambda: torch.ops.vllm.helion_all_gather_fp8_gemm(
-                a_shared,
+                a_shared_symm,
                 b,
                 scale_a,
                 scale_b,
@@ -266,7 +282,7 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
                 SPLITS_PER_RANK=sp,
             )
             baseline_kernel = lambda: torch.ops.symm_mem.fused_all_gather_scaled_matmul(
-                a_shared,
+                a_shared_symm,
                 [b],
                 scale_a,
                 [scale_b],
@@ -277,6 +293,7 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
                 use_fast_accum=[False],
                 group_name=group_name,
             )
+            # TODO: add a santity check, currently we test it separately in `vllm/tests/distributed/test_all_gather_gemm_fp8.py`
 
             # benchmark Helion kernel
             torch.cuda.reset_peak_memory_stats(device)
@@ -333,8 +350,8 @@ if __name__ == "__main__":
         (2048, 4096, 4096),
         (4096, 2048, 4096),
         #large shapes
-        (4096, 5120, 5120),
-        #(8192, 8192, 8192),
+        (4096, 5120, 5120), # this fails to do_bench_distributed_graph
+        #(8192, 8192, 8192), this fails to benchmark (might be OOM) for split_per_rank=1,2,4
     ]
     rank, local_rank, world_size, device, dist_group, world_group = setup_distributed()
     try:
