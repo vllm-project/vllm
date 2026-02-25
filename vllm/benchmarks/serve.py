@@ -1902,11 +1902,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             output_lens = benchmark_result.get("output_lens", [])
 
             if input_lens and output_lens:
-                for i in range(len(input_lens)):
+                for req_input_len, req_output_len in zip(input_lens, output_lens):
                     per_request_data.append(
                         {
-                            "prompt_len": input_lens[i],
-                            "output_tokens": output_lens[i],
+                            "prompt_len": req_input_len,
+                            "output_tokens": req_output_len,
                         }
                     )
 
