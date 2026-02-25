@@ -38,7 +38,6 @@ TEXT_FILE_2 = "example_text_2.txt"
 NUM_SEGMENTS = 4
 
 # LLM configuration
-MAX_TOKENS = 10_000
 MAX_GENERATED_TOKENS = 128
 GPU_MEMORY_UTIL = 0.9
 
@@ -222,10 +221,14 @@ class KVConfigBuilder:
 
     @classmethod
     def segmented_prefill_offload(cls) -> KVTransferConfig:
+        """
+        SegmentedPrefillOffloadConnector with gap policy configured at scheduler level.
+        Note: gap_length is now configured via SchedulerConfig, not connector config.
+        """
         return KVTransferConfig(
             kv_connector="SegmentedPrefillOffloadConnector",
             **cls.BASE_CONFIG,
-            kv_connector_extra_config={"cpu_bytes_to_use": CPU_CACHE_BYTES, "gap_length": 64},
+            kv_connector_extra_config={"cpu_bytes_to_use": CPU_CACHE_BYTES},
             kv_connector_module_path="segmented_prefill_example_connector",
         )
 
@@ -269,19 +272,33 @@ class LLMInstance:
         model_name: str,
         kv_config: KVTransferConfig | None = None,
         max_generated: int = MAX_GENERATED_TOKENS,
+        use_gap_policy: bool = False,
     ) -> "LLMInstance":
         """Create a new LLM instance with the given configuration."""
         samp_preload = SamplingParams(temperature=0, max_tokens=1)
         samp_generate = SamplingParams(temperature=0, max_tokens=max_generated)
 
+        # Configure gap policy if requested
+        gap_policy_name = None
+        gap_policy_config = None
+        if use_gap_policy:
+            gap_policy_name = "span_aware"
+            gap_policy_config = {
+                "gap_length": 32,
+                "span_marker_token_id": SPAN_TOKEN_PLUS,
+                "block_size": BLOCK_SIZE,
+            }
+
         llm = LLM(
             model=model_name,
             gpu_memory_utilization=GPU_MEMORY_UTIL,
             kv_transfer_config=kv_config,
+            gap_policy_name=gap_policy_name,
+            gap_policy_config=gap_policy_config,
             enforce_eager=True,
             block_size=BLOCK_SIZE,
             attention_backend="TRITON_ATTN",
-            enable_prefix_caching=False,
+            # enable_prefix_caching=False, # Use this for testing with external cache (Like offloadingConnector)
         )
 
         tok = llm.get_tokenizer()
@@ -307,7 +324,7 @@ class LLMInstance:
         start = time.time()
         response = self.llm.generate(
             wrap_prompt(prompt),
-            sampling_params=self.sampling_params_generate, # self.sampling_params_preload
+            sampling_params=self.sampling_params_generate, # self.sampling_params_preload for checking timing performance
             use_tqdm=False,
         )
         elapsed = time.time() - start
@@ -528,12 +545,15 @@ def main():
     setup_environment()
     model_name = MODEL_NAMES[SELECTED_MODEL_INDEX]
 
-    # Create first LLM instance with SegmentedPrefillOffloadConnector
+    # Create first LLM instance with OffloadingConnector + SpanAwareGapPolicy
     runner = TestRunner(model_name)
-    runner.print_header("Creating vLLM with SegmentedPrefillOffloadConnector")
+    runner.print_header("Creating vLLM with OffloadingConnector + SpanAwareGapPolicy")
 
+    # Gap policy is configured via LLM parameters
     instance1 = LLMInstance.create(
-        model_name, kv_config=KVConfigBuilder.segmented_prefill_offload()
+        model_name,
+        kv_config=KVConfigBuilder.offloading(),
+        use_gap_policy=True,  # Enable span-aware gap policy
     )
     tokenizer = instance1.tokenizer
 
@@ -587,10 +607,10 @@ def main():
     print(f"\nFull prompt length: {len(full_prompt)} tokens")
 
     # =============================================================================
-    # TEST 1: SegmentedPrefillOffloadConnector
+    # TEST 1: OffloadingConnector + SpanAwareGapPolicy
     # =============================================================================
 
-    test_name = f"SegmentedPrefillOffloadConnector ({len(all_docs)} docs)"
+    test_name = f"OffloadingConnector + SpanAwareGapPolicy ({len(all_docs)} docs)"
     runner.print_header(f"TEST 1: {test_name}")
 
     response, gen_time = instance1.generate(full_prompt)
@@ -622,7 +642,7 @@ def main():
     print(f"Output tokens: {num_output_tokens}")
     print(f"Output: {output_text[:200]}...")
 
-    dump_kv_cache_to_file(instance1.llm, "kv_cache_test1_segmented.txt", test_name)
+    dump_kv_cache_to_file(instance1.llm, "kv_cache_test1_with_gap_policy.txt", test_name)
     runner.results.append(
         TestResult(test_name, preload_time, gen_time, output_text, model_name, ttft, tpot, num_output_tokens)
     )
@@ -633,13 +653,17 @@ def main():
     time.sleep(3)
 
     # =============================================================================
-    # TEST 2: OffloadingConnector 
+    # TEST 2: OffloadingConnector (No GapPolicy - Baseline)
     # =============================================================================
 
-    runner.print_header("Creating new vLLM with OffloadingConnector")
-    instance2 = LLMInstance.create(model_name, kv_config=KVConfigBuilder.offloading())
+    runner.print_header("Creating new vLLM with OffloadingConnector (No GapPolicy)")
+    instance2 = LLMInstance.create(
+        model_name,
+        kv_config=KVConfigBuilder.offloading(),
+        use_gap_policy=False  # Disable gap policy for baseline comparison
+    )
 
-    runner.print_header("TEST 2: OffloadingConnector")
+    runner.print_header("TEST 2: OffloadingConnector (No GapPolicy - Baseline)")
 
     # Preload
     preload_time2 = instance2.preload(list(all_docs), prefix)
@@ -668,8 +692,8 @@ def main():
     print(f"Output tokens: {num_output_tokens2}")
     print(f"Output: {output_text2[:200]}...")
 
-    test_name2 = "OffloadingConnector (with preload)"
-    dump_kv_cache_to_file(instance2.llm, "kv_cache_test2_offloading.txt", test_name2)
+    test_name2 = "OffloadingConnector (No GapPolicy - Baseline)"
+    dump_kv_cache_to_file(instance2.llm, "kv_cache_test2_no_gap_policy.txt", test_name2)
     runner.results.append(
         TestResult(test_name2, preload_time2, gen_time2, output_text2, model_name, ttft2, tpot2, num_output_tokens2)
     )
