@@ -1579,7 +1579,7 @@ class TestFP8Layer(torch.nn.Module):
         )
 
     def is_quant_fp8_enabled(self) -> bool:
-        return self.kernel.input_quant_op.enabled()
+        return self.kernel.quant_fp8.enabled()
 
     def forward(
         self, y: torch.Tensor, bias: torch.Tensor | None = None

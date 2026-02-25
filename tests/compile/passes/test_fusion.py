@@ -164,7 +164,7 @@ class TestModel(torch.nn.Module):
 
         # Enable aiter quantization if requested
         for layer in self.fp8_linear_layers:
-            layer.kernel.input_quant_op.use_aiter = use_aiter_quant
+            layer.kernel.quant_fp8.use_aiter = use_aiter_quant
 
         self.enable_quant_fp8_custom_op = self.fp8_linear_layers[
             0

@@ -760,7 +760,7 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             assert len(qkv_proj.weight.shape) == 2
             assert len(qkv_proj.weight_scale.shape) == 2
 
-            input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.input_quant_op
+            input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.quant_fp8
             assert isinstance(input_quant_op, QuantFP8)
             assert input_quant_op._forward_method in (
                 input_quant_op.forward_cuda,

@@ -174,7 +174,7 @@ class AiterFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             and rocm_aiter_ops.is_triton_gemm_w8a8_tuned(n, k)
         )
 
-        q_input, input_scale = self.input_quant_op(
+        q_input, input_scale = self.quant_fp8(
             input_2d, input_scale, scale_up, use_triton=use_triton
         )
 
