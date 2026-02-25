@@ -1115,6 +1115,9 @@ int mindiv(int N, int div1, int div2) {
   return 0;
 }
 
+// Skinny GEMM C = A @ B + bias with Wave-SplitK: splits work across CUs and
+// reduces partial sums via atomics. Targets small N (e.g. 1–4) for good
+// utilization on AMD GPUs
 torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                        const std::optional<at::Tensor>& in_bias,
                        const int64_t CuCount) {
