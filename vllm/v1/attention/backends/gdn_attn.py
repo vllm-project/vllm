@@ -546,10 +546,10 @@ class GDNAttentionMetadataBuilder(
             non_spec_query_start_loc[num_decodes + 1 :].fill_(non_spec_num_query_tokens)
 
             if prefix_caching_enabled and num_decodes > 0:
-                self.state_indices_tensor[:num_decodes].copy_(
+                self.state_indices_tensor_d[:num_decodes].copy_(
                     state_indices_tensor, non_blocking=True
                 )
-                state_indices_tensor = self.state_indices_tensor[:num_decodes]
+                state_indices_tensor = self.state_indices_tensor_d[:num_decodes]
 
                 assert block_idx_last_scheduled_token is not None
                 assert block_idx_last_computed_token is not None
