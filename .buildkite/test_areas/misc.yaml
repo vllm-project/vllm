@@ -200,3 +200,10 @@ steps:
   commands:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
+
+- label: Model strategy test
+  gpu: h100
+  num_gpus: 1
+  source_file_dependencies: []
+  commands:
+    - pytest -v -s models/nightly/gptoss.py
