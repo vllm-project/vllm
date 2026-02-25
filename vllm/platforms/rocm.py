@@ -215,6 +215,54 @@ def flash_attn_triton_available() -> bool:
         return False
 
 
+def _get_backend_priorities(
+    use_mla: bool,
+    use_sparse: bool,
+) -> list[AttentionBackendEnum]:
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    # TODO (Sage) Should we fallback to dense MLA if this backend fails validation or
+    # just crash?
+    if use_sparse:
+        return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
+
+    if use_mla:
+        if rocm_aiter_ops.is_mla_enabled():
+            return [
+                AttentionBackendEnum.ROCM_AITER_MLA,
+                AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.ROCM_AITER_TRITON_MLA,
+            ]
+        else:
+            return [
+                AttentionBackendEnum.TRITON_MLA,
+            ]
+
+    backends = []
+
+    # Priority 1: Check for AITER Unified Attention (must check before MHA)
+    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION:
+        backends.append(AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN)
+
+    # Priority 2: Check for AITER MHA (Flash Attention)
+    if envs.VLLM_ROCM_USE_AITER and envs.VLLM_ROCM_USE_AITER_MHA:
+        backends.append(AttentionBackendEnum.ROCM_AITER_FA)
+
+    # Priority 3: Check for ROCM_ATTN (prefill-decode split)
+    from vllm.config import get_current_vllm_config_or_none
+
+    vllm_config = get_current_vllm_config_or_none()
+    if (
+        vllm_config is not None
+        and vllm_config.attention_config.use_prefill_decode_attention
+    ):
+        backends.append(AttentionBackendEnum.ROCM_ATTN)
+
+    # Default: Triton Unified Attention
+    backends.append(AttentionBackendEnum.TRITON_ATTN)
+    return backends
+
+
 class RocmPlatform(Platform):
     _enum = PlatformEnum.ROCM
     device_name: str = "rocm"
@@ -259,7 +307,113 @@ class RocmPlatform(Platform):
             import vllm._rocm_C  # noqa: F401
 
     @classmethod
+    def get_valid_backends(
+        cls,
+        device_capability: DeviceCapability,
+        attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
+    ) -> tuple[
+        list[tuple["AttentionBackendEnum", int]],
+        dict["AttentionBackendEnum", list[str]],
+    ]:
+        valid_backends_priorities = []
+        invalid_reasons = {}
+
+        backend_priorities = _get_backend_priorities(
+            attn_selector_config.use_mla,
+            attn_selector_config.use_sparse,
+        )
+        for priority, backend in enumerate(backend_priorities):
+            try:
+                backend_class = backend.get_class()
+                invalid_reasons_i = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons_i = ["ImportError"]
+            if invalid_reasons_i:
+                invalid_reasons[backend] = invalid_reasons_i
+            else:
+                valid_backends_priorities.append((backend, priority))
+
+        return valid_backends_priorities, invalid_reasons
+
+    @classmethod
     def get_attn_backend_cls(
+        cls,
+        selected_backend: "AttentionBackendEnum",
+        attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
+    ) -> str:
+        device_capability = cls.get_device_capability()
+        assert device_capability is not None
+
+        attn_selector_config = attn_selector_config._replace(block_size=None)
+        # First try checking just the selected backend, if there is one.
+        if selected_backend is not None:
+            try:
+                backend_class = selected_backend.get_class()
+                invalid_reasons = backend_class.validate_configuration(
+                    device_capability=device_capability,
+                    **attn_selector_config._asdict(),
+                )
+            except ImportError:
+                invalid_reasons = ["ImportError"]
+            if invalid_reasons:
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {invalid_reasons}"
+                )
+            else:
+                logger.info("Using %s backend.", selected_backend)
+                return selected_backend.get_path()
+
+        # No selected backend or the selected backend is invalid,
+        # so we try finding a valid backend.
+        valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
+            device_capability=device_capability,
+            attn_selector_config=attn_selector_config,
+            num_heads=num_heads,
+        )
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{backend.name}: [{', '.join(reasons)}]"
+                for backend, reasons in invalid_reasons.items()
+            )
+            + "}"
+        )
+        config_str = attn_selector_config.__repr__()
+        logger.debug_once(
+            f"Some attention backends are not valid for {cls.device_name} with "
+            f"{config_str}. Reasons: {reasons_str}."
+        )
+        if len(valid_backends_priorities) == 0:
+            raise ValueError(
+                f"No valid attention backend found for {cls.device_name} "
+                f"with {config_str}. Reasons: {reasons_str}."
+            )
+
+        # We have found some valid backends. Select the one with the
+        # highest priority.
+        sorted_indices = sorted(
+            range(len(valid_backends_priorities)),
+            key=lambda i: valid_backends_priorities[i][1],
+        )
+        selected_index = sorted_indices[0]
+        selected_backend = valid_backends_priorities[selected_index][0]
+        logger.info_once(
+            "Using %s attention backend out of potential backends: %s.",
+            selected_backend.name,
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
+            scope="local",
+        )
+
+        return selected_backend.get_path()
+
+    @classmethod
+    def get_attn_backend_cls_old(
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",

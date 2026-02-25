@@ -12,6 +12,7 @@ from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
+from vllm.platforms.interface import DeviceCapability
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import get_cu_count
 from vllm.v1.attention.backend import (
@@ -765,6 +766,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
         return (2, num_blocks, block_size, num_kv_heads, head_size)
+
+    @classmethod
+    def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        return capability.major == 9
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
