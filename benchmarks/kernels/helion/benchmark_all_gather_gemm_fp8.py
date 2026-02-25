@@ -293,19 +293,24 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
                 use_fast_accum=[False],
                 group_name=group_name,
             )
-            # TODO: add a santity check, currently we test it separately in `vllm/tests/distributed/test_all_gather_gemm_fp8.py`
+            # if rank == 0:
+            #     print(f"[Rank:{rank}] Sanity check Testing shape M={M},N={N},K={K} with split {sp} (tokens per rank: {M_per_rank})")
+            a_out, c = helion_kernel()
+            ag_golden, mm_golden = baseline_kernel()
+            torch.testing.assert_close(a_out, ag_golden), "All-gather outputs do not match"
+            torch.testing.assert_close(c, mm_golden[0].to(torch.bfloat16), rtol=1e-1, atol=1e-1), "Matmul outputs do not match"
 
             # benchmark Helion kernel
             torch.cuda.reset_peak_memory_stats(device)
-            if rank == 0:
-                print(f"Benchmarking Helion M={M},N={N},K={K} on rank {rank}...")
+            # if rank == 0:
+            #     print(f" Rank:{rank}] Benchmarking Helion M={M},N={N},K={K} ")
             helion_latency = do_bench_distributed(helion_kernel, repeat=repeat, return_mode='mean', device=device, dist_group=dist_group)
             helion_peak_mem = torch.cuda.max_memory_allocated(device) / MB
 
             # benchmark baseline kernel
             torch.cuda.reset_peak_memory_stats(device)
-            if rank == 0:
-                print(f"Benchmarking baseline M={M},N={N},K={K} on rank {rank}...")
+            # if rank == 0:
+            #     print(f"[Rank:{rank}] Benchmarking baseline M={M},N={N},K={K}")            
             baseline_latency = do_bench_distributed(baseline_kernel, repeat=repeat, return_mode='mean', device=device, dist_group=dist_group)
             baseline_peak_mem = torch.cuda.max_memory_allocated(device) / MB
 
@@ -313,8 +318,8 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
             speedup_x = baseline_latency / helion_latency if helion_latency > 0 else float("inf")
             mem_improve_x = baseline_peak_mem / helion_peak_mem if helion_peak_mem > 0 else float("inf")
 
-            if rank == 0:
-                print(f"Finished shape M={M},N={N},K={K} -> helion {helion_latency:.3f} ms, helion peak {helion_peak_mem:.2f} MB")
+            # if rank == 0:
+            #     print(f"Rank:{rank}] Finished Benchmarking on shape M={M},N={N},K={K}")            
 
             rows.append(
                 Row(
