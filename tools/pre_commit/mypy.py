@@ -30,8 +30,6 @@ SEPARATE_GROUPS = [
     # v0 related
     "vllm/lora",
     "vllm/model_executor",
-    # v1 related
-    "vllm/v1/kv_offload",
 ]
 
 # TODO(woosuk): Include the code from Megatron and HuggingFace.
@@ -45,7 +43,6 @@ EXCLUDE = [
     "vllm/benchmarks",
     "vllm/config",
     "vllm/device_allocator",
-    "vllm/profiler",
     "vllm/reasoning",
     "vllm/tool_parser",
 ]

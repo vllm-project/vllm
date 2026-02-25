@@ -8,12 +8,14 @@ import vllm.envs as envs
 from vllm.config.model import LogprobsMode
 from vllm.sampling_params import SamplingParams
 from vllm.v1.worker.gpu.metrics.logits import get_num_nans
+from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
 from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
+from vllm.v1.worker.gpu.states import RequestState
 
 
 class Sampler:
@@ -22,6 +24,7 @@ class Sampler:
         max_num_reqs: int,
         vocab_size: int,
         device: torch.device,
+        req_states: RequestState,
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
     ):
@@ -31,8 +34,9 @@ class Sampler:
         self.compute_nans = envs.VLLM_COMPUTE_NANS_IN_LOGITS  # False by default.
 
         self.sampling_states = SamplingStates(max_num_reqs, vocab_size)
-        self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
+        self.penalties_state = PenaltiesState(req_states)
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
+        self.bad_words_state = BadWordsState(req_states)
         self.num_speculative_tokens = num_speculative_tokens
 
     def add_request(
@@ -41,18 +45,13 @@ class Sampler:
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
+        self.bad_words_state.add_request(req_idx, sampling_params)
 
-    def apply_staged_writes(
-        self,
-        prefill_token_ids: torch.Tensor,
-        prefill_lens: np.ndarray,
-        prompt_lens: np.ndarray,
-    ) -> None:
+    def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
-        self.penalties_state.apply_staged_writes(
-            prefill_token_ids, prefill_lens, prompt_lens
-        )
+        self.penalties_state.apply_staged_writes()
         self.logit_bias_state.apply_staged_writes()
+        self.bad_words_state.apply_staged_writes()
 
     def __call__(
         self,
@@ -122,6 +121,15 @@ class Sampler:
             input_ids,
             expanded_local_pos,
             self.num_speculative_tokens,
+        )
+
+        # Apply bad words masking in place.
+        self.bad_words_state.apply_bad_words(
+            logits,
+            idx_mapping,
+            idx_mapping_np,
+            input_ids,
+            expanded_local_pos,
         )
 
         # Apply temperature in place.

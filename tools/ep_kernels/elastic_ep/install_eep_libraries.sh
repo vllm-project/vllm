@@ -23,7 +23,7 @@ while getopts "w:n" opt; do
 done
 
 if [ ! -d "$WORKSPACE" ]; then
-    mkdir -p $WORKSPACE
+    mkdir -p "$WORKSPACE"
 fi
 
 
@@ -31,7 +31,7 @@ fi
 pip3 install cmake torch ninja
 
 # build nvshmem
-pushd $WORKSPACE
+pushd "$WORKSPACE"
 # Reset NVSHMEM build if requested
 if [ "$INSTALL_NVSHMEM" = true ]; then
     mkdir -p nvshmem_src
@@ -69,8 +69,8 @@ export NVSHMEM_BUILD_HYDRA_LAUNCHER=0
 export NVSHMEM_BUILD_TXZ_PACKAGE=0
 export NVSHMEM_TIMEOUT_DEVICE_POLLING=0
 
-cmake -G Ninja -S . -B $WORKSPACE/nvshmem_build/ -DCMAKE_INSTALL_PREFIX=$WORKSPACE/nvshmem_install
-cmake --build $WORKSPACE/nvshmem_build/ --target install
+cmake -G Ninja -S . -B "$WORKSPACE"/nvshmem_build/ -DCMAKE_INSTALL_PREFIX="$WORKSPACE"/nvshmem_install
+cmake --build "$WORKSPACE"/nvshmem_build/ --target install
 
 popd
 
