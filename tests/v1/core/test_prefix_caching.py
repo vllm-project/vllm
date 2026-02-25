@@ -75,13 +75,15 @@ def make_request(
             )
             mm_features.append(mm_feature)
 
+    sampling_params = SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs)
+    sampling_params.update_from_generation_config({}, eos_token_id=100)
+
     return Request(
         request_id=request_id,
         prompt_token_ids=prompt_token_ids,
         mm_features=mm_features if mm_features else None,
-        sampling_params=SamplingParams(max_tokens=17, prompt_logprobs=prompt_logprobs),
+        sampling_params=sampling_params,
         pooling_params=None,
-        eos_token_id=100,
         lora_request=lora_request,
         cache_salt=cache_salt,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
@@ -742,6 +744,12 @@ def _make_hybrid_kv_cache_config(
             shapes=(1, 1),
             dtypes=(torch.float32,),
         ),
+        "mamba_align": lambda: MambaSpec(
+            block_size=block_size,
+            shapes=(1, 1),
+            dtypes=(torch.float32,),
+            mamba_cache_mode="align",
+        ),
     }
 
     kv_cache_groups = [
@@ -857,6 +865,8 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
     # Should have blocks for all groups
     assert len(blocks.get_block_ids()) == num_groups
 
+    manager.new_step_starts()
+
     # Second request: should hit cached blocks for common prefix
     req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)
     computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
@@ -956,6 +966,46 @@ def test_prefill_hybrid_model_combinations_eagle(
 
     manager.free(req0)
     manager.free(req1)
+
+
+def test_prefill_hybrid_model_mamba_align():
+    """Test that MambaManager.cache_blocks() handles null blocks in align mode.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/34361.
+    In mamba_cache_mode="align", allocate_new_blocks() pads req_to_blocks with
+    null blocks. cache_full_blocks() correctly skips them, but
+    MambaManager.cache_blocks() must also skip null blocks when tracking
+    cached_blocks_this_step.
+    """
+    block_size = 16
+    num_blocks = 30
+
+    kv_cache_config = _make_hybrid_kv_cache_config(
+        block_size, num_blocks, ["full", "mamba_align"]
+    )
+    manager = KVCacheManager(
+        kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+    )
+
+    hash_fn = sha256
+
+    # 3 full blocks (48 tokens) + 7 partial tokens = 55 tokens total
+    all_token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 7
+
+    # First request: allocate_slots should not crash with the assertion error
+    # in MambaManager.cache_blocks() when null blocks are present.
+    req0 = make_request("0", all_token_ids, block_size, hash_fn)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+
+    blocks = manager.allocate_slots(req0, 55, num_computed_tokens, computed_blocks)
+    assert blocks is not None
+    assert len(blocks.get_block_ids()) == 2  # full_attn + mamba groups
+
+    manager.free(req0)
 
 
 def test_prefill_plp():

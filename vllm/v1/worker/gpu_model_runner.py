@@ -82,7 +82,7 @@ from vllm.model_executor.models.interfaces_base import (
     is_text_generation_model,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
-from vllm.multimodal.budget import MultiModalBudget
+from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
     BatchedTensorInputs,
     MultiModalKwargsItem,
@@ -93,6 +93,7 @@ from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
+from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
@@ -346,9 +347,13 @@ class GPUModelRunner(
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
 
-        from vllm.model_executor.models.utils import set_cpu_offload_max_bytes
+        from vllm.model_executor.models.utils import (
+            set_cpu_offload_max_bytes,
+            set_cpu_offload_params,
+        )
 
         set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
+        set_cpu_offload_params(self.cache_config.cpu_offload_params)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -510,6 +515,7 @@ class GPUModelRunner(
         custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (
             tuple(logits_processors) if logits_processors is not None else ()
         )
+        placeholder_block_size = self.cache_config.block_size or 16
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             # We need to use the encoder length for encoder-decoer
@@ -519,8 +525,8 @@ class GPUModelRunner(
             device=self.device,
             pin_memory=self.pin_memory,
             vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[self.cache_config.block_size],
-            kernel_block_sizes=[self.cache_config.block_size],
+            block_sizes=[placeholder_block_size],
+            kernel_block_sizes=[placeholder_block_size],
             is_spec_decode=bool(self.vllm_config.speculative_config),
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
@@ -1259,6 +1265,9 @@ class GPUModelRunner(
 
         mm_budget = self.mm_budget
         assert mm_budget is not None
+
+        if not mm_budget.mm_max_toks_per_item:
+            return {}  # No tower modalities (embed-only mode)
 
         dummy_modality = mm_budget.get_modality_with_max_tokens()
         return self._get_mm_dummy_batch(dummy_modality, num_seqs)
@@ -2321,7 +2330,7 @@ class GPUModelRunner(
 
                 # Prefer pos_info.get_num_embeds to count precise MM embedding tokens.
                 num_tokens = self.model.get_num_mm_encoder_tokens(  # type: ignore[attr-defined]
-                    pos_info.get_num_embeds
+                    pos_info.get_num_embeds()
                 )
                 prompt_lora_mapping.append(lora_id)
                 token_lora_mapping.extend([lora_id] * num_tokens)
@@ -4077,7 +4086,7 @@ class GPUModelRunner(
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
                 next_token_ids=next_token_ids,
-                last_token_indices=token_indices_to_sample,
+                token_indices_to_sample=token_indices_to_sample,
                 sampling_metadata=sampling_metadata,
                 mm_embed_inputs=mm_embed_inputs,
                 num_rejected_tokens_gpu=num_rejected_tokens_gpu,
@@ -4098,6 +4107,7 @@ class GPUModelRunner(
             new_config = update_config(config, config_overrides)
             setattr(self, config_name, new_config)
 
+    @instrument(span_name="Loading (GPU)")
     def load_model(self, eep_scale_up: bool = False) -> None:
         """
         Args:
@@ -4769,6 +4779,7 @@ class GPUModelRunner(
             pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
             attn_metadata, _ = self._build_attention_metadata(
                 num_tokens=num_tokens_unpadded,
+                num_tokens_padded=num_tokens_padded if pad_attn else None,
                 num_reqs=num_reqs_padded,
                 max_query_len=max_query_len,
                 ubatch_slices=ubatch_slices_padded if pad_attn else ubatch_slices,
@@ -5024,7 +5035,7 @@ class GPUModelRunner(
 
         model = cast(VllmModelForPooling, self.get_model())
         dummy_pooling_params = PoolingParams(task=task)
-        dummy_pooling_params.verify(task=task, model_config=self.model_config)
+        dummy_pooling_params.verify(self.model_config)
         to_update = model.pooler.get_pooling_updates(task)
         to_update.apply(dummy_pooling_params)
 
@@ -5101,40 +5112,50 @@ class GPUModelRunner(
                 assert mm_budget is not None
 
                 if (encoder_budget := mm_budget.get_encoder_budget()) > 0:
-                    # NOTE: Currently model is profiled with a single non-text
-                    # modality with the max possible input tokens even when
-                    # it supports multiple.
-                    dummy_modality = mm_budget.get_modality_with_max_tokens()
-                    max_mm_items_per_batch = mm_budget.mm_max_items_per_batch[
-                        dummy_modality
-                    ]
+                    if not mm_budget.mm_max_toks_per_item:
+                        # All modality limits are 0 — embedding-only mode.
+                        # Budget is non-zero for embedding storage, but
+                        # there's no encoder to profile.
+                        logger.info(
+                            "Skipping encoder profiling for embedding-only "
+                            "mode (all modality limits=0 with "
+                            "enable_mm_embeds=True).",
+                        )
+                    else:
+                        # NOTE: Currently model is profiled with a single
+                        # non-text modality with the max possible input
+                        # tokens even when it supports multiple.
+                        dummy_modality = mm_budget.get_modality_with_max_tokens()
+                        max_mm_items_per_batch = mm_budget.mm_max_items_per_batch[
+                            dummy_modality
+                        ]
 
-                    logger.info(
-                        "Encoder cache will be initialized with a budget of "
-                        "%s tokens, and profiled with %s %s items of the "
-                        "maximum feature size.",
-                        encoder_budget,
-                        max_mm_items_per_batch,
-                        dummy_modality,
-                    )
+                        logger.info(
+                            "Encoder cache will be initialized with a "
+                            "budget of %s tokens, and profiled with "
+                            "%s %s items of the maximum feature size.",
+                            encoder_budget,
+                            max_mm_items_per_batch,
+                            dummy_modality,
+                        )
 
-                    # Create dummy batch of multimodal inputs.
-                    batched_dummy_mm_inputs = self._get_mm_dummy_batch(
-                        dummy_modality,
-                        max_mm_items_per_batch,
-                    )
+                        # Create dummy batch of multimodal inputs.
+                        batched_dummy_mm_inputs = self._get_mm_dummy_batch(
+                            dummy_modality,
+                            max_mm_items_per_batch,
+                        )
 
-                    # Run multimodal encoder.
-                    dummy_encoder_outputs = self.model.embed_multimodal(
-                        **batched_dummy_mm_inputs
-                    )
+                        # Run multimodal encoder.
+                        dummy_encoder_outputs = self.model.embed_multimodal(
+                            **batched_dummy_mm_inputs
+                        )
 
-                    sanity_check_mm_encoder_outputs(
-                        dummy_encoder_outputs,
-                        expected_num_items=max_mm_items_per_batch,
-                    )
-                    for i, output in enumerate(dummy_encoder_outputs):
-                        self.encoder_cache[f"tmp_{i}"] = output
+                        sanity_check_mm_encoder_outputs(
+                            dummy_encoder_outputs,
+                            expected_num_items=max_mm_items_per_batch,
+                        )
+                        for i, output in enumerate(dummy_encoder_outputs):
+                            self.encoder_cache[f"tmp_{i}"] = output
 
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
@@ -5152,6 +5173,7 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
+    @instrument(span_name="Capture model")
     def capture_model(self) -> int:
         if self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE:
             logger.warning(
@@ -5668,28 +5690,23 @@ class GPUModelRunner(
             kv_cache_config: The KV cache configuration.
             kernel_block_sizes: The kernel block sizes for each KV cache group.
         """
-        block_sizes = [
-            kv_cache_group.kv_cache_spec.block_size
-            for kv_cache_group in kv_cache_config.kv_cache_groups
-            if not isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec)
-        ]
+        block_sizes = []
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
-        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
             if isinstance(kv_cache_group.kv_cache_spec, EncoderOnlyAttentionSpec):
                 continue
+            block_size = kv_cache_group.kv_cache_spec.block_size
+            block_sizes.append(block_size)
             max_num_blocks_per_req = cdiv(
-                max_model_len, block_sizes[i] * get_total_cp_world_size()
+                max_model_len, block_size * get_total_cp_world_size()
             )
             if isinstance(kv_cache_group.kv_cache_spec, MambaSpec):
-                mamba_blocks_per_req = (
+                max_num_blocks_per_req = (
                     max_num_blocks_per_req
                     if self.cache_config.enable_prefix_caching
                     else 1
                 ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
-                max_num_blocks_per_req = max(
-                    max_num_blocks_per_req, mamba_blocks_per_req
-                )
             max_num_blocks.append(max_num_blocks_per_req)
 
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
