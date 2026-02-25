@@ -15,7 +15,7 @@ from fastapi import Request
 from openai_harmony import Message as OpenAIMessage
 from partial_json_parser.core.options import Allow
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
@@ -88,6 +88,7 @@ logger = init_logger(__name__)
 class OpenAIServingChat(OpenAIServingInference):
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         response_role: str,
@@ -109,6 +110,7 @@ class OpenAIServingChat(OpenAIServingInference):
         default_chat_template_kwargs: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
@@ -232,8 +234,8 @@ class OpenAIServingChat(OpenAIServingInference):
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        if self.renderer_client.errored:
+            raise self.renderer_client.dead_error
 
         try:
             tokenizer = self.renderer.tokenizer

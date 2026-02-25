@@ -14,7 +14,7 @@ from fastapi import Request
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -85,6 +85,7 @@ class OpenAISpeechToText(OpenAIServingInference):
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -95,6 +96,7 @@ class OpenAISpeechToText(OpenAIServingInference):
         enable_force_include_usage: bool = False,
     ):
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
@@ -478,8 +480,8 @@ class OpenAISpeechToText(OpenAIServingInference):
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        if self.renderer_client.errored:
+            raise self.renderer_client.dead_error
 
         if request.response_format not in ["text", "json", "verbose_json"]:
             return self.create_error_response(

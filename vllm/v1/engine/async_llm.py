@@ -19,7 +19,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.engine.protocol import EngineClient, RendererClient, StreamingInput
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -67,7 +67,7 @@ class InputStreamError(Exception):
         super().__init__(str(cause))
 
 
-class AsyncLLM(EngineClient):
+class AsyncLLM(RendererClient, EngineClient):
     """An asynchronous wrapper for the vLLM engine."""
 
     def __init__(

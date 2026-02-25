@@ -86,13 +86,8 @@ class RendererClient(ABC):
         raise NotImplementedError
 
 
-class EngineClient(RendererClient):
-    """Full engine client interface including inference operations.
-
-    Extends :class:`RendererClient` with methods that require a running
-    inference engine: generation, encoding, profiling, cache management,
-    scheduler control, and weight transfer.
-    """
+class EngineClient(ABC):
+    """Engine client interface for inference operations."""
 
     @abstractmethod
     def generate(

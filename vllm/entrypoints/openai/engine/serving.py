@@ -229,7 +229,7 @@ class OpenAIServing:
 
     def __init__(
         self,
-        engine_client: RendererClient,
+        renderer_client: RendererClient,
         models: OpenAIServingModels,
         *,
         request_logger: RequestLogger | None,
@@ -238,7 +238,7 @@ class OpenAIServing:
     ):
         super().__init__()
 
-        self.engine_client = engine_client
+        self.renderer_client = renderer_client
 
         self.models = models
 
@@ -247,10 +247,10 @@ class OpenAIServing:
 
         self.log_error_stack = log_error_stack
 
-        self.model_config = engine_client.model_config
-        self.renderer = engine_client.renderer
-        self.io_processor = engine_client.io_processor
-        self.input_processor = engine_client.input_processor
+        self.model_config = renderer_client.model_config
+        self.renderer = renderer_client.renderer
+        self.io_processor = renderer_client.io_processor
+        self.input_processor = renderer_client.input_processor
 
     def create_error_response(
         self,
@@ -710,7 +710,7 @@ class OpenAIServing:
         self,
         headers: Headers,
     ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+        is_tracing_enabled = await self.renderer_client.is_tracing_enabled()
 
         if is_tracing_enabled:
             return extract_trace_headers(headers)
@@ -853,15 +853,14 @@ class OpenAIServing:
 class OpenAIServingInference(OpenAIServing):
     """OpenAIServing subclass for endpoints that require inference.
 
-    Extends :class:`OpenAIServing` by narrowing ``engine_client`` from
-    :class:`RendererClient` to :class:`EngineClient` and adding methods
-    that call ``generate()`` / ``encode()`` on the engine.
+    Extends :class:`OpenAIServing` with a separate ``engine_client``
+    (:class:`EngineClient`) for methods that call ``generate()`` /
+    ``encode()`` on the engine.
     """
-
-    engine_client: EngineClient
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -870,12 +869,13 @@ class OpenAIServingInference(OpenAIServing):
         log_error_stack: bool = False,
     ):
         super().__init__(
-            engine_client=engine_client,
+            renderer_client=renderer_client,
             models=models,
             request_logger=request_logger,
             return_tokens_as_token_ids=return_tokens_as_token_ids,
             log_error_stack=log_error_stack,
         )
+        self.engine_client = engine_client
 
     async def _check_model(
         self,
