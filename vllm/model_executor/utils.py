@@ -44,6 +44,17 @@ def set_weight_attrs(
         setattr(weight, key, value)
 
 
+def set_weight_attr_computed(weight: torch.Tensor) -> None:
+    """Mark a weight parameter as computed (not loaded from checkpoint).
+
+    Parameters marked this way are excluded from weight loading validation
+    in ``DefaultModelLoader.track_weights_loading``. Use this for parameters
+    that are derived from other weights in ``process_weights_after_loading``
+    (e.g. argsort indices) and are therefore never present in checkpoints.
+    """
+    set_weight_attrs(weight, {"skip_weight_check": True})
+
+
 def replace_parameter(
     layer: torch.nn.Module, param_name: str, new_data: torch.Tensor | None
 ):

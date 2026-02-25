@@ -55,6 +55,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     RowvLLMParameter,
 )
+from vllm.model_executor.utils import set_weight_attr_computed
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
 from vllm.transformers_utils.config import get_safetensors_params_metadata
@@ -644,9 +645,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
-        # sort indices are always computed in process_weights_after_loading,
-        # never loaded from checkpoint, so skip weight loading tracking
-        set_weight_attrs(w13_g_idx_sort_indices, {"skip_weight_check": True})
+        set_weight_attr_computed(w13_g_idx_sort_indices)
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
                 num_experts,
@@ -657,9 +656,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
-        # sort indices are always computed in process_weights_after_loading,
-        # never loaded from checkpoint, so skip weight loading tracking
-        set_weight_attrs(w2_g_idx_sort_indices, {"skip_weight_check": True})
+        set_weight_attr_computed(w2_g_idx_sort_indices)
 
         device = layer.w13_qweight.device
         layer.workspace = marlin_make_workspace_new(device, 4)
