@@ -347,7 +347,6 @@ class HummingLinearMethod(LinearMethodBase):
         layer.input_size_per_partition = input_size_per_partition
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
-        layer.weight_block_size = None
 
         self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
         self.quant_config.c_dtype = self.quant_config.c_dtype or f16_dtype
