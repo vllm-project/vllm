@@ -277,7 +277,9 @@ class DefaultModelLoader(BaseModelLoader):
         )
 
     @instrument(span_name="Load weights")
-    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+    def load_weights(
+        self, model: nn.Module, model_config: ModelConfig
+    ) -> set[str] | None:
         if model_config.quantization == "torchao":
             quant_config = get_quant_config(model_config, self.load_config)
             if (
@@ -295,7 +297,7 @@ class DefaultModelLoader(BaseModelLoader):
             self.counter_after_loading_weights - self.counter_before_loading_weights,
             scope="local",
         )
-        self.track_weights_loading(model, loaded_weights)
+        return loaded_weights
 
     def track_weights_loading(
         self, model: nn.Module, loaded_weights: set[str] | None
@@ -309,6 +311,14 @@ class DefaultModelLoader(BaseModelLoader):
                     for param_name, _ in module.named_parameters():
                         full_name = f"{name}.{param_name}" if name else param_name
                         loaded_weights.add(full_name)
+            # Skip params that are:
+            # 1. Empty tensors (intentionally zeroed-out after
+            #    process_weights_after_loading, e.g. g_idx with actorder=null)
+            # 2. Marked skip_weight_check=True (computed internally, e.g.
+            #    g_idx_sort_indices which are derived via argsort)
+            for param_name, param in model.named_parameters():
+                if param.numel() == 0 or getattr(param, "skip_weight_check", False):
+                    loaded_weights.add(param_name)
             weights_not_loaded = weights_to_load - loaded_weights
             if weights_not_loaded:
                 raise ValueError(

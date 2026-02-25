@@ -1484,6 +1484,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         )
         layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
+        # sort indices are always computed in process_weights_after_loading,
+        # never loaded from checkpoint, so skip weight loading tracking
+        set_weight_attrs(w13_g_idx_sort_indices, {"skip_weight_check": True})
 
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
@@ -1495,6 +1498,9 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
         )
         layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
+        # sort indices are always computed in process_weights_after_loading,
+        # never loaded from checkpoint, so skip weight loading tracking
+        set_weight_attrs(w2_g_idx_sort_indices, {"skip_weight_check": True})
 
         layer.a13_scale = None
         layer.a2_scale = None
@@ -1891,6 +1897,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
         layer.register_parameter("w13_g_idx_sort_indices", w13_g_idx_sort_indices)
         set_weight_attrs(w13_g_idx_sort_indices, extra_weight_attrs)
+        # sort indices are always computed in process_weights_after_loading,
+        # never loaded from checkpoint, so skip weight loading tracking
+        set_weight_attrs(w13_g_idx_sort_indices, {"skip_weight_check": True})
 
         w2_g_idx_sort_indices = torch.nn.Parameter(
             torch.empty(
@@ -1902,6 +1911,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
         layer.register_parameter("w2_g_idx_sort_indices", w2_g_idx_sort_indices)
         set_weight_attrs(w2_g_idx_sort_indices, extra_weight_attrs)
+        # sort indices are always computed in process_weights_after_loading,
+        # never loaded from checkpoint, so skip weight loading tracking
+        set_weight_attrs(w2_g_idx_sort_indices, {"skip_weight_check": True})
 
         layer.a13_scale = None
         layer.a2_scale = None

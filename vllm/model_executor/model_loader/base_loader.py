@@ -33,9 +33,12 @@ class BaseModelLoader(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def load_weights(self, model: nn.Module, model_config: ModelConfig) -> None:
+    def load_weights(
+        self, model: nn.Module, model_config: ModelConfig
+    ) -> set[str] | None:
         """Load weights into a model. This standalone API allows
-        inplace weights loading for an already-initialized model"""
+        inplace weights loading for an already-initialized model.
+        Returns the set of loaded weight names, or None if not tracked."""
         raise NotImplementedError
 
     @instrument(span_name="Load model")
@@ -59,7 +62,7 @@ class BaseModelLoader(ABC):
 
             logger.debug("Loading weights on %s ...", load_device)
             # Quantization does not happen in `load_weights` but after it
-            self.load_weights(model, model_config)
+            loaded_weights = self.load_weights(model, model_config)
 
             # Log peak GPU memory after loading weights. This is needed
             # to have test coverage on peak memory for online quantization.
@@ -72,6 +75,12 @@ class BaseModelLoader(ABC):
                 )
 
             process_weights_after_loading(model, model_config, target_device)
+
+            # Track weights loading after process_weights_after_loading so
+            # that params computed during that step (e.g. g_idx_sort_indices
+            # for AWQ MoE) are not falsely reported as missing.
+            if hasattr(self, "track_weights_loading"):
+                self.track_weights_loading(model, loaded_weights)
 
         return model.eval()
 
