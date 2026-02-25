@@ -168,6 +168,9 @@ class FlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
+        # FA2 is not supported on SM12x (Blackwell GB10/GB200)
+        if capability.major >= 12:
+            return False
         return capability >= DeviceCapability(8, 0)
 
     @classmethod
