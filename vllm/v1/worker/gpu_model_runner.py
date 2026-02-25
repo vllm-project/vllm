@@ -432,6 +432,9 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        # (raw_tensor, page_size_bytes) pairs for zeroing newly allocated blocks.
+        # Populated by _allocate_kv_cache_tensors.
+        self.kv_cache_raw_buffers: list[tuple[torch.Tensor, int]] = []
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
@@ -865,6 +868,13 @@ class GPUModelRunner(
                 decode_threshold=self.reorder_batch_threshold,
             )
 
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        """Zero the raw KV cache memory for the given block IDs."""
+        for raw_tensor, page_size in self.kv_cache_raw_buffers:
+            for bid in block_ids:
+                start = bid * page_size
+                raw_tensor[start : start + page_size] = 0
+
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties"""
@@ -897,6 +907,11 @@ class GPUModelRunner(
         # and handling the second as a new request.
         for req_id in scheduler_output.finished_req_ids:
             self.input_batch.remove_request(req_id)
+
+        # Zero GPU memory for freshly allocated cache blocks to prevent
+        # stale NaN/data from corrupting attention or SSM computation.
+        if scheduler_output.new_block_ids_to_zero:
+            self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
         # Free the cached encoder outputs.
         for mm_hash in scheduler_output.free_encoder_mm_hashes:
@@ -5775,12 +5790,15 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
+        num_blocks = kv_cache_config.num_blocks
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             tensor = torch.zeros(
                 kv_cache_tensor.size, dtype=torch.int8, device=self.device
             )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = tensor
+            page_size = kv_cache_tensor.size // num_blocks
+            self.kv_cache_raw_buffers.append((tensor, page_size))
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:

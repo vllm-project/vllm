@@ -238,6 +238,11 @@ class SchedulerOutput:
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
 
+    # Block IDs freshly allocated from the pool during this scheduling step.
+    # The worker zeros the corresponding GPU memory before the blocks are used,
+    # preventing stale NaN/data from corrupting attention or SSM computation.
+    new_block_ids_to_zero: list[int] | None = None
+
     @classmethod
     def make_empty(cls) -> "SchedulerOutput":
         return cls(
