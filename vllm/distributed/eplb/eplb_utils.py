@@ -9,40 +9,6 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-try:
-    import torch.distributed._symmetric_memory as torch_symm_mem
-
-    _symm_mem_available = True
-except ImportError:
-    _symm_mem_available = False
-
-
-def maybe_set_nvshmem_backend_for_eplb_communicator(communicator: str) -> None:
-    """Set symmetric-memory backend to NVSHMEM for EPLB symm_mem communicator."""
-    if communicator != "symm_mem":
-        return
-    if not _symm_mem_available:
-        logger.warning_once(
-            "EPLB symm_mem communicator requested but torch symmetric memory "
-            "module is unavailable.",
-            scope="global",
-        )
-        return
-    if not torch_symm_mem.is_nvshmem_available():
-        logger.warning_once(
-            "EPLB symm_mem communicator requested but NVSHMEM is unavailable.",
-            scope="global",
-        )
-        return
-    try:
-        torch_symm_mem.set_backend("NVSHMEM")
-    except Exception as exc:
-        logger.warning_once(
-            "Failed to set NVSHMEM backend for EPLB symm_mem communicator: %s",
-            exc,
-            scope="global",
-        )
-
 
 def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     """

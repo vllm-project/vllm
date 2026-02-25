@@ -76,25 +76,32 @@ class ncclDataTypeEnum:
     ncclNumTypes = 11
 
     @classmethod
+    def _torch_to_nccl_map(cls) -> dict[torch.dtype, int]:
+        return {
+            torch.int8: cls.ncclInt8,
+            torch.uint8: cls.ncclUint8,
+            torch.int32: cls.ncclInt32,
+            torch.int64: cls.ncclInt64,
+            torch.float16: cls.ncclFloat16,
+            torch.float32: cls.ncclFloat32,
+            torch.float64: cls.ncclFloat64,
+            torch.bfloat16: cls.ncclBfloat16,
+            current_platform.fp8_dtype(): cls.ncclFloat8e4m3,
+        }
+
+    @classmethod
+    def supports_torch_dtype(cls, dtype: torch.dtype) -> bool:
+        return dtype in cls._torch_to_nccl_map()
+
+    @classmethod
+    def try_from_torch(cls, dtype: torch.dtype) -> int | None:
+        return cls._torch_to_nccl_map().get(dtype)
+
+    @classmethod
     def from_torch(cls, dtype: torch.dtype) -> int:
-        if dtype == torch.int8:
-            return cls.ncclInt8
-        if dtype == torch.uint8:
-            return cls.ncclUint8
-        if dtype == torch.int32:
-            return cls.ncclInt32
-        if dtype == torch.int64:
-            return cls.ncclInt64
-        if dtype == torch.float16:
-            return cls.ncclFloat16
-        if dtype == torch.float32:
-            return cls.ncclFloat32
-        if dtype == torch.float64:
-            return cls.ncclFloat64
-        if dtype == torch.bfloat16:
-            return cls.ncclBfloat16
-        if dtype == current_platform.fp8_dtype():
-            return cls.ncclFloat8e4m3
+        nccl_dtype = cls.try_from_torch(dtype)
+        if nccl_dtype is not None:
+            return nccl_dtype
         raise ValueError(
             f"Unsupported dtype {dtype}: should be one of "
             f"int8, uint8, int32, int64, float16, float32, float64, bfloat16,"

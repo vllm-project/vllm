@@ -24,7 +24,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
 from vllm.distributed.eplb.eplb_utils import (
-    maybe_set_nvshmem_backend_for_eplb_communicator,
     override_envs_for_eplb,
 )
 from vllm.distributed.kv_transfer import (
@@ -1127,9 +1126,6 @@ def init_worker_distributed_environment(
     init_method = distributed_init_method or "env://"
     init_distributed_environment(
         parallel_config.world_size, rank, init_method, local_rank, backend
-    )
-    maybe_set_nvshmem_backend_for_eplb_communicator(
-        parallel_config.eplb_config.communicator
     )
 
     ensure_model_parallel_initialized(

@@ -501,8 +501,7 @@ def _test_rearrange_expert_weights_with_redundancy(
         (4, 8, 8, 16),
     ],
 )
-# @pytest.mark.parametrize("eplb_communicator", ["torch", "pynccl", "symm_mem"])
-@pytest.mark.parametrize("eplb_communicator", ["symm_mem"])
+@pytest.mark.parametrize("eplb_communicator", ["symm_mem", "torch", "pynccl"])
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
     num_layers,
