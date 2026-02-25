@@ -39,7 +39,7 @@ def default_server_args():
         "--max-num-seqs", "256",
         "--gpu-memory-utilization", "0.9",
         "--reasoning-parser", "openai_gptoss",
-        "--tensor-parallel-size", "1",
+        "--tensor-parallel-size", "2",
         "--attention-backend", attention_backend,
     ]
 
