@@ -217,6 +217,7 @@ class MultiprocExecutor(Executor):
                 for uw in unready_workers:
                     if uw.death_writer is not None:
                         uw.death_writer.close()
+                        uw.death_writer = None
                 self._ensure_worker_termination([uw.proc for uw in unready_workers])
 
         self.output_rank = self._get_output_rank()
@@ -252,6 +253,7 @@ class MultiprocExecutor(Executor):
             died = multiprocessing.connection.wait(sentinels)
             _self = self_ref()
             if not _self or getattr(_self, "shutting_down", False):
+                logger.debug("MultiprocWorkerMonitor: shutdown already initiated")
                 return
             _self.is_failed = True
             proc_name = next(h.proc.name for h in workers if h.proc.sentinel == died[0])
@@ -420,6 +422,7 @@ class MultiprocExecutor(Executor):
     def shutdown(self):
         """Properly shut down the executor and its workers"""
         if not getattr(self, "shutting_down", False):
+            logger.debug("Triggering shutdown of workers")
             self.shutting_down = True
 
             # Make sure all the worker processes are terminated first.
@@ -429,10 +432,20 @@ class MultiprocExecutor(Executor):
                     if w.death_writer is not None:
                         w.death_writer.close()
                         w.death_writer = None
-                    w.worker_response_mq = None
                 self._ensure_worker_termination([w.proc for w in workers])
 
-        self.rpc_broadcast_mq = None
+                for w in workers:
+                    # Shutdown response queues
+                    if w.worker_response_mq is not None:
+                        w.worker_response_mq.shutdown()
+                        w.worker_response_mq = None
+
+        if self.rpc_broadcast_mq is not None:
+            self.rpc_broadcast_mq.shutdown()
+            self.rpc_broadcast_mq = None
+        for mq in self.response_mqs:
+            mq.shutdown()
+        self.response_mqs = []
 
     def check_health(self) -> None:
         self.collective_rpc("check_health", timeout=10)
