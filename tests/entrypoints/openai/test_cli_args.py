@@ -166,6 +166,18 @@ def test_enable_auto_choice_passes_with_tool_call_parser(serve_parser):
     validate_parsed_serve_args(args)
 
 
+def test_enable_auto_choice_passes_with_auto_tool_call_parser(serve_parser):
+    """Ensure validation passes with --tool-call-parser auto"""
+    args = serve_parser.parse_args(
+        args=[
+            "--enable-auto-tool-choice",
+            "--tool-call-parser",
+            "auto",
+        ]
+    )
+    validate_parsed_serve_args(args)
+
+
 def test_enable_auto_choice_fails_with_enable_reasoning(serve_parser):
     """Ensure validation fails if reasoning is enabled with auto tool choice"""
     args = serve_parser.parse_args(
