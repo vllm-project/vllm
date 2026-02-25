@@ -748,8 +748,7 @@ class Worker(WorkerBase):
 
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
-                profiler_type = self.profiler_config.profiler
-                if profiler_type == "torch":
+                if self.profiler_config.profiler == "torch":
                     self.profiler = TorchProfilerWrapper(
                         self.profiler_config,
                         worker_name=trace_name,
@@ -759,12 +758,9 @@ class Worker(WorkerBase):
                     logger.debug(
                         "Starting torch profiler with trace name: %s", trace_name
                     )
-                elif profiler_type == "cuda":
+                elif self.profiler_config.profiler == "cuda":
                     self.profiler = CudaProfilerWrapper(self.profiler_config)
                     logger.debug("Starting CUDA profiler")
-                else:
-                    logger.warning("Unrecognized profiler: %s", profiler_type)
-                    return
                 self.profiler.start()
             else:
                 # Profiler already initialized. Restart profiling but keep

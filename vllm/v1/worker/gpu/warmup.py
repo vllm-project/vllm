@@ -59,6 +59,8 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
     prefill_output.total_num_scheduled_tokens = prompt_len * num_reqs
     prefill_output.num_common_prefix_blocks = [0] * num_kv_cache_groups
 
+    # Disable KV connector for warmup run.
+    model_runner.kv_connector.set_disabled(True)
     model_runner.execute_model(prefill_output)
 
     if not model_runner.is_pooling_model:
@@ -99,3 +101,5 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)
     model_runner.execute_model(cleanup_output)
+    model_runner.kv_connector.set_disabled(False)
+    torch.cuda.synchronize()
