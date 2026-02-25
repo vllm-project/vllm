@@ -85,6 +85,8 @@ class FlashAttnMLABackend(MLACommonBackend):
             return "FlashAttention MLA not supported on this device"
         return None
 
+    forward_includes_kv_cache_update: bool = False
+
 
 @dataclass
 class FlashAttnMLADecodeMetadata(MLACommonDecodeMetadata):
