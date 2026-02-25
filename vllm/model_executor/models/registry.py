@@ -260,7 +260,7 @@ _EMBEDDING_MODELS = {
     "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
     "LlamaNemotronVLModel": (
-        "nemotron_vl_embed",
+        "nemotron_vl",
         "LlamaNemotronVLForEmbedding",
     ),
     # Technically Terratorch models work on images, both in
