@@ -9,9 +9,8 @@
 import torch
 
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
-
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
 
