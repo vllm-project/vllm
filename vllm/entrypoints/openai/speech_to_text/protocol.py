@@ -103,7 +103,7 @@ class TranscriptionRequest(OpenAIBaseModel):
     response_format: AudioResponseFormat = Field(default="json")
     """
     The format of the output, in one of these options: `json`, `text`, `srt`,
-    `verbose_json`, `diarized_json`, or `vtt`.
+    `verbose_json`, or `vtt`.
     """
 
     ## TODO (varun) : Support if set to 0, certain thresholds are met !!
