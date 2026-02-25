@@ -202,7 +202,7 @@ steps:
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
 - label: Model strategy test
-  gpu: h100
+  device: h100
   num_gpus: 4
   source_file_dependencies: []
   commands:
