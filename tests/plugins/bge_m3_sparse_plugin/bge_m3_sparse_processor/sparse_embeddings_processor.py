@@ -50,7 +50,7 @@ class BgeM3SparseEmbeddingsProcessor(
         # for vllm.entrypoints.llm.LLM, offline mode, calls `encode` directly.
         if isinstance(request_data, dict):
             return SparseEmbeddingCompletionRequestMixin(**request_data)
-        raise ValueError("Unable to parse request_data")
+        raise TypeError("request_data should be a dictionary")
 
     def pre_process(
         self,
