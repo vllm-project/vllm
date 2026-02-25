@@ -84,6 +84,7 @@ ReqId = str
 NIXL_CONNECTOR_VERSION: int = 2
 
 GET_META_MSG = b"get_meta_msg"
+REGISTER_BLOCKS_MSG = b"register_blocks_msg"
 
 logger = init_logger(__name__)
 
@@ -435,6 +436,25 @@ class NixlConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         return self.connector_worker.get_finished()
 
+    def start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: list[int],
+        registration_data: dict[str, Any]
+    ) -> None:
+        """
+        Trigger push-based KV transfer from P node to D node.
+
+        This is an RPC method called by the P scheduler when blocks are ready.
+
+        Args:
+            request_id: Request ID
+            local_block_ids: Local block IDs to push
+            registration_data: Registration data from D node
+        """
+        assert self.connector_worker is not None
+        self.connector_worker.start_push_kv(request_id, local_block_ids, registration_data)
+
     def get_block_ids_with_load_errors(self) -> set[int]:
         """Get block IDs that failed to load via NIXL."""
         assert self.connector_worker is not None
@@ -551,11 +571,49 @@ class NixlConnectorScheduler:
         # remote prefill or aborted.
         self._reqs_not_processed: set[ReqId] = set()
 
+        # Storage for registered blocks from D nodes (for push-based transfer)
+        # Maps remote_request_id -> registration_data
+        self._registered_blocks: dict[str, dict[str, Any]] = {}
+        self._registered_blocks_lock = threading.Lock()
+
+        # Track block_ids for finished requests (for scenario 2)
+        # Maps request_id -> block_ids
+        self._finished_request_blocks: dict[ReqId, list[int]] = {}
+
+        # Reference to model executor for making RPC calls to worker
+        self._model_executor: Any = None
+
+    def set_model_executor(self, model_executor: Any) -> None:
+        """
+        Set reference to model executor for making RPC calls to worker.
+
+        This is needed for push-based transfers where the scheduler needs to
+        trigger the worker to initiate NIXL WRITE when blocks are ready.
+
+        Args:
+            model_executor: The model executor instance that can make RPC calls
+        """
+        self._model_executor = model_executor
+        logger.info("Set model_executor reference for P scheduler push triggers")
+
     def shutdown(self):
         self._stop_event.set()
         if self._nixl_handshake_listener_t is not None:
             self._nixl_handshake_listener_t.join()
             self._nixl_handshake_listener_t = None
+
+    def pop_registered_blocks(self, request_id: str) -> dict[str, Any] | None:
+        """
+        Get and remove registered block data for a specific request.
+
+        Args:
+            request_id: The request ID to look up
+
+        Returns:
+            Registration data dict if found, None otherwise
+        """
+        with self._registered_blocks_lock:
+            return self._registered_blocks.pop(request_id, None)
 
     def set_xfer_handshake_metadata(
         self, metadata: dict[int, KVConnectorHandshakeMetadata]
@@ -592,6 +650,9 @@ class NixlConnectorScheduler:
                     ready_event,
                     self._stop_event,
                     self.side_channel_port,
+                    self._registered_blocks,
+                    self._registered_blocks_lock,
+                    self,  # Pass scheduler instance for scenario 2 handling where Prefil completes request before Decode registers blocks
                 ),
                 daemon=True,
                 name="nixl_handshake_listener",
@@ -599,12 +660,112 @@ class NixlConnectorScheduler:
             self._nixl_handshake_listener_t.start()
             ready_event.wait()  # Wait for listener ZMQ socket to be ready.
 
+    def _register_blocks_with_prefill(
+        self,
+        req_id: str,
+        meta: ReqMeta,
+    ) -> bool:
+        """Register D node's allocated block IDs with P node for push-based transfer.
+
+        Args:
+            req_id: Local request ID
+            meta: Request metadata containing remote info and local block IDs
+
+        Returns:
+            True if registration successful, False otherwise
+        """
+        assert meta.remote is not None
+        remote_engine_id = meta.remote.engine_id
+        remote_request_id = meta.remote.request_id
+        remote_host = meta.remote.host
+        remote_port = meta.remote.port
+
+        try:
+            # For registration, we just need to connect to P node's listener
+            # The TP rank is not critical for the registration message itself
+            p_remote_rank = 0  # Default to rank 0 for registration
+
+            path = make_zmq_path("tcp", remote_host, remote_port)
+            logger.debug(
+                "Registering blocks with P node at %s for request %s (remote_request_id: %s)",
+                path,
+                req_id,
+                remote_request_id,
+            )
+
+            # Prepare registration message with block IDs
+            # Calculate total number of blocks across all KV cache groups
+            if isinstance(meta.local_physical_block_ids, (list, tuple)) and len(meta.local_physical_block_ids) > 0:
+                # Check if it's a nested structure (list of lists for multiple KV groups)
+                if isinstance(meta.local_physical_block_ids[0], (list, tuple)):
+                    # Multiple KV cache groups: sum blocks across all groups
+                    num_blocks = sum(len(group) for group in meta.local_physical_block_ids)
+                else:
+                    # Single list of block IDs
+                    num_blocks = len(meta.local_physical_block_ids)
+            else:
+                num_blocks = 0
+
+            registration_data = {
+                "request_id": remote_request_id,
+                "decode_engine_id": self.engine_id,
+                "decode_tp_rank": 0,  # Will be updated when we have proper TP rank
+                "local_block_ids": meta.local_physical_block_ids,
+                "num_blocks": num_blocks,
+                # D node's actual IP for P to handshake and send blocks_written
+                "remote_host": self.side_channel_host,
+                "remote_port": self.side_channel_port,
+            }
+
+            with zmq_ctx(zmq.REQ, path) as sock:
+                # Send registration request
+                msg = msgspec.msgpack.encode((REGISTER_BLOCKS_MSG, p_remote_rank, registration_data))
+                sock.setsockopt(zmq.RCVTIMEO, 5000)  # 5 second timeout
+                sock.send(msg)
+
+                # Wait for acknowledgment
+                ack_bytes = sock.recv()
+                ack_msg = msgspec.msgpack.decode(ack_bytes)
+
+                if ack_msg.get("status") == "success":
+                    logger.info(
+                        "Successfully registered %s blocks with P node for request %s",
+                        registration_data["num_blocks"],
+                        req_id,
+                    )
+                    return True
+                else:
+                    logger.error(
+                        "P node rejected block registration for request %s: %s",
+                        req_id,
+                        ack_msg.get("error", "Unknown error"),
+                    )
+                    return False
+
+        except zmq.Again:
+            logger.error(
+                "Timeout registering blocks with P node for request %s. "
+                "P node may not be responding.",
+                req_id,
+            )
+            return False
+        except Exception as e:
+            logger.exception(
+                "Failed to register blocks with P node for request %s: %s",
+                req_id,
+                e,
+            )
+            return False
+
     @staticmethod
     def _nixl_handshake_listener(
         encoded_data: dict[int, Any],
         ready_event: threading.Event,
         stop_event: threading.Event,
         port: int,
+        registered_blocks: dict[str, dict[str, Any]],
+        registered_blocks_lock: threading.Lock,
+        scheduler_instance: "NixlConnectorScheduler",
     ):
         """Background thread for getting new NIXL handshakes."""
         # NOTE(rob): this is a simple implementation. We will move
@@ -624,15 +785,133 @@ class NixlConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode the message which contains (GET_META_MSG, rank)
-                msg, target_tp_rank = msgspec.msgpack.decode(msg)
-                logger.debug(
-                    "Received message for tp rank %s",
-                    target_tp_rank,
-                )
-                if msg != GET_META_MSG:
-                    logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
+
+                # Decode the message which contains (GET_META_MSG, rank) or (REGISTER_BLOCKS_MSG, rank, data)
+                try:
+                    decoded_msg = msgspec.msgpack.decode(msg)
+                    logger.debug("Decoded message: type=%s, content=%s", type(decoded_msg), decoded_msg)
+                except Exception as e:
+                    logger.warning("Failed to decode message: %s", e)
+                    # Don't send error response for GET_META_MSG as client can't handle it
+                    continue
+
+                # Handle different message types
+                if not isinstance(decoded_msg, (tuple, list)) or len(decoded_msg) < 2:
+                    logger.warning("Connection listener got malformed message: type=%s, len=%s, content=%s",
+                                   type(decoded_msg),
+                                   len(decoded_msg) if isinstance(decoded_msg, (tuple, list)) else "N/A",
+                                   decoded_msg)
+                    # Don't send error response for GET_META_MSG as client can't handle it
+                    continue
+
+                msg_type = decoded_msg[0]
+
+                if msg_type == GET_META_MSG:
+                    target_tp_rank = decoded_msg[1]
+                    logger.debug(
+                        "Received GET_META_MSG for tp rank %s",
+                        target_tp_rank,
+                    )
+                    # Check if we have metadata for this rank
+                    if target_tp_rank not in encoded_data:
+                        logger.error(
+                            "No metadata available for tp rank %s. Available ranks: %s",
+                            target_tp_rank,
+                            list(encoded_data.keys()),
+                        )
+                        # Don't send a response - let the client timeout
+                        # This is because the client expects a NixlHandshakePayload
+                        # and cannot handle error dictionaries
+                        continue
+                    sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
+
+                elif msg_type == REGISTER_BLOCKS_MSG:
+                    # Handle block registration from D node
+                    target_tp_rank = decoded_msg[1]
+                    registration_data = decoded_msg[2] if len(decoded_msg) > 2 else {}
+
+                    logger.info(
+                        "Received REGISTER_BLOCKS_MSG from D node for request %s, "
+                        "decode_engine_id: %s, num_blocks: %s",
+                        registration_data.get("request_id"),
+                        registration_data.get("decode_engine_id"),
+                        registration_data.get("num_blocks"),
+                    )
+
+                    # Send ACK immediately so D node doesn't timeout
+                    ack_msg = {"status": "success", "message": "Block registration received",}
+                    sock.send_multipart((identity, b"", msgspec.msgpack.encode(ack_msg)))
+
+                    # Store the registration data
+                    request_id = registration_data.get("request_id")
+                    if request_id:
+                        with registered_blocks_lock:
+                            registered_blocks[request_id] = registration_data
+                            logger.info(
+                                "Stored registration data for request %s with %s blocks",
+                                request_id,
+                                registration_data.get("num_blocks"),
+                            )
+
+                        # Scenario 2: Check if P node has already finished this request
+                        # If yes, both conditions are met, so trigger push immediately via RPC
+                        if request_id in scheduler_instance._reqs_need_send:
+                            logger.info(
+                                "Scenario 2: P node already finished request %s, "
+                                "D node just registered, triggering push via RPC",
+                                request_id,
+                            )
+
+                            # Get block_ids from finished request tracking
+                            if hasattr(scheduler_instance, '_finished_request_blocks') and \
+                               request_id in scheduler_instance._finished_request_blocks:
+                                block_ids = scheduler_instance._finished_request_blocks[request_id]
+
+                                # Trigger push via RPC to worker
+                                if scheduler_instance._model_executor is not None:
+                                    try:
+                                        logger.info(
+                                            "Calling RPC start_push_kv for request %s with %d blocks",
+                                            request_id,
+                                            len(block_ids),
+                                        )
+
+                                        # Call RPC to worker to trigger push
+                                        # Include D node connection info for handshake if needed
+                                        scheduler_instance._model_executor.collective_rpc(
+                                            "start_push_kv",
+                                            args=(request_id, block_ids, registration_data)
+                                        )
+
+                                        # Remove from tracking since push is triggered
+                                        del scheduler_instance._reqs_need_send[request_id]
+                                        # TODO: check if we need to handle push fail scenario or
+                                        # let D node timeout and do prefil on its own
+                                        scheduler_instance._finished_request_blocks.pop(request_id, None)
+
+                                        logger.info(
+                                            "Successfully triggered push for request %s via RPC",
+                                            request_id,
+                                        )
+                                    except Exception:
+                                        logger.exception(
+                                            "Failed to trigger push via RPC for request %s",
+                                            request_id,
+                                        )
+                                else:
+                                    logger.error(
+                                        "model_executor not set, cannot trigger push for request %s",
+                                        request_id,
+                                    )
+                            else:
+                                logger.error(
+                                    "Request %s in _reqs_need_send but no block_ids found",
+                                    request_id,
+                                )
+                else:
+                    logger.warning("Connection listener got unexpected message type: %s (full message: %s)", msg_type, decoded_msg)
+                    # Don't send error response as client might not be able to handle it
+                    continue
 
     def get_num_new_matched_tokens(
         self, request: "Request", num_computed_tokens: int
@@ -721,8 +1000,48 @@ class NixlConnectorScheduler:
                         "request will not utilize KVTransfer",
                         params,
                     )
-            else:
-                assert num_external_tokens == 0
+            elif num_external_tokens > 0:
+                # KV PUSH mode: D node registers blocks with P node
+                # P node will push KV cache when request finishes
+                logger.info(
+                    "KV PUSH mode: D node registering blocks for request %s",
+                    request.request_id,
+                )
+                local_block_ids = blocks.get_unhashed_block_ids()
+
+                # Create ReqMeta for registration
+                meta = ReqMeta(
+                    local_block_ids=local_block_ids,
+                    local_physical_block_ids=local_block_ids,
+                    tp_size=params.get("tp_size", 1),
+                )
+                meta.remote = RemoteMeta(
+                    block_ids=[],  # Not used for push mode
+                    engine_id=params["remote_engine_id"],
+                    request_id=params["remote_request_id"],
+                    host=params["remote_host"],
+                    port=params["remote_port"],
+                )
+
+                # Register blocks with P node
+                success = self._register_blocks_with_prefill(
+                    request.request_id,
+                    meta,
+                )
+
+                if not success:
+                    logger.error(
+                        "Failed to register blocks with P node for request %s",
+                        request.request_id,
+                    )
+
+                # Still add to reqs_need_recv to track the request
+                # but with empty block_ids since we're not pulling
+                self._reqs_need_recv[request.request_id] = (
+                    request,
+                    [],  # Empty because we're waiting for push, not pulling
+                )
+
             # Only trigger 1 KV transfer per request.
             params["do_remote_prefill"] = False
 
@@ -776,7 +1095,8 @@ class NixlConnectorScheduler:
         self._reqs_need_recv.clear()
         self._reqs_in_batch = set()
         self._reqs_not_processed = set()
-        self._reqs_need_send = {}
+        # Don't clear `_reqs_need_send` here. It will be cleared either when the request is pushed above or timedout
+        #self._reqs_need_send = {}
 
         return meta
 
@@ -788,6 +1108,10 @@ class NixlConnectorScheduler:
         """
         Once a request is finished, determine whether request blocks
         should be freed now or will be sent asynchronously and freed later.
+
+        For push-based transfer (Scenario 1):
+        - Check if D node has already registered blocks
+        - If yes, add to push queue to be sent to worker via build_connector_meta()
         """
         from vllm.v1.request import RequestStatus
 
@@ -838,6 +1162,62 @@ class NixlConnectorScheduler:
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + envs.VLLM_NIXL_ABORT_REQUEST_TIMEOUT
             )
+
+            # Track block_ids for scenario 2 (when D registers after request_finished)
+            if not hasattr(self, '_finished_request_blocks'):
+                self._finished_request_blocks: dict[ReqId, list[int]] = {}
+            self._finished_request_blocks[request.request_id] = block_ids
+
+            # Scenario 1: Check if D node has already registered blocks for push-based transfer
+            registration_data = self.pop_registered_blocks(request.request_id)
+            if registration_data:
+                logger.info(
+                    "Scenario 1: D node already registered blocks for request %s, "
+                    "P node KV ready, triggering push via RPC",
+                    request.request_id,
+                )
+
+                # Trigger push via RPC to worker
+                if self._model_executor is not None:
+                    try:
+                        logger.info(
+                            "Calling RPC start_push_kv for request %s with %d blocks",
+                            request.request_id,
+                            len(block_ids),
+                        )
+
+                        # Call RPC to worker to trigger push
+                        self._model_executor.collective_rpc(
+                            "start_push_kv",
+                            args=(request.request_id, block_ids, registration_data)
+                        )
+
+                        # Remove from tracking since push is triggered
+                        self._finished_request_blocks.pop(request.request_id, None)
+
+                        logger.info(
+                            "Successfully triggered push for request %s via RPC",
+                            request.request_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "Failed to trigger push via RPC for request %s",
+                            request.request_id,
+                        )
+                else:
+                    logger.error(
+                        "model_executor not set, cannot trigger push for request %s",
+                        request.request_id,
+                    )
+            else:
+                # Scenario 2: D node hasn't registered yet, store blocks for later
+                # When D registers, listener will check _reqs_need_send and trigger RPC
+                logger.debug(
+                    "Scenario 2: D node hasn't registered yet for request %s, "
+                    "storing %d blocks for push when registration arrives",
+                    request.request_id,
+                    len(block_ids),
+                )
 
         return delay_free_blocks, dict(
             do_remote_prefill=True,
@@ -2011,7 +2391,39 @@ class NixlConnectorWorker:
         notified_req_ids: set[str] = set()
         for notifs in self.nixl_wrapper.get_new_notifs().values():
             for notif in notifs:
-                req_id, tp_size = notif.decode("utf-8").rsplit(":", 1)
+                notif_str = notif.decode("utf-8")
+
+                # Check if this is a push completion notification
+                if notif_str.endswith(":push_complete"):
+                    # Format: {remote_request_id}:{tp_ratio}:push_complete
+                    parts = notif_str.rsplit(":", 2)
+                    if len(parts) == 3:
+                        req_id = parts[0]
+                        logger.info(
+                            "Received push completion notification for request %s",
+                            req_id,
+                        )
+                        # For D node in push mode, mark as done receiving
+                        # Add to _recving_transfers with empty handle list so _pop_done_transfers
+                        # will immediately mark it as done (no handles to check = transfer complete)
+                        if req_id in self._recving_metadata:
+                            # Since _recving_transfers is a defaultdict(list), just ensure entry exists
+                            # If already exists (shouldn't happen), keep existing handles
+                            # If doesn't exist, defaultdict creates empty list automatically
+                            _ = self._recving_transfers[req_id]
+                            logger.debug(
+                                "Marked push mode request %s as done receiving",
+                                req_id,
+                            )
+                        else:
+                            logger.warning(
+                                "Received push completion for unknown request %s",
+                                req_id,
+                            )
+                        continue
+
+                # Regular pull notification format: {req_id}:{tp_ratio}
+                req_id, tp_ratio = notif_str.rsplit(":", 1)
                 if (
                     req_id not in self._reqs_to_send
                     and req_id not in self._reqs_to_process
@@ -2132,6 +2544,28 @@ class NixlConnectorWorker:
             )
             # always store metadata for failure recovery
             self._recving_metadata[req_id] = meta
+
+            # Check if this is a push mode request (no remote block_ids means P will push)
+            if not meta.remote.block_ids:
+                logger.info(
+                    "Push mode: D node waiting for P to push blocks for request %s",
+                    req_id,
+                )
+
+                # In push mode, P and D must have same block size
+                # Store P node's block size so cleanup code can access it
+                if remote_engine_id not in self._block_size:
+                    self._block_size[remote_engine_id] = self.block_size
+                    logger.debug(
+                        "Stored block size %d for P node %s (push mode)",
+                        self.block_size,
+                        remote_engine_id,
+                    )
+
+                # Don't add to _recving_transfers yet - will be handled when notification arrives
+                # Just store metadata and continue
+                continue
+
             if remote_engine_id not in self._remote_agents:
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
@@ -2165,6 +2599,198 @@ class NixlConnectorWorker:
         for req_id, expiration_time in metadata.reqs_to_send.items():
             if req_id in self._reqs_to_process:
                 self._reqs_to_send[req_id] = expiration_time
+
+    def start_push_kv(
+        self,
+        request_id: str,
+        local_block_ids: list[int],
+        registration_data: dict[str, Any]
+    ) -> None:
+        """
+        RPC method called by P scheduler to start kv transfer to D node.
+
+        This is called when both conditions are met:
+        1. P node has finished the request and blocks are ready
+        2. D node has sent REGISTER_BLOCKS_MSG with allocated block IDs
+
+        This method directly initiates the NIXL WRITE transfer (non-blocking).
+
+        Args:
+            request_id: Request ID on P node
+            local_block_ids: Local block IDs to push
+            registration_data: Registration data from D node containing:
+                - decode_engine_id: D node engine ID
+                - decode_tp_rank: D node TP rank
+                - local_block_ids: Remote block IDs on D node
+                - num_blocks: Number of blocks
+                - remote_host: D node scheduler host
+                - remote_port: D node scheduler port
+        """
+        logger.info(
+            "RPC start_push_kv called for request %s: pushing %d blocks to D node %s",
+            request_id,
+            len(local_block_ids),
+            registration_data.get("decode_engine_id"),
+        )
+
+        try:
+            # Directly call _process_push_request to initiate NIXL WRITE
+            # This is non-blocking - NIXL handles the transfer in its own threads
+            self._process_push_request(request_id, local_block_ids, registration_data)
+
+            logger.info(
+                "Successfully initiated push transfer for request %s",
+                request_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to initiate push transfer for request %s",
+                request_id,
+            )
+
+    def _process_push_request(
+        self,
+        request_id: str,
+        local_block_ids: list[int],
+        registration_data: dict[str, Any]
+    ):
+        """
+        Process a push request from D node by initiating NIXL WRITE transfer.
+
+        Args:
+            request_id: The request ID on the P node
+            local_block_ids: Local block IDs to push (from request_finished)
+            registration_data: Registration data from D node containing remote block IDs
+        """
+        decode_engine_id = registration_data.get("decode_engine_id")
+        decode_tp_rank = registration_data.get("decode_tp_rank", 0)
+        remote_block_ids = registration_data.get("local_block_ids", [])
+        num_blocks = registration_data.get("num_blocks", 0)
+
+        # Get D node connection info from registration data
+        # We'll need this to handshake and send blocks_written notification
+        remote_host = registration_data.get("remote_host")
+        remote_port = registration_data.get("remote_port")
+
+        logger.info(
+            "Processing push request %s to D node %s: "
+            "pushing %d local blocks to %d remote blocks",
+            request_id,
+            decode_engine_id,
+            len(local_block_ids),
+            len(remote_block_ids) if isinstance(remote_block_ids, list) else num_blocks,
+        )
+
+        if not decode_engine_id or not remote_block_ids:
+            logger.warning(
+                "Invalid registration data for request %s: missing engine_id or block_ids",
+                request_id,
+            )
+            return
+
+        if not local_block_ids:
+            logger.warning(
+                "No local blocks to push for request %s",
+                request_id,
+            )
+            return
+
+        # Check if we have remote agent info for D node
+        # If not, do handshake with D scheduler (similar to pull mode)
+        if decode_engine_id not in self._remote_agents:
+            if not remote_host or not remote_port:
+                logger.error(
+                    "Cannot handshake with D node %s: missing connection info",
+                    decode_engine_id,
+                )
+                return
+
+            logger.info(
+                "No remote agent info for D node %s, performing handshake with D scheduler",
+                decode_engine_id,
+            )
+
+            try:
+                # Do synchronous handshake with D scheduler
+                # This is symmetric to pull mode where D worker handshakes with P scheduler
+                remote_tp_size = self.world_size  # Assume same TP size
+                remote_agents = self._nixl_handshake(
+                    remote_host,
+                    remote_port,
+                    remote_tp_size,
+                    decode_engine_id,
+                )
+
+                # Store the remote agent info
+                with self._handshake_lock:
+                    self._remote_agents[decode_engine_id] = remote_agents
+
+                logger.info(
+                    "Successfully completed handshake with D node %s, got %d remote agents",
+                    decode_engine_id,
+                    len(remote_agents),
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to handshake with D node %s for push request %s",
+                    decode_engine_id,
+                    request_id,
+                )
+                return
+
+        # Convert logical block IDs to physical/kernel block IDs
+        physical_block_ids = self._logical_to_kernel_block_ids(local_block_ids)
+
+        # If using host buffer, ensure blocks are copied to host first
+        if self.use_host_buffer and self.copy_blocks is not None:
+            logger.debug(
+                "Copying %d blocks from device to host buffer for push request %s",
+                len(physical_block_ids),
+                request_id,
+            )
+            try:
+                self.copy_blocks(
+                    self.device_kv_caches,
+                    self.host_xfer_buffers,
+                    physical_block_ids,
+                    physical_block_ids,
+                    "d2h",
+                )
+            except Exception:
+                logger.exception(
+                    "Failed to copy blocks to host buffer for push request %s",
+                    request_id,
+                )
+                return
+
+        # Handle remote block IDs - they might be nested for multiple KV groups
+        if isinstance(remote_block_ids, list) and len(remote_block_ids) > 0:
+            if isinstance(remote_block_ids[0], (list, tuple)):
+                # Flatten nested structure
+                flat_remote_block_ids = [bid for group in remote_block_ids for bid in group]
+            else:
+                flat_remote_block_ids = remote_block_ids
+        else:
+            flat_remote_block_ids = []
+
+        # Convert remote block IDs to physical
+        physical_remote_block_ids = self._logical_to_kernel_block_ids(flat_remote_block_ids)
+
+        # Initiate write operation
+        try:
+            self._write_blocks(
+                local_block_ids=physical_block_ids,
+                remote_block_ids=physical_remote_block_ids,
+                dst_engine_id=decode_engine_id,
+                request_id=request_id,
+                remote_request_id=request_id,
+            )
+        except Exception:
+            logger.exception(
+                "Failed to initiate push for request %s to D node %s",
+                request_id,
+                decode_engine_id,
+            )
 
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         assert meta.remote is not None and self.kv_topo is not None
@@ -2390,6 +3016,126 @@ class NixlConnectorWorker:
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
             self._failed_recv_reqs.add(request_id)
+
+    def _write_blocks(
+        self,
+        local_block_ids: list[int],
+        remote_block_ids: list[int],
+        dst_engine_id: str,
+        request_id: str,
+        remote_request_id: str,
+    ):
+        """
+        Push local KV cache blocks to remote D node using NIXL WRITE operation.
+
+        This is used for push-based KV transfer where P node writes to D node's
+        pre-allocated blocks.
+
+        Args:
+            local_block_ids: Local P node block IDs to push
+            remote_block_ids: Remote D node block IDs to write to
+            dst_engine_id: Destination D node engine ID
+            request_id: Local request ID
+            remote_request_id: Remote request ID
+        """
+        logger.info(
+            "Pushing %d blocks to D node for request %s (remote_request_id: %s)",
+            len(local_block_ids),
+            request_id,
+            remote_request_id,
+        )
+
+        # Handle block size ratio if needed
+        block_size_ratio = self.kv_topo.block_size_ratio_from_engine_id(dst_engine_id)
+        if block_size_ratio > 1:
+            local_block_ids = self.get_mapped_blocks(
+                np.asarray(local_block_ids), block_size_ratio
+            )
+            if len(local_block_ids) > len(remote_block_ids):
+                local_block_ids = local_block_ids[: len(remote_block_ids)]
+
+        num_local_blocks = len(local_block_ids)
+        num_remote_blocks = len(remote_block_ids)
+
+        if num_local_blocks == 0:
+            logger.warning(
+                "No blocks to push for request %s",
+                request_id,
+            )
+            return
+
+        # Ensure we don't push more blocks than remote has allocated
+        if num_local_blocks > num_remote_blocks:
+            logger.warning(
+                "Local blocks (%d) exceed remote blocks (%d), truncating",
+                num_local_blocks,
+                num_remote_blocks,
+            )
+            local_block_ids = local_block_ids[:num_remote_blocks]
+        elif num_local_blocks < num_remote_blocks:
+            # Only push the blocks we have
+            remote_block_ids = remote_block_ids[:num_local_blocks]
+
+        # Get side handles
+        remote_block_size = self.kv_topo.remote_block_size.get(
+            dst_engine_id, self.block_size
+        )
+        local_xfer_side_handle = self.src_xfer_side_handles.get(
+            remote_block_size, self.src_xfer_side_handle
+        )
+        remote_xfer_side_handle = self.dst_xfer_side_handles[dst_engine_id]
+
+        # Get descriptor IDs for local and remote blocks
+        local_block_descs_ids: np.ndarray
+        remote_block_descs_ids: np.ndarray
+
+        if not self.block_window_per_layer:
+            # Default case: assume global attention
+            local_block_descs_ids = self._get_block_descs_ids(
+                self.engine_id,
+                local_block_ids,
+                block_size_ratio=block_size_ratio,
+            )
+            remote_block_descs_ids = self._get_block_descs_ids(
+                dst_engine_id,
+                remote_block_ids,
+            )
+
+        # Prepare notification message for D node
+        # The notification tells D node that P node has finished writing blocks
+        tp_ratio = self.kv_topo.tp_ratio_from_engine_id(dst_engine_id)
+        notif_id = f"{remote_request_id}:{tp_ratio}:push_complete".encode()
+
+        # Prepare WRITE transfer with NIXL
+        handle = None
+        try:
+            handle = self.nixl_wrapper.make_prepped_xfer(
+                "WRITE",  # Use WRITE instead of READ for push
+                local_xfer_side_handle,
+                local_block_descs_ids,
+                remote_xfer_side_handle,
+                remote_block_descs_ids,
+                notif_msg=notif_id,
+            )
+
+            # Begin async write transfer
+            self.nixl_wrapper.transfer(handle)
+
+            logger.info(
+                "Successfully initiated WRITE transfer for request %s, "
+                "pushing %d blocks to D node %s",
+                request_id,
+                len(local_block_ids),
+                dst_engine_id,
+            )
+        except Exception:
+            logger.exception(
+                "NIXL WRITE transfer setup/initiation failed for request %s",
+                request_id,
+            )
+            self.xfer_stats.record_failed_transfer()
+            if handle is not None:
+                self.nixl_wrapper.release_xfer_handle(handle)
 
     def get_mapped_blocks(self, block_ids, block_size_ratio):
         """
