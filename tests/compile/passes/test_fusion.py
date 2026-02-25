@@ -26,34 +26,20 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (  # noqa: E501
-    _KernelT,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.aiter import (
+from vllm.model_executor.kernels.linear import (
     AiterFp8BlockScaledMMKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cuda import (
+    ChannelWiseTorchFP8ScaledMMLinearKernel,
     CudaFp8BlockScaledMMKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
     CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
-    ChannelWiseTorchFP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
-    RowWiseTorchFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.triton import (
+    RowWiseTorchFP8ScaledMMLinearKernel,
     TritonFp8BlockScaledMMKernel,
+    _KernelT,
 )
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     create_fp8_quant_key,

@@ -42,7 +42,7 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
+from vllm.model_executor.kernels.linear import (
     _KernelT,
     init_fp8_linear_kernel,
 )
