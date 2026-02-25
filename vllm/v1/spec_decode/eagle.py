@@ -823,7 +823,11 @@ class SpecDecodeBaseProposer:
                 assert logits is not None
                 draft_probs = logits.softmax(dim=-1, dtype=torch.float32)
                 draft_token_ids_probs = draft_probs.gather(1, draft_token_ids.unsqueeze(1)).squeeze(-1)
-                should_exit_gpu = (draft_token_ids_probs < self.spec_confidence_threshold).any()
+                # Mean policy: exit if the average confidence across the batch
+                # falls below the threshold. More robust than 'any' under mixed
+                # workloads — a single low-confidence request does not penalise
+                # high-confidence ones.
+                should_exit_gpu = draft_token_ids_probs.mean() < self.spec_confidence_threshold
 
                 if should_exit_gpu.item():
                     self.dsl_early_exits += 1
