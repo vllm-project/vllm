@@ -238,17 +238,6 @@ class DefaultMoERunner(MoERunner):
             states_shape = (moe.max_num_tokens, self.moe_config.hidden_dim)
             logits_shape = (moe.max_num_tokens, self.moe_config.num_logical_experts)
 
-        from vllm.v1.worker.workspace import current_workspace_manager
-
-        self.batched_hidden_states, self.batched_router_logits = (
-            current_workspace_manager().get_simultaneous(
-                (states_shape, moe.in_dtype),
-                (logits_shape, moe.router_logits_dtype),
-            )
-        )
-
-        return
-
         self.batched_hidden_states = torch.zeros(
             states_shape, dtype=moe.in_dtype, device=torch.cuda.current_device()
         )
