@@ -62,8 +62,10 @@ def run_jinavl_reranker() -> RerankModelData:
         max_model_len=32768,
         trust_remote_code=True,
         mm_processor_kwargs={
-            "min_pixels": 3136,
-            "max_pixels": 602112,
+            "size": {
+                "shortest_edge": 3136,
+                "longest_edge": 602112,
+            },
         },
     )
     return RerankModelData(engine_args=engine_args, modality={"image"})

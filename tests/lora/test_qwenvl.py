@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
+from typing import Any
 
 import vllm
 from vllm.assets.image import ImageAsset
@@ -18,14 +19,16 @@ class TestConfig:
     enable_tower_connector_lora: bool = False
     max_model_len: int = 8192
     gpu_memory_utilization: float = 0.85
-    mm_processor_kwargs: dict[str, int] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
     mm_processor_cache_gb: float = 4
 
     def __post_init__(self):
         if self.mm_processor_kwargs is None:
             self.mm_processor_kwargs = {
-                "min_pixels": 28 * 28,
-                "max_pixels": 1280 * 28 * 28,
+                "size": {
+                    "shortest_edge": 28 * 28,
+                    "longest_edge": 1280 * 28 * 28,
+                },
             }
 
 

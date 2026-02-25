@@ -253,8 +253,10 @@ VLM_TEST_SETTINGS = {
             **(
                 {
                     "mm_processor_kwargs": {
-                        "min_pixels": 256 * 28 * 28,
-                        "max_pixels": 1280 * 28 * 28,
+                        "size": {
+                            "shortest_edge": 256 * 28 * 28,
+                            "longest_edge": 1280 * 28 * 28,
+                        },
                     },
                 }
                 if current_platform.is_rocm()
