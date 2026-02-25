@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
-import warnings
 from abc import abstractmethod
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
@@ -773,7 +772,7 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         Args:
             data: Raw video bytes
             num_frames: Not used in dynamic backend
-            fps: Target FPS for sampling (default: 2)
+            fps: Target FPS for sampling (default: 1)
 
         Returns:
             Tuple of (frames_array, metadata_dict)
@@ -816,43 +815,23 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
             for t in sample_frame_timestamps
         ]
 
-        width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-        frames = np.empty((len(frames_indices), height, width, 3), dtype=np.uint8)
+        frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
+            cap, frames_indices, total_frames_num
+        )
+        valid_num_frames = len(valid_frame_indices)
 
-        i = 0
-        for frame_idx in frames_indices:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-            ret, frame = cap.read()
-            if ret:
-                frames[i] = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                i += 1
-            else:
-                # when get a bad frame,continuous finding a next good frame
-                next_idx = frame_idx + 1
-                while next_idx < total_frames_num:
-                    ret, next_frame = cap.read()
-                    if ret:
-                        frames[i] = cv2.cvtColor(next_frame, cv2.COLOR_BGR2RGB)
-                        i += 1
-                        break
-                    next_idx += 1
-
-        if i != len(frames_indices):
-            warnings.warn(
-                f"Expected reading {len(frames_indices)} frames,"
-                f"but only loaded {i} frames from video.",
-                UserWarning,
-                stacklevel=2,
+        if recovered_map:
+            logger.info(
+                "Frame recovery: %d frames recovered using forward scan.",
+                len(recovered_map),
             )
 
-        # Use transformers transformers.video_utils.VideoMetadata format
         metadata = {
             "total_num_frames": total_frames_num,
             "fps": original_fps,
             "duration": total_duration,
             "video_backend": "opencv_dynamic_openpangu",
-            "frames_indices": frames_indices,
+            "frames_indices": valid_frame_indices,
             "do_sample_frames": False,
         }
         return frames, metadata
