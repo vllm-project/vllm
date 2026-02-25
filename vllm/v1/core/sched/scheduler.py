@@ -240,6 +240,18 @@ class Scheduler(SchedulerInterface):
             self.connector, "bind_gpu_block_pool"
         ):
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
+        
+        if getattr(self.kv_cache_config, "enable_tiering", False):
+            from vllm_extensions.tiered_block_manager import TieredBlockSpaceManager
+            from vllm_extensions.eviction_policies import HybridEvictionPolicy
+
+            # Use hybrid policy (Attention + LRU/LFU) by default
+            policy = HybridEvictionPolicy(attention_weight=0.6, recency_weight=0.3, frequency_weight=0.1)
+            self.kv_cache_manager = TieredBlockSpaceManager(
+                num_gpu_blocks=self.kv_cache_config.num_gpu_blocks,
+                num_cpu_blocks=self.kv_cache_config.num_cpu_blocks,
+                eviction_policy=policy
+            )
 
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER

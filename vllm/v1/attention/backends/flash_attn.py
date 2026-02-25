@@ -804,6 +804,23 @@ class FlashAttentionImpl(AttentionImpl):
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
                 )
+                
+                # --- KV Cache Tiering Extension Hook ---
+                # Track attention magnitude globally for block eviction policies.
+                # In a full implementation, you can approximate attention importance 
+                # via output magnitude per block to avoid the overhead of `return_attn_probs=True`.
+                # Example:
+                '''
+                if hasattr(self, "tiering_manager") and self.tiering_manager:
+                    # Token magnitudes as a proxy for attention weight (Option B from spec)
+                    token_mags = output[:num_actual_tokens].norm(dim=-1)
+                    
+                    # Accumulate onto the blocks allocated for this request
+                    # We map `cu_seqlens_q` to the `block_table` and call
+                    # self.tiering_manager.eviction_policy.update_on_access(block_meta, token_mags)
+                '''
+                # ---------------------------------------
+                
                 return output
 
         # Cascade attention (rare case).
