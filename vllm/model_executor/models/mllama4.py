@@ -66,6 +66,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     PromptUpdateDetails,
 )
+from vllm.renderers import TokenizeParams
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
@@ -554,6 +555,9 @@ class Mllama4ProcessingInfo(BaseProcessingInfo):
             Llama4Processor, use_fast=kwargs.pop("use_fast", True), **kwargs
         )
 
+    def get_default_tok_params(self) -> TokenizeParams:
+        return super().get_default_tok_params().with_kwargs(add_special_tokens=False)
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         # Although vLLM can support more images from an infra capability
         # perspective, we do not recommend using >10 images in practice.
@@ -703,14 +707,13 @@ class Mllama4DummyInputsBuilder(BaseDummyInputsBuilder[Mllama4ProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         (target_width, target_height) = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -1148,6 +1151,28 @@ class Llama4ForConditionalGeneration(
         """
         return MultiModelKeys.from_string_field(
             language_model="language_model",
-            connector="multi_modal_projector.",
+            connector=[
+                "multi_modal_projector.",
+                "vision_model.vision_adapter.",
+            ],
             tower_model="vision_model.",
         )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        vision_config = self.config.vision_config
+        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
+        if num_image_tokens <= 0 or patches_per_chunk <= 0:
+            return 0
+        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
+        num_chunks = num_image_tokens // patches_per_chunk
+        # Encoder processes raw_patches + 1 (CLS) per chunk
+        return num_chunks * (raw_patches + 1)
+
+    def get_num_mm_connector_tokens(self, num_vision_tokens: int) -> int:
+        vision_config = self.config.vision_config
+        raw_patches = (vision_config.image_size // vision_config.patch_size) ** 2
+        if num_vision_tokens <= 0:
+            return 0
+        num_chunks = num_vision_tokens // (raw_patches + 1)
+        patches_per_chunk = Mllama4ProcessingInfo.get_patch_per_chunk(vision_config)
+        return num_chunks * patches_per_chunk
