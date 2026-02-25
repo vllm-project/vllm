@@ -534,7 +534,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # must apply it per-path (prefill vs decode) below.
         positions = self._positions
         if positions is not None:
-            positions = positions[:attn_metadata.num_actual_tokens]
+            positions = positions[: attn_metadata.num_actual_tokens]
 
         use_fused = (
             fp8_attention
@@ -592,14 +592,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 prefill_k_pe = k_pe[num_mqa_tokens:]
                 prefill_positions = positions[num_mqa_tokens:]
 
-                prefill_q_nope = prefill_q[
-                    ..., :self.qk_nope_head_dim]
-                prefill_q_pe = prefill_q[
-                    ..., self.qk_nope_head_dim:]
+                prefill_q_nope = prefill_q[..., : self.qk_nope_head_dim]
+                prefill_q_pe = prefill_q[..., self.qk_nope_head_dim :]
                 prefill_q_pe, prefill_k_pe = self.impl.rotary_emb(
-                    prefill_positions, prefill_q_pe, prefill_k_pe)
-                prefill_q = torch.cat(
-                    [prefill_q_nope, prefill_q_pe], dim=-1)
+                    prefill_positions, prefill_q_pe, prefill_k_pe
+                )
+                prefill_q = torch.cat([prefill_q_nope, prefill_q_pe], dim=-1)
 
                 # Write prefill tokens to cache (after RoPE)
                 if kv_cache.numel() > 0:
@@ -607,14 +605,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         k_c_normed[num_mqa_tokens:],
                         prefill_k_pe.squeeze(1),
                         kv_cache,
-                        attn_metadata.slot_mapping[
-                            num_mqa_tokens:].flatten(),
+                        attn_metadata.slot_mapping[num_mqa_tokens:].flatten(),
                         kv_cache_dtype=self.kv_cache_dtype,
                         scale=self._k_scale,
                     )
 
-                kv_cache_prefill = kv_cache.view(
-                    current_platform.fp8_dtype())
+                kv_cache_prefill = kv_cache.view(current_platform.fp8_dtype())
 
                 self.impl.forward_mha(
                     prefill_q,
@@ -698,16 +694,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 decode_k_pe = k_pe[:num_mqa_tokens]
                 decode_positions = positions[:num_mqa_tokens]
 
-                mqa_q, decode_k_c_out, decode_k_pe_out = (
-                    self.impl._fused_rope_quant(
-                        mqa_ql_nope,
-                        mqa_q_pe,
-                        decode_k_c,
-                        decode_k_pe.squeeze(1),
-                        decode_positions,
-                        self._q_scale_float,
-                        self._k_scale_float,
-                    ))
+                mqa_q, decode_k_c_out, decode_k_pe_out = self.impl._fused_rope_quant(
+                    mqa_ql_nope,
+                    mqa_q_pe,
+                    decode_k_c,
+                    decode_k_pe.squeeze(1),
+                    decode_positions,
+                    self._q_scale_float,
+                    self._k_scale_float,
+                )
 
                 # Write decode tokens to cache (K has RoPE from fused
                 # kernel, stored as FP8)
@@ -716,8 +711,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         decode_k_c_out,
                         decode_k_pe_out,
                         kv_cache,
-                        attn_metadata.slot_mapping[
-                            :num_mqa_tokens].flatten(),
+                        attn_metadata.slot_mapping[:num_mqa_tokens].flatten(),
                         kv_cache_dtype=self.kv_cache_dtype,
                         scale=self._k_scale,
                     )
@@ -2737,4 +2731,3 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         layer: AttentionLayer,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         raise NotImplementedError
-
