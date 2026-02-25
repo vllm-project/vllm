@@ -13,8 +13,6 @@
 # This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 
-from functools import lru_cache
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -163,14 +161,8 @@ def layer_norm_fwd_kernel(
     tl.store(Y_base, y, mask=mask)
 
 
-@lru_cache
-def _get_sm_count(device: torch.device) -> int:
-    """Get and cache the SM count for a given device."""
-    return num_compute_units(device.index)
-
-
 def calc_rows_per_block(M: int, device: torch.device) -> int:
-    sm_count = _get_sm_count(device)
+    sm_count = num_compute_units(device.index)
     rows_per_block = next_power_of_2(cdiv(M, 2 * sm_count))
     rows_per_block = min(rows_per_block, 4)
     return rows_per_block
