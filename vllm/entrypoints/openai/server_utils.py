@@ -136,16 +136,27 @@ def get_uvicorn_log_config(args: Namespace) -> dict | None:
     if log_config is not None:
         return log_config
 
-    # If endpoints to filter are specified, create a config with the filter
+    # Build the excluded endpoint list from CLI options.
+    excluded_paths: list[str] = []
     if args.disable_access_log_for_endpoints:
+        # Parse comma-separated string into list.
+        excluded_paths.extend(
+            [
+                p.strip()
+                for p in args.disable_access_log_for_endpoints.split(",")
+                if p.strip()
+            ]
+        )
+
+    # Convenience flag to suppress only /metrics access logs.
+    if getattr(args, "disable_uvicorn_metrics_access_log", False):
+        excluded_paths.append("/metrics")
+
+    # If endpoints to filter are specified, create a config with the filter.
+    if excluded_paths:
         from vllm.logging_utils import create_uvicorn_log_config
 
-        # Parse comma-separated string into list
-        excluded_paths = [
-            p.strip()
-            for p in args.disable_access_log_for_endpoints.split(",")
-            if p.strip()
-        ]
+        excluded_paths = list(dict.fromkeys(excluded_paths))
         return create_uvicorn_log_config(
             excluded_paths=excluded_paths,
             log_level=args.uvicorn_log_level,

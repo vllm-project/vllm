@@ -255,6 +255,15 @@ def test_default_chat_template_kwargs_invalid_json(serve_parser):
         )
 
 
+def test_disable_uvicorn_metrics_access_log(serve_parser):
+    """Ensure metrics-only access log flag is parsed correctly."""
+    args = serve_parser.parse_args(args=[])
+    assert args.disable_uvicorn_metrics_access_log is False
+
+    args = serve_parser.parse_args(args=["--disable-uvicorn-metrics-access-log"])
+    assert args.disable_uvicorn_metrics_access_log is True
+
+
 @pytest.mark.parametrize(
     "args, raises",
     [
