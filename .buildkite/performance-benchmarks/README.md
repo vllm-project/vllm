@@ -3,7 +3,7 @@
 ## Introduction
 
 This directory contains a benchmarking suite for **developers** to run locally and gain clarity on whether their PR improves/degrades vllm's performance.
-vLLM also maintains a continuous performance benchmark under [perf.vllm.ai](https://perf.vllm.ai/), hosted under PyTorch CI HUD.
+vLLM also maintains a continuous performance benchmark under the [vLLM Performance Dashboard](https://hud.pytorch.org/benchmark/llms?repoName=vllm-project%2Fvllm), hosted under PyTorch CI HUD.
 
 ## Performance benchmark quick overview
 
