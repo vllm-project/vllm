@@ -52,3 +52,11 @@ def is_uva_available() -> bool:
     # UVA requires pinned memory.
     # TODO: Add more requirements for UVA if needed.
     return is_pin_memory_available()
+
+
+@cache
+def num_compute_units(device_id: int = 0) -> int:
+    """Get the number of compute units of the current device."""
+    from vllm.platforms import current_platform
+
+    return current_platform.num_compute_units(device_id)

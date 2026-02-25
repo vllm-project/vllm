@@ -15,8 +15,8 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonMetadata,
     MLACommonMetadataBuilder,
 )
-from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -75,7 +75,7 @@ class SM100Workspace:
 
         # Pre-compute sm_count to avoid recomputing it. Use device 0 as a proxy
         # (assumes all devices are similar)
-        self._sm_count = current_platform.num_compute_units(0)
+        self._sm_count = num_compute_units(0)
 
     def get_buf(self):
         return self._workspace_buf

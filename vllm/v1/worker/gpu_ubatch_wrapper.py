@@ -23,6 +23,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.import_utils import has_deep_gemm
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.worker.ubatching import UBatchContext, make_ubatch_contexts
 
 logger = init_logger(__name__)
@@ -72,9 +73,7 @@ class SMControlContextManager:
             "SM control is currently only supported on CUDA"
         )
 
-        total_sms = current_platform.num_compute_units(
-            torch.cuda.current_device().index
-        )
+        total_sms = num_compute_units(torch.cuda.current_device().index)
 
         assert comm_sms < total_sms
         self.total_sms = total_sms
