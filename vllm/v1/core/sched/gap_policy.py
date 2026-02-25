@@ -80,13 +80,11 @@ class SpanAwareGapPolicy(GapPolicy):
     
     DEFAULT_GAP_LENGTH = 32
     DEFAULT_SPAN_MARKER_TOKEN_ID = 10
-    DEFAULT_MIN_EXTERNAL_TOKENS = 32  # 2 blocks * 16 tokens/block
     
     def __init__(
         self,
         gap_length: int = DEFAULT_GAP_LENGTH,
         span_marker_token_id: int = DEFAULT_SPAN_MARKER_TOKEN_ID,
-        min_external_tokens: int = DEFAULT_MIN_EXTERNAL_TOKENS,
         block_size: int = 16,
     ):
         """
@@ -95,18 +93,16 @@ class SpanAwareGapPolicy(GapPolicy):
         Args:
             gap_length: Length of each gap in tokens (0 disables gaps)
             span_marker_token_id: Token ID that marks span boundaries
-            min_external_tokens: Minimum external tokens required to create gaps
             block_size: Block size for alignment (used in debug output)
         """
         self.gap_length = gap_length
         self.span_marker_token_id = span_marker_token_id
-        self.min_external_tokens = min_external_tokens
         self.block_size = block_size
         
         logger.info(
             "SpanAwareGapPolicy initialized: gap_length=%d, "
-            "span_marker_token_id=%d, min_external_tokens=%d",
-            gap_length, span_marker_token_id, min_external_tokens
+            "span_marker_token_id=%d",
+            gap_length, span_marker_token_id
         )
     
     def get_gaps(
@@ -116,52 +112,50 @@ class SpanAwareGapPolicy(GapPolicy):
         num_external_tokens: int,
     ) -> list[tuple[int, int]]:
         """
-        Create gaps at span boundaries within external token range.
+        Create gaps at span boundaries within ALL computed tokens (local + external).
         
-        Logic migrated from SegmentedPrefillExampleConnector._choose_gaps()
+        This allows gaps to be created across the entire cached token range,
+        not just in externally-loaded tokens.
         """
-        # Disable gaps if gap_length is 0 or insufficient external tokens
+        # Disable gaps if gap_length is 0
         if self.gap_length <= 0:
             return []
         
-        # Calculate external token range
-        external_start = num_computed_tokens - num_external_tokens
-        external_end = num_computed_tokens
-        
-        logger.debug(
-            "Choosing gaps: external_start=%d, external_end=%d, "
-            "num_computed_tokens=%d, num_external_tokens=%d",
-            external_start, external_end, num_computed_tokens, num_external_tokens
-        )
-        
-        if external_end - external_start < self.min_external_tokens:
-            logger.debug(
-                "Insufficient external tokens (%d < %d), no gaps created",
-                external_end - external_start, self.min_external_tokens
-            )
+        if num_computed_tokens == 0:
             return []
         
-        # Find all span start positions in external range
+        logger.debug(
+            "Choosing gaps: num_computed_tokens=%d, num_external_tokens=%d",
+            num_computed_tokens, num_external_tokens
+        )
+        
+        # Find all span start positions in the ENTIRE computed token range
         span_starts = []
         if request.prompt_token_ids:
             for i, token_id in enumerate(request.prompt_token_ids):
-                if (token_id == self.span_marker_token_id and 
-                    external_start <= i < external_end):
+                if (token_id == self.span_marker_token_id and
+                    i < num_computed_tokens):
                     span_starts.append(i)
         
         if not span_starts:
-            logger.debug("No span markers found in external range, no gaps created")
+            logger.debug(
+                "No span markers found in computed range [0, %d), no gaps created",
+                num_computed_tokens
+            )
             return []
         
-        logger.debug("Found span starts at positions: %s", span_starts)
+        logger.debug(
+            "Found %d span markers at positions: %s",
+            len(span_starts), span_starts
+        )
         
         # Create gaps for each span
         gaps = []
         for idx, gap_start in enumerate(span_starts):
-            # Find end of this span (next span start or external_end)
+            # Find end of this span (next span start or end of computed tokens)
             next_span_start = (
-                span_starts[idx + 1] if idx + 1 < len(span_starts) 
-                else external_end
+                span_starts[idx + 1] if idx + 1 < len(span_starts)
+                else num_computed_tokens
             )
             
             span_length = next_span_start - gap_start
@@ -174,7 +168,7 @@ class SpanAwareGapPolicy(GapPolicy):
             gap_end = min(
                 gap_start + self.gap_length,
                 next_span_start,
-                external_end
+                num_computed_tokens
             )
             
             if gap_end > gap_start:
@@ -204,17 +198,23 @@ class SpanAwareGapPolicy(GapPolicy):
         block_size = self.block_size
         representation = []
         
+        # Calculate local token boundary
+        num_local_tokens = num_computed_tokens - num_external_tokens
+        
         for block_start in range(0, total_tokens, block_size):
             block_end = min(block_start + block_size, total_tokens)
             block_chars = []
             
             for i in range(block_start, block_end):
-                if i < num_computed_tokens - num_external_tokens:
-                    block_chars.append("C")  # Computed token (local)
+                # Check if token is in a gap
+                in_gap = any(start <= i < end for start, end in gaps)
+                
+                if in_gap:
+                    block_chars.append("-")  # Gap (will be recomputed)
+                elif i < num_local_tokens:
+                    block_chars.append("L")  # Local cached token
                 else:
-                    # Check if in gap
-                    in_gap = any(start <= i < end for start, end in gaps)
-                    block_chars.append("-" if in_gap else "E")  # Gap or External token
+                    block_chars.append("E")  # External cached token
             
             # Determine the character for this block
             unique_chars = set(block_chars)
@@ -222,12 +222,12 @@ class SpanAwareGapPolicy(GapPolicy):
             char = unique_chars.pop() if len(unique_chars) == 1 else "X"
             representation.append(char)
         
-        logger.debug("Cache status per block (C=computed, E=external, -=gap, X=mixed):")
+        logger.debug("Cache status per block (L=local, E=external, -=gap, X=mixed):")
         logger.debug("".join(representation))
         logger.debug("Gaps: %s", gaps)
         logger.debug(
-            "Total tokens: %d, computed tokens: %d, external tokens: %d",
-            total_tokens, num_computed_tokens, num_external_tokens
+            "Total tokens: %d (local: %d, external: %d)",
+            total_tokens, num_local_tokens, num_external_tokens
         )
 
 
