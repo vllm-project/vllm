@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from __future__ import annotations  # enable PEP 604 (X|Y) on Python 3.8-3.9
+
 import statistics
 from collections import defaultdict, deque
 from collections.abc import Iterable
@@ -773,9 +775,13 @@ class OffloadingConnectorWorker:
             self._load_job[req_id] = job_id
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
-            # Record (job_id, approx prefix_len) for Strategy B cost model.
-            # We estimate prefix_len from transfer_spec if available, else 0.
-            self._pending_load_info[req_id] = (job_id, 0)
+            # Record (job_id, prefix_len) for Strategy B cost model.
+            # transfer_spec = (src_spec, dst_spec); dst_spec is a
+            # GPULoadStoreSpec whose block_ids list length × gpu_block_size
+            # gives the exact number of tokens being loaded.
+            _dst_spec = transfer_spec[1]
+            prefix_len_tokens = len(_dst_spec.block_ids) * self.spec.gpu_block_size
+            self._pending_load_info[req_id] = (job_id, prefix_len_tokens)
 
     def _check_loads_ready(
         self, metadata: OffloadingConnectorMetadata
@@ -807,11 +813,12 @@ class OffloadingConnectorWorker:
                 continue
 
             # Evaluate cost model: is recomputing faster than waiting?
-            estimated_ms = self.timing_stats.estimate_ms(max(prefix_len, 1))
+            estimated_ms = self.timing_stats.estimate_ms(prefix_len)
+            # Recomputing 0 tokens costs 0 ms — trigger fallback immediately.
             recompute_ms = (
                 prefix_len / self._model_tokens_per_ms
                 if prefix_len > 0
-                else float("inf")
+                else 0.0
             )
             prefer_recompute = estimated_ms >= recompute_ms
 

@@ -1,99 +1,75 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Unit tests for AdaptiveOffloadingPolicy (Strategy B / P2)."""
+"""Unit tests for AdaptiveOffloadingPolicy (Strategy B / P2).
+
+The production class is loaded by extracting its AST node from
+offloading_connector.py and exec()'ing only that class definition.
+This means:
+  - Tests always run against the REAL production source code.
+  - Any change to AdaptiveOffloadingPolicy is immediately detected.
+  - No vllm import chain needed (avoids Python 3.10+ dependency in CI for
+    pure-unit tests).
+"""
+from __future__ import annotations
+
+import ast
+import pathlib
+import statistics
+import textwrap
+from collections import deque
+
 import pytest
 
+# ---------------------------------------------------------------------------
+# Load the real AdaptiveOffloadingPolicy from production source
+# ---------------------------------------------------------------------------
 
-def make_policy(**kwargs):
-    """Import and construct AdaptiveOffloadingPolicy after stubbing vllm."""
-    import sys, types
-    for mod_name in [
-        "vllm", "vllm.v1", "vllm.v1.core", "vllm.v1.core.kv_cache_utils",
-        "vllm.v1.kv_offload", "vllm.distributed",
-        "vllm.distributed.kv_events",
-        "vllm.distributed.kv_transfer",
-        "vllm.distributed.kv_transfer.kv_connector",
-        "vllm.distributed.kv_transfer.kv_connector.utils",
-        "vllm.distributed.kv_transfer.kv_connector.v1",
-        "vllm.distributed.kv_transfer.kv_connector.v1.base",
-        "vllm.distributed.kv_transfer.kv_connector.v1.metrics",
-        "vllm.v1.kv_offload.mediums",
-        "vllm.v1.kv_offload.reuse_tracker",
-        "vllm.v1.kv_offload.transfer_timing",
-        "vllm.v1.kv_offload.spec",
-        "vllm.v1.kv_offload.factory",
-        "vllm.v1.kv_offload.worker",
-        "vllm.v1.kv_offload.worker.worker",
-        "vllm.v1.kv_offload.abstract",
-        "vllm.v1.outputs", "vllm.v1.request",
-        "vllm.v1.core.kv_cache_manager",
-        "vllm.v1.core.sched.output",
-        "vllm.v1.attention.backend",
-        "vllm.v1.kv_cache_interface",
-        "vllm.config",
-        "vllm.forward_context",
-        "vllm.logger",
-        "vllm.model_executor",
-        "vllm.model_executor.layers",
-        "vllm.model_executor.layers.attention",
-    ]:
-        if mod_name not in sys.modules:
-            m = types.ModuleType(mod_name)
-            sys.modules[mod_name] = m
+_CONNECTOR_PATH = (
+    pathlib.Path(__file__).resolve().parents[3]
+    / "vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py"
+)
 
-    # Minimal stubs needed
-    sys.modules["vllm.v1.core.kv_cache_utils"].BlockHash = int
-    sys.modules["vllm.logger"].init_logger = lambda *a, **kw: __import__("logging").getLogger("test")
-    sys.modules["vllm.v1.kv_offload.reuse_tracker"].BlockReuseTracker = __import__(
-        "importlib.util", fromlist=["util"]
-    )  # placeholder; won't be called
 
-    import importlib.util, pathlib
-    spec = importlib.util.spec_from_file_location("_oc", str(
-        pathlib.Path(__file__).parent.parent.parent.parent.parent
-        / "vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py"
-    ))
-    # Instead, directly load just the policy class via exec
-    import statistics
-    from collections import deque
+def _extract_class_source(path: pathlib.Path, class_name: str) -> str:
+    """Parse the file's AST and return the exact source lines of class_name."""
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    lines = source.splitlines()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            # ast gives 1-indexed line numbers
+            return "\n".join(lines[node.lineno - 1 : node.end_lineno])
+    raise RuntimeError(f"Class {class_name!r} not found in {path}")
 
-    # Copy-in the class definition to avoid full vllm import
-    class AdaptiveOffloadingPolicy:
-        def __init__(
-            self,
-            overhead_threshold_pct: float = 5.0,
-            window: int = 200,
-            warmup_steps: int = 50,
-            expected_baseline_ttft_ms=None,
-        ):
-            self.overhead_threshold_pct = overhead_threshold_pct
-            self.recent_ttfts = deque(maxlen=window)
-            self.warmup_steps = warmup_steps
-            self._step = 0
-            self.paused = True
-            self.baseline_ttft = expected_baseline_ttft_ms
-            if self.baseline_ttft is not None:
-                self.paused = False
 
-        def record_ttft(self, ttft_ms: float):
-            self._step += 1
-            self.recent_ttfts.append(ttft_ms)
-            if self.baseline_ttft is None:
-                if self._step >= self.warmup_steps:
-                    self.baseline_ttft = statistics.median(self.recent_ttfts)
-                    self.paused = False
-            else:
-                if len(self.recent_ttfts) >= max(self.recent_ttfts.maxlen // 2, 10):
-                    current = statistics.median(self.recent_ttfts)
-                    overhead = (current - self.baseline_ttft) / self.baseline_ttft * 100
-                    self.paused = overhead > self.overhead_threshold_pct
+# Exec the class definition into an isolated namespace.
+# The class needs: statistics, deque (stdlib), and logger (module-level global).
+import logging as _logging
+_ns: dict = {
+    "statistics": statistics,
+    "deque": deque,
+    "logger": _logging.getLogger("test.adaptive_policy"),
+}
+exec(  # noqa: S102
+    textwrap.dedent(_extract_class_source(_CONNECTOR_PATH, "AdaptiveOffloadingPolicy")),
+    _ns,
+)
+AdaptiveOffloadingPolicy = _ns["AdaptiveOffloadingPolicy"]
 
-        @property
-        def effective_load_mode(self):
-            return "blocking" if self.paused else "async_with_fallback"
 
-    return AdaptiveOffloadingPolicy(**kwargs)
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
+def make_policy(**kwargs) -> "AdaptiveOffloadingPolicy":
+    defaults = dict(overhead_threshold_pct=5.0, window=20, warmup_steps=3)
+    defaults.update(kwargs)
+    return AdaptiveOffloadingPolicy(**defaults)
+
+
+# ---------------------------------------------------------------------------
+# Tests: warm-up behaviour
+# ---------------------------------------------------------------------------
 
 class TestAdaptiveOffloadingPolicyWarmup:
     def test_starts_paused(self):
@@ -111,51 +87,56 @@ class TestAdaptiveOffloadingPolicyWarmup:
 
     def test_skips_warmup_with_provided_baseline(self):
         p = make_policy(expected_baseline_ttft_ms=12.0, warmup_steps=50)
-        # Should be active immediately
         assert p.paused is False
         assert p.baseline_ttft == pytest.approx(12.0)
 
     def test_baseline_uncontaminated(self):
-        """Baseline = median of TTFTs measured WHILE paused (no offload noise)."""
+        """Baseline = median of warm-up TTFTs (measured while paused)."""
         p = make_policy(warmup_steps=3, window=10)
         p.record_ttft(8.0)
         p.record_ttft(10.0)
-        p.record_ttft(12.0)  # warmup complete; baseline = median([8,10,12]) = 10
+        p.record_ttft(12.0)  # baseline = median(8, 10, 12) = 10
         assert p.baseline_ttft == pytest.approx(10.0)
 
 
+# ---------------------------------------------------------------------------
+# Tests: regression detection and auto-resume
+# ---------------------------------------------------------------------------
+
 class TestAdaptiveOffloadingPolicyRegression:
-    def _activated_policy(self, baseline: float = 10.0, **kwargs):
+    def _activated(self, baseline: float = 10.0, **kwargs):
         p = make_policy(warmup_steps=3, window=20, **kwargs)
         for _ in range(3):
             p.record_ttft(baseline)
-        assert p.paused is False
+        assert p.paused is False, "policy should be active after warmup"
         return p
 
     def test_pauses_on_regression(self):
-        p = self._activated_policy(baseline=10.0, overhead_threshold_pct=5.0)
-        # Feed 10 samples at 20ms (100% overhead)
+        p = self._activated(baseline=10.0, overhead_threshold_pct=5.0)
         for _ in range(10):
-            p.record_ttft(20.0)
+            p.record_ttft(20.0)  # 100% overhead
         assert p.paused is True
 
     def test_resumes_when_regression_clears(self):
-        # window=20; need to flush out all 10 regression samples with good ones.
-        # Feed 20 good samples so the window holds only baseline-level TTFTs.
-        p = self._activated_policy(baseline=10.0, overhead_threshold_pct=5.0)
+        # window=20; need 20 good samples to fully flush the regression samples.
+        p = self._activated(baseline=10.0, overhead_threshold_pct=5.0)
         for _ in range(10):
-            p.record_ttft(20.0)  # trigger pause
+            p.record_ttft(20.0)
         assert p.paused is True
         for _ in range(20):
-            p.record_ttft(10.0)  # 20 samples fully replace the regression window
+            p.record_ttft(10.0)
         assert p.paused is False
 
     def test_no_pause_within_threshold(self):
-        p = self._activated_policy(baseline=10.0, overhead_threshold_pct=20.0)
+        p = self._activated(baseline=10.0, overhead_threshold_pct=20.0)
         for _ in range(10):
-            p.record_ttft(11.0)  # 10% overhead < 20% threshold
+            p.record_ttft(11.0)  # 10% < 20% threshold
         assert p.paused is False
 
+
+# ---------------------------------------------------------------------------
+# Tests: effective_load_mode property
+# ---------------------------------------------------------------------------
 
 class TestAdaptiveOffloadingPolicyEffectiveLoadMode:
     def test_blocking_when_paused(self):
