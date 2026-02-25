@@ -39,8 +39,11 @@ from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
-from vllm.model_executor.layers.fused_moe.runner.default_moe_runner import (
-    DefaultMoERunner,
+from vllm.model_executor.layers.fused_moe.runner.moe_runner import (
+    MoERunner,
+)
+from vllm.model_executor.layers.fused_moe.runner.moe_runner_factory import (
+    create_moe_runner,
 )
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -648,11 +651,11 @@ class FusedMoE(CustomOp):
             quant_method=self.quant_method,
         )
 
-    def _init_runner(self) -> DefaultMoERunner:
+    def _init_runner(self) -> MoERunner:
         # Storing the runner in the FusedMoE is an intermediate state, eventually
         # the runner will own the FusedMoE layer and provide the execution interface
         # for MoE ops.
-        return DefaultMoERunner(
+        return create_moe_runner(
             layer=self,
             moe_config=self.moe_config,
             router=self.router,
