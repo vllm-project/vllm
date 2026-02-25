@@ -926,19 +926,17 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
     # Verify other compilation_config defaults
     compilation_config_dict = default_config["compilation_config"]
     for k, v in compilation_config_dict.items():
-        if k != "pass_config":
-            actual = getattr(vllm_config.compilation_config, k)
-            expected = v(vllm_config) if callable(v) else v
-            # On platforms without static graph support, __post_init__ forces
-            # cudagraph_mode to NONE; expect that instead of the level default.
-            if (
-                k == "cudagraph_mode"
-                and not current_platform.support_static_graph_mode()
-            ):
-                expected = CUDAGraphMode.NONE
-            assert actual == expected, (
-                f"compilation_config.{k}: expected {expected}, got {actual}"
-            )
+        if k == "pass_config":
+            continue
+        actual = getattr(vllm_config.compilation_config, k)
+        expected = v(vllm_config) if callable(v) else v
+        # On platforms without static graph support, __post_init__ forces
+        # cudagraph_mode to NONE; expect that instead of the level default.
+        if k == "cudagraph_mode" and not current_platform.support_static_graph_mode():
+            expected = CUDAGraphMode.NONE
+        assert actual == expected, (
+            f"compilation_config.{k}: expected {expected}, got {actual}"
+        )
 
 
 def test_vllm_config_callable_defaults():
