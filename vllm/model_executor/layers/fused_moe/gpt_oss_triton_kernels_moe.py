@@ -6,6 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -183,7 +184,11 @@ def triton_kernel_moe_forward(
     unpadded_N_w2=None,
     unpadded_K_w2=None,
 ) -> torch.Tensor:
-    if quant_config is not None and quant_config.use_mxfp4_w4a8:
+    if (
+        quant_config is not None
+        and quant_config.use_mxfp4_w4a8
+        and rocm_aiter_ops.is_enabled()
+    ):
         from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
 
         routing_data, gather_idx, scatter_idx = aiter_routing(
@@ -197,7 +202,7 @@ def triton_kernel_moe_forward(
             routing_data,
             gather_idx,
             scatter_idx,
-            activation=activation,
+            activation=activation.value,
             quant_config=quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
@@ -213,6 +218,9 @@ def triton_kernel_moe_forward(
         )
 
         output = torch.empty_like(hidden_states)
+        effective_quant_config = (
+            quant_config if quant_config is not None else FUSED_MOE_UNQUANTIZED_CONFIG
+        )
 
         return triton_kernel_fused_mxfp4_w4a16_experts(
             output,
@@ -224,7 +232,7 @@ def triton_kernel_moe_forward(
             scatter_idx,
             topk=topk,
             activation=activation,
-            quant_config=quant_config,
+            quant_config=effective_quant_config,
             apply_router_weight_on_input=apply_router_weight_on_input,
             global_num_experts=global_num_experts,
             expert_map=expert_map,
@@ -242,7 +250,7 @@ def triton_kernel_fused_mxfp4_w4a16_experts(
     scatter_indx,  # ScatterIndx
     topk: int,
     activation: MoEActivation = MoEActivation.SWIGLUOAI,
-    quant_config: FusedMoEQuantConfig = None,
+    quant_config: FusedMoEQuantConfig | None = None,
     swiglu_alpha: float = 1.702,
     swiglu_limit: float = 7.0,
     apply_router_weight_on_input: bool = False,
@@ -255,6 +263,7 @@ def triton_kernel_fused_mxfp4_w4a16_experts(
     assert activation == MoEActivation.SWIGLUOAI, (
         "Only SWIGLUOAI activation is supported"
     )
+    assert quant_config is not None
 
     # type check, uint8 means mxfp4
     assert hidden_states.dtype == torch.bfloat16
@@ -341,7 +350,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
     activation: str = "silu",
-    quant_config: FusedMoEQuantConfig = None,
+    quant_config: FusedMoEQuantConfig | None = None,
     swiglu_alpha: float = 1.702,
     swiglu_limit: float = 7.0,
     apply_router_weight_on_input: bool = False,
@@ -353,6 +362,7 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     unpadded_N_w2=None,
     unpadded_K_w2=None,
 ) -> torch.Tensor:
+    assert quant_config is not None
     # type check, uint8 means mxfp4
     assert hidden_states.dtype == torch.bfloat16
     assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
