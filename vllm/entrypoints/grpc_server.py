@@ -24,7 +24,6 @@ import io
 import signal
 import sys
 import time
-from collections import defaultdict
 from collections.abc import AsyncGenerator
 
 import grpc
@@ -153,8 +152,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             num_logprobs = sampling_params.logprobs
             num_prompt_logprobs = sampling_params.prompt_logprobs
 
-            # Track first chunk per index (for input_logprobs in first chunk)
-            is_first_chunk_per_index: dict[int, bool] = defaultdict(lambda: True)
+            # Track which indices have sent their first chunk
+            seen_indices: set[int] = set()
 
             async for output in self.async_llm.generate(
                 prompt=prompt,
@@ -165,7 +164,8 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                 if request.stream:
                     for completion in output.outputs:
                         idx = completion.index
-                        is_first = is_first_chunk_per_index[idx]
+                        is_first = idx not in seen_indices
+                        seen_indices.add(idx)
 
                         # Send chunk with delta data (Rust accumulates for vLLM)
                         yield self._chunk_response(
@@ -175,8 +175,6 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
                             num_prompt_logprobs=num_prompt_logprobs,
                             is_first_chunk=is_first,
                         )
-
-                        is_first_chunk_per_index[idx] = False
 
                         # Send Complete when sequence finishes (n>1 support)
                         if completion.finish_reason:
