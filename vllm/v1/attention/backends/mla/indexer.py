@@ -8,8 +8,8 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils import cdiv
 from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, has_deep_gemm
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionBackend,
