@@ -112,7 +112,7 @@ class xpu_ops:
         return flash_attn_varlen_func(
             out=out,
             q=q.contiguous(),
-            k=k,
+            k=k.contiguous(),
             v=v,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_k=cu_seqlens_k,
