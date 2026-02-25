@@ -5,7 +5,7 @@ services:
     volumes:
       - "${MODEL_CACHE:-~/.cache/huggingface}:/root/.cache/huggingface"
       #- /mnt/hf_cache:/mnt/hf_cache
-      #- "${VLLM_FOLDER_PATH:-./vllm}/.buildkite:/workspace/.buildkite"
+      #- "${VLLM_FOLDER_PATH:-./vllm}/.buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh:/vllm-workspace/.buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh"
       #- "${VLLM_FOLDER_PATH:-./vllm}/benchmarks:/workspace/benchmarks"
       - "./tests/serving-tests.json:/vllm-workspace/.buildkite/performance-benchmarks/tests/serving-tests.json:ro"
       - "./results:/vllm-workspace/benchmarks/results"
@@ -27,5 +27,11 @@ services:
       http_proxy: ${http_proxy}
       https_proxy: ${https_proxy}
       HF_TOKEN: ${HF_TOKEN}
+      PROMPTS_PER_CONCURRENCY: 1
     entrypoint: ["bash", "/vllm-workspace/.buildkite/performance-benchmarks/scripts/run-performance-benchmarks.sh"]
-
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/v1/models >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 600s
