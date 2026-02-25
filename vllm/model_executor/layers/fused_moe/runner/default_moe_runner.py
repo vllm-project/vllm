@@ -37,6 +37,7 @@ from vllm.utils.torch_utils import (
     direct_register_custom_op,
 )
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+from vllm.v1.worker.workspace import current_workspace_manager
 
 logger = init_logger(__name__)
 
@@ -237,8 +238,6 @@ class DefaultMoERunner(MoERunner):
         else:
             states_shape = (moe.max_num_tokens, self.moe_config.hidden_dim)
             logits_shape = (moe.max_num_tokens, self.moe_config.num_logical_experts)
-
-        from vllm.v1.worker.workspace import current_workspace_manager
 
         self.batched_hidden_states, self.batched_router_logits = (
             current_workspace_manager().get_simultaneous(
