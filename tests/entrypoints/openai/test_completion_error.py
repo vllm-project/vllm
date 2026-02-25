@@ -219,3 +219,23 @@ async def test_completion_error_stream():
         f"Expected error message in chunks: {chunks}"
     )
     assert chunks[-1] == "data: [DONE]\n\n"
+
+
+def test_negative_prompt_token_ids_nested():
+    """Negative token IDs in prompt (nested list) should raise validation error."""
+    with pytest.raises(Exception, match="greater than or equal to 0"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[[-1]],
+            max_tokens=10,
+        )
+
+
+def test_negative_prompt_token_ids_flat():
+    """Negative token IDs in prompt (flat list) should raise validation error."""
+    with pytest.raises(Exception, match="greater than or equal to 0"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt=[-1],
+            max_tokens=10,
+        )
