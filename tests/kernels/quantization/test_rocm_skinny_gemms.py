@@ -951,15 +951,20 @@ def test_zero_and_bias(dtype):
     torch.testing.assert_close(out_b, BIAS.unsqueeze(0).expand(n, -1), atol=0, rtol=0)
 
 
-@pytest.mark.parametrize("num_runs", [5])
+@pytest.mark.parametrize("num_runs", [10])
+@pytest.mark.parametrize("enforce_eager", [True, False])
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="rocm only")
-def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
+def test_e2e_logprob_reproducibility(num_runs, enforce_eager, vllm_runner):
     """End-to-end logprob reproducibility across repeated inference runs.
 
-    Locks down all known non-determinism sources to isolate whether
-    any remaining jitter comes from the skinny GEMM kernels or from
-    other pipeline components (attention, layernorm, MoE routing).
+    With enforce_eager=True (no CUDA graphs), results must be bitwise identical.
+    With enforce_eager=False (CUDA graphs enabled), we allow a small tolerance
+    (1e-6) to account for non-determinism introduced by graph capture/replay.
     """
+    # When CUDA graphs are enabled, allow tolerance up to 1e-6.
+    # When eager, require exact bitwise reproducibility.
+    atol = 1e-6 if not enforce_eager else 0.0
+
     model = "TitanML/tiny-mixtral"
     prompts = [
         "The capital of France is",
@@ -974,7 +979,7 @@ def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
         with vllm_runner(
             model,
             dtype="half",
-            enforce_eager=True,
+            enforce_eager=enforce_eager,
             max_num_seqs=1,
             seed=0,
             enable_prefix_caching=False,
@@ -982,12 +987,13 @@ def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
             outputs = llm.generate_greedy_logprobs(prompts, max_tokens, top_logprobs)
             all_runs.append(outputs)
 
+    mode_label = "eager" if enforce_eager else "cuda-graph"
+
     # Per-run comparison tables and summary collection
     summary_rows = []
-
     for run_idx in range(1, num_runs):
         print(f"\n{'=' * 80}")
-        print(f"  Run 0 vs Run {run_idx}")
+        print(f"  Run 0 vs Run {run_idx}  (mode={mode_label}, atol={atol:.1e})")
         print(f"{'=' * 80}")
 
         for prompt_idx, prompt in enumerate(prompts):
@@ -1012,7 +1018,7 @@ def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
 
             max_lp_diff = max(lp_diffs) if lp_diffs else 0.0
             mean_lp_diff = sum(lp_diffs) / len(lp_diffs) if lp_diffs else 0.0
-            bitwise_equal = all(d == 0.0 for d in lp_diffs)
+            within_tol = all(d <= atol for d in lp_diffs)
 
             print(f'\n  Prompt {prompt_idx}: "{prompt[:40]}..."')
             print(f"  {'─' * 60}")
@@ -1027,7 +1033,7 @@ def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
             )
             print(f"  {'Max logprob diff:':<25} {max_lp_diff:>12.2e}")
             print(f"  {'Mean logprob diff:':<25} {mean_lp_diff:>12.2e}")
-            print(f"  {'Bitwise equal:':<25} {'YES' if bitwise_equal else 'NO':>8}")
+            print(f"  {'Within tolerance:':<25} {'YES' if within_tol else 'NO':>8}")
 
             summary_rows.append(
                 {
@@ -1037,13 +1043,13 @@ def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
                     "top5_mismatch": top5_mismatches,
                     "max_lp_diff": max_lp_diff,
                     "mean_lp_diff": mean_lp_diff,
-                    "bitwise": bitwise_equal,
+                    "within_tol": within_tol,
                 }
             )
 
             # Assertions
             assert ref_token_ids == cur_token_ids, (
-                f"Token mismatch run 0 vs {run_idx}, "
+                f"[{mode_label}] Token mismatch run 0 vs {run_idx}, "
                 f"prompt {prompt_idx}: "
                 f"ref={ref_token_ids[:10]}... "
                 f"cur={cur_token_ids[:10]}..."
@@ -1052,11 +1058,11 @@ def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
             for pos in range(len(ref_lps)):
                 ref_top = ref_lps[pos]
                 cur_top = cur_lps[pos]
-
                 ref_ids = set(ref_top.keys())
                 cur_ids = set(cur_top.keys())
+
                 assert ref_ids == cur_ids, (
-                    f"Top-{top_logprobs} set mismatch at pos {pos}, "
+                    f"[{mode_label}] Top-{top_logprobs} set mismatch at pos {pos}, "
                     f"run 0 vs {run_idx}, prompt {prompt_idx}: "
                     f"ref={ref_ids} cur={cur_ids}"
                 )
@@ -1064,22 +1070,27 @@ def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
                 for token_id in ref_ids:
                     ref_val = ref_top[token_id].logprob
                     cur_val = cur_top[token_id].logprob
-                    assert ref_val == cur_val, (
-                        f"Logprob mismatch at pos {pos}, "
+                    diff = abs(ref_val - cur_val)
+                    assert diff <= atol, (
+                        f"[{mode_label}] Logprob mismatch at pos {pos}, "
                         f"token {token_id}, "
                         f"run 0 vs {run_idx}, prompt {prompt_idx}: "
                         f"ref={ref_val:.10f} cur={cur_val:.10f} "
-                        f"diff={abs(ref_val - cur_val):.2e}"
+                        f"diff={diff:.2e} > atol={atol:.1e}"
                     )
 
     # Summary table
     print(f"\n{'=' * 80}")
-    print(f"  REPRODUCIBILITY SUMMARY ({num_runs} runs, {len(prompts)} prompts)")
+    print(
+        f"  REPRODUCIBILITY SUMMARY "
+        f"({num_runs} runs, {len(prompts)} prompts, "
+        f"mode={mode_label}, atol={atol:.1e})"
+    )
     print(f"{'=' * 80}")
     print(
         f"  {'Comparison':<10} {'Prompt':<7} {'Tok Match':>10} "
         f"{'Top5 Miss':>10} {'Max LP Diff':>12} "
-        f"{'Mean LP Diff':>13} {'Bitwise':>8}"
+        f"{'Mean LP Diff':>13} {'In Tol':>8}"
     )
     print(f"  {'─' * 72}")
     for row in summary_rows:
@@ -1089,20 +1100,20 @@ def test_e2e_logprob_reproducibility(num_runs, vllm_runner):
             f"{row['top5_mismatch']:>10d} "
             f"{row['max_lp_diff']:>12.2e} "
             f"{row['mean_lp_diff']:>13.2e} "
-            f"{'YES' if row['bitwise'] else 'NO':>8}"
+            f"{'YES' if row['within_tol'] else 'NO':>8}"
         )
 
-    all_bitwise = all(r["bitwise"] for r in summary_rows)
+    all_within = all(r["within_tol"] for r in summary_rows)
     all_token = all(r["token_match"] == 1.0 for r in summary_rows)
     worst_lp = max(r["max_lp_diff"] for r in summary_rows)
     print(f"  {'─' * 72}")
-    print(f"  All bitwise equal: {'YES' if all_bitwise else 'NO'}")
-    print(f"  All tokens match:  {'YES' if all_token else 'NO'}")
-    print(f"  Worst logprob diff across all runs: {worst_lp:.2e}")
+    print(f"  All within tolerance: {'YES' if all_within else 'NO'}")
+    print(f"  All tokens match:    {'YES' if all_token else 'NO'}")
+    print(f"  Worst logprob diff:  {worst_lp:.2e}")
     print(f"{'=' * 80}\n")
 
 
-@pytest.mark.parametrize("num_runs", [5])
+@pytest.mark.parametrize("num_runs", [10])
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="rocm only")
 def test_e2e_logprob_stability(num_runs, vllm_runner):
     """Softer e2e check: logprobs within 0.001 nats where tokens agree.
