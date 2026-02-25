@@ -2,7 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputMessage,
+    ResponseReasoningItem,
+)
 from openai.types.responses.response_output_item import McpCall
 from openai_harmony import Author, Message, Role, TextContent
 
@@ -10,6 +14,7 @@ from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     get_encoding,
+    get_system_message,
     has_custom_tools,
     parse_chat_input_to_harmony_message,
     parse_chat_output,
@@ -840,15 +845,58 @@ class TestParseChatOutput:
         assert reasoning == "I've thought hard about this."
         assert final_content == "The answer is 4."
 
+    def test_parse_chat_output_commentary_with_recipient_excluded(self) -> None:
+        """Commentary with a recipient (tool call) should not appear in
+        final_content — those are handled separately by the tool parser.
+
+        The first message is a preamble (visible), the second is a tool
+        call (excluded). Only the preamble should appear in final_content.
+        """
+        harmony_str = (
+            "<|channel|>commentary"
+            "<|message|>Let me check the weather.<|end|>"
+            "<|start|>assistant to=functions.get_weather"
+            "<|channel|>commentary"
+            '<|message|>{"location": "SF"}<|end|>'
+        )
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "Let me check the weather."
+
+    def test_parse_chat_output_interrupted_preamble(self) -> None:
+        """Partial/interrupted preamble (commentary without recipient) should
+        appear in final_content, not reasoning."""
+        harmony_str = "<|channel|>commentary<|message|>I'll search for that"
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "I'll search for that"
+
+    def test_parse_chat_output_preamble_then_final(self) -> None:
+        """Preamble followed by a final message should both appear in
+        final_content, joined by newline."""
+        harmony_str = (
+            "<|channel|>commentary"
+            "<|message|>Let me look that up.<|end|>"
+            "<|start|>assistant<|channel|>final"
+            "<|message|>The answer is 42.<|end|>"
+        )
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "Let me look that up.\nThe answer is 42."
+
 
 class TestParseOutputMessage:
     """Tests for parse_output_message function."""
 
-    def test_commentary_with_no_recipient_creates_reasoning(self):
-        """Test that commentary with recipient=None (preambles) creates reasoning items.
+    def test_commentary_with_no_recipient_creates_message(self):
+        """Test that commentary with recipient=None (preambles) creates message items.
 
-        Per Harmony format, commentary channel can contain preambles to calling
-        multiple functions - explanatory text with no recipient.
+        Per Harmony format, preambles are intended to be shown to end-users,
+        unlike analysis channel content which is hidden reasoning.
+        See: https://cookbook.openai.com/articles/openai-harmony
         """
         message = Message.from_role_and_content(
             Role.ASSISTANT, "I will now search for the weather information."
@@ -859,13 +907,16 @@ class TestParseOutputMessage:
         output_items = parse_output_message(message)
 
         assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
+        assert isinstance(output_items[0], ResponseOutputMessage)
+        assert output_items[0].type == "message"
+        assert output_items[0].role == "assistant"
+        assert output_items[0].status == "completed"
+        assert len(output_items[0].content) == 1
+        assert output_items[0].content[0].type == "output_text"
         assert (
             output_items[0].content[0].text
             == "I will now search for the weather information."
         )
-        assert output_items[0].content[0].type == "reasoning_text"
 
     def test_commentary_with_function_recipient_creates_function_call(self):
         """Test commentary with recipient='functions.X' creates function calls."""
@@ -944,7 +995,7 @@ class TestParseOutputMessage:
         output_items = parse_output_message(message)
 
         assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
+        assert isinstance(output_items[0], ResponseOutputMessage)
         assert output_items[0].content[0].text == ""
 
     def test_commentary_with_multiple_contents_and_no_recipient(self):
@@ -958,10 +1009,13 @@ class TestParseOutputMessage:
 
         output_items = parse_output_message(message)
 
-        assert len(output_items) == 2
-        assert all(isinstance(item, ResponseReasoningItem) for item in output_items)
+        # _parse_final_message returns single ResponseOutputMessage with
+        # multiple contents
+        assert len(output_items) == 1
+        assert isinstance(output_items[0], ResponseOutputMessage)
+        assert len(output_items[0].content) == 2
         assert output_items[0].content[0].text == "Step 1: Analyze the request"
-        assert output_items[1].content[0].text == "Step 2: Prepare to call functions"
+        assert output_items[0].content[1].text == "Step 2: Prepare to call functions"
 
     def test_commentary_with_multiple_function_calls(self):
         """Test multiple function calls in commentary channel."""
@@ -1133,7 +1187,7 @@ def test_parse_remaining_state_commentary_channel() -> None:
     assert mcp_items[0].status == "in_progress"
 
     # Test 3: Built-in tool (python)
-    # should NOT return MCP call, falls through to reasoning
+    # should NOT return MCP call, returns reasoning (internal tool interaction)
     parser_builtin = Mock()
     parser_builtin.current_content = "print('hello')"
     parser_builtin.current_role = Role.ASSISTANT
@@ -1142,10 +1196,25 @@ def test_parse_remaining_state_commentary_channel() -> None:
 
     builtin_items = parse_remaining_state(parser_builtin)
 
-    # Should fall through to reasoning logic
+    # Built-in tools explicitly return reasoning
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+    # Test 4: No recipient (preamble) → should return message, not reasoning
+    parser_preamble = Mock()
+    parser_preamble.current_content = "I'll search for that information now."
+    parser_preamble.current_role = Role.ASSISTANT
+    parser_preamble.current_channel = "commentary"
+    parser_preamble.current_recipient = None
+
+    preamble_items = parse_remaining_state(parser_preamble)
+
+    assert len(preamble_items) == 1
+    assert isinstance(preamble_items[0], ResponseOutputMessage)
+    assert preamble_items[0].type == "message"
+    assert preamble_items[0].content[0].text == "I'll search for that information now."
+    assert preamble_items[0].status == "incomplete"  # streaming
 
 
 def test_parse_remaining_state_analysis_channel() -> None:
@@ -1199,3 +1268,29 @@ def test_parse_remaining_state_analysis_channel() -> None:
     assert len(builtin_items) == 1
     assert not isinstance(builtin_items[0], McpCall)
     assert builtin_items[0].type == "reasoning"
+
+
+class TestGetSystemMessage:
+    """Tests for get_system_message channel configuration."""
+
+    def test_commentary_channel_present_without_custom_tools(self) -> None:
+        """Commentary channel must be valid even without custom tools."""
+        sys_msg = get_system_message(with_custom_tools=False)
+        valid_channels = sys_msg.content[0].channel_config.valid_channels
+        assert "commentary" in valid_channels
+
+    def test_commentary_channel_present_with_custom_tools(self) -> None:
+        """Commentary channel present when custom tools are enabled."""
+        sys_msg = get_system_message(with_custom_tools=True)
+        valid_channels = sys_msg.content[0].channel_config.valid_channels
+        assert "commentary" in valid_channels
+
+    def test_all_standard_channels_present(self) -> None:
+        """All three standard Harmony channels should always be valid."""
+        for with_tools in (True, False):
+            sys_msg = get_system_message(with_custom_tools=with_tools)
+            valid_channels = sys_msg.content[0].channel_config.valid_channels
+            for channel in ("analysis", "commentary", "final"):
+                assert channel in valid_channels, (
+                    f"{channel} missing when with_custom_tools={with_tools}"
+                )

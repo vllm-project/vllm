@@ -180,20 +180,13 @@ class TestExtractHarmonyStreamingDelta:
 
         assert delta_message.tool_calls[0].index == 1
 
-    @pytest.mark.parametrize(
-        "channel,recipient",
-        [
-            ("commentary", None),
-            ("commentary", "browser.search"),
-        ],
-    )
-    def test_returns_tool_call_preambles(self, channel, recipient):
-        """Test that invalid tool recipient on commentary is treated as content."""
+    def test_returns_preambles_as_content(self):
+        """Test that commentary with no recipient (preamble) is user content."""
         parser = MockStreamableParser()
         delta_text = "some text"
 
         token_states = [
-            TokenState(channel=channel, recipient=recipient, text=delta_text)
+            TokenState(channel="commentary", recipient=None, text=delta_text)
         ]
 
         delta_message, tools_streamed = extract_harmony_streaming_delta(
@@ -211,6 +204,7 @@ class TestExtractHarmonyStreamingDelta:
         [
             (None, None),
             ("unknown_channel", None),
+            ("commentary", "browser.search"),
         ],
     )
     def test_returns_none_for_invalid_inputs(self, channel, recipient):

@@ -712,15 +712,14 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
 async def test_system_message_with_tools(client: OpenAI, model_name: str):
     from vllm.entrypoints.openai.parser.harmony_utils import get_system_message
 
-    # Test with custom tools enabled - commentary channel should be available
-    sys_msg = get_system_message(with_custom_tools=True)
-    valid_channels = sys_msg.content[0].channel_config.valid_channels
-    assert "commentary" in valid_channels
-
-    # Test with custom tools disabled - commentary channel should be removed
-    sys_msg = get_system_message(with_custom_tools=False)
-    valid_channels = sys_msg.content[0].channel_config.valid_channels
-    assert "commentary" not in valid_channels
+    # Commentary channel should always be present (needed for preambles)
+    # regardless of whether custom tools are enabled
+    for with_tools in (True, False):
+        sys_msg = get_system_message(with_custom_tools=with_tools)
+        valid_channels = sys_msg.content[0].channel_config.valid_channels
+        assert "commentary" in valid_channels, (
+            f"commentary channel missing when with_custom_tools={with_tools}"
+        )
 
 
 @pytest.mark.asyncio
