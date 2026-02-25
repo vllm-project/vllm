@@ -125,7 +125,7 @@ If GPU/CPU communication cannot be established, you can use the following Python
     pynccl.disabled = False
 
     s = torch.cuda.Stream()
-    with torch.cuda.stream(s):
+    with s:
         data.fill_(1)
         out = pynccl.all_reduce(data, stream=s)
         value = out.mean().item()
