@@ -401,14 +401,19 @@ class MultiprocExecutor(Executor):
 
         active_procs = lambda: [proc for proc in worker_procs if proc.is_alive()]
         # Give processes time to clean themselves up properly first
+        logger.debug("Worker Termination: allow workers to gracefully shutdown")
         if wait_for_termination(active_procs(), 4):
             return
 
         # Send SIGTERM if still running
+        logger.debug("Worker Termination: workers still running sending SIGTERM")
         for p in active_procs():
             p.terminate()
         if not wait_for_termination(active_procs(), 4):
             # Send SIGKILL if still running
+            logger.debug(
+                "Worker Termination: resorting to SIGKILL to take down workers"
+            )
             for p in active_procs():
                 p.kill()
 
