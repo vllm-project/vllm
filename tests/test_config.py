@@ -929,6 +929,13 @@ def test_vllm_config_defaults(model_id, compiliation_config, optimization_level)
         if k != "pass_config":
             actual = getattr(vllm_config.compilation_config, k)
             expected = v(vllm_config) if callable(v) else v
+            # On platforms without static graph support, __post_init__ forces
+            # cudagraph_mode to NONE; expect that instead of the level default.
+            if (
+                k == "cudagraph_mode"
+                and not current_platform.support_static_graph_mode()
+            ):
+                expected = CUDAGraphMode.NONE
             assert actual == expected, (
                 f"compilation_config.{k}: expected {expected}, got {actual}"
             )
@@ -971,7 +978,7 @@ def test_vllm_config_callable_defaults():
 
 @pytest.mark.skipif(
     not current_platform.support_static_graph_mode(),
-    reason="On platforms without static graph support, explicit overrides/defaults may be force-overwritten internally.",
+    reason="Explicit overrides may be force-overwritten without static graph support.",
 )
 def test_vllm_config_explicit_overrides():
     """Test that explicit property overrides work correctly with callable defaults.
