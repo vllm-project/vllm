@@ -234,7 +234,7 @@ SEED = [0]
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
 @pytest.mark.parametrize("op_type", ["shrink", "expand"])
-@pytest.mark.skipif(not current_platform.is_xpu())
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="skip for non xpu platform")
 def test_bgmv(
     batches: int,
     num_loras: int,
@@ -275,7 +275,7 @@ def test_bgmv(
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("seed", SEED)
-@pytest.mark.skipif(not current_platform.is_xpu())
+@pytest.mark.skipif(not current_platform.is_xpu(), reason="skip for non xpu platform")
 def test_bgmv_expand_nslices(
     batches: int,
     num_loras: int,
