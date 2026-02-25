@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import copy
 import gc
 import weakref
 from collections.abc import Iterable, Sequence
@@ -151,8 +152,12 @@ class ElasticEPScalingExecutor:
         new_dp_size = reconfig_request.new_data_parallel_size
         world_size = self.worker.vllm_config.parallel_config.world_size
         new_world_size_across_dp = world_size * new_dp_size
-        # TODO(yongji): check whether we need to use updated vllm_config here
-        with set_current_vllm_config(self.worker.vllm_config):
+        updated_config = copy.copy(self.worker.vllm_config)
+        updated_config.parallel_config = copy.deepcopy(
+            self.worker.vllm_config.parallel_config
+        )
+        updated_config.parallel_config.data_parallel_size = new_dp_size
+        with set_current_vllm_config(updated_config):
             create_standby_groups(
                 new_dp_size=new_dp_size,
                 new_world_size_across_dp=new_world_size_across_dp,
