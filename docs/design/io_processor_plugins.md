@@ -13,26 +13,70 @@ IOProcessorInput = TypeVar("IOProcessorInput")
 IOProcessorOutput = TypeVar("IOProcessorOutput")
 
 class IOProcessor(ABC, Generic[IOProcessorInput, IOProcessorOutput]):
-    def __init__(self, vllm_config: VllmConfig):
+    """Abstract interface for pre/post-processing of engine I/O."""
+
+    def __init__(self, vllm_config: VllmConfig, renderer: BaseRenderer):
         super().__init__()
 
         self.vllm_config = vllm_config
 
-    @abstractmethod
     def parse_data(self, data: object) -> IOProcessorInput:
+        if callable(parse_request := getattr(self, "parse_request", None)):
+            warnings.warn(
+                "`parse_request` has been renamed to `parse_data`. "
+                "Please update your IO Processor Plugin to use the new name. "
+                "The old name will be removed in v0.19.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            return parse_request(data)  # type: ignore
+
         raise NotImplementedError
 
     def merge_sampling_params(
         self,
         params: SamplingParams | None = None,
     ) -> SamplingParams:
+        if callable(
+            validate_or_generate_params := getattr(
+                self, "validate_or_generate_params", None
+            )
+        ):
+            warnings.warn(
+                "`validate_or_generate_params` has been split into "
+                "`merge_sampling_params` and `merge_pooling_params`."
+                "Please update your IO Processor Plugin to use the new methods. "
+                "The old name will be removed in v0.19.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            return validate_or_generate_params(params)  # type: ignore
+
         return params or SamplingParams()
 
     def merge_pooling_params(
         self,
         params: PoolingParams | None = None,
     ) -> PoolingParams:
-        return params or PoolingParams()
+        if callable(
+            validate_or_generate_params := getattr(
+                self, "validate_or_generate_params", None
+            )
+        ):
+            warnings.warn(
+                "`validate_or_generate_params` has been split into "
+                "`merge_sampling_params` and `merge_pooling_params`."
+                "Please update your IO Processor Plugin to use the new methods. "
+                "The old name will be removed in v0.19.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+
+            return validate_or_generate_params(params)  # type: ignore
+
+        return params or PoolingParams(task="plugin")
 
     @abstractmethod
     def pre_process(
