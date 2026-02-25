@@ -40,7 +40,6 @@ def default_server_args():
         "--gpu-memory-utilization", "0.9",
         "--reasoning-parser", "openai_gptoss",
         "--tensor-parallel-size", "1",
-        "--cpu-offload-gb", "4",
         "--attention-backend", attention_backend,
     ]
 
