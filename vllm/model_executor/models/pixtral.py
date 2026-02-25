@@ -413,25 +413,100 @@ class PixtralForConditionalGeneration(
             self.language_model.make_empty_intermediate_tensors
         )
 
-        # Proxy MoE interface from language model if applicable
-        if is_mixture_of_experts(self.language_model):
-            self._setup_moe_from_language_model()
+        # Track whether the language model is MoE so we can proxy its
+        # attributes via @property (see below).
+        self._is_moe = is_mixture_of_experts(self.language_model)
 
-    def _setup_moe_from_language_model(self) -> None:
-        """Proxy MoE attributes from the language model so that
-        ``is_mixture_of_experts(self)`` returns ``True`` and EPLB /
-        expert-parallel features work on the outer model."""
-        lm = self.language_model
-        self.num_moe_layers = lm.num_moe_layers
-        self.num_expert_groups = lm.num_expert_groups
-        self.num_logical_experts = lm.num_logical_experts
-        self.num_physical_experts = lm.num_physical_experts
-        self.num_local_physical_experts = lm.num_local_physical_experts
-        self.num_routed_experts = lm.num_routed_experts
-        self.num_shared_experts = lm.num_shared_experts
-        self.num_redundant_experts = lm.num_redundant_experts
-        self.moe_layers = lm.moe_layers
-        self.expert_weights = lm.expert_weights
+    # -- Dynamic MoE attribute proxying via properties --
+    # Using properties instead of copying attributes avoids stale state when
+    # the language model's attributes are mutated after initialization.
+
+    @property
+    def num_moe_layers(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_moe_layers
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute 'num_moe_layers'"
+        )
+
+    @property
+    def num_expert_groups(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_expert_groups
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_expert_groups'"
+        )
+
+    @property
+    def num_logical_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_logical_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_logical_experts'"
+        )
+
+    @property
+    def num_physical_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_physical_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_physical_experts'"
+        )
+
+    @property
+    def num_local_physical_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_local_physical_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_local_physical_experts'"
+        )
+
+    @property
+    def num_routed_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_routed_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_routed_experts'"
+        )
+
+    @property
+    def num_shared_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_shared_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_shared_experts'"
+        )
+
+    @property
+    def num_redundant_experts(self) -> int:  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.num_redundant_experts
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute "
+            "'num_redundant_experts'"
+        )
+
+    @property
+    def moe_layers(self):  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.moe_layers
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute 'moe_layers'"
+        )
+
+    @property
+    def expert_weights(self):  # type: ignore[override]
+        if self._is_moe:
+            return self.language_model.expert_weights
+        raise AttributeError(
+            "'PixtralForConditionalGeneration' object has no attribute 'expert_weights'"
+        )
 
     def set_eplb_state(
         self,
@@ -454,10 +529,6 @@ class PixtralForConditionalGeneration(
             num_physical_experts=num_physical_experts,
             num_local_physical_experts=num_local_physical_experts,
         )
-        # Keep the outer model's proxied attributes in sync
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
 
     def _parse_and_validate_image_input(
         self, **kwargs: object
