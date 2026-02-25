@@ -912,14 +912,6 @@ class BailingMoeV25Model(nn.Module):
             for i in range(self.num_layers)
         ]
 
-        num_linear = sum(1 for t in self.decoder_attention_types if t == 0)
-        num_full = sum(1 for t in self.decoder_attention_types if t == 1)
-        logger.info(
-            "BailingMoeV25: %d linear attention layers, %d full attention layers",
-            num_linear,
-            num_full,
-        )
-
         # Embeddings
         if get_pp_group().is_first_rank:
             self.word_embeddings = VocabParallelEmbedding(
@@ -1004,6 +996,114 @@ class BailingMoeV25Model(nn.Module):
             else:
                 hidden_states = self.norm(hidden_states)
         return hidden_states
+
+
+class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
+    """Bailing MoE v2.5 For CausalLM."""
+
+    packed_modules_mapping = {
+        "gate_up_proj": ["gate_proj", "up_proj"],
+    }
+
+    def __init__(
+        self,
+        *,
+        vllm_config: VllmConfig,
+        prefix: str = "",
+    ) -> None:
+        super().__init__()
+        config = vllm_config.model_config.hf_config
+        quant_config = vllm_config.quant_config
+
+        self.config = config
+        self.quant_config = quant_config
+
+        self.model = BailingMoeV25Model(
+            vllm_config=vllm_config,
+            prefix=maybe_prefix(prefix, "model"),
+        )
+
+        if get_pp_group().is_last_rank:
+            self.lm_head = ParallelLMHead(
+                config.vocab_size,
+                config.hidden_size,
+                quant_config=quant_config,
+            )
+            self.logits_processor = LogitsProcessor(config.vocab_size)
+        else:
+            self.lm_head = PPMissingLayer()
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.model.embed_input_ids(input_ids)
+
+    def forward(
+        self,
+        input_ids: torch.Tensor | None,
+        positions: torch.Tensor,
+        intermediate_tensors: IntermediateTensors | None = None,
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        hidden_states = self.model(
+            input_ids=input_ids,
+            positions=positions,
+            intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
+        )
+        return hidden_states
+
+    def compute_logits(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        return self.logits_processor(self.lm_head, hidden_states)
+
+    def make_empty_intermediate_tensors(
+        self, batch_size: int, dtype: torch.dtype, device: torch.device
+    ) -> IntermediateTensors:
+        return IntermediateTensors(
+            {
+                "hidden_states": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+                "residual": torch.zeros(
+                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
+                ),
+            }
+        )
+
+    @classmethod
+    def get_mamba_state_shape_from_config(
+        cls,
+        vllm_config: VllmConfig,
+    ) -> tuple[tuple[int, ...], ...]:
+        """Calculate shape for linear attention cache."""
+        config = vllm_config.model_config.hf_config
+        tp_size = vllm_config.parallel_config.tensor_parallel_size
+
+        head_dim = getattr(
+            config, "head_dim", config.hidden_size // config.num_attention_heads
+        )
+
+        # Return base state shape from linear attention (no padding)
+        return MambaStateShapeCalculator.linear_attention_state_shape(
+            num_heads=config.num_attention_heads,
+            tp_size=tp_size,
+            head_dim=head_dim,
+        )
+
+    @classmethod
+    def get_mamba_state_dtype_from_config(
+        cls,
+        vllm_config: VllmConfig,
+    ) -> tuple[torch.dtype, ...]:
+        return MambaStateDtypeCalculator.linear_attention_state_dtype(
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+        )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple:
+        return MambaStateCopyFuncCalculator.linear_attention_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load checkpoint weights with simplified mapping."""
@@ -1137,111 +1237,3 @@ class BailingMoeV25Model(nn.Module):
             load_param(norm_name, weight)
 
         return loaded_params
-
-
-class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
-    """Bailing MoE v2.5 For CausalLM."""
-
-    packed_modules_mapping = {
-        "gate_up_proj": ["gate_proj", "up_proj"],
-    }
-
-    def __init__(
-        self,
-        *,
-        vllm_config: VllmConfig,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        config = vllm_config.model_config.hf_config
-        quant_config = vllm_config.quant_config
-
-        self.config = config
-        self.quant_config = quant_config
-
-        self.model = BailingMoeV25Model(
-            vllm_config=vllm_config,
-            prefix=maybe_prefix(prefix, "model"),
-        )
-
-        if get_pp_group().is_last_rank:
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-            )
-            self.logits_processor = LogitsProcessor(config.vocab_size)
-        else:
-            self.lm_head = PPMissingLayer()
-
-    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        return self.model.embed_input_ids(input_ids)
-
-    def forward(
-        self,
-        input_ids: torch.Tensor | None,
-        positions: torch.Tensor,
-        intermediate_tensors: IntermediateTensors | None = None,
-        inputs_embeds: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        hidden_states = self.model(
-            input_ids=input_ids,
-            positions=positions,
-            intermediate_tensors=intermediate_tensors,
-            inputs_embeds=inputs_embeds,
-        )
-        return hidden_states
-
-    def compute_logits(
-        self,
-        hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        return self.logits_processor(self.lm_head, hidden_states)
-
-    def make_empty_intermediate_tensors(
-        self, batch_size: int, dtype: torch.dtype, device: torch.device
-    ) -> IntermediateTensors:
-        return IntermediateTensors(
-            {
-                "hidden_states": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-                "residual": torch.zeros(
-                    (batch_size, self.config.hidden_size), dtype=dtype, device=device
-                ),
-            }
-        )
-
-    @classmethod
-    def get_mamba_state_shape_from_config(
-        cls,
-        vllm_config: VllmConfig,
-    ) -> tuple[tuple[int, ...], ...]:
-        """Calculate shape for linear attention cache."""
-        config = vllm_config.model_config.hf_config
-        tp_size = vllm_config.parallel_config.tensor_parallel_size
-
-        head_dim = getattr(
-            config, "head_dim", config.hidden_size // config.num_attention_heads
-        )
-
-        # Return base state shape from linear attention (no padding)
-        return MambaStateShapeCalculator.linear_attention_state_shape(
-            num_heads=config.num_attention_heads,
-            tp_size=tp_size,
-            head_dim=head_dim,
-        )
-
-    @classmethod
-    def get_mamba_state_dtype_from_config(
-        cls,
-        vllm_config: VllmConfig,
-    ) -> tuple[torch.dtype, ...]:
-        return MambaStateDtypeCalculator.linear_attention_state_dtype(
-            vllm_config.model_config.dtype,
-            vllm_config.cache_config.mamba_cache_dtype,
-        )
-
-    @classmethod
-    def get_mamba_state_copy_func(cls) -> tuple:
-        return MambaStateCopyFuncCalculator.linear_attention_state_copy_func()
