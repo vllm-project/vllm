@@ -8,7 +8,7 @@ LLM generation to follow specific patterns or structures.
 
 FSM Graph Structure:
     The FSM is represented as a nested dictionary:
-    graph[current_state][token_id] = next_state
+    ``graph[current_state][token_id] = next_state``
 
     Example:
         {
@@ -65,7 +65,7 @@ class CustomFSM:
         return self._state_counter
 
     @classmethod
-    def from_prebuilt(cls, file_path: str):
+    def from_prebuilt(cls, file_path: str) -> "CustomFSM":
         """
         Load FSM from a prebuilt JSON file.
 
