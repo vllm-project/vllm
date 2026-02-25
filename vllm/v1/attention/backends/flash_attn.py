@@ -95,6 +95,11 @@ class FlashAttentionBackend(AttentionBackend):
             AttentionType.ENCODER_DECODER,
         )
 
+    @classmethod
+    def supports_per_head_quant_scales(cls) -> bool:
+        fa_version = get_flash_attn_version()
+        return fa_version is not None and fa_version >= 3
+
     @staticmethod
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionImpl
@@ -595,11 +600,6 @@ class FlashAttentionImpl(AttentionImpl):
             )
 
         self.supports_quant_query_input = True
-        self.supports_per_head_quant_scales = (
-            self.vllm_flash_attn_version >= 3
-            if self.vllm_flash_attn_version is not None
-            else False
-        )
 
     def forward(
         self,
