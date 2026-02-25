@@ -126,14 +126,27 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if rotary embedding custom op is active and
+    use_inductor_graph_partition is enabled.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return (
+        rocm_aiter_ops.is_enabled()
+        and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+        and cfg.compilation_config.use_inductor_graph_partition
+    )
+
+
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and AITER Triton GEMMs
     and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
+    from vllm._aiter_ops import rocm_aiter_ops
 
     return (
-        envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        rocm_aiter_ops.is_rmsnorm_enabled()
+        and not rocm_aiter_ops.is_triton_gemm_enabled()
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
@@ -149,6 +162,7 @@ OPTIMIZATION_LEVEL_00 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
+            "fuse_rope_kvcache": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -167,6 +181,7 @@ OPTIMIZATION_LEVEL_01 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -185,6 +200,7 @@ OPTIMIZATION_LEVEL_02 = {
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -203,6 +219,7 @@ OPTIMIZATION_LEVEL_03 = {
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -394,6 +411,15 @@ class VllmConfig:
             :10
         ]
         return hash_str
+
+    @property
+    def num_speculative_tokens(self) -> int:
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.num_speculative_tokens is not None
+        ):
+            return self.speculative_config.num_speculative_tokens
+        return 0
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -822,6 +848,8 @@ class VllmConfig:
                 self.speculative_config is None
             )
 
+        self._set_max_num_scheduled_tokens()
+
         if current_platform.support_static_graph_mode():
             # if cudagraph_mode has full cudagraphs, we need to check support
             if model_config := self.model_config:
@@ -914,6 +942,32 @@ class VllmConfig:
                 "to True to enable."
             )
         current_platform.check_and_update_config(self)
+
+        # If DCP, ensure the block size is right.
+        if self.parallel_config.decode_context_parallel_size > 1:
+            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
+                self.parallel_config.cp_kv_cache_interleave_size
+                != self.parallel_config.dcp_kv_cache_interleave_size
+            ):
+                self.parallel_config.cp_kv_cache_interleave_size = (
+                    self.parallel_config.dcp_kv_cache_interleave_size
+                )
+                logger.warning_once(
+                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
+                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
+                    "deprecated when PCP is fully supported."
+                )
+            assert (
+                self.parallel_config.cp_kv_cache_interleave_size
+                <= self.cache_config.block_size
+                and self.cache_config.block_size
+                % self.parallel_config.cp_kv_cache_interleave_size
+                == 0
+            ), (
+                f"Block_size({self.cache_config.block_size}) should be greater "
+                "than or equal to and divisible by cp_kv_cache_interleave_size "
+                f"({self.parallel_config.cp_kv_cache_interleave_size})."
+            )
 
         # Do this after all the updates to compilation_config.mode
         effective_dp_size = (
@@ -1082,6 +1136,26 @@ class VllmConfig:
             # Default to enable HMA if not explicitly disabled by user or logic above.
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
+        if self.cache_config.mamba_cache_mode == "align":
+            assert (
+                self.cache_config.block_size
+                <= self.scheduler_config.max_num_batched_tokens
+            ), (
+                "In Mamba cache align mode, block_size "
+                f"({self.cache_config.block_size}) must be <= "
+                "max_num_batched_tokens "
+                f"({self.scheduler_config.max_num_batched_tokens})."
+            )
+            if self.scheduler_config.long_prefill_token_threshold > 0:
+                assert (
+                    self.scheduler_config.long_prefill_token_threshold
+                    >= self.cache_config.block_size
+                )
+            assert not self.scheduler_config.disable_chunked_mm_input, (
+                "Chunked MM input is required because we need the flexibility to "
+                "schedule a multiple of block_size tokens even if they are in the "
+                "middle of a mm input"
+            )
         if self.compilation_config.debug_dump_path:
             self.compilation_config.debug_dump_path = (
                 self.compilation_config.debug_dump_path.absolute().expanduser()
@@ -1138,6 +1212,37 @@ class VllmConfig:
             for size in possible_sizes
             if size % self.parallel_config.tensor_parallel_size == 0
         ]
+
+    def _set_max_num_scheduled_tokens(self):
+        """
+        In most cases, the scheduler may schedule a batch with as many tokens as the
+        worker is configured to handle. However for some speculative decoding methods,
+        the drafter model may insert additional slots into the batch when drafting.
+        To account for this, we need to decrease the max_num_scheduled_tokens by an
+        upper bound on the number of slots that can be added.
+        """
+        if self.speculative_config is not None:
+            scheduled_token_delta = (
+                self.speculative_config.max_num_new_slots_for_drafting
+                * self.scheduler_config.max_num_seqs
+            )
+            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+            if self.scheduler_config.max_num_scheduled_tokens is None:
+                self.scheduler_config.max_num_scheduled_tokens = (
+                    max_num_batched_tokens - scheduled_token_delta
+                )
+
+            max_num_scheduled_tokens = self.scheduler_config.max_num_scheduled_tokens
+            if max_num_batched_tokens < max_num_scheduled_tokens + (
+                self.speculative_config.max_num_new_slots_for_drafting
+                * self.scheduler_config.max_num_seqs
+            ):
+                raise ValueError(
+                    f"VllmConfig received max_num_scheduled_tokens but it does not have"
+                    " enough slots to support the speculative decoding settings."
+                    f" It should be greater by at least {scheduled_token_delta}, but"
+                    f" got {max_num_batched_tokens=} and {max_num_scheduled_tokens=}."
+                )
 
     def _set_cudagraph_sizes(self):
         """
@@ -1301,22 +1406,8 @@ class VllmConfig:
         computed_compile_ranges_split_points = []
 
         # The upper bound of the compile ranges is the max_num_batched_tokens.
-        # For speculative decoding, the compile range must be extended
-        # - Sequential: + 1 * max_num_seqs (one draft token per iteration)
-        # - Parallel draft: + num_speculative_tokens * max_num_seqs
         compile_range_end = self.scheduler_config.max_num_batched_tokens
         if compile_range_end is not None:
-            if self.speculative_config is not None and (
-                self.speculative_config.uses_draft_model()
-                or self.speculative_config.use_eagle()
-            ):
-                multiplier = (
-                    self.speculative_config.num_speculative_tokens
-                    if self.speculative_config.parallel_drafting
-                    else 1
-                )
-                compile_range_end += multiplier * self.scheduler_config.max_num_seqs
-
             computed_compile_ranges_split_points.append(compile_range_end)
 
         # Add the compile ranges for flashinfer
@@ -1334,6 +1425,20 @@ class VllmConfig:
                     logger.debug(
                         "Max num batched tokens below allreduce-rms fusion threshold, "
                         "allreduce-rms fusion will be enabled for all num_tokens."
+                    )
+
+        if compilation_config.pass_config.fuse_rope_kvcache:
+            max_token_num = (
+                compilation_config.pass_config.rope_kvcache_fusion_max_token_num
+            )
+            if max_token_num is not None:
+                if compile_range_end is not None and max_token_num < compile_range_end:
+                    computed_compile_ranges_split_points.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below rope+kvcache fusion threshold, "
+                        "rope+kvcache fusion enabled for num_tokens <= %d.",
+                        compile_range_end,
                     )
 
         if compilation_config.compile_ranges_split_points is not None:
@@ -1441,57 +1546,6 @@ class VllmConfig:
             f"pooler_config={self.model_config.pooler_config!r}, "
             f"compilation_config={self.compilation_config!r}"
         )
-
-    def validate_block_size(self) -> None:
-        """Validate block_size against DCP and mamba constraints.
-
-        Called after Platform.update_block_size_for_backend() has
-        finalised block_size, so that the checks see the real value
-        rather than the initial None sentinel.
-        """
-        block_size = self.cache_config.block_size
-        assert block_size is not None, (
-            "validate_block_size called before block_size was set"
-        )
-
-        # DCP interleave-size compatibility
-        if self.parallel_config.decode_context_parallel_size > 1:
-            if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
-                self.parallel_config.cp_kv_cache_interleave_size
-                != self.parallel_config.dcp_kv_cache_interleave_size
-            ):
-                self.parallel_config.cp_kv_cache_interleave_size = (
-                    self.parallel_config.dcp_kv_cache_interleave_size
-                )
-                logger.warning_once(
-                    "cp_kv_cache_interleave_size is overridden by dcp_kv_cache"
-                    "_interleave_size. And dcp-kv-cache-interleave-size will be "
-                    "deprecated when PCP is fully supported."
-                )
-            assert (
-                self.parallel_config.cp_kv_cache_interleave_size <= block_size
-                and block_size % self.parallel_config.cp_kv_cache_interleave_size == 0
-            ), (
-                f"Block_size({block_size}) should be greater "
-                "than or equal to and divisible by cp_kv_cache_interleave_size "
-                f"({self.parallel_config.cp_kv_cache_interleave_size})."
-            )
-
-        # Mamba cache align-mode constraints
-        if self.cache_config.mamba_cache_mode == "align":
-            assert block_size <= self.scheduler_config.max_num_batched_tokens, (
-                "In Mamba cache align mode, block_size "
-                f"({block_size}) must be <= "
-                "max_num_batched_tokens "
-                f"({self.scheduler_config.max_num_batched_tokens})."
-            )
-            if self.scheduler_config.long_prefill_token_threshold > 0:
-                assert self.scheduler_config.long_prefill_token_threshold >= block_size
-            assert not self.scheduler_config.disable_chunked_mm_input, (
-                "Chunked MM input is required because we need the flexibility "
-                "to schedule a multiple of block_size tokens even if they are "
-                "in the middle of a mm input"
-            )
 
     @model_validator(mode="after")
     def validate_mamba_block_size(self) -> "VllmConfig":

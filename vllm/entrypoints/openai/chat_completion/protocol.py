@@ -5,7 +5,6 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
-from dataclasses import replace
 from typing import Annotated, Any, ClassVar, Literal
 
 import torch
@@ -16,6 +15,7 @@ from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnota
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
+from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -555,8 +555,16 @@ class ChatCompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data["structured_outputs"]
+        # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
+        # as a StructuredOutputsParams dataclass instance.
+        is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
         count = sum(
-            structured_outputs_kwargs.get(k) is not None
+            (
+                getattr(structured_outputs_kwargs, k, None)
+                if is_dataclass
+                else structured_outputs_kwargs.get(k)
+            )
+            is not None
             for k in ("json", "regex", "choice")
         )
         # you can only use one kind of constraints for structured outputs
@@ -673,4 +681,53 @@ class ChatCompletionRequest(OpenAIBaseModel):
             raise ValueError(
                 "Parameter 'cache_salt' must be a non-empty string if provided."
             )
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_system_message_content_type(cls, data):
+        """Warn if system messages contain non-text content.
+
+        According to OpenAI API spec, system messages can only be of type
+        'text'. We log a warning instead of rejecting to avoid breaking
+        users who intentionally send multimodal system messages.
+        See: https://platform.openai.com/docs/api-reference/chat/create#chat_create-messages-system_message
+        """
+        if not isinstance(data, dict):
+            return data
+        messages = data.get("messages", [])
+        for msg in messages:
+            # Check if this is a system message
+            if isinstance(msg, dict) and msg.get("role") == "system":
+                content = msg.get("content")
+
+                # If content is a list (multimodal format)
+                if isinstance(content, list):
+                    for part in content:
+                        if isinstance(part, dict):
+                            part_type = part.get("type")
+                            # Infer type when 'type' field is not explicit
+                            if part_type is None:
+                                if "image_url" in part or "image_pil" in part:
+                                    part_type = "image_url"
+                                elif "image_embeds" in part:
+                                    part_type = "image_embeds"
+                                elif "audio_url" in part:
+                                    part_type = "audio_url"
+                                elif "input_audio" in part:
+                                    part_type = "input_audio"
+                                elif "audio_embeds" in part:
+                                    part_type = "audio_embeds"
+                                elif "video_url" in part:
+                                    part_type = "video_url"
+
+                            # Warn about non-text content in system messages
+                            if part_type and part_type != "text":
+                                logger.warning_once(
+                                    "System messages should only contain text "
+                                    "content according to the OpenAI API spec. "
+                                    "Found content type: '%s'.",
+                                    part_type,
+                                )
+
         return data
