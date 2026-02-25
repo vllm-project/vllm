@@ -676,7 +676,7 @@ async def build_endpoint_registry(
     # Initialize all serving objects using init_app_state
     # This provides full functionality including chat template processing,
     # LoRA support, tool servers, etc.
-    await init_app_state(engine_client, state, args, supported_tasks)
+    await init_app_state(renderer_client, engine_client, state, args, supported_tasks)
 
     # Get serving objects from state (defaulting to None if not set)
     openai_serving_chat = getattr(state, "openai_serving_chat", None)

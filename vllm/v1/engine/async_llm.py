@@ -1097,7 +1097,5 @@ class AsyncRenderer(RendererClient):
         if renderer := getattr(self, "renderer", None):
             renderer.shutdown()
 
-    # RendererClient methods ---------------------------------------------------
-
     async def is_tracing_enabled(self) -> bool:
         return self._observability_config.otlp_traces_endpoint is not None
