@@ -58,6 +58,7 @@ from vllm.model_executor.layers.rotary_embedding import (
     MRotaryEmbedding,
     XDRotaryEmbedding,
 )
+from vllm.model_executor.layers.utils import set_fast_skinny_gemm
 from vllm.model_executor.model_loader import TensorizerLoader, get_model_loader
 from vllm.model_executor.model_loader.reload import (
     finalize_layerwise_reload,
@@ -89,6 +90,7 @@ from vllm.multimodal.inputs import (
     PlaceholderRange,
 )
 from vllm.multimodal.utils import group_mm_kwargs_by_modality
+from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
@@ -4180,6 +4182,11 @@ class GPUModelRunner(
             self.model_config.model,
             scope="global",
         )
+
+        # Set ROCm skinny GEMM mode before loading model
+        if current_platform.is_rocm():
+            set_fast_skinny_gemm(self.model_config.fast_skinny_gemm)
+
         global_expert_loads, old_global_expert_indices_per_model, rank_mapping = (
             EplbState.get_eep_state(self.parallel_config)
             if eep_scale_up
