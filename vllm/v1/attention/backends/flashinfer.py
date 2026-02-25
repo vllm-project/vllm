@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
-from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
 from typing import ClassVar
@@ -1250,15 +1249,6 @@ class FlashInferImpl(AttentionImpl):
             self.dcp_combine = dcp_a2a_lse_reduce
         else:
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
-        # TODO(#34018): --dcp-replicate-q-proj to make Q replication
-        # configurable at weight level, removing runtime allgather.
-        self._dcp_prepare_query: Callable[[torch.Tensor], torch.Tensor]
-        if dcp_a2a:
-            self._dcp_prepare_query = lambda q: q
-        else:
-            self._dcp_prepare_query = lambda q: get_dcp_group().all_gather(
-                q.contiguous(), dim=-2
-            )
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
         return (
@@ -1545,7 +1535,9 @@ class FlashInferImpl(AttentionImpl):
                 assert decode_wrapper._sm_scale == self.scale
 
                 if use_dcp:
-                    decode_query = self._dcp_prepare_query(decode_query)
+                    decode_query = get_dcp_group().all_gather(
+                        decode_query.contiguous(), dim=-2
+                    )
                     output_tmp = torch.empty_like(decode_query)
                     lse = torch.empty(
                         (decode_query.size(0), decode_query.size(1)),
