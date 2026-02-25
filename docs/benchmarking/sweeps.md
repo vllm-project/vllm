@@ -85,7 +85,7 @@ vllm bench sweep serve \
     -o benchmarks/results
 ```
 
-Each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
+By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
 
 !!! important
     If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
