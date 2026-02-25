@@ -4,10 +4,12 @@ Schemas and utilites for preprocessing inputs.
 
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
+
 import numpy as np
-import math
+
 from vllm.inputs import (
     EmbedsPrompt,
     ExplicitEncoderDecoderPrompt,
@@ -17,9 +19,10 @@ from vllm.inputs import (
     TextPrompt,
     TokensPrompt,
 )
+from vllm.transformers_utils.processor import get_feature_extractor
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import is_list_of
-from vllm.transformers_utils.processor import get_feature_extractor
+
 if TYPE_CHECKING:
     import torch
 

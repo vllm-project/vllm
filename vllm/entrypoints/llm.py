@@ -1,17 +1,16 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import copy
 import itertools
 import warnings
-from collections.abc import Callable, Iterable, Sequence
-from typing import TYPE_CHECKING, Any
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, cast
 
 import cloudpickle
-import copy
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
-from typing import cast, Any, Mapping
 from typing_extensions import TypeVar, overload
 
 from vllm.beam_search import (
@@ -78,10 +77,10 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import ChatParams, merge_kwargs
 from vllm.renderers.inputs.preprocess import (
+    chunk_audio_data,
     conversation_to_seq,
     parse_model_prompt,
     prompt_to_seq,
-    chunk_audio_data,
 )
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
