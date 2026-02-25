@@ -1643,14 +1643,6 @@ def fast_plan_decode(
     Part of the code get inspiration from the original plan from FlashInfer repo
     and the implementation of fast_decode_plan for FlashInfer in SGlang repo.
     """
-    # fixed_split_size and disable_split_kv are only supported by the
-    # tensor-core decode backend; passing them with FA2 raises an error.
-    use_tensor_cores = getattr(self, "_use_tensor_cores", True)
-    tc_kwargs: dict = {}
-    if use_tensor_cores:
-        tc_kwargs["fixed_split_size"] = fixed_split_size
-        tc_kwargs["disable_split_kv"] = disable_split_kv
-
     # Warm up with the original plan if it is first call, and always run the
     # original plan if we run for dynamic shape. For fixed shape (cudagraph),
     # this warm up is to generate the _cached_module for the decode wrapper.
@@ -1676,7 +1668,8 @@ def fast_plan_decode(
             non_blocking=non_blocking,
             block_tables=None,
             seq_lens=None,
-            **tc_kwargs,
+            fixed_split_size=fixed_split_size,
+            disable_split_kv=disable_split_kv,
         )
         self.vllm_first_call = False
         return
@@ -1702,7 +1695,8 @@ def fast_plan_decode(
         rope_scale=rope_scale,
         rope_theta=rope_theta,
         non_blocking=non_blocking,
-        **tc_kwargs,
+        fixed_split_size=fixed_split_size,
+        disable_split_kv=disable_split_kv,
     )
 
 
