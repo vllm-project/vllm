@@ -139,9 +139,7 @@ For example:
 
 --8<-- "vllm/model_executor/models/transformers/moe.py:transformers_fused_moe"
 
---8<-- "vllm/model_executor/layers/fused_moe/router/grouped_topk_router.py:grouped_topk"
-
---8<-- "vllm/model_executor/layers/fused_moe/runner/default_moe_runner.py:default_moe_runner"
+--8<-- "vllm/model_executor/layers/fused_moe/fused_moe.py:grouped_topk"
 ```
 
 **9. Norm:**
