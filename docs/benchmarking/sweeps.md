@@ -55,14 +55,17 @@ Follow these steps to run the script:
     ```json
     [
         {
+            "_benchmark_name": "scenario_A",
             "random_input_len": 128,
             "random_output_len": 32
         },
         {
+            "_benchmark_name": "scenario_B",
             "random_input_len": 256,
             "random_output_len": 64
         },
         {
+            "_benchmark_name": "scenario_C",
             "random_input_len": 512,
             "random_output_len": 128
         }
@@ -92,6 +95,9 @@ vllm bench sweep serve \
 
 !!! note
     By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
+
+!!! tip
+    Set `_benchmark_name` to provide a human-readable name for parameter combinations with many variables.
 
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
