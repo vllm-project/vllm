@@ -1303,6 +1303,13 @@ def init_distributed_environment(
                 rank,
                 distributed_init_method,
             )
+    # set the local rank
+    # local_rank is not available in torch ProcessGroup,
+    # see https://github.com/pytorch/pytorch/issues/122816
+    if local_rank == -1:
+        # local rank not set, this usually happens in single-node
+        # setting, where we can use rank as local rank
+        local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
     if not torch.distributed.is_initialized():
         logger.info(
             "world_size=%d rank=%d local_rank=%d distributed_init_method=%s backend=%s",
@@ -1325,6 +1332,17 @@ def init_distributed_environment(
                 "Fallback Gloo backend is not available."
             )
             backend = "gloo"
+
+        # Setting device_id enables eager communicator init and
+        # ncclCommSplit for sub-groups, avoiding hangs from lazy
+        # ncclCommInitRankConfig on the first collective call.
+        # Only set for multi-rank setups to avoid unnecessary GPU
+        # memory consumption in single-rank.
+        device_id = None
+        if (backend == "nccl" and torch.cuda.is_available()
+                and world_size > 1):
+            device_id = torch.device(f"cuda:{local_rank}")
+
         # this backend is used for WORLD
         torch.distributed.init_process_group(
             backend=backend,
@@ -1332,14 +1350,8 @@ def init_distributed_environment(
             world_size=world_size,
             rank=rank,
             timeout=timeout,
+            device_id=device_id,
         )
-    # set the local rank
-    # local_rank is not available in torch ProcessGroup,
-    # see https://github.com/pytorch/pytorch/issues/122816
-    if local_rank == -1:
-        # local rank not set, this usually happens in single-node
-        # setting, where we can use rank as local rank
-        local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if _WORLD is None:
         ranks = list(range(torch.distributed.get_world_size()))

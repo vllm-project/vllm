@@ -6,7 +6,7 @@ set -ex
 
 BUCKET="vllm-wheels"
 INDICES_OUTPUT_DIR="indices"
-DEFAULT_VARIANT_ALIAS="cu129" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
+DEFAULT_VARIANT_ALIAS="cu130" # align with vLLM_MAIN_CUDA_VERSION in vllm/envs.py
 PYTHON=${PYTHON_PROG:=python3} # try to read from env var, otherwise use python3
 SUBPATH=$BUILDKITE_COMMIT
 S3_COMMIT_PREFIX="s3://$BUCKET/$SUBPATH/"
