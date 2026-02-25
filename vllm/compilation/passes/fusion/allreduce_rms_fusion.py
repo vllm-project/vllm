@@ -767,11 +767,20 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                     group=self.group,
                 )
             except Exception as e:
-                logger.warning(
-                    "Failed to initialize FlashInfer All Reduce workspace: %s. "
-                    "AllReduce fusion pass will be disabled.",
-                    e,
-                )
+                if "multicast" in str(e).lower():
+                    logger.warning(
+                        "AllReduce fusion pass is disabled: flashinfer workspace "
+                        "creation failed: %s. This is expected on GPUs without "
+                        "NVSwitch (e.g., NVLink bridge-only or PCIe topologies). "
+                        "Falling back to non-fused allreduce.",
+                        str(e),
+                    )
+                else:
+                    logger.warning(
+                        "Failed to initialize FlashInfer All Reduce workspace: %s. "
+                        "AllReduce fusion pass will be disabled.",
+                        e,
+                    )
                 return
 
         self.allreduce_params = FlashInferFusedAllReduceParams(
