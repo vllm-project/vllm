@@ -180,6 +180,7 @@ async def run_vllm_async(
     n: int,
     engine_args: AsyncEngineArgs,
     do_profile: bool,
+    disable_frontend_multiprocessing: bool = False,
     disable_detokenize: bool = False,
 ) -> float:
     from vllm import SamplingParams
@@ -189,6 +190,7 @@ async def run_vllm_async(
 
     async with build_async_engine_client_from_engine_args(
         engine_args,
+        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
     ) as (renderer_client, engine_client):
         model_config = renderer_client.model_config
         assert all(
@@ -854,6 +856,7 @@ def main(args: argparse.Namespace):
                     requests,
                     args.n,
                     AsyncEngineArgs.from_cli_args(args),
+                    disable_frontend_multiprocessing=args.disable_frontend_multiprocessing,
                     disable_detokenize=args.disable_detokenize,
                     do_profile=args.profile,
                 )
