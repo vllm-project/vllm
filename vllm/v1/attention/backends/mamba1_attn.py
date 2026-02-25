@@ -35,6 +35,9 @@ class Mamba1AttentionMetadataBuilder(
         common_prefix_len: int,
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
+        *,
+        num_accepted_tokens: torch.Tensor | None = None,
+        **kwargs: Any,
     ) -> Mamba1AttentionMetadata:
         common = self._compute_common_metadata(common_attn_metadata)
 
