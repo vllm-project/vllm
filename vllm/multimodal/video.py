@@ -818,7 +818,6 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
             cap, frames_indices, total_frames_num
         )
-        valid_num_frames = len(valid_frame_indices)
 
         if recovered_map:
             logger.info(
