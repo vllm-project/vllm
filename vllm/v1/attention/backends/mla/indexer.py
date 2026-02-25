@@ -8,6 +8,7 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils import cdiv
 from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, has_deep_gemm
 from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
@@ -21,6 +22,7 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
     split_prefill_chunks,
 )
+from vllm.v1.worker.cp_utils import get_total_cp_world_size
 
 logger = init_logger(__name__)
 
@@ -228,7 +230,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             dtype=torch.int32,
             device=self.device,
         )
-        self._expanded_block_table_buffer: torch.Tensor | None = None
+        max_num_blocks_per_req = cdiv(
+            self.vllm_config.model_config.max_model_len,
+            self.kv_cache_spec.block_size * get_total_cp_world_size(),
+        )
+        self._expanded_block_table_buffer = torch.zeros(
+            (
+                scheduler_config.max_num_batched_tokens,
+                max_num_blocks_per_req,
+            ),
+            dtype=torch.int32,
+            device=self.device,
+        )
 
         # See: DeepGMM/csrc/apis/attention.hpp
         self.scheduler_metadata_buffer = torch.empty(
@@ -371,21 +384,9 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 self.expanded_seq_lens_buffer[actual_expanded:] = 0
                 seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
 
-                expanded_bt = torch.repeat_interleave(block_table, decode_lens, dim=0)
-                if (
-                    self._expanded_block_table_buffer is None
-                    or self._expanded_block_table_buffer.shape[1]
-                    != block_table.shape[1]
-                ):
-                    self._expanded_block_table_buffer = torch.zeros(
-                        (
-                            self.expanded_seq_lens_buffer.shape[0],
-                            block_table.shape[1],
-                        ),
-                        dtype=block_table.dtype,
-                        device=self.device,
-                    )
-                self._expanded_block_table_buffer[:actual_expanded] = expanded_bt
+                self._expanded_block_table_buffer[:actual_expanded] = (
+                    torch.repeat_interleave(block_table, decode_lens, dim=0)
+                )
                 if actual_expanded < num_decode_tokens:
                     self._expanded_block_table_buffer[
                         actual_expanded:num_decode_tokens
