@@ -1024,9 +1024,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
         return self.parse_audio(audio_url, uuid)
 
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
-        keep_bytes = bool(
-            self._tracker._mm_processor_kwargs.get("use_audio_in_video")
-        )
+        keep_bytes = bool(self._tracker._mm_processor_kwargs.get("use_audio_in_video"))
         video = (
             self._connector.fetch_video_async(
                 video_url=video_url, keep_video_bytes=keep_bytes
@@ -1540,7 +1538,7 @@ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
 def parse_chat_messages(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    content_format: _ChatTemplateContentFormat,
+    content_format: ChatTemplateContentFormat,
     mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
@@ -1576,7 +1574,7 @@ def parse_chat_messages(
 async def parse_chat_messages_async(
     messages: list[ChatCompletionMessageParam],
     model_config: ModelConfig,
-    content_format: _ChatTemplateContentFormat,
+    content_format: ChatTemplateContentFormat,
     mm_processor_kwargs: dict[str, Any] | None = None,
 ) -> tuple[
     list[ConversationMessage],
