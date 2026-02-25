@@ -749,7 +749,7 @@ class Molmo2VideoBackend(VideoLoader):
         return out
 
 
-@VIDEO_LOADER_REGISTRY.register("opencv_dynamic_openpangu")
+@VIDEO_LOADER_REGISTRY.register("openpangu")
 class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
     @classmethod
     def load_bytes(
