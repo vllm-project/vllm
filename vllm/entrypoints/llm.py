@@ -796,128 +796,19 @@ class LLM:
                         "progress."
                     )
                 for _ in token_iter:
-                    all_beams: list[BeamSearchSequence] = list(
-                        sum(
-                            (instance.beams for instance in instances_batch),
-                            [],
-                        )
+                    should_stop = self._beam_search_step(
+                        instances_batch=instances_batch,
+                        base_sampling_params=base_sampling_params,
+                        eos_token_id=eos_token_id,
+                        ignore_eos=ignore_eos,
+                        beam_width=beam_width,
+                        sort_beams_key=sort_beams_key,
+                        structured_output_backend=structured_output_backend,
+                        structured_output_key=structured_output_key,
+                        structured_output_bitmask=structured_output_bitmask,
                     )
-                    pos = [0] + list(
-                        itertools.accumulate(
-                            len(instance.beams) for instance in instances_batch
-                        )
-                    )
-                    instance_start_and_end: list[tuple[int, int]] = list(
-                        zip(pos[:-1], pos[1:])
-                    )
-
-                    if len(all_beams) == 0:
+                    if should_stop:
                         break
-
-                    if structured_output_backend is not None:
-                        assert (
-                            structured_output_key is not None
-                            and structured_output_bitmask is not None
-                        )
-                        beam_params = self._build_beam_sampling_params(
-                            all_beams,
-                            base_sampling_params,
-                            structured_output_backend,
-                            structured_output_key,
-                            structured_output_bitmask,
-                        )
-                        active_indices = [
-                            i for i, p in enumerate(beam_params) if p is not None
-                        ]
-                        for i, p in enumerate(beam_params):
-                            if p is None:
-                                beam = all_beams[i]
-                                prompt_len = len(beam.orig_prompt["prompt_token_ids"])
-                                if len(beam.tokens) > prompt_len:
-                                    for (s, e), inst in zip(
-                                        instance_start_and_end,
-                                        instances_batch,
-                                    ):
-                                        if s <= i < e:
-                                            inst.completed.append(beam)
-                                            break
-
-                        if not active_indices:
-                            break
-
-                        active_beams = [all_beams[i] for i in active_indices]
-                        active_params: Sequence[SamplingParams | PoolingParams] = [
-                            beam_params[i]  # type: ignore[misc]
-                            for i in active_indices
-                        ]
-                    else:
-                        active_indices = list(range(len(all_beams)))
-                        active_beams = all_beams
-                        active_params = self._params_to_seq(  # type: ignore[assignment]
-                            base_sampling_params, len(all_beams)
-                        )
-
-                    # only runs for one step
-                    # we don't need to use tqdm here
-                    active_output = self._render_and_run_requests(
-                        prompts=(beam.get_prompt() for beam in active_beams),
-                        params=active_params,
-                        output_type=RequestOutput,
-                        lora_requests=[beam.lora_request for beam in active_beams],
-                        use_tqdm=False,
-                    )
-
-                    output: list[RequestOutput | None] = [None] * len(all_beams)
-                    for idx, active_idx in enumerate(active_indices):
-                        output[active_idx] = active_output[idx]
-
-                    # Logprobs are computed from raw logits before
-                    # allowed_token_ids masking, so they may contain
-                    # tokens outside the grammar's allowed set.
-                    allowed_sets: list[set[int] | None] = [None] * len(all_beams)
-                    if structured_output_backend is not None:
-                        for idx, p in zip(active_indices, active_params):
-                            if isinstance(p, SamplingParams) and p.allowed_token_ids:
-                                allowed_sets[idx] = set(p.allowed_token_ids)
-
-                    for (start, end), instance in zip(
-                        instance_start_and_end, instances_batch
-                    ):
-                        instance_new_beams = []
-                        for i in range(start, end):
-                            current_beam = all_beams[i]
-                            result = output[i]
-
-                            if result is None:
-                                continue
-
-                            if result.outputs[0].logprobs is not None:
-                                # if logprobs is None, the sequence completed
-                                # due to max-model-len or abortion.
-                                logprobs = result.outputs[0].logprobs[0]
-                                allowed = allowed_sets[i]
-                                for token_id, logprob_obj in logprobs.items():
-                                    if allowed is not None and token_id not in allowed:
-                                        continue
-                                    new_beam = BeamSearchSequence(
-                                        current_beam.orig_prompt,
-                                        tokens=current_beam.tokens + [token_id],
-                                        logprobs=current_beam.logprobs + [logprobs],
-                                        lora_request=current_beam.lora_request,
-                                        cum_logprob=current_beam.cum_logprob
-                                        + logprob_obj.logprob,
-                                    )
-
-                                    if token_id == eos_token_id and not ignore_eos:
-                                        instance.completed.append(new_beam)
-                                    else:
-                                        instance_new_beams.append(new_beam)
-                        sorted_beams = sorted(
-                            instance_new_beams,
-                            key=sort_beams_key,
-                            reverse=True,
-                        )
-                        instance.beams = sorted_beams[:beam_width]
         finally:
             if structured_output_backend is not None:
                 structured_output_backend.destroy()
@@ -936,6 +827,135 @@ class LLM:
             outputs.append(BeamSearchOutput(sequences=best_beams))
 
         return outputs
+
+    def _beam_search_step(
+        self,
+        instances_batch: list[BeamSearchInstance],
+        base_sampling_params: SamplingParams,
+        eos_token_id: int | None,
+        ignore_eos: bool,
+        beam_width: int,
+        sort_beams_key: Callable,
+        structured_output_backend: StructuredOutputBackend | None,
+        structured_output_key: tuple | None,
+        structured_output_bitmask: torch.Tensor | None,
+    ) -> bool:
+        """Run one token step of beam search across a batch of instances.
+
+        Returns True if all beams are exhausted and search should stop.
+        """
+        all_beams: list[BeamSearchSequence] = list(
+            sum((instance.beams for instance in instances_batch), [])
+        )
+        pos = [0] + list(
+            itertools.accumulate(len(instance.beams) for instance in instances_batch)
+        )
+        instance_start_and_end: list[tuple[int, int]] = list(zip(pos[:-1], pos[1:]))
+
+        if len(all_beams) == 0:
+            return True
+
+        if structured_output_backend is not None:
+            assert (
+                structured_output_key is not None
+                and structured_output_bitmask is not None
+            )
+            beam_params = self._build_beam_sampling_params(
+                all_beams,
+                base_sampling_params,
+                structured_output_backend,
+                structured_output_key,
+                structured_output_bitmask,
+            )
+            active_indices = [i for i, p in enumerate(beam_params) if p is not None]
+            for i, p in enumerate(beam_params):
+                if p is None:
+                    beam = all_beams[i]
+                    prompt_len = len(beam.orig_prompt["prompt_token_ids"])
+                    if len(beam.tokens) > prompt_len:
+                        for (s, e), inst in zip(
+                            instance_start_and_end,
+                            instances_batch,
+                        ):
+                            if s <= i < e:
+                                inst.completed.append(beam)
+                                break
+
+            if not active_indices:
+                return True
+
+            active_beams = [all_beams[i] for i in active_indices]
+            active_params: Sequence[SamplingParams | PoolingParams] = [
+                beam_params[i]  # type: ignore[misc]
+                for i in active_indices
+            ]
+        else:
+            active_indices = list(range(len(all_beams)))
+            active_beams = all_beams
+            active_params = self._params_to_seq(  # type: ignore[assignment]
+                base_sampling_params, len(all_beams)
+            )
+
+        # only runs for one step
+        # we don't need to use tqdm here
+        active_output = self._render_and_run_requests(
+            prompts=(beam.get_prompt() for beam in active_beams),
+            params=active_params,
+            output_type=RequestOutput,
+            lora_requests=[beam.lora_request for beam in active_beams],
+            use_tqdm=False,
+        )
+
+        output: list[RequestOutput | None] = [None] * len(all_beams)
+        for idx, active_idx in enumerate(active_indices):
+            output[active_idx] = active_output[idx]
+
+        # Logprobs are computed from raw logits before
+        # allowed_token_ids masking, so they may contain
+        # tokens outside the grammar's allowed set.
+        allowed_sets: list[set[int] | None] = [None] * len(all_beams)
+        if structured_output_backend is not None:
+            for idx, p in zip(active_indices, active_params):
+                if isinstance(p, SamplingParams) and p.allowed_token_ids:
+                    allowed_sets[idx] = set(p.allowed_token_ids)
+
+        for (start, end), instance in zip(instance_start_and_end, instances_batch):
+            instance_new_beams = []
+            for i in range(start, end):
+                current_beam = all_beams[i]
+                result = output[i]
+
+                if result is None:
+                    continue
+
+                if result.outputs[0].logprobs is not None:
+                    # if logprobs is None, the sequence completed
+                    # due to max-model-len or abortion.
+                    logprobs = result.outputs[0].logprobs[0]
+                    allowed = allowed_sets[i]
+                    for token_id, logprob_obj in logprobs.items():
+                        if allowed is not None and token_id not in allowed:
+                            continue
+                        new_beam = BeamSearchSequence(
+                            current_beam.orig_prompt,
+                            tokens=current_beam.tokens + [token_id],
+                            logprobs=current_beam.logprobs + [logprobs],
+                            lora_request=current_beam.lora_request,
+                            cum_logprob=current_beam.cum_logprob + logprob_obj.logprob,
+                        )
+
+                        if token_id == eos_token_id and not ignore_eos:
+                            instance.completed.append(new_beam)
+                        else:
+                            instance_new_beams.append(new_beam)
+            sorted_beams = sorted(
+                instance_new_beams,
+                key=sort_beams_key,
+                reverse=True,
+            )
+            instance.beams = sorted_beams[:beam_width]
+
+        return False
 
     def _init_beam_search_structured_output(
         self,
