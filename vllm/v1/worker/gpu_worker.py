@@ -560,10 +560,10 @@ class Worker(WorkerBase):
             logger.debug(msg)
 
         if self.use_v2_model_runner:
-            # Run full execute_model + sample_tokens to JIT compile triton kernels.
+            # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
             warmup_kernels(self.model_runner)
         elif get_pp_group().is_last_rank:
-            # Warm up sampler and preallocate memory buffer for logits and other
+            # V1: Warm up sampler and preallocate memory buffer for logits and other
             # sampling related tensors of max possible shape to avoid memory
             # fragmentation issue.
             # NOTE: This is called after `capture_model` on purpose to prevent

@@ -842,7 +842,7 @@ class SamplingParams(
 
     @staticmethod
     def for_sampler_warmup() -> "SamplingParams":
-        """Set parameters to exercise all logits processing logic."""
+        """Set parameters to exercise all sampler logic."""
         return SamplingParams(
             temperature=0.9,
             top_p=0.9,
