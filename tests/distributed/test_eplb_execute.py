@@ -8,8 +8,8 @@ import pytest
 import torch
 import torch.distributed
 
+from vllm.distributed.eplb.eplb_communicator import create_eplb_communicator
 from vllm.distributed.eplb.rebalance_execute import (
-    create_eplb_communicator,
     move_from_buffer,
     rearrange_expert_weights_inplace,
     transfer_layer,
