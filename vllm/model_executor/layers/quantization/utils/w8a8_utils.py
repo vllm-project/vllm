@@ -25,7 +25,10 @@ def cutlass_fp8_supported() -> bool:
     capability_tuple = current_platform.get_device_capability()
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
-    return ops.cutlass_scaled_mm_supports_fp8(capability)
+    try:
+        return ops.cutlass_scaled_mm_supports_fp8(capability)
+    except (AttributeError, RuntimeError):
+        return False
 
 
 def cutlass_block_fp8_supported() -> bool:
@@ -35,7 +38,10 @@ def cutlass_block_fp8_supported() -> bool:
     capability_tuple = current_platform.get_device_capability()
     capability = -1 if capability_tuple is None else capability_tuple.to_int()
 
-    return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+    try:
+        return ops.cutlass_scaled_mm_supports_block_fp8(capability)
+    except (AttributeError, RuntimeError):
+        return False
 
 
 def cutlass_group_gemm_supported() -> bool:
@@ -48,16 +54,8 @@ def cutlass_group_gemm_supported() -> bool:
     return ops.cutlass_group_gemm_supported(capability)
 
 
-# Handle case where CUTLASS ops might not be available (build issue)
-try:
-    CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
-except (AttributeError, RuntimeError):
-    CUTLASS_FP8_SUPPORTED = False
-
-try:
-    CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
-except (AttributeError, RuntimeError):
-    CUTLASS_BLOCK_FP8_SUPPORTED = False
+CUTLASS_FP8_SUPPORTED = cutlass_fp8_supported()
+CUTLASS_BLOCK_FP8_SUPPORTED = cutlass_block_fp8_supported()
 
 
 def per_tensor_dequantize(
