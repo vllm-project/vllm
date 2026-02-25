@@ -967,7 +967,6 @@ class Moondream3Attention(nn.Module):
         self.tau_wv = nn.Parameter(torch.zeros(self.num_heads_per_partition, qkv_dim))
         self.tp_size = tp_size
 
-
     def forward(
         self,
         positions: torch.Tensor,
