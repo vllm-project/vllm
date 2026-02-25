@@ -783,7 +783,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${DSV3_FUSED_A_GEMM_SRC}"
       CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
     list(APPEND VLLM_EXT_SRC ${DSV3_FUSED_A_GEMM_SRC})
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_DSV3_FUSED_A_GEMM=1")
     message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
   else()
     message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
@@ -1100,6 +1099,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
                    " in CUDA target architectures")
+  endif()
+
+  # DeepSeek V3 router GEMM kernel - requires SM90+
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_ROUTER_GEMM_ARCHS)
+    set(DSV3_ROUTER_GEMM_SRC
+      "csrc/moe/dsv3_router_gemm_entry.cu"
+      "csrc/moe/dsv3_router_gemm_float_out.cu"
+      "csrc/moe/dsv3_router_gemm_bf16_out.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV3_ROUTER_GEMM_SRC}"
+      CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
+    message(STATUS "Building DSV3 router GEMM kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
+                   " (requires SM90+ and CUDA >= 12.0)")
   endif()
 endif()
 
