@@ -243,6 +243,7 @@ class CoreEngineProcManager:
                 sentinels.remove(sentinel)
 
     def join_first(self):
+        """Wait for any process to exit."""
         connection.wait(proc.sentinel for proc in self.processes)
 
     def sentinels(self) -> list:

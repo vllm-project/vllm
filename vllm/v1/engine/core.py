@@ -143,16 +143,13 @@ class EngineCoreSentinel(BaseSentinel):
 
     def run(self):
         """
-        Loop to fetch exception information from the fault_signal_q queue.
-        Keep retrieving exception data continuously until an exception is detected or
-        a command from ClientSentinel is dispatched; after that, switch to the command
-        listening state.
+        Continuously poll for fault signals and commands.
         """
         while not self.sentinel_dead:
             # Check for engine fault signals
             self.poll_and_report_fault_events()
             # Check for commands from ClientSentinel
-            self.receive_and_execute_upstream_cmd()
+            self.poll_and_execute_upstream_cmd()
 
     def poll_and_report_fault_events(self):
         try:

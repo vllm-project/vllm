@@ -163,10 +163,6 @@ class ThreadSafeDict(Generic[KT, VT]):
         with self._lock:
             return self._storage.get(key, default)
 
-    def setdefault(self, key: KT, default: VT) -> VT:
-        with self._lock:
-            return self._storage.setdefault(key, default)
-
     def update(self, items: Iterable[tuple[KT, VT]]) -> None:
         with self._lock:
             self._storage.update(items)
@@ -210,3 +206,8 @@ class ThreadSafeDict(Generic[KT, VT]):
     def to_dict(self) -> dict[KT, VT]:
         with self._lock:
             return self._storage.copy()
+
+    def set_from_dict(self, new_dict: dict[KT, VT]) -> None:
+        with self._lock:
+            self._storage.clear()
+            self._storage.update(new_dict)

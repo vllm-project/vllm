@@ -144,7 +144,7 @@ class WorkerSentinel(BaseSentinel):
     def run(self):
         # Wait for fault tolerance instructions from EngineCoreSentinel
         while not self.sentinel_dead:
-            self.receive_and_execute_upstream_cmd()
+            self.poll_and_execute_upstream_cmd()
 
     def pause(self, timeout: int = 1, **kwargs) -> bool:
         soft_pause = kwargs.get("soft_pause", False)
@@ -219,7 +219,6 @@ class WorkerSentinel(BaseSentinel):
                 nccl_comm.disabled = not active
 
     def retry(self, timeout: int = 1, **kwargs) -> bool:
-        # todo: fix why DP1~3 occupies memory on the first GPU
         if self.communicator_aborted:
             torch.cuda.set_device(self.device)
             with set_current_vllm_config(self.vllm_config):

@@ -92,7 +92,7 @@ class BaseSentinel:
         """
         raise NotImplementedError
 
-    def receive_upstream_cmd(self) -> tuple[bool, FaultToleranceRequest | None]:
+    def poll_upstream_cmd(self) -> tuple[bool, FaultToleranceRequest | None]:
         """
         This method polls the upstream command socket and attempts to receive
         a fault tolerance request.
@@ -118,12 +118,12 @@ class BaseSentinel:
             ft_request = None
         return has_msg, ft_request
 
-    def receive_and_execute_upstream_cmd(self):
+    def poll_and_execute_upstream_cmd(self):
         """
         Receive and execute a command from upstream sentinel and send back
         the execution result.
         """
-        has_msg, ft_request = self.receive_upstream_cmd()
+        has_msg, ft_request = self.poll_upstream_cmd()
         if has_msg:
             assert ft_request is not None
             ft_result = self._execute_cmd(ft_request)

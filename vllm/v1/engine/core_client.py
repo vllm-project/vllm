@@ -578,7 +578,7 @@ class ClientSentinel(BaseSentinel):
                     request_id=str(uuid.uuid4()),
                     instruction="pause",
                     params={
-                        "timeout": self.ft_config.gloo_comm_timeout,
+                        "timeout": self.ft_config.gloo_comm_timeout + 5,
                         "soft_pause": False,
                     },
                 )
@@ -1524,8 +1524,7 @@ class AsyncMPClient(MPClient):
                 frames = self.fault_state_sub_socket.recv_multipart()
                 payload = frames[-1]
                 status_dict = msgspec.msgpack.decode(payload)
-                self.engine_status_dict.clear()
-                self.engine_status_dict.update(status_dict.items())
+                self.engine_status_dict.set_from_dict(status_dict)
                 healthy = True
                 for k, v in self.engine_status_dict.items():
                     if v.get("status") != EngineStatusType.HEALTHY:
