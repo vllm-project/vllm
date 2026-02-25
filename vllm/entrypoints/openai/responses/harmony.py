@@ -385,6 +385,22 @@ def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem
     return output_items
 
 
+def _parse_message_no_recipient(
+    message: Message,
+) -> list[ResponseOutputItem]:
+    """Parse a Harmony message with no recipient based on its channel."""
+    if message.channel == "analysis":
+        return _parse_reasoning(message)
+
+    if message.channel in ("commentary", "final"):
+        # Per Harmony format, preambles (commentary with no recipient) and
+        # final channel content are both intended to be shown to end-users.
+        # See: https://cookbook.openai.com/articles/openai-harmony
+        return [_parse_final_message(message)]
+
+    raise ValueError(f"Unknown channel: {message.channel}")
+
+
 # ---------------------------------------------------------------------------
 # 4. Public output parsing functions
 # ---------------------------------------------------------------------------
@@ -422,19 +438,8 @@ def harmony_to_response_output(message: Message) -> list[ResponseOutputItem]:
             output_items.extend(_parse_mcp_call(message, recipient))
 
     # No recipient - handle based on channel for non-tool messages
-    elif message.channel == "analysis":
-        output_items.extend(_parse_reasoning(message))
-
-    elif message.channel == "commentary":
-        # Per Harmony format, commentary channel can contain preambles to calling
-        # multiple functions - explanatory text with no recipient
-        output_items.extend(_parse_reasoning(message))
-
-    elif message.channel == "final":
-        output_items.append(_parse_final_message(message))
-
     else:
-        raise ValueError(f"Unknown channel: {message.channel}")
+        output_items.extend(_parse_message_no_recipient(message))
 
     return output_items
 
@@ -498,7 +503,26 @@ def parser_state_to_response_output(
                 )
             ]
 
-    if parser.current_channel in ("commentary", "analysis"):
+    if parser.current_channel == "commentary":
+        # Per Harmony format, preambles (commentary with no recipient) are
+        # intended to be shown to end-users, unlike analysis channel content.
+        output_text = ResponseOutputText(
+            text=parser.current_content,
+            annotations=[],
+            type="output_text",
+            logprobs=None,
+        )
+        return [
+            ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[output_text],
+                role="assistant",
+                status="incomplete",
+                type="message",
+            )
+        ]
+
+    if parser.current_channel == "analysis":
         return [
             ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",

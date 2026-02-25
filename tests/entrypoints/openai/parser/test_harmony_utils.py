@@ -8,6 +8,7 @@ from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     get_encoding,
+    get_system_message,
     has_custom_tools,
     parse_chat_input_to_harmony_message,
     parse_chat_output,
@@ -764,6 +765,48 @@ class TestParseChatOutput:
         assert reasoning == "I've thought hard about this."
         assert final_content == "The answer is 4."
 
+    def test_parse_chat_output_commentary_with_recipient_excluded(self) -> None:
+        """Commentary with a recipient (tool call) should not appear in
+        final_content — those are handled separately by the tool parser.
+
+        The first message is a preamble (visible), the second is a tool
+        call (excluded). Only the preamble should appear in final_content.
+        """
+        harmony_str = (
+            "<|channel|>commentary"
+            "<|message|>Let me check the weather.<|end|>"
+            "<|start|>assistant to=functions.get_weather"
+            "<|channel|>commentary"
+            '<|message|>{"location": "SF"}<|end|>'
+        )
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "Let me check the weather."
+
+    def test_parse_chat_output_interrupted_preamble(self) -> None:
+        """Partial/interrupted preamble (commentary without recipient) should
+        appear in final_content, not reasoning."""
+        harmony_str = "<|channel|>commentary<|message|>I'll search for that"
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "I'll search for that"
+
+    def test_parse_chat_output_preamble_then_final(self) -> None:
+        """Preamble followed by a final message should both appear in
+        final_content, joined by newline."""
+        harmony_str = (
+            "<|channel|>commentary"
+            "<|message|>Let me look that up.<|end|>"
+            "<|start|>assistant<|channel|>final"
+            "<|message|>The answer is 42.<|end|>"
+        )
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "Let me look that up.\nThe answer is 42."
+
 
 def test_has_custom_tools() -> None:
     assert not has_custom_tools(set())
@@ -772,3 +815,29 @@ def test_has_custom_tools() -> None:
     assert has_custom_tools(
         {"web_search_preview", "code_interpreter", "container", "others"}
     )
+
+
+class TestGetSystemMessage:
+    """Tests for get_system_message channel configuration."""
+
+    def test_commentary_channel_present_without_custom_tools(self) -> None:
+        """Commentary channel must be valid even without custom tools."""
+        sys_msg = get_system_message(with_custom_tools=False)
+        valid_channels = sys_msg.content[0].channel_config.valid_channels
+        assert "commentary" in valid_channels
+
+    def test_commentary_channel_present_with_custom_tools(self) -> None:
+        """Commentary channel present when custom tools are enabled."""
+        sys_msg = get_system_message(with_custom_tools=True)
+        valid_channels = sys_msg.content[0].channel_config.valid_channels
+        assert "commentary" in valid_channels
+
+    def test_all_standard_channels_present(self) -> None:
+        """All three standard Harmony channels should always be valid."""
+        for with_tools in (True, False):
+            sys_msg = get_system_message(with_custom_tools=with_tools)
+            valid_channels = sys_msg.content[0].channel_config.valid_channels
+            for channel in ("analysis", "commentary", "final"):
+                assert channel in valid_channels, (
+                    f"{channel} missing when with_custom_tools={with_tools}"
+                )

@@ -8,7 +8,6 @@ from typing import Literal
 from openai.types.responses.tool import Tool
 from openai_harmony import (
     Author,
-    ChannelConfig,
     Conversation,
     DeveloperContent,
     HarmonyEncodingName,
@@ -101,13 +100,6 @@ def get_system_message(
         sys_msg_content = sys_msg_content.with_tools(python_description)
     if container_description is not None:
         sys_msg_content = sys_msg_content.with_tools(container_description)
-    if not with_custom_tools:
-        channel_config = sys_msg_content.channel_config
-        invalid_channel = "commentary"
-        new_config = ChannelConfig.require_channels(
-            [c for c in channel_config.valid_channels if c != invalid_channel]
-        )
-        sys_msg_content = sys_msg_content.with_channel_config(new_config)
     sys_msg = Message.from_role_and_content(Role.SYSTEM, sys_msg_content)
     return sys_msg
 
@@ -365,17 +357,30 @@ def parse_chat_output(
     is_tool_call = False  # TODO: update this when tool call is supported
 
     # Get completed messages from the parser
+    # - analysis channel: hidden reasoning
+    # - commentary channel without recipient (preambles): visible to user
+    # - final channel: visible to user
+    # - commentary with recipient (tool calls): handled separately by tool parser
     reasoning_texts = [
         msg.content[0].text for msg in output_msgs if msg.channel == "analysis"
     ]
     final_texts = [
-        msg.content[0].text for msg in output_msgs if msg.channel != "analysis"
+        msg.content[0].text
+        for msg in output_msgs
+        if msg.channel == "final" or (msg.channel == "commentary" and not msg.recipient)
     ]
 
     # Extract partial messages from the parser
     if parser.current_channel == "analysis" and parser.current_content:
         reasoning_texts.append(parser.current_content)
-    elif parser.current_channel != "analysis" and parser.current_content:
+    elif parser.current_channel == "final" and parser.current_content:
+        final_texts.append(parser.current_content)
+    elif (
+        parser.current_channel == "commentary"
+        and not parser.current_recipient
+        and parser.current_content
+    ):
+        # Preambles (commentary without recipient) are visible to user
         final_texts.append(parser.current_content)
 
     # Flatten multiple messages into a single string
