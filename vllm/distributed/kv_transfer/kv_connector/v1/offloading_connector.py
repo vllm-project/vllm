@@ -33,6 +33,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
+from vllm.v1.kv_offload.reuse_tracker import BlockReuseTracker
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingWorker,
@@ -62,6 +63,10 @@ class OffloadingConnectorStats(KVConnectorStats):
 
     def reset(self):
         self.data: dict[str, list[OffloadingOperationMetrics]] = {}
+        # Counters for store gating (Strategy A / P0)
+        self.stores_skipped: int = 0
+        self.stores_submitted: int = 0
+        self.loads_hit: int = 0
 
     def aggregate(self, other: KVConnectorStats) -> KVConnectorStats:
         if not other.is_empty():
@@ -111,6 +116,11 @@ class OffloadingConnectorStats(KVConnectorStats):
 class OffloadingConnectorMetadata(KVConnectorMetadata):
     reqs_to_load: dict[ReqId, TransferSpec]
     reqs_to_store: dict[ReqId, TransferSpec]
+    # Effective load mode decided by AdaptiveOffloadingPolicy and propagated
+    # from the scheduler process to the worker process each step.
+    # "blocking"            -> wait for PCIe transfer before dispatching.
+    # "async_with_fallback" -> non-blocking check; defer if still in-flight.
+    effective_load_mode: str = "blocking"
 
 
 class OffloadingConnector(KVConnectorBase_V1):
@@ -267,6 +277,17 @@ class OffloadingConnectorScheduler:
         # request ID -> set(block hashes being stored/load)
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
+
+        # Strategy A (P0): gate GPU->CPU stores on observed block-hash reuse.
+        # Only blocks seen >= store_threshold times will be stored to CPU.
+        self.reuse_tracker = BlockReuseTracker(
+            max_size=int(
+                spec.extra_config.get("reuse_tracker_max_size", 64_000)
+            ),
+            store_threshold=int(
+                spec.extra_config.get("store_threshold", 2)
+            ),
+        )
 
     def _get_block_hashes(
         self,
@@ -454,10 +475,19 @@ class OffloadingConnectorScheduler:
             for idx, blk_hash in enumerate(new_block_hashes):
                 if blk_hash not in block_hashes_to_store:
                     continue
+                # Strategy A: skip store for blocks unlikely to be reused.
+                if not self.reuse_tracker.record_and_check(blk_hash):
+                    logger.debug(
+                        "Skipping store for block hash %s (below reuse threshold)",
+                        blk_hash,
+                    )
+                    continue
                 offloaded_block_idx = start_block_idx + idx
                 gpu_block_idx = offloaded_block_idx * self.block_size_factor
                 for i in range(self.block_size_factor):
                     src_block_ids.append(block_ids[gpu_block_idx + i])
+            if not src_block_ids:
+                continue
             src_spec = GPULoadStoreSpec(src_block_ids)
 
             reqs_to_store[req_id] = (src_spec, dst_spec)
@@ -478,6 +508,7 @@ class OffloadingConnectorScheduler:
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
             reqs_to_store=self._get_reqs_to_store(scheduler_output),
+            effective_load_mode="blocking",  # PR 2 will set this dynamically
         )
         self._reqs_to_load = {}
 
@@ -754,6 +785,26 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             documentation="Histogram of KV offload transfer size, in bytes.",
             buckets=buckets[:],
             labelnames=labelnames + ["transfer_type"],
+        )
+
+        # Strategy A / P0: store-gate metrics (vllm_ naming convention)
+        self._counter_store_skip = self._counter_cls(
+            name="vllm_offload_store_skip_total",
+            documentation=(
+                "Total KV cache blocks skipped by the reuse-tracker gate "
+                "(blocks that were evicted but deemed unlikely to be re-used)."
+            ),
+            labelnames=labelnames,
+        )
+        self._counter_store_submitted = self._counter_cls(
+            name="vllm_offload_store_submitted_total",
+            documentation="Total KV cache blocks actually sent to CPU offload storage.",
+            labelnames=labelnames,
+        )
+        self._counter_load_hit = self._counter_cls(
+            name="vllm_offload_load_hit_total",
+            documentation="Total CPU cache hits that triggered a CPU->GPU load.",
+            labelnames=labelnames,
         )
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
