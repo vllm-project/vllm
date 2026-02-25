@@ -21,10 +21,10 @@ from tests.utils import RemoteOpenAIServer
 
 
 AITER_MODEL_LIST = [
-    "openai/gpt-oss-120b"
+    "openai/gpt-oss-20b"
 ]
 
-MODEL_NAME = "openai/gpt-oss-120b"
+MODEL_NAME = "openai/gpt-oss-20b"
 
 
 @pytest.fixture(scope="module")
@@ -39,7 +39,7 @@ def default_server_args():
         "--max-num-seqs", "256",
         "--gpu-memory-utilization", "0.9",
         "--reasoning-parser", "openai_gptoss",
-        "--tensor-parallel-size", "2",
+        "--tensor-parallel-size", "1",
         "--cpu-offload-gb", "4",
         "--attention-backend", attention_backend,
     ]
