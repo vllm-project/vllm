@@ -4,6 +4,7 @@
 
 from fastapi import APIRouter, FastAPI, Request
 from fastapi.responses import Response
+from pydantic import BaseModel, Field
 
 from vllm.config import ProfilerConfig
 from vllm.engine.protocol import EngineClient
@@ -14,14 +15,37 @@ logger = init_logger(__name__)
 router = APIRouter()
 
 
+class StartProfileRequest(BaseModel):
+    num_steps: int | None = Field(
+        default=None,
+        description="Maximum number of engine steps to profile. "
+        "Overrides the server's max_iterations config for this session. "
+        "0 means unlimited.",
+    )
+    delay_steps: int | None = Field(
+        default=None,
+        description="Number of engine steps to skip before profiling begins. "
+        "Overrides the server's delay_iterations config for this session.",
+    )
+
+
 def engine_client(request: Request) -> EngineClient:
     return request.app.state.engine_client
 
 
 @router.post("/start_profile")
-async def start_profile(raw_request: Request):
-    logger.info("Starting profiler...")
-    await engine_client(raw_request).start_profile()
+async def start_profile(raw_request: Request, body: StartProfileRequest | None = None):
+    if body is None:
+        body = StartProfileRequest()
+    logger.info(
+        "Starting profiler... (num_steps=%s, delay_steps=%s)",
+        body.num_steps,
+        body.delay_steps,
+    )
+    await engine_client(raw_request).start_profile(
+        num_steps=body.num_steps,
+        delay_steps=body.delay_steps,
+    )
     logger.info("Profiler started.")
     return Response(status_code=200)
 

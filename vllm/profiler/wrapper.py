@@ -68,14 +68,32 @@ class WorkerProfiler(ABC):
             logger.warning("Failed to stop profiler: %s", e)
         self._running = False  # Always mark as not running, assume stop worked
 
-    def start(self) -> None:
-        """Attempt to start the profiler, accounting for delayed starts."""
+    def start(
+        self,
+        num_steps: int | None = None,
+        delay_steps: int | None = None,
+    ) -> None:
+        """Attempt to start the profiler, accounting for delayed starts.
+
+        Args:
+            num_steps: If provided, overrides max_iterations for this
+                profiling session. 0 means unlimited.
+            delay_steps: If provided, overrides delay_iterations for this
+                profiling session.
+        """
         if self._active:
             logger.debug(
                 "start_profile received when profiler is already active. "
                 "Ignoring request."
             )
             return
+
+        # Apply runtime overrides if provided
+        if num_steps is not None:
+            self._max_iters = num_steps
+        if delay_steps is not None:
+            self._delay_iters = delay_steps
+
         self._active = True
         if self._delay_iters == 0:
             self._call_start()

@@ -749,7 +749,13 @@ class Worker(WorkerBase):
     def take_draft_token_ids(self) -> DraftTokenIds | None:
         return self.model_runner.take_draft_token_ids()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+    def profile(
+        self,
+        is_start: bool = True,
+        profile_prefix: str | None = None,
+        num_steps: int | None = None,
+        delay_steps: int | None = None,
+    ):
         # Check if profiling is enabled
         if self.profiler_config is None or self.profiler_config.profiler is None:
             raise RuntimeError(
@@ -790,11 +796,11 @@ class Worker(WorkerBase):
                 else:
                     logger.warning("Unrecognized profiler: %s", profiler_type)
                     return
-                self.profiler.start()
+                self.profiler.start(num_steps=num_steps, delay_steps=delay_steps)
             else:
                 # Profiler already initialized. Restart profiling but keep
                 # the original trace name from the first initialization.
-                self.profiler.start()
+                self.profiler.start(num_steps=num_steps, delay_steps=delay_steps)
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
