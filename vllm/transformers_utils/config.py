@@ -159,7 +159,9 @@ class HFConfigParser(ConfigParserBase):
             if isinstance(hf_overrides, dict) and "model_type" in hf_overrides:
                 model_type = hf_overrides["model_type"]
             elif callable(hf_overrides):
-                model_type = hf_overrides(PretrainedConfig()).model_type or model_type
+                dummy_config = PretrainedConfig(architectures=[""])
+                if hf_overrides_model_type := hf_overrides(dummy_config).model_type:
+                    model_type = hf_overrides_model_type
 
         if model_type in _CONFIG_REGISTRY:
             config_class = _CONFIG_REGISTRY[model_type]
