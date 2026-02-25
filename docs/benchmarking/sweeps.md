@@ -1,15 +1,15 @@
 # Parameter Sweeps
 
-`vllm bench sweep` is a suite of commands designed to run benchmarks across vLLM configurations and visualize the results for easy comparison.
+`vllm bench sweep` is a suite of commands designed to run benchmarks across multiple configurations and compare them by visualizing the results.
 
 ## Online Benchmark
 
 ### Basic
 
-`vllm bench sweep serve` automatically starts `vllm serve` and runs `vllm bench serve` to evaluate vLLM over multiple configurations.
+`vllm bench sweep serve` starts `vllm serve` and iteratively runs `vllm bench serve for each server configuration.
 
 !!! tip
-    If you only need to run benchmarks for a single vLLM configuration, consider using [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
+    If you only need to run benchmarks for a single server configuration, consider using [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
 
 Follow these steps to run the script:
 
@@ -98,7 +98,7 @@ vllm bench sweep serve \
 
 ### SLA Finder
 
-`vllm bench sweep serve_sla` is a wrapper over `vllm bench sweep serve` that explores different values of request rate or concurrency (choose using `--sla-variable`) in order to find the tradeoff between latency and throughput. The results can then be [visualized](#visualization) to determine the feasible SLAs.
+`vllm bench sweep serve_sla` is a variant of `vllm bench sweep serve` that explores different values of request rate or concurrency (choose using `--sla-variable`) in order to find the tradeoff between latency and throughput. The results can then be [visualized](#visualization) to determine the feasible SLAs.
 
 Example command:
 
@@ -218,3 +218,6 @@ Example:
 vllm bench sweep plot_pareto benchmarks/results/<timestamp> \
   --label-by max_concurrency,tensor_parallel_size,pipeline_parallel_size
 ```
+
+!!! tip
+    You can use `--dry-run` to preview the figures to be plotted.
