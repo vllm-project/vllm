@@ -85,6 +85,8 @@ vllm bench sweep serve \
     -o benchmarks/results
 ```
 
+Each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
+
 !!! important
     If both `--serve-params` and `--bench-params` are passed, the script will iterate over the Cartesian product between them.
     You can use `--dry-run` to preview the commands to be run.
@@ -94,10 +96,8 @@ vllm bench sweep serve \
     In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
 
 !!! note
-    By default, each parameter combination is benchmarked 3 times to make the results more reliable. You can adjust the number of runs by setting `--num-runs`.
-
-!!! tip
-    Set `_benchmark_name` to provide a human-readable name for parameter combinations with many variables.
+    You should  `_benchmark_name` to provide a human-readable name for parameter combinations involving many variables.
+    This becomes mandatory if the file name would otherwise exceed the maximum path length allowed by the filesystem.
 
 !!! tip
     You can use the `--resume` option to continue the parameter sweep if an unexpected error occurs, e.g., timeout when connecting to HF Hub.
