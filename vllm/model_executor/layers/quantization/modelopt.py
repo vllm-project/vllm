@@ -249,7 +249,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if hf_quant_cfg is None:
             return None
         if hf_quant_cfg.get("quant_method", "").lower() != "modelopt":
-            raise ValueError("Only modelopt is supported as quant_method.")
+            return None
         if "quantization" in hf_quant_cfg:
             quant_config = hf_quant_cfg["quantization"]
             if isinstance(quant_config, dict):
