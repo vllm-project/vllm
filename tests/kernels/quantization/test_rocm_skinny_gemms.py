@@ -279,6 +279,17 @@ def test_rocm_wvsplitk_invalid_bias_by_does_not_divide_n():
         ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
 
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+def test_rocm_wvsplitk_invalid_bias_dtype_mismatch():
+    """Bias must have the same dtype as inputs to avoid unsafe reinterpret_cast."""
+    cu_count = get_cu_count()
+    A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
+    B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
+    BIAS = torch.rand(16, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(RuntimeError, match="in_bias must have the same dtype"):
+        ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
+
+
 @pytest.mark.parametrize("xnorm", [False, True])
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK_FP8)
 @pytest.mark.parametrize("dtype", DTYPES)
