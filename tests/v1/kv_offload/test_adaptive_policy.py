@@ -13,12 +13,36 @@ This means:
 from __future__ import annotations
 
 import ast
+import logging as _logging
 import pathlib
 import statistics
 import textwrap
 from collections import deque
+from typing import TYPE_CHECKING, Any, Protocol
 
 import pytest
+
+# Structural stub used by mypy only — describes the interface of the
+# dynamically-loaded AdaptiveOffloadingPolicy without requiring a full vllm
+# import at type-check time.
+if TYPE_CHECKING:
+    class AdaptiveOffloadingPolicy(Protocol):  # pragma: no cover
+        paused: bool
+        baseline_ttft: float | None
+        overhead_threshold_pct: float
+
+        def __init__(
+            self,
+            overhead_threshold_pct: float = ...,
+            window: int = ...,
+            warmup_steps: int = ...,
+            expected_baseline_ttft_ms: float | None = ...,
+        ) -> None: ...
+
+        def record_ttft(self, ttft_ms: float) -> None: ...
+
+        @property
+        def effective_load_mode(self) -> str: ...
 
 # ---------------------------------------------------------------------------
 # Load the real AdaptiveOffloadingPolicy from production source
@@ -44,8 +68,7 @@ def _extract_class_source(path: pathlib.Path, class_name: str) -> str:
 
 # Exec the class definition into an isolated namespace.
 # The class needs: statistics, deque (stdlib), and logger (module-level global).
-import logging as _logging
-_ns: dict = {
+_ns: dict[str, Any] = {
     "statistics": statistics,
     "deque": deque,
     "logger": _logging.getLogger("test.adaptive_policy"),
@@ -54,7 +77,8 @@ exec(  # noqa: S102
     textwrap.dedent(_extract_class_source(_CONNECTOR_PATH, "AdaptiveOffloadingPolicy")),
     _ns,
 )
-AdaptiveOffloadingPolicy = _ns["AdaptiveOffloadingPolicy"]
+if not TYPE_CHECKING:
+    AdaptiveOffloadingPolicy = _ns["AdaptiveOffloadingPolicy"]  # type: ignore[assignment]
 
 
 # ---------------------------------------------------------------------------

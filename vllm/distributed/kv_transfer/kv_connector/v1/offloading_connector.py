@@ -35,7 +35,7 @@ from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
-from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
+from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec, GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_tracker import BlockReuseTracker
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.transfer_timing import TransferTimingStats
@@ -108,7 +108,10 @@ class AdaptiveOffloadingPolicy:
                 )
         else:
             # Active phase: detect regression.
-            if len(self.recent_ttfts) >= max(self.recent_ttfts.maxlen // 2, 10):
+            # deque.maxlen is int|None; it is only None when the deque is
+            # unbounded, which never happens here (we always pass maxlen=window).
+            maxlen: int = self.recent_ttfts.maxlen or 200
+            if len(self.recent_ttfts) >= max(maxlen // 2, 10):
                 current = statistics.median(self.recent_ttfts)
                 overhead = (
                     (current - self.baseline_ttft) / self.baseline_ttft * 100
@@ -777,10 +780,13 @@ class OffloadingConnectorWorker:
             assert success
             # Record (job_id, prefix_len) for Strategy B cost model.
             # transfer_spec = (src_spec, dst_spec); dst_spec is a
-            # GPULoadStoreSpec whose block_ids list length × gpu_block_size
+            # BlockIDsLoadStoreSpec whose block_ids length × gpu_block_size
             # gives the exact number of tokens being loaded.
-            _dst_spec = transfer_spec[1]
-            prefix_len_tokens = len(_dst_spec.block_ids) * self.spec.gpu_block_size
+            dst_spec = transfer_spec[1]
+            if isinstance(dst_spec, BlockIDsLoadStoreSpec):
+                prefix_len_tokens = len(dst_spec.block_ids) * self.spec.gpu_block_size
+            else:
+                prefix_len_tokens = 0
             self._pending_load_info[req_id] = (job_id, prefix_len_tokens)
 
     def _check_loads_ready(
@@ -789,26 +795,26 @@ class OffloadingConnectorWorker:
         """Non-blocking check of in-flight CPU->GPU loads (Strategy B / P2).
 
         Returns:
-            fallback_reqs:  req_ids where recompute is preferred         → treat
-                            as cache-miss this step so prefill can proceed now.
-            deferred_reqs:  req_ids where transfer is still in-flight but
+            fallback_reqs:  req_ids where recompute is preferred → treat as
+                            cache-miss this step so prefill can proceed now.
+            deferred_reqs:  req_ids where transfer is still in-flight but the
                             fallback cap is full → defer to next scheduling step.
 
-        Uses CUDA event.query() atomically: once it returns True the transfer
-        data is committed — no TOCTOU race possible.  Over-budget requests are
-        deferred (placed back into _pending_load_info for re-evaluation next
-        step) rather than synchronously blocked, preserving the non-blocking
-        promise.
+        Uses the existing _get_finished_internal() to collect completed jobs.
+        Once a load job_id appears in the finished set, its data is committed
+        to the GPU KV cache (CUDA event ordering guarantees this).
+        Over-budget requests are deferred, not blocked.
         """
-        completed_jobs: set[int] = {
-            tr.job_id for tr in self.worker.get_finished_load_jobs()
-        }
+        # Drain the finished queue to discover which load jobs have completed.
+        finished_sending, finished_recving = self._get_finished_internal()
+        finished_load_req_ids: set[str] = finished_recving
+
         fallback_reqs: set[str] = set()
         deferred_reqs: set[str] = set()
         concurrent_fallbacks = 0
 
         for req_id, (job_id, prefix_len) in list(self._pending_load_info.items()):
-            if job_id in completed_jobs:
+            if req_id in finished_load_req_ids:
                 del self._pending_load_info[req_id]  # load done, proceed normally
                 continue
 
