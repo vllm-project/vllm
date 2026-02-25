@@ -191,6 +191,7 @@ class Base(
         self.attention_instances = self.create_attention_instances()
 
         # Input embeddings
+        self.embed_scale = None
         input_embeddings = self.model.get_input_embeddings()
         if not isinstance(input_embeddings, PPMissingLayer):
             # Some models scale embeddings inside the input embedding layer
