@@ -643,7 +643,7 @@ def test_run_guidellm_benchmark(
         # Read and print JSON output
         with open(output_path, "r") as f:
             raw_output = f.read()
-        print(raw_output)
+        print("GUIDELLM OUTPUT: \n", raw_output)
 
         # Clean up temp file
         os.unlink(output_path)
