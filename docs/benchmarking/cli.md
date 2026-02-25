@@ -53,6 +53,9 @@ Legend:
 
 ### 🚀 Online Benchmark
 
+!!! tip
+    For production-level benchmarking, we recommend [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
+
 <details class="admonition abstract" markdown="1">
 <summary>Show more</summary>
 
