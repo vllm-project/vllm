@@ -780,7 +780,7 @@ TORCH_LIBRARY_EXPAND(CONCAT(TORCH_EXTENSION_NAME, _cache_ops), cache_ops) {
                  &indexer_k_quant_and_cache);
 
   cache_ops.def(
-    "concat_mla_q(Tensor ql_nope, Tensor q_pe, Tensor! q_out) -> ()");
+      "concat_mla_q(Tensor ql_nope, Tensor q_pe, Tensor! q_out) -> ()");
   cache_ops.impl("concat_mla_q", torch::kCUDA, &concat_mla_q);
 
   cache_ops.def(

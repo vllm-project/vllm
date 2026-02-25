@@ -215,9 +215,8 @@ __forceinline__ __device__ int4 ld128_cs(const int4* addr) {
 }
 
 __forceinline__ __device__ void st128_cs(int4* addr, int4 val) {
-  asm volatile(
-      "st.global.cs.v4.u32 [%0], {%1,%2,%3,%4};" ::"l"(addr),
-      "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
+  asm volatile("st.global.cs.v4.u32 [%0], {%1,%2,%3,%4};" ::"l"(addr),
+               "r"(val.x), "r"(val.y), "r"(val.z), "r"(val.w));
 }
 
 // Predicated 256-bit / 128-bit cache-global (.cg) loads.

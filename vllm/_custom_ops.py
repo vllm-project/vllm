@@ -2567,6 +2567,7 @@ def cp_gather_and_upconvert_fp8_kv_cache(
         src_cache, dst, block_table, seq_lens, workspace_starts, batch_size
     )
 
+
 def concat_mla_q(
     ql_nope: torch.Tensor,
     q_pe: torch.Tensor,
@@ -2580,6 +2581,7 @@ def concat_mla_q(
         q_out: Output tensor [num_tokens, num_heads, nope_dim + rope_dim]
     """
     torch.ops._C_cache_ops.concat_mla_q(ql_nope, q_pe, q_out)
+
 
 def indexer_k_quant_and_cache(
     k: torch.Tensor,

@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import argparse
-import itertools
 
 import torch
 
@@ -30,12 +29,10 @@ def make_inputs(num_tokens, dtype):
                          [N,B,L].transpose(0,1)).
     """
     # Simulate: bmm output [N, B, L].transpose(0, 1) -> [B, N, L]
-    raw = torch.randn(NUM_HEADS, num_tokens, NOPE_DIM, dtype=dtype,
-                        device="cuda")
+    raw = torch.randn(NUM_HEADS, num_tokens, NOPE_DIM, dtype=dtype, device="cuda")
     ql_nope = raw.transpose(0, 1)
 
-    q_pe = torch.randn(num_tokens, NUM_HEADS, ROPE_DIM, dtype=dtype,
-                       device="cuda")
+    q_pe = torch.randn(num_tokens, NUM_HEADS, ROPE_DIM, dtype=dtype, device="cuda")
     return ql_nope, q_pe
 
 
@@ -57,37 +54,39 @@ def bench_transposed(num_tokens, provider):
     dtype = torch.bfloat16
     ql_nope, q_pe = make_inputs(num_tokens, dtype)
 
-    q_out = torch.empty(num_tokens, NUM_HEADS, NOPE_DIM + ROPE_DIM,
-                        dtype=dtype, device="cuda")
+    q_out = torch.empty(
+        num_tokens, NUM_HEADS, NOPE_DIM + ROPE_DIM, dtype=dtype, device="cuda"
+    )
 
     quantiles = [0.5, 0.2, 0.8]
 
     if provider == "torch_cat":
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: torch.cat((ql_nope, q_pe), dim=-1),
-            quantiles=quantiles, rep=500)
+            lambda: torch.cat((ql_nope, q_pe), dim=-1), quantiles=quantiles, rep=500
+        )
     else:
         ms, min_ms, max_ms = triton.testing.do_bench_cudagraph(
-            lambda: ops.concat_mla_q(ql_nope, q_pe, q_out),
-            quantiles=quantiles, rep=500)
+            lambda: ops.concat_mla_q(ql_nope, q_pe, q_out), quantiles=quantiles, rep=500
+        )
 
     return ms * 1000, max_ms * 1000, min_ms * 1000  # us
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Benchmark concat_mla_q vs torch.cat"
+    parser = argparse.ArgumentParser(description="Benchmark concat_mla_q vs torch.cat")
+    parser.add_argument(
+        "--save-path", type=str, default=None, help="Path to save benchmark results"
     )
-    parser.add_argument("--save-path", type=str, default=None,
-                        help="Path to save benchmark results")
     args = parser.parse_args()
 
     print("\n" + "=" * 70)
     print("CONCAT MLA Q KERNEL BENCHMARKS")
     print("=" * 70)
     print(f"Dimensions: nope={NOPE_DIM}, rope={ROPE_DIM}, heads={NUM_HEADS}")
-    print(f"Per-head output: {NOPE_DIM + ROPE_DIM} bf16 = "
-          f"{(NOPE_DIM + ROPE_DIM) * 2} bytes")
+    print(
+        f"Per-head output: {NOPE_DIM + ROPE_DIM} bf16 = "
+        f"{(NOPE_DIM + ROPE_DIM) * 2} bytes"
+    )
     print(f"num_tokens (decode=batch_size, prefill=chunk_size): {NUM_TOKENS}")
     print("=" * 70)
 
