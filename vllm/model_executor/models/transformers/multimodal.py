@@ -468,7 +468,8 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             video_grid_thw
         )
 
-        # In v4 this utility didn't accept any `kwargs`, thus we filter
+        # In v4 `get_rope_index` doesn't have wildcard `kwargs`, and
+        # can't accept arbitrary args, even if its value is `None`
         kwargs = {}
         if mm_token_type_ids:
             kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
