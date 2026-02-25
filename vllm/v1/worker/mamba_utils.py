@@ -129,7 +129,13 @@ def preprocess_mamba(
     block_size = mamba_spec.block_size
     finished_req_ids = scheduler_output.finished_req_ids
     preempted_req_ids = scheduler_output.preempted_req_ids or set()
-    for req_id in itertools.chain(finished_req_ids, preempted_req_ids):
+    # We need to clear mamba_state_idx for resumed requests. When requests are
+    # force-preempted (e.g., during reset_prefix_cache / KV cache flush),
+    # they appear in resumed_req_ids without a corresponding entry in
+    # preempted_req_ids, leaving stale mamba_state_idx entries that can
+    # point to block indices beyond the new (smaller) block allocation.
+    resumed_req_ids = scheduler_output.scheduled_cached_reqs.resumed_req_ids
+    for req_id in itertools.chain(finished_req_ids, preempted_req_ids, resumed_req_ids):
         mamba_state_idx.pop(req_id, None)
 
     src_state_list: list[int] = []
