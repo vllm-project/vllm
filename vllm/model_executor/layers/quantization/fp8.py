@@ -577,14 +577,13 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
                 if args
                 else kwargs.get("loaded_shard_id", kwargs.get("shard_id"))
             )
+            copy_numel_counter = CopyNumelCounter()
             if isinstance(loaded_shard_id, tuple) and hasattr(
                 layer, "weight_loader_v2"
             ):
-                copy_numel_counter = CopyNumelCounter()
                 with copy_numel_counter:
                     res = layer.weight_loader_v2(param, loaded_weight, loaded_shard_id)
             else:
-                copy_numel_counter = CopyNumelCounter()
                 with copy_numel_counter:
                     res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
             layer._loaded_numel += copy_numel_counter.copied_numel
