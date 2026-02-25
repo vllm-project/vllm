@@ -265,9 +265,7 @@ def test_sym_size_in_producer_subgraph():
             continue
         if item.graph_id > splitting_items[0].graph_id:
             continue
-        sym_size_nodes = list(
-            find_op_nodes(torch.ops.aten.sym_size, item.graph.graph)
-        )
+        sym_size_nodes = list(find_op_nodes(torch.ops.aten.sym_size, item.graph.graph))
         if sym_size_nodes:
             producer_subgraphs_with_sym_size.append(item.submod_name)
 
