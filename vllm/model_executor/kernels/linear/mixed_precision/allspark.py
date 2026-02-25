@@ -11,6 +11,7 @@ from vllm.model_executor.layers.quantization.utils.allspark_utils import (
     check_allspark_supported_dtype_shape,
 )
 from vllm.model_executor.parameter import BasevLLMParameter, permute_param_layout_
+from vllm.utils.platform_utils import num_compute_units
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -45,7 +46,7 @@ class AllSparkLinearKernel(MPLinearKernel):
 
         # prepare the parameters required for the kernel
         properties = torch.cuda.get_device_properties(device.index)
-        sm_count = properties.multi_processor_count
+        sm_count = num_compute_units(device.index)
         sm_version = properties.major * 10 + properties.minor
         gemm_args = {}
         gemm_args["sm_count"] = sm_count
