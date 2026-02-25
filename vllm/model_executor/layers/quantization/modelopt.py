@@ -294,10 +294,20 @@ class ModelOptQuantConfigBase(QuantizationConfig):
             # "exclude_modules" is the key in the legacy hf_quant_config.json
             exclude_modules = quant_config.get("exclude_modules", [])
         else:
-            # Compressed-tensors style format:
+            # Compressed-tensors style format (config.json quantization_config):
             # {"quant_algo": "...", "quant_method": "modelopt"}
             quant_method = config.get("quant_algo")
-            kv_cache_quant_method = config.get("kv_cache_quant_algo")
+
+            # "kv_cache_scheme" (a dict) instead of "kv_cache_quant_algo" (a string).
+            kv_cache_scheme = config.get("kv_cache_scheme")
+            if isinstance(kv_cache_scheme, dict) and (
+                kv_cache_scheme.get("type") == "float"
+                and kv_cache_scheme.get("num_bits") == 8
+            ):
+                kv_cache_quant_method = "FP8"
+            else:
+                kv_cache_quant_method = None
+
             # "ignore" is the key in config.json
             exclude_modules = config.get("ignore", [])
             group_size_raw = config.get("group_size")
