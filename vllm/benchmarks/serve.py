@@ -1919,12 +1919,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                     "successfully.",
                     stacklevel=2,
                 )
-        except ImportError:
-            warnings.warn(
-                "matplotlib is required for dataset statistics "
-                "plotting. Install it with: pip install matplotlib",
-                stacklevel=2,
-            )
         except Exception as e:
             warnings.warn(
                 f"Failed to generate dataset statistics plot: {e}", stacklevel=2
