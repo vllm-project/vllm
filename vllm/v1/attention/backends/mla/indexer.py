@@ -357,17 +357,31 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # Flatten multi-token decode requests into single-token
                 # batch entries, expanding seq_lens and block tables so
                 # the kernel always sees next_n=1.
-                #
-                # For request i with seq_len=S, decode_len=L, create L
-                # entries with seqlens [S-L+1, S-L+2, ..., S].
+
+                # Assume 4 requests with seq_lens [10, 7, 12, 0] (the final req is
+                # padding) and decode_lens [3, 1, 4, 0] in the below example comments.
+                # The context lengths are therefore
+                # [10-3, 7-1, 12-4, 0-0] = [7, 6, 8, 0].
+
+                # 3 + 1 + 4 + 0 = 8
                 actual_expanded = int(decode_lens_cpu.sum().item())
+
+                # [7, 6, 8, 0] -> [7, 7, 7, 6, 8, 8, 8, 8]
                 expanded_base = torch.repeat_interleave(
                     seq_lens - decode_lens, decode_lens
                 )
+
+                # [3, 1, 4, 0] -> [3, 4, 8, 8]
                 cumsum = torch.cumsum(decode_lens, dim=0, dtype=torch.int32)
+
+                # [3, 4, 8, 8] -> [0, 3, 4, 8]
                 starts = torch.zeros_like(cumsum)
                 starts[1:] = cumsum[:-1]
+
+                # [0, 3, 4, 8] -> [0, 0, 0, 3, 4, 4, 4, 4]
                 expanded_starts = torch.repeat_interleave(starts, decode_lens)
+
+                # [0, 1, 2, 0, 0, 1, 2, 3]
                 positions_within = (
                     torch.arange(
                         actual_expanded,
@@ -377,13 +391,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     - expanded_starts
                 )
 
+                # [8, 9, 10, 7, 9, 10, 11, 12, ...] where ... is unused buffer space
                 self.expanded_seq_lens_buffer[:actual_expanded] = (
                     expanded_base + positions_within + 1
                 )
-                self.expanded_seq_lens_buffer[:actual_expanded].clamp_(min=0)
                 self.expanded_seq_lens_buffer[actual_expanded:] = 0
                 seq_lens = self.expanded_seq_lens_buffer[:num_decode_tokens]
 
+                # Give each of the flattened entries the same block table row as the
+                # original request.
                 self._expanded_block_table_buffer[:actual_expanded] = (
                     torch.repeat_interleave(block_table, decode_lens, dim=0)
                 )
@@ -393,6 +409,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     ] = 0
                 block_table = self._expanded_block_table_buffer[:num_decode_tokens]
 
+                # All reqs now have decode_len=1
                 self.decode_lens_buffer[:num_decode_tokens] = 1
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
                 requires_padding = False
