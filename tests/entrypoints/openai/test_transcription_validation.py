@@ -183,6 +183,7 @@ async def test_diarized_stream_event_contract_unit():
             text="Bye",
             token_ids=[21, 22],
             finish_reason="stop",
+            prompt_token_ids=[4, 5],
         ),
     )
 
@@ -234,8 +235,9 @@ async def test_diarized_stream_event_contract_unit():
     assert all("usage" not in payload for payload in payloads)
 
     assert request_metadata.final_usage_info is not None
+    assert request_metadata.final_usage_info.prompt_tokens == 5
     assert request_metadata.final_usage_info.completion_tokens == 4
-    assert request_metadata.final_usage_info.total_tokens == 7
+    assert request_metadata.final_usage_info.total_tokens == 9
 
 
 @pytest.mark.asyncio

@@ -770,6 +770,12 @@ class OpenAISpeechToText(OpenAIServing):
         completion_tokens = 0
         num_prompt_tokens = 0
 
+        audio_tokens = self.model_cls.get_num_audio_tokens(
+            audio_duration_s, self.asr_config, self.model_config
+        )
+        if audio_tokens:
+            num_prompt_tokens += audio_tokens
+
         include_usage = self.enable_force_include_usage or request.stream_include_usage
         include_continuous_usage = (
             request.stream_continuous_usage_stats
@@ -782,11 +788,7 @@ class OpenAISpeechToText(OpenAIServing):
                 async for res in result_generator:
                     # On first result.
                     if res.prompt_token_ids is not None:
-                        num_prompt_tokens = len(res.prompt_token_ids)
-                        if audio_tokens := self.model_cls.get_num_audio_tokens(
-                            audio_duration_s, self.asr_config, self.model_config
-                        ):
-                            num_prompt_tokens += audio_tokens
+                        num_prompt_tokens += len(res.prompt_token_ids)
 
                     # We need to do it here, because if there are exceptions in
                     # the result_generator, it needs to be sent as the FIRST
@@ -882,6 +884,12 @@ class OpenAISpeechToText(OpenAIServing):
         full_text_parts: list[str] = []
         chunk_size_in_s = self.asr_config.max_audio_clip_s
 
+        audio_tokens = self.model_cls.get_num_audio_tokens(
+            audio_duration_s, self.asr_config, self.model_config
+        )
+        if audio_tokens:
+            num_prompt_tokens += audio_tokens
+
         try:
             for idx, result_generator in enumerate(list_result_generator):
                 segment_text_parts: list[str] = []
@@ -896,11 +904,7 @@ class OpenAISpeechToText(OpenAIServing):
 
                 async for res in result_generator:
                     if res.prompt_token_ids is not None:
-                        num_prompt_tokens = len(res.prompt_token_ids)
-                        if audio_tokens := self.model_cls.get_num_audio_tokens(
-                            audio_duration_s, self.asr_config, self.model_config
-                        ):
-                            num_prompt_tokens += audio_tokens
+                        num_prompt_tokens += len(res.prompt_token_ids)
 
                     assert len(res.outputs) == 1
                     output = res.outputs[0]
