@@ -61,7 +61,6 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
     VideoItem,
 )
 from vllm.multimodal.media.audio import extract_audio_from_video_bytes
@@ -72,6 +71,7 @@ from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
+    MultiModalUUIDItems,
     VideoProcessorItems,
 )
 from vllm.multimodal.processing import BaseDummyInputsBuilder
@@ -1389,16 +1389,15 @@ class NanoNemotronVLMultiModalProcessor(
 
     def _extract_audio_from_videos(
         self,
-        mm_data: MultiModalDataDict,
-    ) -> tuple[MultiModalDataDict, list[AudioItem]]:
-        """Extract audio tracks from video bytes in *mm_data*.
+        mm_items: MultiModalDataItems,
+    ) -> tuple[MultiModalDataItems, list[AudioItem]]:
+        """Extract audio tracks from video bytes in *mm_items*.
 
         Returns:
-            The (possibly augmented) *mm_data* and the list of
+            The augmented *mm_items* (with audio added) and the list of
             extracted audio items.
         """
-        video_items = self.data_parser.parse_mm_data({"video": mm_data["video"]})
-        videos = video_items.get_items("video", VideoProcessorItems)
+        videos = mm_items.get_items("video", VideoProcessorItems)
         assert isinstance(videos.metadata, list)
         metadata_list = videos.metadata
 
@@ -1424,37 +1423,42 @@ class NanoNemotronVLMultiModalProcessor(
             )
             del metadata["original_video_bytes"]
 
-        mm_data = dict(mm_data)
-        mm_data["audio"] = audio_items
-        return mm_data, audio_items
+        audio_parsed = self.data_parser.parse_mm_data({"audio": audio_items})
+        mm_items = MultiModalDataItems({**mm_items, **audio_parsed})
+        return mm_items, audio_items
 
     def apply(
         self,
         prompt: str | list[int],
-        mm_data: MultiModalDataDict,
-        hf_processor_mm_kwargs: Mapping[str, object],
+        mm_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems | None = None,
+        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
         tokenization_kwargs: Mapping[str, object] | None = None,
-        *,
-        mm_uuids: MultiModalUUIDDict | None = None,
     ) -> MultiModalInputs:
+        if hf_processor_mm_kwargs is None:
+            hf_processor_mm_kwargs = {}
+
         use_audio_in_video = bool(
             hf_processor_mm_kwargs.get("use_audio_in_video", False)
         )
 
         hf_processor_mm_kwargs = {
-            k: v for k, v in hf_processor_mm_kwargs.items() if k != "use_audio_in_video"
+            k: v for k, v in hf_processor_mm_kwargs.items()
+            if k != "use_audio_in_video"
         }
 
-        if not (use_audio_in_video and "video" in mm_data and "audio" not in mm_data):
+        if not (use_audio_in_video
+                and "video" in mm_items
+                and "audio" not in mm_items):
             return super().apply(
                 prompt,
-                mm_data,
+                mm_items,
+                mm_uuid_items,
                 hf_processor_mm_kwargs,
                 tokenization_kwargs,
-                mm_uuids=mm_uuids,
             )
 
-        mm_data, audio_items = self._extract_audio_from_videos(mm_data)
+        mm_items, audio_items = self._extract_audio_from_videos(mm_items)
 
         if not isinstance(prompt, str):
             tokenizer = self.info.get_tokenizer()
@@ -1466,8 +1470,6 @@ class NanoNemotronVLMultiModalProcessor(
         if tokenization_kwargs is None:
             tokenization_kwargs = {}
 
-        mm_items = self._to_mm_items(mm_data)
-
         # Bypass the cached path: the HF processor must receive the
         # prompt (with injected <so_embedding>) and the audio data
         # together so it can perform audio-token replacement natively.
@@ -1478,9 +1480,9 @@ class NanoNemotronVLMultiModalProcessor(
         ) = self._apply_hf_processor(
             prompt,
             mm_items,
+            mm_uuid_items,
             hf_processor_mm_kwargs,
             tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
 
         prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
