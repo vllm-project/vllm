@@ -27,7 +27,7 @@ from vllm.entrypoints.openai.responses.serving import (
     extract_tool_types,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
-    HarmonyStreamingState,
+    StreamingState,
 )
 from vllm.inputs.data import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -474,7 +474,7 @@ class TestHarmonyPreambleStreaming:
         )
 
         ctx = self._make_ctx(channel="commentary", recipient=None)
-        state = HarmonyStreamingState()
+        state = StreamingState()
 
         events = emit_content_delta_events(ctx, state)
 
@@ -489,7 +489,7 @@ class TestHarmonyPreambleStreaming:
         )
 
         ctx = self._make_ctx(channel="commentary", recipient=None, delta="w")
-        state = HarmonyStreamingState()
+        state = StreamingState()
         state.sent_output_item_added = True
         state.current_item_id = "msg_test"
         state.current_content_index = 0
@@ -510,7 +510,7 @@ class TestHarmonyPreambleStreaming:
             channel="commentary",
             recipient="functions.get_weather",
         )
-        state = HarmonyStreamingState()
+        state = StreamingState()
 
         events = emit_content_delta_events(ctx, state)
 
@@ -525,7 +525,7 @@ class TestHarmonyPreambleStreaming:
         )
 
         previous = self._make_previous_item(channel="commentary", recipient=None)
-        state = HarmonyStreamingState()
+        state = StreamingState()
         state.current_item_id = "msg_test"
         state.current_output_index = 0
         state.current_content_index = 0
@@ -547,7 +547,7 @@ class TestHarmonyPreambleStreaming:
         previous = self._make_previous_item(
             channel="commentary", recipient="functions.get_weather"
         )
-        state = HarmonyStreamingState()
+        state = StreamingState()
         state.current_item_id = "fc_test"
 
         events = emit_previous_item_done_events(previous, state)

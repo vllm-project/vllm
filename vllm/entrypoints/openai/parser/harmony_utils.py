@@ -26,7 +26,6 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 from openai_harmony import (
     Author,
-    ChannelConfig,
     Conversation,
     DeveloperContent,
     HarmonyEncodingName,
@@ -126,13 +125,6 @@ def get_system_message(
         sys_msg_content = sys_msg_content.with_tools(python_description)
     if container_description is not None:
         sys_msg_content = sys_msg_content.with_tools(container_description)
-    if not with_custom_tools:
-        channel_config = sys_msg_content.channel_config
-        invalid_channel = "commentary"
-        new_config = ChannelConfig.require_channels(
-            [c for c in channel_config.valid_channels if c != invalid_channel]
-        )
-        sys_msg_content = sys_msg_content.with_channel_config(new_config)
     sys_msg = Message.from_role_and_content(Role.SYSTEM, sys_msg_content)
     return sys_msg
 
