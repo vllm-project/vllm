@@ -32,6 +32,7 @@ def get_latest_nixl_version():
 
 
 NIXL_VERSION = os.environ.get("NIXL_VERSION", get_latest_nixl_version())
+UCX_VERSION = os.environ.get("UCX_VERSION", "v1.19.x")
 
 
 def run_command(command, cwd=".", env=None):
