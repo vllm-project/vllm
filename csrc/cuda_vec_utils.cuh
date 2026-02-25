@@ -136,11 +136,6 @@ __device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
                : "=r"(val.d[0]), "=r"(val.d[1]), "=r"(val.d[2]), "=r"(val.d[3]),
                  "=r"(val.d[4]), "=r"(val.d[5]), "=r"(val.d[6]), "=r"(val.d[7])
                : "l"(ptr));
-  #else
-  const uint4* src = reinterpret_cast<const uint4*>(ptr);
-  uint4* dst = reinterpret_cast<uint4*>(val.d);
-  dst[0] = __ldg(&src[0]);
-  dst[1] = __ldg(&src[1]);
   #endif
 }
 
@@ -152,11 +147,6 @@ __device__ __forceinline__ void st256(u32x8_t& val, u32x8_t* ptr) {
                  "r"(val.d[3]), "r"(val.d[4]), "r"(val.d[5]), "r"(val.d[6]),
                  "r"(val.d[7])
                : "memory");
-  #else
-  uint4* dst = reinterpret_cast<uint4*>(ptr);
-  const uint4* src = reinterpret_cast<const uint4*>(val.d);
-  dst[0] = src[0];
-  dst[1] = src[1];
   #endif
 }
 

@@ -8,6 +8,11 @@
 
 namespace vllm {
 
+// Concatenates ql_nope [num_tokens, num_heads, NOPE_DIM] and
+// q_pe [num_tokens, num_heads, 64] 
+// into q_out [num_tokens, num_heads, NOPE_DIM+64].
+// Currently instantiated only for NOPE_DIM=512. 
+// Rope dim is hardcoded to 64 (DeepSeek V3.2 MLA)
 template <typename DType, int NOPE_DIM>
 __global__ void ConcatMLAQKernel(
     DType* __restrict__ q_out,
