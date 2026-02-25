@@ -1026,7 +1026,7 @@ class AsyncMultiModalContentParser(BaseMultiModalContentParser):
     async def _video_with_uuid_async(self, video_url: str | None, uuid: str | None):
         keep_bytes = bool(self._tracker._mm_processor_kwargs.get("use_audio_in_video"))
         video = (
-            self._connector.fetch_video_async(
+            await self._connector.fetch_video_async(
                 video_url=video_url, keep_video_bytes=keep_bytes
             )
             if video_url

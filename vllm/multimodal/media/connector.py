@@ -293,7 +293,9 @@ class MediaConnector:
         )
 
         video_kwargs = dict(self.media_io_kwargs.get("video", {}))
-        video_kwargs["keep_video_bytes"] = keep_video_bytes
+        video_kwargs["keep_video_bytes"] = keep_video_bytes or video_kwargs.get(
+            "keep_video_bytes", False
+        )
 
         video_io = VideoMediaIO(image_io, **video_kwargs)
 
@@ -320,7 +322,9 @@ class MediaConnector:
         )
 
         video_kwargs = dict(self.media_io_kwargs.get("video", {}))
-        video_kwargs["keep_video_bytes"] = keep_video_bytes
+        video_kwargs["keep_video_bytes"] = keep_video_bytes or video_kwargs.get(
+            "keep_video_bytes", False
+        )
 
         video_io = VideoMediaIO(image_io, **video_kwargs)
 
