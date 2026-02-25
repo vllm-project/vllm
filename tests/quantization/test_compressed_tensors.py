@@ -10,6 +10,9 @@ import torch
 from compressed_tensors.quantization import QuantizationType
 
 from tests.models.utils import check_logprobs_close
+from vllm.model_executor.kernels.linear import (
+    Fp8BlockScaledMMLinearKernel,
+)
 from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
     CompressedTensors24,
@@ -23,9 +26,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsWNA16,
 )
 from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    Fp8BlockScaledMMLinearKernel,
-)
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     cutlass_fp4_supported,
 )
