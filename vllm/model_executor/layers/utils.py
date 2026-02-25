@@ -11,7 +11,7 @@ from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.platforms import CpuArchEnum, current_platform
-from vllm.utils.platform_utils import get_cu_count
+from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -149,7 +149,7 @@ def rocm_unquantized_gemm_impl(
     m = weight.shape[0]
     k = weight.shape[1]
 
-    cu_count = get_cu_count()
+    cu_count = num_compute_units()
     if use_aiter_triton_gemm(n, m, k, x.dtype):
         from aiter.ops.triton.gemm_a16w16 import gemm_a16w16
 
@@ -199,7 +199,7 @@ def rocm_unquantized_gemm_impl(
 
     x_view = x.reshape(-1, x.size(-1))
     if m > 8 and 0 < n <= 4:
-        cu_count = get_cu_count()
+        cu_count = num_compute_units()
         out = ops.wvSplitK(weight, x_view, cu_count, bias)
         return out.reshape(*x.shape[:-1], weight.shape[0])
     elif m % 4 == 0 and n == 1 and k <= 8192 and bias is None:
