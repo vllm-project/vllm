@@ -20,7 +20,7 @@ from pydantic_core.core_schema import ValidationInfo
 from tqdm import tqdm
 
 from vllm.engine.arg_utils import AsyncEngineArgs, optional_type
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -672,6 +672,7 @@ def make_transcription_wrapper(is_translation: bool) -> WrapperFn:
 
 
 def build_endpoint_registry(
+    renderer_client: RendererClient,
     engine_client: EngineClient,
     args: Namespace,
     base_model_paths: list[BaseModelPath],
@@ -682,6 +683,7 @@ def build_endpoint_registry(
     Build the endpoint registry with all serving objects and handler configurations.
 
     Args:
+        renderer_client: The renderer client
         engine_client: The engine client
         args: Command line arguments
         base_model_paths: List of base model paths
@@ -691,10 +693,11 @@ def build_endpoint_registry(
     Returns:
         Dictionary mapping endpoint keys to their configurations
     """
-    model_config = engine_client.model_config
+    model_config = renderer_client.model_config
 
     # Create the openai serving objects.
     openai_serving_models = OpenAIServingModels(
+        renderer_client=renderer_client,
         engine_client=engine_client,
         base_model_paths=base_model_paths,
         lora_modules=None,
@@ -702,9 +705,10 @@ def build_endpoint_registry(
 
     openai_serving_chat = (
         OpenAIServingChat(
-            engine_client,
-            openai_serving_models,
-            args.response_role,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=openai_serving_models,
+            response_role=args.response_role,
             request_logger=request_logger,
             chat_template=None,
             chat_template_content_format="auto",
@@ -721,8 +725,9 @@ def build_endpoint_registry(
 
     openai_serving_embedding = (
         OpenAIServingEmbedding(
-            engine_client,
-            openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=openai_serving_models,
             request_logger=request_logger,
             chat_template=None,
             chat_template_content_format="auto",
@@ -738,8 +743,9 @@ def build_endpoint_registry(
 
     openai_serving_scores = (
         ServingScores(
-            engine_client,
-            openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=openai_serving_models,
             request_logger=request_logger,
             score_template=None,
         )
@@ -749,8 +755,9 @@ def build_endpoint_registry(
 
     openai_serving_transcription = (
         OpenAIServingTranscription(
-            engine_client,
-            openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=openai_serving_models,
             request_logger=request_logger,
             enable_force_include_usage=args.enable_force_include_usage,
         )
@@ -760,8 +767,9 @@ def build_endpoint_registry(
 
     openai_serving_translation = (
         OpenAIServingTranslation(
-            engine_client,
-            openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=openai_serving_models,
             request_logger=request_logger,
             enable_force_include_usage=args.enable_force_include_usage,
         )
@@ -842,6 +850,7 @@ def validate_run_batch_args(args):
 
 
 async def run_batch(
+    renderer_client: RendererClient,
     engine_client: EngineClient,
     args: Namespace,
 ) -> None:
@@ -863,6 +872,7 @@ async def run_batch(
     logger.info("Supported tasks: %s", supported_tasks)
 
     endpoint_registry = build_endpoint_registry(
+        renderer_client=renderer_client,
         engine_client=engine_client,
         args=args,
         base_model_paths=base_model_paths,
@@ -927,9 +937,8 @@ async def main(args: Namespace):
     async with build_async_engine_client(
         args,
         usage_context=UsageContext.OPENAI_BATCH_RUNNER,
-        disable_frontend_multiprocessing=False,
-    ) as engine_client:
-        await run_batch(engine_client, args)
+    ) as (renderer_client, engine_client):
+        await run_batch(renderer_client, engine_client, args)
 
 
 if __name__ == "__main__":

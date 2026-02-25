@@ -71,9 +71,8 @@ async def build_async_engine_client(
     args: Namespace,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    disable_frontend_multiprocessing: bool | None = None,
     client_config: dict[str, Any] | None = None,
-) -> AsyncIterator[EngineClient]:
+) -> AsyncIterator[tuple[RendererClient, EngineClient]]:
     if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
         # The executor is expected to be mp.
         # Pre-import heavy modules in the forkserver process
@@ -90,16 +89,12 @@ async def build_async_engine_client(
         engine_args._api_process_count = client_config.get("client_count", 1)
         engine_args._api_process_rank = client_config.get("client_index", 0)
 
-    if disable_frontend_multiprocessing is None:
-        disable_frontend_multiprocessing = bool(args.disable_frontend_multiprocessing)
-
     async with build_async_engine_client_from_engine_args(
         engine_args,
         usage_context=usage_context,
-        disable_frontend_multiprocessing=disable_frontend_multiprocessing,
         client_config=client_config,
-    ) as engine:
-        yield engine
+    ) as clients:
+        yield clients
 
 
 @asynccontextmanager
@@ -107,25 +102,16 @@ async def build_async_engine_client_from_engine_args(
     engine_args: AsyncEngineArgs,
     *,
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
-    disable_frontend_multiprocessing: bool = False,
     client_config: dict[str, Any] | None = None,
-) -> AsyncIterator[EngineClient]:
-    """
-    Create EngineClient, either:
-        - in-process using the AsyncLLMEngine Directly
-        - multiprocess using AsyncLLMEngine RPC
-
-    Returns the Client or None if the creation failed.
-    """
+) -> AsyncIterator[tuple[RendererClient, EngineClient]]:
+    """Create a co-located (RendererClient, EngineClient) pair backed by AsyncLLM."""
 
     # Create the EngineConfig (determines if we can use V1).
     vllm_config = engine_args.create_engine_config(usage_context=usage_context)
 
-    if disable_frontend_multiprocessing:
-        logger.warning("V1 is enabled, but got --disable-frontend-multiprocessing.")
+    from vllm.v1.engine.async_llm import AsyncLLM, AsyncRenderer
 
-    from vllm.v1.engine.async_llm import AsyncLLM
-
+    async_renderer: AsyncRenderer | None = None
     async_llm: AsyncLLM | None = None
 
     # Don't mutate the input client_config
@@ -134,6 +120,7 @@ async def build_async_engine_client_from_engine_args(
     client_index = client_config.pop("client_index", 0)
 
     try:
+        async_renderer = AsyncRenderer(vllm_config)
         async_llm = AsyncLLM.from_vllm_config(
             vllm_config=vllm_config,
             usage_context=usage_context,
@@ -146,13 +133,14 @@ async def build_async_engine_client_from_engine_args(
         )
 
         # Don't keep the dummy data in memory
-        assert async_llm is not None
         await async_llm.reset_mm_cache()
 
-        yield async_llm
+        yield async_renderer, async_llm
     finally:
         if async_llm:
             async_llm.shutdown()
+        if async_renderer:
+            async_renderer.shutdown()
 
 
 def build_app(
@@ -518,11 +506,8 @@ async def run_server_worker(
     async with build_async_engine_client(
         args,
         client_config=client_config,
-    ) as engine_client:
-        # In co-located mode, AsyncLLM implements both RendererClient
-        # (CPU ops) and EngineClient (inference ops).
-        renderer_client = engine_client
-        supported_tasks = await renderer_client.get_supported_tasks()
+    ) as (renderer_client, engine_client):
+        supported_tasks = await engine_client.get_supported_tasks()
         logger.info("Supported tasks: %s", supported_tasks)
 
         app = build_app(args, supported_tasks)
@@ -532,7 +517,7 @@ async def run_server_worker(
 
         logger.info(
             "Starting vLLM API server %d on %s",
-            engine_client.vllm_config.parallel_config._api_process_rank,
+            renderer_client.vllm_config.parallel_config._api_process_rank,
             listen_address,
         )
         shutdown_task = await serve_http(

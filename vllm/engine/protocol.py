@@ -38,21 +38,11 @@ class StreamingInput:
     sampling_params: SamplingParams | None = None
 
 
-class RendererClient(ABC):
-    """Client interface for the renderer layer (CPU-only operations).
+class Client(ABC):
+    """Base client interface for liveness and health monitoring.
 
-    Contains only methods and attributes that don't require a running
-    inference engine: configuration, tokenization, health checks, and
-    status monitoring.
-
-    See :class:`EngineClient` for the full interface including inference.
+    Shared by both :class:`RendererClient` and :class:`EngineClient`.
     """
-
-    vllm_config: VllmConfig
-    model_config: ModelConfig
-    renderer: BaseRenderer
-    io_processor: IOProcessor | None
-    input_processor: InputProcessor
 
     @property
     @abstractmethod
@@ -71,23 +61,44 @@ class RendererClient(ABC):
     def dead_error(self) -> BaseException: ...
 
     @abstractmethod
-    async def is_tracing_enabled(self) -> bool: ...
-
-    @abstractmethod
-    async def do_log_stats(self) -> None: ...
-
-    @abstractmethod
     async def check_health(self) -> None:
         """Raise if unhealthy"""
         ...
 
+
+class RendererClient(Client):
+    """Client interface for the renderer layer (CPU-only operations).
+
+    Covers configuration, tokenization, and tracing — everything that
+    does not require a running inference engine.
+
+    See :class:`EngineClient` for the tok-in/tok-out inference interface.
+    """
+
+    vllm_config: VllmConfig
+    model_config: ModelConfig
+    renderer: BaseRenderer
+    io_processor: IOProcessor | None
+    input_processor: InputProcessor
+
+    @abstractmethod
+    async def is_tracing_enabled(self) -> bool: ...
+
+
+class EngineClient(Client):
+    """Engine client interface for tok-in/tok-out inference operations.
+
+    Covers generation, encoding, LoRA management, and engine control.
+    Does not extend :class:`RendererClient`; the two interfaces are
+    independently implementable for disaggregated prefill deployments.
+    """
+
+    @abstractmethod
+    async def do_log_stats(self) -> None: ...
+
     async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         """Get supported tasks"""
         raise NotImplementedError
-
-
-class EngineClient(ABC):
-    """Engine client interface for inference operations."""
 
     @abstractmethod
     def generate(

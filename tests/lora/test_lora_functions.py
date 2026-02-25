@@ -88,7 +88,7 @@ async def test_lora_functions_async():
         await fn(args)
         assert set(await llm.list_loras()) == set(expected)
 
-    async with build_async_engine_client_from_engine_args(engine_args) as llm:
+    async with build_async_engine_client_from_engine_args(engine_args) as (_, llm):
         await run_check(llm.add_lora, make_lora_request(1), [1])
         await run_check(llm.add_lora, make_lora_request(2), [1, 2])
 

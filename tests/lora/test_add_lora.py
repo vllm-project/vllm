@@ -86,7 +86,7 @@ async def test_add_lora(chatglm3_lora_files):
     warmup_run_requests = lora_requests[part_size : part_size * 2]
     cold_run_requests = lora_requests[part_size * 2 :]
 
-    async with build_async_engine_client_from_engine_args(engine_args) as llm:
+    async with build_async_engine_client_from_engine_args(engine_args) as (_, llm):
         # Dummy run - So any 1-time functionality like triton kernel compilation
         # is complete here.
         await requests_processing_time(llm, dummy_run_requests)
