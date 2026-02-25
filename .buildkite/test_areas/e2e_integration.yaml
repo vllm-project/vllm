@@ -29,7 +29,7 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
-- label: DeepSeek V2-Lite Prefetch Offload Accuracy
+- label: DeepSeek V2-Lite Prefetch Offload Accuracy (H100)
   timeout_in_minutes: 60
   device: h100
   optional: true
