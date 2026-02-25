@@ -13,6 +13,7 @@ from vllm.model_executor.layers.quantization.utils.allspark_utils import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.platform_utils import num_compute_units
 
 
 def is_gptq_allspark_supported(min_capability: int, max_capability: int) -> bool:
@@ -78,7 +79,7 @@ def test_gptq_allspark_gemm_ampere(mnk_factors, group_size, has_zp, dtype):
     if has_zp:
         zp = zp.to(dtype)
     properties = torch.cuda.get_device_properties(qw.device.index)
-    sm_count = properties.multi_processor_count
+    sm_count = num_compute_units(qw.device.index)
     sm_version = properties.major * 10 + properties.minor
 
     n_32align = (n + 32 - 1) // 32 * 32
