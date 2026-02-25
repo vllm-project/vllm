@@ -33,6 +33,7 @@ def get_latest_nixl_version():
 
 NIXL_VERSION = os.environ.get("NIXL_VERSION", get_latest_nixl_version())
 UCX_VERSION = os.environ.get("UCX_VERSION", "v1.19.x")
+WITH_ZE = os.environ.get("WITH_ZE", "no").lower()
 
 
 def run_command(command, cwd=".", env=None):
@@ -141,7 +142,7 @@ def build_and_install_prerequisites(args):
         run_command(["git", "clone", UCX_REPO_URL, UCX_DIR])
     ucx_source_path = os.path.abspath(UCX_DIR)
     # Pin UCX to commit e5d9887 for XPU GDR support until a release includes it.
-    run_command(["git", "checkout", "e5d9887"], cwd=ucx_source_path)
+    run_command(["git", "checkout", UCX_VERSION], cwd=ucx_source_path)
     run_command(["./autogen.sh"], cwd=ucx_source_path)
     configure_command = [
         "./configure",
@@ -154,7 +155,7 @@ def build_and_install_prerequisites(args):
         "--enable-devel-headers",
         "--with-verbs",
         "--enable-mt",
-        "--with-ze=yes",
+        f"--with-ze={WITH_ZE}",
     ]
     run_command(configure_command, cwd=ucx_source_path)
     run_command(["make", "-j", str(os.cpu_count() or 1)], cwd=ucx_source_path)

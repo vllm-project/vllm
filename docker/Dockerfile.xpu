@@ -119,6 +119,7 @@ RUN uv pip install -e tests/vllm_test_utils
 ENV NIXL_VERSION=0.7.0
 # Pin UCX to commit e5d9887 for XPU GDR support until a release includes it.
 ENV UCX_VERSION=e5d9887
+ENV WITH_ZE=yes
 RUN python /workspace/vllm/tools/install_nixl_from_source_ubuntu.py
 
 # FIX triton
