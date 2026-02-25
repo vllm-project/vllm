@@ -67,11 +67,11 @@ def _run_test(
             with torch.inference_mode():
                 if text.startswith(QUERY_PREFIX):
                     # Strip prefix and use encode_queries for query texts
-                    query_text = text[len(QUERY_PREFIX):]
+                    query_text = text[len(QUERY_PREFIX) :]
                     embedding = hf_model.model.encode_queries([query_text])
                 elif text.startswith(PASSAGE_PREFIX):
                     # Strip prefix and use encode_documents for passages/images
-                    passage_text = text[len(PASSAGE_PREFIX):]
+                    passage_text = text[len(PASSAGE_PREFIX) :]
                     if image is not None:
                         # Image document - pass image to encode_documents
                         embedding = hf_model.model.encode_documents(
@@ -85,8 +85,7 @@ def _run_test(
                         )
                 else:
                     raise ValueError(
-                        f"Text must start with '{QUERY_PREFIX}' or "
-                        f"'{PASSAGE_PREFIX}'"
+                        f"Text must start with '{QUERY_PREFIX}' or '{PASSAGE_PREFIX}'"
                     )
 
                 hf_outputs.append(embedding[0].tolist())
@@ -134,8 +133,7 @@ def test_models_image(
 ) -> None:
     """Test image embedding."""
     input_texts_images = [
-        (text, asset.pil_image)
-        for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
+        (text, asset.pil_image) for text, asset in zip(HF_IMAGE_PROMPTS, image_assets)
     ]
     input_texts = [text for text, _ in input_texts_images]
     input_images = [image for _, image in input_texts_images]
