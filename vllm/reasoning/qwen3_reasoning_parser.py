@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
 )
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
+from vllm.tokenizers import TokenizerLike
 
 
 class Qwen3ReasoningParser(BaseThinkingReasoningParser):
@@ -33,6 +34,14 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     it is stripped before extraction (non-streaming) or skipped (streaming).
     """
 
+    def __init__(self, tokenizer: TokenizerLike, *args, **kwargs):
+        super().__init__(tokenizer, *args, **kwargs)
+
+        chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
+        # Qwen3 defaults to thinking enabled; only treat output as
+        # pure content when the user explicitly disables it.
+        self.thinking_enabled = chat_kwargs.get("enable_thinking", True)
+
     @property
     def start_token(self) -> str:
         """The token that starts reasoning content."""
@@ -54,8 +63,11 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         If <think> is present (e.g. from a different template), it is
         stripped before extraction.
 
-        When thinking is disabled (no </think> in output), returns
-        (None, model_output) to indicate all output is content.
+        When thinking is explicitly disabled and no </think> appears,
+        returns (None, model_output) — all output is content.
+        Otherwise (thinking enabled, default), a missing </think> means
+        the output was truncated and everything is reasoning:
+        returns (model_output, None).
 
         Returns:
             tuple[Optional[str], Optional[str]]: reasoning content and content
@@ -68,9 +80,12 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
         )
 
         if self.end_token not in model_output:
-            # No end token means thinking is disabled or the model
-            # did not produce reasoning. Treat everything as content.
-            return None, model_output
+            if not self.thinking_enabled:
+                # Thinking explicitly disabled — treat everything as content.
+                return None, model_output
+            # Thinking enabled but no </think>: output was truncated.
+            # Everything generated so far is reasoning.
+            return model_output, None
 
         # Extract reasoning content from the model output.
         reasoning, _, content = model_output.partition(self.end_token)
