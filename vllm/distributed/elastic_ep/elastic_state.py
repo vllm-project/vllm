@@ -94,7 +94,6 @@ class ElasticEPScalingState:
         self.worker_type = worker_type
         self.scale_type = scale_type
         self.reconfig_request = reconfig_request
-        self.last_barrier_timeout = False
 
         if scale_type == "scale_up":
             self.state = (
@@ -166,7 +165,7 @@ class ElasticEPScalingState:
             if len(processes_arrived) < group_size:
                 sched_yield()
 
-    def _staged_barrier(self, use_new_group: bool) -> bool:
+    def _staged_barrier(self, use_new_group: bool, barrier_name: str) -> bool:
         """
         Execute a two-staged barrier to synchronize all engines in the DP group.
 
@@ -189,32 +188,26 @@ class ElasticEPScalingState:
 
         group_rank = dp_group.rank()
         group_size = dp_group.size()
-        barrier_id = "eep_barrier"
+        barrier_id = f"eep_barrier_{barrier_name}"
+        sync_key = f"{barrier_id}_sync"
 
         # TODO(yongji): figure out appropriate timeout for the barrier
-        timeout = (
-            None
-            if dp_store.check(["eep_barrier_sync"]) or self.last_barrier_timeout
-            else timedelta(seconds=5)
-        )
+        timeout = None if dp_store.check([sync_key]) else timedelta(seconds=5)
 
         try:
             self._execute_tcp_store_barrier(
                 dp_store, group_rank, group_size, barrier_id, timeout=timeout
             )
             torch.distributed.barrier(dp_group)
-            self.last_barrier_timeout = False
-            # clean up barrier keys
             if group_rank == 0:
-                dp_store.delete_key("eep_barrier_sync")
+                dp_store.delete_key(sync_key)
                 for i in range(group_size):
                     dp_store.delete_key(f"arrival_{barrier_id}_{i}")
             return True
         except _BarrierTimeoutError as e:
             if timeout is None:
                 raise RuntimeError("Unexpected timeout encountered") from e
-            self.last_barrier_timeout = True
-            dp_store.compare_set("eep_barrier_sync", "", b"1")
+            dp_store.compare_set(sync_key, "", b"1")
             return False
 
     def _progress_existing_engine(self) -> bool:
@@ -230,7 +223,9 @@ class ElasticEPScalingState:
                 < self.old_dp_group.size()
             ):
                 return False
-            if not self._staged_barrier(use_new_group=False):
+            if not self._staged_barrier(
+                use_new_group=False, barrier_name="create_standby_groups"
+            ):
                 return False
             if self.old_dp_group.rank() == 0:
                 self.old_dp_store.delete_key("eep_barrier_engine_count")
@@ -252,7 +247,9 @@ class ElasticEPScalingState:
                 < self.old_dp_group.size()
             ):
                 return False
-            if not self._staged_barrier(use_new_group=False):
+            if not self._staged_barrier(
+                use_new_group=False, barrier_name="transfer_weights"
+            ):
                 return False
             if self.old_dp_group.rank() == 0:
                 self.old_dp_store.delete_key("eep_barrier_engine_count")
@@ -278,7 +275,9 @@ class ElasticEPScalingState:
                 < self.new_dp_group.size()
             ):
                 return False
-            if not self._staged_barrier(use_new_group=True):
+            if not self._staged_barrier(
+                use_new_group=True, barrier_name="eplb_reshuffle"
+            ):
                 return False
             if self.new_dp_group.rank() == 0:
                 self.new_dp_store.delete_key("eep_barrier_engine_count")
@@ -316,7 +315,9 @@ class ElasticEPScalingState:
                 < self.new_dp_group.size()
             ):
                 return False
-            if not self._staged_barrier(use_new_group=True):
+            if not self._staged_barrier(
+                use_new_group=True, barrier_name="eplb_reshuffle"
+            ):
                 return False
             assert self.new_dp_group.rank() > 0
             self._eplb_reshuffle()
@@ -341,7 +342,9 @@ class ElasticEPScalingState:
                 < self.old_dp_group.size()
             ):
                 return False
-            if not self._staged_barrier(use_new_group=False):
+            if not self._staged_barrier(
+                use_new_group=False, barrier_name="eplb_reshuffle"
+            ):
                 return False
             if self.old_dp_group.rank() == 0:
                 self.old_dp_store.delete_key("eep_barrier_engine_count")
@@ -378,7 +381,9 @@ class ElasticEPScalingState:
                 < self.old_dp_group.size()
             ):
                 return False
-            if not self._staged_barrier(use_new_group=False):
+            if not self._staged_barrier(
+                use_new_group=False, barrier_name="eplb_reshuffle"
+            ):
                 return False
             assert self.old_dp_group.rank() > 0
             self._eplb_reshuffle_before_scale_down()
