@@ -34,6 +34,7 @@ from collections.abc import AsyncGenerator, Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
+from pathlib import Path
 from typing import Any, Literal
 
 import aiohttp
@@ -1843,8 +1844,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Generate timeline plot if requested
     if args.plot_timeline:
         try:
-            from pathlib import Path
-
             from vllm.benchmarks.plot import generate_timeline_plot
 
             # Prepare per-request data for timeline
@@ -1895,8 +1894,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     # Generate dataset statistics plot if requested
     if args.plot_dataset_stats:
         try:
-            from pathlib import Path
-
             from vllm.benchmarks.plot import generate_dataset_stats_plot
 
             # Prepare per-request data for dataset stats
