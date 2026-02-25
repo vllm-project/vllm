@@ -1042,6 +1042,7 @@ setup(
             "scipy",
             "soundfile",
             "mistral_common[audio]",
+            "av",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
         "flashinfer": [],  # Kept for backwards compatibility
