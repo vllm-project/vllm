@@ -20,10 +20,14 @@ from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
 if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.base import KVConnectorBase
+    from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
 
 EngineId = str
+# block ids as returned by the hybrid KV cache manager. list[list[int]] are allow
+# mutability and are for connector internal use only.
+BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
@@ -299,6 +303,37 @@ def yield_req_data(
         cached_reqs.new_block_ids,
         (req_id in cached_reqs.resumed_req_ids for req_id in cached_reqs.req_ids),
     )
+
+
+def get_full_attention_group_idx(
+    kv_cache_config: "KVCacheConfig",
+) -> int:
+    """
+    Get the index of the full attention KV cache group from KVCacheConfig.
+
+    Args:
+        kv_cache_config: The KV cache configuration
+
+    Returns:
+        The index of the full attention group
+
+    Raises:
+        AssertionError: If no full attention group is found
+    """
+    from vllm.v1.kv_cache_interface import FullAttentionSpec
+
+    fa_group_idx = next(
+        (
+            i
+            for i, group in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(group.kv_cache_spec, FullAttentionSpec)
+        ),
+        None,
+    )
+    assert fa_group_idx is not None, (
+        "No full attention KV cache group found in kv_cache_config"
+    )
+    return fa_group_idx
 
 
 @dataclass
