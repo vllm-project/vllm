@@ -1882,12 +1882,6 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
                     "Ensure the benchmark completed successfully.",
                     stacklevel=2,
                 )
-        except ImportError:
-            warnings.warn(
-                "plotly is required for timeline plotting. "
-                "Install it with: pip install plotly",
-                stacklevel=2,
-            )
         except Exception as e:
             warnings.warn(f"Failed to generate timeline plot: {e}", stacklevel=2)
 
