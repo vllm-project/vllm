@@ -185,25 +185,23 @@ class ElasticEPScalingExecutor:
         num_new_workers = new_dp_size - old_dp_size
         dp_rank = self.worker.vllm_config.parallel_config.data_parallel_rank
 
-        ranks_to_send = []
-        # NOTE(yongji): determine sender-receiver pairing in weight transfer.
-        # Mapping rule:
-        # Base: each existing worker i gets (num_new_workers // old_dp_size) new workers
-        #   to send weights to. Worker i sends weights to new workers with global ranks
-        #   in [old_dp_size + i * num_dst_per_sender,
-        #   old_dp_size + (i + 1) * num_dst_per_sender].
-        # Remainder: Each of the first (num_new_workers % old_dp_size) existing workers
-        #   gets an additional new worker to send weights to, whose global rank is
-        #   old_dp_size * (num_dst_per_sender + 1) + i.
+        # Sender-receiver pairing: the first new_workers % old_dp_size
+        # senders get (k+1) contiguous receivers, the rest get k
+        # receivers.
         num_dst_per_sender = num_new_workers // old_dp_size
-        sender_pos = dp_rank
-        recv_begin = sender_pos * num_dst_per_sender
-        recv_end = recv_begin + num_dst_per_sender
+        remainder = num_new_workers % old_dp_size
+
+        if dp_rank < remainder:
+            recv_begin = dp_rank * (num_dst_per_sender + 1)
+            recv_end = recv_begin + num_dst_per_sender + 1
+        else:
+            recv_begin = (
+                remainder * (num_dst_per_sender + 1)
+                + (dp_rank - remainder) * num_dst_per_sender
+            )
+            recv_end = recv_begin + num_dst_per_sender
+
         ranks_to_send = list(range(old_dp_size + recv_begin, old_dp_size + recv_end))
-        remainder_start = old_dp_size * num_dst_per_sender
-        recver_pos = remainder_start + sender_pos
-        if recver_pos < num_new_workers:
-            ranks_to_send.append(old_dp_size + recver_pos)
 
         model = self.worker.model_runner.get_model()
         for new_worker_rank in sorted(ranks_to_send):
