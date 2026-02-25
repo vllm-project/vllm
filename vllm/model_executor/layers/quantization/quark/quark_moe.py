@@ -1156,10 +1156,10 @@ class QuarkOCP_MX_MoEMethod_OSS(QuarkOCP_MX_MoEMethod):
             )
 
         from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (  # noqa: E501
-            triton_kernel_moe_oss_forward,
+            triton_kernel_moe_forward,
         )
 
-        return triton_kernel_moe_oss_forward(
+        return triton_kernel_moe_forward(
             hidden_states=x,
             w1=self.w13_weight_triton_tensor,
             w2=self.w2_weight_triton_tensor,
