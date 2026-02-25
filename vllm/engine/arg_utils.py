@@ -519,6 +519,9 @@ class EngineArgs:
     disable_hybrid_kv_cache_manager: bool | None = (
         SchedulerConfig.disable_hybrid_kv_cache_manager
     )
+    
+    gap_policy_name: str | None = SchedulerConfig.gap_policy_name
+    gap_policy_config: dict[str, Any] | None = SchedulerConfig.gap_policy_config
 
     structured_outputs_config: StructuredOutputsConfig = get_field(
         VllmConfig, "structured_outputs_config"
@@ -1758,6 +1761,8 @@ class EngineArgs:
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
             async_scheduling=self.async_scheduling,
             stream_interval=self.stream_interval,
+            gap_policy_name=self.gap_policy_name,
+            gap_policy_config=self.gap_policy_config,
         )
 
         if not model_config.is_multimodal_model and self.default_mm_loras:
