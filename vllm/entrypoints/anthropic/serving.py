@@ -313,77 +313,84 @@ class AnthropicServingMessages(OpenAIServingChat):
         generator: AsyncGenerator[str, None],
     ) -> AsyncGenerator[str, None]:
         try:
+
+            class _ActiveBlockState:
+                def __init__(self) -> None:
+                    self.content_block_index = 0
+                    self.block_type: str | None = None
+                    self.block_index: int | None = None
+                    self.block_signature: str | None = None
+                    self.signature_emitted: bool = False
+                    self.tool_use_id: str | None = None
+
+                def reset(self) -> None:
+                    self.block_type = None
+                    self.block_index = None
+                    self.block_signature = None
+                    self.signature_emitted = False
+                    self.tool_use_id = None
+
+                def start(self, block: AnthropicContentBlock) -> None:
+                    self.block_type = block.type
+                    self.block_index = self.content_block_index
+                    if block.type == "thinking":
+                        self.block_signature = uuid.uuid4().hex
+                        self.signature_emitted = False
+                        self.tool_use_id = None
+                    elif block.type == "tool_use":
+                        self.block_signature = None
+                        self.signature_emitted = True
+                        self.tool_use_id = block.id
+                    else:
+                        self.block_signature = None
+                        self.signature_emitted = True
+                        self.tool_use_id = None
+
             first_item = True
             finish_reason = None
-            content_block_index = 0
-            active_block_type: str | None = None
-            active_block_index: int | None = None
-            active_block_signature: str | None = None
-            signature_emitted = False
-            active_tool_use_id: str | None = None
+            state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
 
             def stop_active_block():
-                nonlocal active_block_type, active_block_index, content_block_index
-                nonlocal active_block_signature, signature_emitted, active_tool_use_id
                 events: list[str] = []
-                if active_block_type is None:
+                if state.block_type is None:
                     return events
                 if (
-                    active_block_type == "thinking"
-                    and active_block_signature is not None
-                    and not signature_emitted
+                    state.block_type == "thinking"
+                    and state.block_signature is not None
+                    and not state.signature_emitted
                 ):
                     chunk = AnthropicStreamEvent(
-                        index=active_block_index,
+                        index=state.block_index,
                         type="content_block_delta",
                         delta=AnthropicDelta(
                             type="signature_delta",
-                            signature=active_block_signature,
+                            signature=state.block_signature,
                         ),
                     )
                     data = chunk.model_dump_json(exclude_unset=True)
                     events.append(wrap_data_with_event(data, "content_block_delta"))
-                    signature_emitted = True
+                    state.signature_emitted = True
                 stop_chunk = AnthropicStreamEvent(
-                    index=active_block_index,
+                    index=state.block_index,
                     type="content_block_stop",
                 )
                 data = stop_chunk.model_dump_json(exclude_unset=True)
                 events.append(wrap_data_with_event(data, "content_block_stop"))
-                active_block_type = None
-                active_block_index = None
-                active_block_signature = None
-                signature_emitted = False
-                active_tool_use_id = None
-                content_block_index += 1
+                state.reset()
+                state.content_block_index += 1
                 return events
 
             def start_block(block: AnthropicContentBlock):
-                nonlocal active_block_type, active_block_index, content_block_index
-                nonlocal active_block_signature, signature_emitted, active_tool_use_id
                 chunk = AnthropicStreamEvent(
-                    index=content_block_index,
+                    index=state.content_block_index,
                     type="content_block_start",
                     content_block=block,
                 )
                 data = chunk.model_dump_json(exclude_unset=True)
                 event = wrap_data_with_event(data, "content_block_start")
-                active_block_type = block.type
-                active_block_index = content_block_index
-                if block.type == "thinking":
-                    active_block_signature = uuid.uuid4().hex
-                    signature_emitted = False
-                    active_tool_use_id = None
-                elif block.type == "tool_use":
-                    active_block_signature = None
-                    signature_emitted = True
-                    active_tool_use_id = block.id
-                else:
-                    active_block_signature = None
-                    signature_emitted = True
-                    active_tool_use_id = None
+                state.start(block)
                 return event
 
             async for item in generator:
@@ -458,7 +465,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             if reasoning_delta == "":
                                 pass
                             else:
-                                if active_block_type != "thinking":
+                                if state.block_type != "thinking":
                                     for event in stop_active_block():
                                         yield event
                                     start_event = start_block(
@@ -469,9 +476,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     yield start_event
                                 chunk = AnthropicStreamEvent(
                                     index=(
-                                        active_block_index
-                                        if active_block_index is not None
-                                        else content_block_index
+                                        state.block_index
+                                        if state.block_index is not None
+                                        else state.content_block_index
                                     ),
                                     type="content_block_delta",
                                     delta=AnthropicDelta(
@@ -486,7 +493,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             if origin_chunk.choices[0].delta.content == "":
                                 pass
                             else:
-                                if active_block_type != "text":
+                                if state.block_type != "text":
                                     for event in stop_active_block():
                                         yield event
                                     start_event = start_block(
@@ -495,9 +502,9 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     yield start_event
                                 chunk = AnthropicStreamEvent(
                                     index=(
-                                        active_block_index
-                                        if active_block_index is not None
-                                        else content_block_index
+                                        state.block_index
+                                        if state.block_index is not None
+                                        else state.content_block_index
                                     ),
                                     type="content_block_delta",
                                     delta=AnthropicDelta(
@@ -522,7 +529,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         else None
                                     )
                                     if (
-                                        active_tool_use_id != tool_call.id
+                                        state.tool_use_id != tool_call.id
                                         and tool_name is not None
                                     ):
                                         for event in stop_active_block():
@@ -540,13 +547,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     if (
                                         tool_call.function
                                         and tool_call.function.arguments
-                                        and active_tool_use_id == tool_call.id
+                                        and state.tool_use_id == tool_call.id
                                     ):
                                         chunk = AnthropicStreamEvent(
                                             index=(
-                                                active_block_index
-                                                if active_block_index is not None
-                                                else content_block_index
+                                                state.block_index
+                                                if state.block_index is not None
+                                                else state.content_block_index
                                             ),
                                             type="content_block_delta",
                                             delta=AnthropicDelta(
@@ -565,13 +572,13 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         tool_use_id is not None
                                         and tool_call.function
                                         and tool_call.function.arguments
-                                        and active_tool_use_id == tool_use_id
+                                        and state.tool_use_id == tool_use_id
                                     ):
                                         chunk = AnthropicStreamEvent(
                                             index=(
-                                                active_block_index
-                                                if active_block_index is not None
-                                                else content_block_index
+                                                state.block_index
+                                                if state.block_index is not None
+                                                else state.content_block_index
                                             ),
                                             type="content_block_delta",
                                             delta=AnthropicDelta(
