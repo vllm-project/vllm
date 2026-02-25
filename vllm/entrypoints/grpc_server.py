@@ -118,9 +118,15 @@ class VllmEngineServicer(vllm_engine_pb2_grpc.VllmEngineServicer):
             if has_mm:
                 prompt["multi_modal_data"] = self._parse_mm_inputs(request.mm_inputs)
 
-            prompt = self.async_llm.input_processor.input_preprocessor.preprocess(
-                prompt
-            )
+            # Process inputs via Renderer for tokenized path (preferred),
+            # fall back to InputPreprocessor for text path (needs tokenization)
+            renderer = self.async_llm.input_processor.input_preprocessor.renderer
+            if input_type == "tokenized":
+                prompt = renderer.process_for_engine(prompt, arrival_time=time.time())
+            else:
+                prompt = self.async_llm.input_processor.input_preprocessor.preprocess(
+                    prompt
+                )
 
             # Validate kv_transfer_params if present
             if request.HasField("kv_transfer_params"):
