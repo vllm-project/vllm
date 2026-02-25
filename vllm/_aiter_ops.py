@@ -831,6 +831,39 @@ def _rocm_aiter_triton_add_rmsnorm_pad_fake(
     return out, residual_out
 
 
+def _rocm_aiter_gemm_a8wfp4_impl(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scales: torch.Tensor,
+    w_scales: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    from aiter.ops.triton.gemm_a8wfp4 import gemm_a8wfp4
+
+    M, N = x.shape[0], w.shape[0]
+    y = torch.zeros(M, N, dtype=out_dtype, device=x.device)
+    gemm_a8wfp4(
+        x=x,
+        w=w,
+        y=y,
+        x_scales=x_scales,
+        w_scales=w_scales,
+        dtype=out_dtype,
+        config=None,
+    )
+    return y
+
+
+def _rocm_aiter_gemm_a8wfp4_fake(
+    x: torch.Tensor,
+    w: torch.Tensor,
+    x_scales: torch.Tensor,
+    w_scales: torch.Tensor,
+    out_dtype: torch.dtype,
+) -> torch.Tensor:
+    return torch.empty(x.shape[0], w.shape[0], dtype=out_dtype, device=x.device)
+
+
 # Global flag to ensure ops are registered only once
 _OPS_REGISTERED = False
 
@@ -1178,6 +1211,14 @@ class rocm_aiter_ops:
                 dispatch_key=current_platform.dispatch_key,
             )
 
+            direct_register_custom_op(
+                op_name="rocm_aiter_gemm_a8wfp4",
+                op_func=_rocm_aiter_gemm_a8wfp4_impl,
+                mutates_args=[],
+                fake_impl=_rocm_aiter_gemm_a8wfp4_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -1457,6 +1498,18 @@ class rocm_aiter_ops:
         scale: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return torch.ops.vllm.rocm_aiter_per_token_quant(x, quant_dtype, scale)
+
+    @staticmethod
+    def gemm_a8wfp4(
+        x: torch.Tensor,
+        w: torch.Tensor,
+        x_scales: torch.Tensor,
+        w_scales: torch.Tensor,
+        out_dtype: torch.dtype,
+    ) -> torch.Tensor:
+        return torch.ops.vllm.rocm_aiter_gemm_a8wfp4(
+            x, w, x_scales, w_scales, out_dtype
+        )
 
     @staticmethod
     def triton_fp4_gemm_dynamic_qaunt(
