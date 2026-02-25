@@ -6,7 +6,8 @@ Schemas and utilites for preprocessing inputs.
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, NamedTuple, TypeAlias, TypedDict, overload
-
+import numpy as np
+import math
 from vllm.inputs import (
     EmbedsPrompt,
     ExplicitEncoderDecoderPrompt,
@@ -18,7 +19,7 @@ from vllm.inputs import (
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.collection_utils import is_list_of
-
+from vllm.transformers_utils.processor import get_feature_extractor
 if TYPE_CHECKING:
     import torch
 
@@ -256,3 +257,62 @@ def extract_prompt_len(
         target_prompt.get("prompt_token_ids"),
         target_prompt.get("prompt_embeds"),
     )
+
+
+def chunk_audio_data(
+    audio_data: np.ndarray, 
+    sample_rate: int,
+    model_name: str,
+) -> list[np.ndarray]:
+    
+    processor = get_feature_extractor(model_name)
+    MAX_AUDIO_LEN = processor.chunk_length 
+    chunk_size = sample_rate * MAX_AUDIO_LEN
+    overlap_size = sample_rate
+    chunks = []
+    i = 0
+    while i < audio_data.shape[-1]:
+        if i + chunk_size >= audio_data.shape[-1]:
+            # handle last chunk
+            chunks.append(audio_data[..., i:])
+            break
+
+        # Find the best split point in the overlap region
+        search_start = i + chunk_size - overlap_size
+        search_end = min(i + chunk_size, audio_data.shape[-1])
+        split_point = _find_split_point(audio_data, search_start, search_end, sample_rate)
+        # Extract chunk up to the split point
+        chunks.append(audio_data[..., i:split_point])
+        i = split_point
+
+    return chunks
+
+def _find_split_point( 
+    wav: np.ndarray, 
+    start_idx: int, 
+    end_idx: int, 
+    samplerate: int
+) -> int:
+    """Find the best point to split audio by
+    looking for silence or low amplitude.
+    Args:
+        wav: Audio tensor [1, T]
+        start_idx: Start index of search region
+        end_idx: End index of search region
+    Returns:
+        Index of best splitting point
+    """
+    segment = wav[start_idx:end_idx]
+
+    # Calculate RMS energy in small windows
+    min_energy = math.inf
+    quietest_idx = 0
+    min_energy_window = samplerate // 10
+    assert min_energy_window is not None
+    for i in range(0, len(segment) - min_energy_window, min_energy_window):
+        window = segment[i : i + min_energy_window]
+        energy = (window**2).mean() ** 0.5
+        if energy < min_energy:
+            quietest_idx = i + start_idx
+            min_energy = energy
+    return quietest_idx

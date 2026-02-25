@@ -7,9 +7,11 @@ from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING, Any
 
 import cloudpickle
+import copy
 import torch.nn as nn
 from pydantic import ValidationError
 from tqdm.auto import tqdm
+from typing import cast, Any, Mapping
 from typing_extensions import TypeVar, overload
 
 from vllm.beam_search import (
@@ -79,6 +81,7 @@ from vllm.renderers.inputs.preprocess import (
     conversation_to_seq,
     parse_model_prompt,
     prompt_to_seq,
+    chunk_audio_data,
 )
 from vllm.sampling_params import BeamSearchParams, RequestOutputKind, SamplingParams
 from vllm.tasks import PoolingTask
@@ -1759,6 +1762,58 @@ class LLM:
 
         return [0] * num_requests
 
+    def _preprocess_parse_prompts(
+        self,
+        seq_prompts: Sequence[PromptType],
+    ):
+        """
+        chunking for multi-modal data, especially audio data over 30s.
+        """
+        result_seq_prompts: list = []
+        merge_list = []
+        model_name = self.model_config.model
+        for idx, prompt in enumerate(seq_prompts):
+            if not isinstance(prompt, Mapping) or prompt is None:
+                continue
+            p_dict: dict[str, Any] = cast(dict[str, Any], prompt)
+            if p_dict.get("multi_modal_data") and p_dict["multi_modal_data"].get(
+                "audio"
+            ):
+                multi_modal_data = p_dict["multi_modal_data"]
+
+                for audio_data in multi_modal_data.get("audio"):
+                    audio, samplerate = audio_data
+                    chunked_list = chunk_audio_data(audio, samplerate, model_name)
+                    chunked_merge_list = [idx] * len(chunked_list)
+                    for chunked_audio in chunked_list:
+                        base_template = copy.deepcopy(p_dict)
+                        base_template["multi_modal_data"]["audio"] = (
+                            chunked_audio,
+                            samplerate,
+                        )
+                        result_seq_prompts.append(base_template)
+                    merge_list.extend(chunked_merge_list)
+
+        return (result_seq_prompts, merge_list)
+
+    def _postprocess_merge_outputs(
+        self,
+        outputs: list[RequestOutput],
+        merge_list: list[int],
+    ) -> list[RequestOutput]:
+        merged_output = [outputs[0]]
+        for i in range(1, len(outputs)):
+            if merge_list[i] == merge_list[i - 1]:
+                last_output = merged_output[-1]
+                last_output.outputs[0].text += outputs[i].outputs[0].text
+                last_output.outputs[0].token_ids = [
+                    *last_output.outputs[0].token_ids,
+                    *outputs[i].outputs[0].token_ids,
+                ]
+            else:
+                merged_output.append(outputs[i])
+        return merged_output
+
     def _run_completion(
         self,
         prompts: PromptType | Sequence[PromptType],
@@ -1773,6 +1828,12 @@ class LLM:
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
         seq_prompts = prompt_to_seq(prompts)
+        ret_seq_prompts, merge_list = self._preprocess_parse_prompts(seq_prompts)
+
+        if len(seq_prompts) <= len(ret_seq_prompts):
+            seq_prompts = ret_seq_prompts
+            priority = [0] * len(ret_seq_prompts)
+
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
         seq_tok_kwargs = [
@@ -1782,9 +1843,9 @@ class LLM:
             )
             for param in seq_params
         ]
-        seq_priority = self._priority_to_seq(priority, len(prompts))
+        seq_priority = self._priority_to_seq(priority, len(seq_prompts))
 
-        return self._render_and_run_requests(
+        outputs = self._render_and_run_requests(
             prompts=(
                 self._preprocess_cmpl_one(prompt, tok_kwargs)
                 for prompt, tok_kwargs in zip(
@@ -1802,6 +1863,9 @@ class LLM:
             lora_requests=seq_lora_requests,
             priorities=seq_priority,
         )
+
+        self._postprocess_merge_outputs(outputs, merge_list)
+        return outputs
 
     def _run_chat(
         self,
