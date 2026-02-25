@@ -225,7 +225,9 @@ class SweepServeSLAArgs(SweepServeArgs):
     sla_iters: int
 
     parser_name: ClassVar[str] = "serve_sla"
-    parser_help: ClassVar[str] = "Explore the latency-throughput space for SLA tuning."
+    parser_help: ClassVar[str] = (
+        "Explore the latency-throughput space for determining SLAs."
+    )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
