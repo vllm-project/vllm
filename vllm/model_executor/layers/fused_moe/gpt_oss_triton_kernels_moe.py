@@ -7,6 +7,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEParallelConfig,
@@ -172,7 +173,7 @@ def triton_kernel_moe_forward(
     gating_output: torch.Tensor,
     topk: int,
     renormalize: bool,
-    activation: str = "silu",
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
     quant_config: FusedMoEQuantConfig | None = None,
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
@@ -237,7 +238,7 @@ def triton_kernel_fused_experts(
     gather_indx,  # GatherIndx
     scatter_indx,  # ScatterIndx
     topk: int,
-    activation: str = "silu",
+    activation: MoEActivation = MoEActivation.SWIGLUOAI,
     quant_config: FusedMoEQuantConfig | None = None,
     swiglu_alpha: float = 1.702,
     swiglu_limit: float = 7.0,
@@ -247,6 +248,10 @@ def triton_kernel_fused_experts(
     intermediate_cache: torch.Tensor | None = None,
     a1q_scale: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    """Triton implementation of fused expert computation using OAI kernels."""
+    assert activation == MoEActivation.SWIGLUOAI, (
+        "Only SWIGLUOAI activation is supported"
+    )
     if quant_config is None:
         quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
 
@@ -404,7 +409,7 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
         )
 
     @staticmethod
-    def _supports_activation(activation: str) -> bool:
+    def _supports_activation(activation: MoEActivation) -> bool:
         raise NotImplementedError(
             "OAITritonExperts is not yet used by an Oracle. "
             "This method should not be called."
@@ -470,6 +475,8 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 
 class OAITritonExperts(BaseOAITritonExperts):
+    """OAI Triton-based fused MoE expert implementation."""
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -486,7 +493,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
         activation_out_dim = self.adjust_N_for_activation(N, activation)
@@ -503,7 +510,7 @@ class OAITritonExperts(BaseOAITritonExperts):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -570,7 +577,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # workspace are allocated inside the kernel
         activation_out_dim = self.adjust_N_for_activation(N, activation)
@@ -590,7 +597,7 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
