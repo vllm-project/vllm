@@ -506,9 +506,8 @@ def fp8_paged_mqa_logits_torch(
         device=q.device,
         dtype=torch.float32,
     )
-    context_lens = context_lens.tolist()
     for i in range(batch_size):
-        context_len = context_lens[i]
+        context_len = context_lens[i].item()
         q_offsets = torch.arange(context_len - next_n, context_len, device="cuda")
         weight_slice = (
             weights[i * next_n : (i + 1) * next_n, :].transpose(0, 1).contiguous()
