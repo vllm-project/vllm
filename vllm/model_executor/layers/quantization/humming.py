@@ -114,7 +114,7 @@ def parse_single_input_config(config):
 
     return {
         "a_dtype": config["input_dtype"],
-        "input_scale_group_size_k": config.get("group_size", 0)
+        "input_scale_group_size_k": config.get("group_size", 0),
     }
 
 
@@ -262,7 +262,7 @@ class HummingConfig(QuantizationConfig):
         return layer_config
 
     @classmethod
-    def get_layer_input_quant_config(cls, prefix: str) -> dict[str, Any] | None:
+    def get_layer_input_quant_config(cls, prefix: str) -> dict[str, Any]:
         config = envs.VLLM_HUMMING_INPUT_QUANT_CONFIG
         if config is None:
             return {}

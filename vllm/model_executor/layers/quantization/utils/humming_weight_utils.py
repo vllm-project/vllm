@@ -44,7 +44,7 @@ class HummingBaseWeightConverter:
         if group_dim is not None:
             dims_list[group_dim] = self._get_num_groups(dims_list[group_dim])
         if num_experts is not None:
-            dims_list = [num_experts,] + dims_list
+            dims_list = [num_experts] + dims_list
         assert_shape_equal(tuple(dims_list), tensor.shape)
 
     def _get_num_groups(self, shape_k: int):
