@@ -530,7 +530,7 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
             assert positive_values > 0
     finally:
         del llm
-        torch.cuda.empty_cache()
+        torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
 
 
