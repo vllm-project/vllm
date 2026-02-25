@@ -450,7 +450,7 @@ class MatcherQuantFP8(MatcherCustomOp):
 class MatcherSiluAndMul(MatcherCustomOp):
     def __init__(self, enabled: bool | None = None) -> None:
         if enabled is None:
-            enabled = SiluAndMul.enabled()
+            enabled = SiluAndMul.enabled() and SILU_MUL_OP is not None
         super().__init__(enabled)
 
     def inputs(self) -> list[torch.Tensor]:
