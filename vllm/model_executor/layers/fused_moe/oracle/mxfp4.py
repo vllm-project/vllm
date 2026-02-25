@@ -202,9 +202,9 @@ def select_gpt_oss_mxfp4_moe_backend(
     Note: Shape-specific fallbacks may still occur at runtime.
     """
     triton_kernels_supported = has_triton_kernels() and (
-        9,
-        0,
-    ) <= current_platform.get_device_capability() <= (12, 1)
+        (9, 0) <= current_platform.get_device_capability() < (11, 0)
+        or (12, 0) <= current_platform.get_device_capability() <= (12, 1)
+    )
 
     # LoRA: separate experts backend path
     if config.is_lora_enabled:
