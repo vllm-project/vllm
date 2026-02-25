@@ -569,10 +569,24 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
             # materialization
             param = layer.weight
 
-            # load the current weight chunk
-            copy_numel_counter = CopyNumelCounter()
-            with copy_numel_counter:
-                res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
+            # Shard id with multiple indices (tuple) is only supported by
+            # weight_loader_v2; use it so we stay in the patched path and
+            # _loaded_numel / process_weights_after_loading still run.
+            loaded_shard_id = (
+                args[0]
+                if args
+                else kwargs.get("loaded_shard_id", kwargs.get("shard_id"))
+            )
+            if isinstance(loaded_shard_id, tuple) and hasattr(
+                layer, "weight_loader_v2"
+            ):
+                copy_numel_counter = CopyNumelCounter()
+                with copy_numel_counter:
+                    res = layer.weight_loader_v2(param, loaded_weight, loaded_shard_id)
+            else:
+                copy_numel_counter = CopyNumelCounter()
+                with copy_numel_counter:
+                    res = weight_loader(param, loaded_weight, *args, **kwargs)  # type: ignore[misc]
             layer._loaded_numel += copy_numel_counter.copied_numel
 
             # if we have loaded all of the elements, call

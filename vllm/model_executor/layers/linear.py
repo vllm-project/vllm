@@ -924,7 +924,13 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
             if isinstance(param, PerTensorScaleParameter):
                 param.load_merged_column_weight(loaded_weight=loaded_weight, shard_id=0)
                 return
-            elif type(param) in (RowvLLMParameter, BasevLLMParameter):
+            # For tuple shard_id (e.g. (0,1,2)), we must split and load by
+            # output_sizes; do not use load_merged_column_weight which expects
+            # a single full tensor.
+            if loaded_shard_id is None and type(param) in (
+                RowvLLMParameter,
+                BasevLLMParameter,
+            ):
                 param.load_merged_column_weight(loaded_weight=loaded_weight)
                 return
             output_sizes = (
