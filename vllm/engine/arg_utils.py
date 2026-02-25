@@ -59,6 +59,7 @@ from vllm.config import (
     get_attr_docs,
 )
 from vllm.config.cache import (
+    BlockSize,
     CacheDType,
     KVOffloadingBackend,
     MambaCacheMode,
@@ -430,7 +431,7 @@ class EngineArgs:
     max_parallel_loading_workers: int | None = (
         ParallelConfig.max_parallel_loading_workers
     )
-    block_size: int = None  # type: ignore[assignment]
+    block_size: BlockSize = CacheConfig.block_size
     enable_prefix_caching: bool | None = None
     prefix_caching_hash_algo: PrefixCachingHashAlgo = (
         CacheConfig.prefix_caching_hash_algo
@@ -2016,21 +2017,20 @@ class EngineArgs:
             )
 
         # Disable chunked prefill and prefix caching for:
-        # POWER (ppc64le)/s390x/RISCV CPUs in V1
+        # POWER (ppc64le)/RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
             CpuArchEnum.POWERPC,
-            CpuArchEnum.S390X,
             CpuArchEnum.RISCV,
         ):
             logger.info(
                 "Chunked prefill is not supported for POWER, "
-                "S390X and RISC-V CPUs; "
+                "and RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
             logger.info(
                 "Prefix caching is not supported for POWER, "
-                "S390X and RISC-V CPUs; "
+                "and RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False

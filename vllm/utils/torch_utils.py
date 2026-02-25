@@ -567,8 +567,8 @@ def current_stream() -> torch.cuda.Stream:
     return _current_stream_tls.value
 
 
-# Global auxilary stream for running operations in background streams.
-# We have single global auxilary stream to avoid an explosion of streams
+# Global auxiliary stream for running operations in background streams.
+# We have single global auxiliary stream to avoid an explosion of streams
 # for every layer (and make profiling look sane).
 #
 # aux_stream() is currently used for:
@@ -743,6 +743,11 @@ def is_torch_equal(target: str) -> bool:
 # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
 def supports_xccl() -> bool:
     return torch.distributed.is_xccl_available()
+
+
+# Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform
+def supports_xpu_graph() -> bool:
+    return is_torch_equal_or_newer("2.11.0.dev")
 
 
 # create a library to hold the custom op
