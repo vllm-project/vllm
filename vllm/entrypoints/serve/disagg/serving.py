@@ -9,7 +9,7 @@ from collections.abc import Sequence as GenericSequence
 
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -22,10 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import (
-    OpenAIServingInference,
-    clamp_prompt_logprobs,
-)
+from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
@@ -41,11 +38,12 @@ from vllm.utils.collection_utils import as_list
 logger = init_logger(__name__)
 
 
-class ServingTokens(OpenAIServingInference):
+class ServingTokens(OpenAIServing):
     """Provides Tokens IN <> Tokens OUT functionality to vLLM API."""
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -57,6 +55,7 @@ class ServingTokens(OpenAIServingInference):
         enable_log_outputs: bool = False,
     ):
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
@@ -85,8 +84,8 @@ class ServingTokens(OpenAIServingInference):
         # If the engine is dead, raise the engine's DEAD_ERROR.
         # This is required for the streaming case, where we return a
         # success status before we actually start generating text :).
-        if self.engine_client.errored:
-            raise self.engine_client.dead_error
+        if self.renderer_client.errored:
+            raise self.renderer_client.dead_error
 
         lora_request = None
         lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)

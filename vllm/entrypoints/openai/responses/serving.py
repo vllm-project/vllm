@@ -54,7 +54,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
-    OpenAIServingInference,
+    OpenAIServing,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -153,7 +153,7 @@ def _extract_allowed_tools_from_mcp_requests(
     return allowed_tools_map
 
 
-class OpenAIServingResponses(OpenAIServingInference):
+class OpenAIServingResponses(OpenAIServing):
     def __init__(
         self,
         renderer_client: RendererClient,

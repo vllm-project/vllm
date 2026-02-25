@@ -7,11 +7,11 @@ import jinja2
 import numpy as np
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.engine.serving import OpenAIServingInference, ServeContext
+from vllm.entrypoints.openai.engine.serving import OpenAIServing, ServeContext
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.classify.protocol import (
     ClassificationChatRequest,
@@ -29,11 +29,12 @@ logger = init_logger(__name__)
 ClassificationServeContext: TypeAlias = ServeContext[ClassificationRequest]
 
 
-class ServingClassification(OpenAIServingInference):
+class ServingClassification(OpenAIServing):
     request_id_prefix = "classify"
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -44,6 +45,7 @@ class ServingClassification(OpenAIServingInference):
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,

@@ -8,9 +8,9 @@ from typing import Literal, cast
 
 import numpy as np
 
-from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.engine.protocol import EngineClient, RendererClient, StreamingInput
 from vllm.entrypoints.logger import RequestLogger
-from vllm.entrypoints.openai.engine.serving import OpenAIServingInference
+from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.inputs.data import PromptType
 from vllm.logger import init_logger
@@ -20,7 +20,7 @@ from vllm.renderers.inputs.preprocess import parse_model_prompt
 logger = init_logger(__name__)
 
 
-class OpenAIServingRealtime(OpenAIServingInference):
+class OpenAIServingRealtime(OpenAIServing):
     """Realtime audio transcription service via WebSocket streaming.
 
     Provides streaming audio-to-text transcription by transforming audio chunks
@@ -29,6 +29,7 @@ class OpenAIServingRealtime(OpenAIServingInference):
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -36,6 +37,7 @@ class OpenAIServingRealtime(OpenAIServingInference):
         log_error_stack: bool = False,
     ):
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,

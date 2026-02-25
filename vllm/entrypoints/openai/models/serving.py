@@ -5,7 +5,7 @@ from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
@@ -38,6 +38,7 @@ class OpenAIServingModels:
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         base_model_paths: list[BaseModelPath],
         *,
@@ -45,6 +46,7 @@ class OpenAIServingModels:
     ):
         super().__init__()
 
+        self.renderer_client = renderer_client
         self.engine_client = engine_client
         self.base_model_paths = base_model_paths
 
@@ -59,10 +61,10 @@ class OpenAIServingModels:
             )
         self.lora_resolver_lock: dict[str, Lock] = defaultdict(Lock)
 
-        self.model_config = self.engine_client.model_config
-        self.renderer = self.engine_client.renderer
-        self.io_processor = self.engine_client.io_processor
-        self.input_processor = self.engine_client.input_processor
+        self.model_config = self.renderer_client.model_config
+        self.renderer = self.renderer_client.renderer
+        self.io_processor = self.renderer_client.io_processor
+        self.input_processor = self.renderer_client.input_processor
 
     async def init_static_loras(self):
         """Loads all static LoRA modules.

@@ -9,11 +9,11 @@ import torch
 from fastapi import Request
 from typing_extensions import assert_never
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import ChatTemplateContentFormatOption
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse, UsageInfo
-from vllm.entrypoints.openai.engine.serving import OpenAIServingInference, ServeContext
+from vllm.entrypoints.openai.engine.serving import OpenAIServing, ServeContext
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.pooling.embed.protocol import (
     EmbeddingBytesResponse,
@@ -42,11 +42,12 @@ logger = init_logger(__name__)
 EmbeddingServeContext: TypeAlias = ServeContext[EmbeddingRequest]
 
 
-class OpenAIServingEmbedding(OpenAIServingInference):
+class OpenAIServingEmbedding(OpenAIServing):
     request_id_prefix = "embd"
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -57,6 +58,7 @@ class OpenAIServingEmbedding(OpenAIServingInference):
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,
