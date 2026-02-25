@@ -36,7 +36,6 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.kv_offload.abstract import OffloadingManager
 from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.mediums import BlockIDsLoadStoreSpec, GPULoadStoreSpec
-from vllm.v1.kv_offload.reuse_tracker import BlockReuseTracker
 from vllm.v1.kv_offload.spec import OffloadingSpec
 from vllm.v1.kv_offload.transfer_timing import TransferTimingStats
 from vllm.v1.kv_offload.worker.worker import (
@@ -358,17 +357,6 @@ class OffloadingConnectorScheduler:
         self._reqs_being_stored = defaultdict[ReqId, set[BlockHash]](set)
         self._reqs_being_loaded = defaultdict[ReqId, set[BlockHash]](set)
 
-        # Strategy A (P0): gate GPU->CPU stores on observed block-hash reuse.
-        # Only blocks seen >= store_threshold times will be stored to CPU.
-        self.reuse_tracker = BlockReuseTracker(
-            max_size=int(
-                spec.extra_config.get("reuse_tracker_max_size", 64_000)
-            ),
-            store_threshold=int(
-                spec.extra_config.get("store_threshold", 2)
-            ),
-        )
-
         # PR 2: Adaptive offloading policy — tracks rolling TTFT to detect
         # overhead and dynamically switch between blocking and async modes.
         self.adaptive_policy = AdaptiveOffloadingPolicy(
@@ -568,13 +556,6 @@ class OffloadingConnectorScheduler:
             src_block_ids: list[int] = []
             for idx, blk_hash in enumerate(new_block_hashes):
                 if blk_hash not in block_hashes_to_store:
-                    continue
-                # Strategy A: skip store for blocks unlikely to be reused.
-                if not self.reuse_tracker.record_and_check(blk_hash):
-                    logger.debug(
-                        "Skipping store for block hash %s (below reuse threshold)",
-                        blk_hash,
-                    )
                     continue
                 offloaded_block_idx = start_block_idx + idx
                 gpu_block_idx = offloaded_block_idx * self.block_size_factor
