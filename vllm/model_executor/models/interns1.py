@@ -197,20 +197,18 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: GotOcr2ImageProcessorFast | None = None,
+        processor: InternVLProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor().image_processor
+        image_processor: GotOcr2ImageProcessorFast = processor.image_processor
 
-        if not isinstance(processor, GotOcr2ImageProcessorFast):
-            raise ValueError(
-                f"GotOcr2ImageProcessorFast is expected but got {type(processor)}"
-            )
-        num_image_patches = processor.get_number_of_image_patches(
-            image_height, image_width, images_kwargs=dict()
+        num_image_patches = image_processor.get_number_of_image_patches(
+            image_height,
+            image_width,
+            self.ctx.get_merged_mm_kwargs(mm_kwargs),
         )
-        num_image_tokens = self.get_hf_processor().image_seq_length * num_image_patches
-        return num_image_tokens
+
+        return processor.image_seq_length * num_image_patches
 
     def resolve_target_ratios(self, use_thumbnail: bool | None = None):
         image_processor = self.get_hf_processor().image_processor
@@ -243,7 +241,8 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
             feat_size = self.get_num_image_tokens(
                 image_width=width,
                 image_height=height,
-                processor=processor.image_processor,
+                processor=processor,
+                mm_kwargs={},
             )
             if feat_size > largest_feature_size:
                 largest_feature_size = feat_size
@@ -262,7 +261,8 @@ class InternS1ProcessingInfo(BaseProcessingInfo):
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            processor=processor.image_processor,
+            processor=processor,
+            mm_kwargs={},
         )
 
     def get_num_frames_with_most_features(
@@ -297,7 +297,7 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
@@ -309,8 +309,8 @@ class InternS1DummyInputsBuilder(BaseDummyInputsBuilder[InternS1ProcessingInfo])
         config = self.info.get_hf_config()
         image_size_h, image_size_w = config.vision_config.image_size
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -547,20 +547,20 @@ class InternS1ForConditionalGeneration(
         )
         self.downsample_ratio = config.downsample_ratio
 
-        self.llm_arch_name = config.text_config.architectures[0]
-        self.vision_tower = self._init_vision_model(
-            config,
-            quant_config=quant_config,
-            prefix=maybe_prefix(prefix, "vision_tower"),
-        )
+        with self._mark_tower_model(vllm_config, {"image", "video"}):
+            self.vision_tower = self._init_vision_model(
+                config,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "vision_tower"),
+            )
+            self.multi_modal_projector = self._init_mlp1(config)
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=config.text_config,
-            prefix=maybe_prefix(prefix, "language_model"),
-        )
-
-        self.multi_modal_projector = self._init_mlp1(config)
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=config.text_config,
+                prefix=maybe_prefix(prefix, "language_model"),
+            )
 
         self.img_context_token_id = None
         self.video_context_token_id = None
@@ -699,8 +699,6 @@ class InternS1ForConditionalGeneration(
         ):
             return image_input["data"]
 
-        assert self.vision_tower is not None
-
         image_embeds = self.extract_feature(image_input["pixel_values"])
 
         num_patches = image_input["num_patches"]
@@ -736,9 +734,6 @@ class InternS1ForConditionalGeneration(
 
     def _set_visual_token_mask(self, input_ids: torch.Tensor) -> None:
         self.visual_token_mask = None
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         modalities = self._parse_and_validate_multimodal_inputs(**kwargs)
@@ -787,14 +782,13 @@ class InternS1ForConditionalGeneration(
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ) -> IntermediateTensors:
         if intermediate_tensors is not None:
-            input_ids = None
             inputs_embeds = None
 
         forward_kwargs = {

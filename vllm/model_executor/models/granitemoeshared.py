@@ -157,7 +157,6 @@ class GraniteMoeSharedModel(nn.Module):
 
         self.config = config
         self.quant_config = quant_config  # Required by MixtralModel
-        self.padding_idx = config.pad_token_id
 
         self.vocab_size = config.vocab_size
 
@@ -183,7 +182,7 @@ class GraniteMoeSharedModel(nn.Module):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None,
         inputs_embeds: torch.Tensor | None = None,
@@ -295,7 +294,7 @@ class GraniteMoeSharedForCausalLM(nn.Module, SupportsLoRA, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

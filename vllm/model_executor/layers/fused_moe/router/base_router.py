@@ -127,7 +127,11 @@ class BaseRouter(FusedMoERouter):
         self.eplb_state = eplb_state
         self.enable_eplb = enable_eplb
         self.indices_type_getter = indices_type_getter
-        self.capture: Callable[[torch.tensor], None] | None = None
+        self.capture_fn: Callable[[torch.Tensor], None] | None = None
+
+    def set_capture_fn(self, capture_fn: Callable[[torch.Tensor], None] | None) -> None:
+        """Set a capture callback for logical routed expert IDs."""
+        self.capture_fn = capture_fn
 
     def _validate_eplb_state(self) -> None:
         """Validate that EPLB state is properly initialized if EPLB is enabled."""
@@ -232,14 +236,14 @@ class BaseRouter(FusedMoERouter):
             hidden_states, router_logits, indices_type
         )
 
+        # Capture logical ids before EPLB mapping.
+        if self.capture_fn is not None:
+            self.capture_fn(topk_ids)
+
         # Step 4: Apply EPLB mapping
         topk_ids = self._apply_eplb_mapping(topk_ids)
 
         # Step 5: Convert indices dtype
         topk_ids = self._convert_indices_dtype(topk_ids, indices_type)
-
-        # TODO(bnell): temporary hack until select_experts is moved into FusedMoE
-        if self.capture is not None:
-            self.capture(topk_ids)
 
         return topk_weights, topk_ids

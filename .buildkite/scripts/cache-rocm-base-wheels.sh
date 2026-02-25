@@ -83,7 +83,7 @@ case "${1:-}" in
             exit 1
         fi
 
-        WHEEL_COUNT=$(ls artifacts/rocm-base-wheels/*.whl 2>/dev/null | wc -l)
+        WHEEL_COUNT=$(find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
         if [[ "$WHEEL_COUNT" -eq 0 ]]; then
             echo "ERROR: No wheels found in artifacts/rocm-base-wheels/" >&2
             exit 1
@@ -110,9 +110,9 @@ case "${1:-}" in
 
         echo ""
         echo "Downloaded wheels:"
-        ls -lh artifacts/rocm-base-wheels/
+        find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' -exec ls -lh {} \;
 
-        WHEEL_COUNT=$(ls artifacts/rocm-base-wheels/*.whl 2>/dev/null | wc -l)
+        WHEEL_COUNT=$(find artifacts/rocm-base-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
         echo ""
         echo "Total: $WHEEL_COUNT wheels"
         echo "========================================"

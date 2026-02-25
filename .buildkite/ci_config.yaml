@@ -1,7 +1,8 @@
 name: vllm_ci
 job_dirs:
-  - ".buildkite/test_areas"
   - ".buildkite/image_build"
+  - ".buildkite/test_areas"
+  - ".buildkite/hardware_tests"
 run_all_patterns:
   - "docker/Dockerfile"
   - "CMakeLists.txt"

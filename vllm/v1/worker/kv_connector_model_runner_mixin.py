@@ -39,40 +39,10 @@ logger = init_logger(__name__)
 # Defined as a kv connector functionality mixin for ModelRunner (GPU, TPU)
 class KVConnectorModelRunnerMixin:
     @staticmethod
-    def maybe_setup_kv_connector(scheduler_output: "SchedulerOutput"):
-        # Update KVConnector with the KVConnector metadata forward().
-        if has_kv_transfer_group():
-            kv_connector = get_kv_transfer_group()
-            assert isinstance(kv_connector, KVConnectorBase)
-            assert scheduler_output.kv_connector_metadata is not None
-            kv_connector.bind_connector_metadata(scheduler_output.kv_connector_metadata)
-
-            # Background KV cache transfers happen here.
-            # These transfers are designed to be async and the requests
-            # involved may be disjoint from the running requests.
-            # Do this here to save a collective_rpc.
-            kv_connector.start_load_kv(get_forward_context())
-
-    @staticmethod
     def ensure_kv_transfer_shutdown() -> None:
         # has_kv_transfer_group can be None during interpreter shutdown.
         if has_kv_transfer_group and has_kv_transfer_group():  # type: ignore[truthy-function]
             ensure_kv_transfer_shutdown()
-
-    @staticmethod
-    def maybe_wait_for_kv_save() -> None:
-        if has_kv_transfer_group():
-            get_kv_transfer_group().wait_for_save()
-
-    @staticmethod
-    def get_finished_kv_transfers(
-        scheduler_output: "SchedulerOutput",
-    ) -> tuple[set[str] | None, set[str] | None]:
-        if has_kv_transfer_group():
-            return get_kv_transfer_group().get_finished(
-                scheduler_output.finished_req_ids
-            )
-        return None, None
 
     @staticmethod
     def kv_connector_no_forward(
@@ -97,9 +67,12 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def maybe_get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
+        clear_metadata: bool = True,
     ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
-            KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
+            KVConnectorModelRunnerMixin._get_kv_connector_output(
+                scheduler_output, clear_metadata=clear_metadata
+            )
             if has_kv_transfer_group()
             else nullcontext()
         )
@@ -109,7 +82,9 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     @contextmanager
     def _get_kv_connector_output(
-        scheduler_output: "SchedulerOutput", wait_for_save: bool = True
+        scheduler_output: "SchedulerOutput",
+        wait_for_save: bool = True,
+        clear_metadata: bool = True,
     ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
 
@@ -138,6 +113,14 @@ class KVConnectorModelRunnerMixin:
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
 
+            if clear_metadata:
+                kv_connector.clear_connector_metadata()
+
+    @staticmethod
+    def clear_kv_connector_metadata() -> None:
+        """Clear the KV connector metadata. Call after draft model runs."""
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
             kv_connector.clear_connector_metadata()
 
     @staticmethod

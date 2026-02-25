@@ -21,7 +21,8 @@
 void scaled_fp4_quant_sm1xxa(torch::Tensor const& output,
                              torch::Tensor const& input,
                              torch::Tensor const& output_sf,
-                             torch::Tensor const& input_sf);
+                             torch::Tensor const& input_sf,
+                             bool is_sf_swizzled_layout);
 #endif
 
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
@@ -51,10 +52,12 @@ void silu_and_mul_scaled_fp4_experts_quant_sm1xxa(
 #endif
 
 void scaled_fp4_quant(torch::Tensor& output, torch::Tensor const& input,
-                      torch::Tensor& output_sf, torch::Tensor const& input_sf) {
+                      torch::Tensor& output_sf, torch::Tensor const& input_sf,
+                      bool is_sf_swizzled_layout) {
 #if (defined(ENABLE_NVFP4_SM100) && ENABLE_NVFP4_SM100) || \
     (defined(ENABLE_NVFP4_SM120) && ENABLE_NVFP4_SM120)
-  return scaled_fp4_quant_sm1xxa(output, input, output_sf, input_sf);
+  return scaled_fp4_quant_sm1xxa(output, input, output_sf, input_sf,
+                                 is_sf_swizzled_layout);
 #endif
   TORCH_CHECK_NOT_IMPLEMENTED(false, "No compiled nvfp4 quantization kernel");
 }

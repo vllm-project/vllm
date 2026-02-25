@@ -164,3 +164,40 @@ def test_classes_are_types():
         pass
 
     assert endswith_fqname(LocalDummy, ".LocalDummy")
+
+
+def test_envs_compile_factors_stable():
+    """Test that envs.compile_factors() hash is stable across fresh initializations.
+
+    Uses subprocesses to ensure env vars with dynamic defaults (like UUIDs)
+    are freshly generated each time, verifying they're properly ignored.
+    """
+    import subprocess
+    import sys
+
+    code = """
+import sys
+import logging
+logging.disable(logging.CRITICAL)
+from vllm import envs
+from vllm.config.utils import hash_factors
+print(hash_factors(envs.compile_factors()))
+"""
+
+    def get_hash_in_subprocess():
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**dict(__import__("os").environ), "VLLM_LOGGING_LEVEL": "ERROR"},
+        )
+        return result.stdout.strip()
+
+    hash1 = get_hash_in_subprocess()
+    hash2 = get_hash_in_subprocess()
+
+    assert hash1 == hash2, (
+        "compile_factors hash differs between fresh initializations - "
+        "dynamic env vars may not be properly ignored"
+    )

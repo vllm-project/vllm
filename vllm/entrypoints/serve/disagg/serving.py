@@ -29,7 +29,6 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponse,
     GenerateResponseChoice,
 )
-from vllm.inputs.data import TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -99,14 +98,13 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        # TODO(NickLucche): Change to EngineCoreRequest once Renderer work is
-        # completed
-        engine_prompt = TokensPrompt(prompt_token_ids=request.token_ids)
-        if request.features is not None:
-            engine_prompt["multi_modal_data"] = None
-
-        if hasattr(request, "cache_salt") and request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
+        engine_prompts = await self._preprocess_completion(
+            request,
+            prompt_input=request.token_ids,
+            prompt_embeds=None,
+        )
+        assert len(engine_prompts) == 1
+        engine_prompt = engine_prompts[0]
 
         # Schedule the request and get the result generator.
         result_generator: AsyncGenerator[RequestOutput, None] | None = None
@@ -117,7 +115,7 @@ class ServingTokens(OpenAIServing):
 
             self._log_inputs(
                 request_id,
-                TokensPrompt(prompt_token_ids=request.token_ids),
+                engine_prompt,
                 params=sampling_params,
                 lora_request=lora_request,
             )
@@ -179,7 +177,7 @@ class ServingTokens(OpenAIServing):
             out_logprobs = output.logprobs
 
             # This is top_logprobs in completions API
-            if sampling_params.logprobs:
+            if sampling_params.logprobs is not None:
                 assert out_logprobs is not None, "Did not output logprobs"
                 logprobs = self._create_tokens_logprobs(
                     token_ids=token_ids,
@@ -279,7 +277,8 @@ class ServingTokens(OpenAIServing):
                                 logprob=max(p[1].logprob, -9999.0),
                             )
                             for i, p in enumerate(step_top_logprobs.items())
-                            if num_output_top_logprobs and i < num_output_top_logprobs
+                            if num_output_top_logprobs is not None
+                            and i < max(num_output_top_logprobs, 1)
                         ],
                     )
                 )

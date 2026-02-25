@@ -118,7 +118,12 @@ try:
                 )
 
                 gemm_a4w4(
-                    x_q, weight, x_s, weight_scale.view(x_s.dtype), y, bpreshuffle=True
+                    x_q,
+                    weight.view(x_q.dtype),
+                    x_s,
+                    weight_scale.view(x_s.dtype),
+                    y,
+                    bpreshuffle=True,
                 )
             return y[:M]
         else:
@@ -154,10 +159,11 @@ try:
         dispatch_key=current_platform.dispatch_key,
     )
 except (ImportError, AttributeError, RuntimeError):
-    logger.warning(
-        "AITER is not found or QuarkOCP_MX is not supported on the current "
-        "platform. QuarkOCP_MX quantization will not be available."
-    )
+    if current_platform.is_rocm():
+        logger.warning(
+            "AITER is not found or QuarkOCP_MX is not supported on the current "
+            "platform. QuarkOCP_MX quantization will not be available."
+        )
     dynamic_mxfp4_quant = gemm_afp4wfp4 = None
 
 

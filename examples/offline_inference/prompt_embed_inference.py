@@ -38,8 +38,8 @@ def get_prompt_embeds(
     embedding_layer: torch.nn.Module,
 ):
     token_ids = tokenizer.apply_chat_template(
-        chat, add_generation_prompt=True, return_tensors="pt"
-    )
+        chat, add_generation_prompt=True, return_tensors="pt", return_dict=True
+    ).input_ids
     prompt_embeds = embedding_layer(token_ids).squeeze(0)
     return prompt_embeds
 
