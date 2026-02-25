@@ -96,7 +96,7 @@ Each parameter combination is benchmarked 3 times to make the results more relia
     In case you are using a custom `--serve-cmd`, you can override the commands used for resetting the state by setting `--after-bench-cmd`.
 
 !!! note
-    You should  `_benchmark_name` to provide a human-readable name for parameter combinations involving many variables.
+    You should set `_benchmark_name` to provide a human-readable name for parameter combinations involving many variables.
     This becomes mandatory if the file name would otherwise exceed the maximum path length allowed by the filesystem.
 
 !!! tip
