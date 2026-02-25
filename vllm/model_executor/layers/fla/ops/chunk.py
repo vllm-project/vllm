@@ -75,7 +75,7 @@ def chunk_gated_delta_rule_fwd(
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     @staticmethod
     @input_guard
-    @torch.amp.custom_fwd(device_type="xpu" if current_platform.is_xpu() else "cuda")
+    @torch.amp.custom_fwd(device_type=current_platform.device_type)
     def forward(
         ctx,
         q: torch.Tensor,
