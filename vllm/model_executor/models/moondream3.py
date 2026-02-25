@@ -26,6 +26,9 @@ from vllm.distributed import (
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention.mm_encoder_attention import (
+    MMEncoderAttention,
+)
 from vllm.model_executor.layers.fused_moe import MoEActivation, fused_experts
 from vllm.model_executor.layers.fused_moe.config import biased_moe_quant_config
 from vllm.model_executor.layers.linear import (
@@ -267,11 +270,7 @@ class Moondream3VisionMLP(nn.Module):
 
 
 class Moondream3VisionAttention(nn.Module):
-    """Self-attention for vision encoder (bidirectional).
-
-    Uses native PyTorch scaled_dot_product_attention to avoid
-    dependency on vLLM forward context during memory profiling.
-    """
+    """Self-attention for vision encoder (bidirectional)."""
 
     def __init__(
         self,
@@ -303,37 +302,18 @@ class Moondream3VisionAttention(nn.Module):
 
         tp_size = get_tensor_model_parallel_world_size()
         self.num_heads_per_partition = num_heads // tp_size
-        self.scale = self.head_dim**-0.5
+
+        self.attn = MMEncoderAttention(
+            num_heads=self.num_heads_per_partition,
+            head_size=self.head_dim,
+            scale=self.head_dim**-0.5,
+            prefix=f"{prefix}.attn",
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Forward pass using native PyTorch SDPA.
-
-        Args:
-            hidden_states: (batch, seq_len, hidden_size)
-
-        Returns:
-            output: (batch, seq_len, hidden_size)
-        """
-        batch_size, seq_len, _ = hidden_states.shape
-
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.chunk(3, dim=-1)
-
-        # Reshape to (batch, num_heads, seq_len, head_dim)
-        q = q.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
-        q = q.transpose(1, 2)
-        k = k.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
-        k = k.transpose(1, 2)
-        v = v.view(batch_size, seq_len, self.num_heads_per_partition, self.head_dim)
-        v = v.transpose(1, 2)
-
-        # Use PyTorch's scaled_dot_product_attention (bidirectional, no mask)
-        out = F.scaled_dot_product_attention(q, k, v, scale=self.scale)
-
-        # Reshape back to (batch, seq_len, hidden_size)
-        out = out.transpose(1, 2).contiguous()
-        out = out.view(batch_size, seq_len, -1)
-
+        out = self.attn(q, k, v)
         out, _ = self.out_proj(out)
         return out
 
@@ -987,26 +967,6 @@ class Moondream3Attention(nn.Module):
         self.tau_wv = nn.Parameter(torch.zeros(self.num_heads_per_partition, qkv_dim))
         self.tp_size = tp_size
 
-        # Prefix-LM attention length: BOS (1) + vision patches (729) = 730
-        self._prefix_attn_len = config.prefix_attn  # 730
-        if self._prefix_attn_len > config.max_context:
-            raise ValueError(
-                "prefix_attn must be <= max_context, "
-                f"got {self._prefix_attn_len} > {config.max_context}."
-            )
-        # Build once and slice per prefill call to avoid allocating an N x N
-        # mask on every forward pass.
-        prefill_mask = torch.tril(
-            torch.ones(
-                1,
-                1,
-                config.max_context,
-                config.max_context,
-                dtype=torch.bool,
-            )
-        )
-        prefill_mask[:, :, : self._prefix_attn_len, : self._prefix_attn_len] = True
-        self.register_buffer("_prefill_mask", prefill_mask, persistent=False)
 
     def forward(
         self,
@@ -1100,58 +1060,7 @@ class Moondream3Attention(nn.Module):
 
         q, k = self.rotary_emb(positions, q, k)
 
-        # ---- SDPA prefill override ----
-        # During prefill (num_tokens >= prefix_attn_len), use PyTorch SDPA
-        # with an explicit bidirectional mask for the prefix-LM region.
-        # This produces hidden states that closely match the HF reference
-        # (which also uses SDPA for prefill).  Decode tokens and short
-        # sequences fall through to the configured attention backend (e.g.
-        # FLEX_ATTENTION) for KV-cache-aware decoding.
-        H = self.num_heads_per_partition
-        Hkv = self.num_kv_heads_per_partition
-        D = self.head_dim
-        P = self._prefix_attn_len  # 730
-
-        if num_tokens > 1 and num_tokens >= P:
-            q_4d = q.view(num_tokens, H, D).transpose(0, 1).unsqueeze(0)
-            k_4d = k.view(num_tokens, Hkv, D).transpose(0, 1).unsqueeze(0)
-            v_4d = v.view(num_tokens, Hkv, D).transpose(0, 1).unsqueeze(0)
-
-            # Causal mask with bidirectional prefix region. Reuse the prebuilt
-            # mask when possible; some profiling paths can exceed max_context.
-            if num_tokens <= self._prefill_mask.shape[-1]:
-                bool_mask = self._prefill_mask[:, :, :num_tokens, :num_tokens]
-            else:
-                bool_mask = torch.tril(
-                    torch.ones(
-                        1,
-                        1,
-                        num_tokens,
-                        num_tokens,
-                        dtype=torch.bool,
-                        device=q.device,
-                    )
-                )
-                bool_mask[:, :, :P, :P] = True
-
-            attn_output = F.scaled_dot_product_attention(
-                q_4d,
-                k_4d,
-                v_4d,
-                attn_mask=bool_mask,
-                scale=self.scaling,
-            )
-            attn_output = (
-                attn_output.squeeze(0)
-                .transpose(0, 1)
-                .contiguous()
-                .view(num_tokens, H * D)
-            )
-
-            # Still call self.attn to populate the KV cache
-            _ = self.attn(q, k, v)
-        else:
-            attn_output = self.attn(q, k, v)
+        attn_output = self.attn(q, k, v)
 
         output, _ = self.out_proj(attn_output)
         return output
