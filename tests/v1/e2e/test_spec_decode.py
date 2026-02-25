@@ -470,16 +470,15 @@ def test_eagle_correctness(
     # Scout requires default backend selection because vision encoder has
     # head_dim 88 being incompatible with FLASH_ATTN and needs to fall back
     # to FLEX_ATTENTION
-    if (
-        "Llama-4-Scout" in model_setup[1]
-        and attn_backend == "FLASH_ATTN"
-        and current_platform.is_rocm()
-    ):
-        print(
-            "FLASH_ATTN for spec_decode not supported on "
-            "ROCm currently. Changing to FLEX_ATTENTION backend."
-        )
-        attention_config = {"backend": "FLEX_ATTENTION"}
+    if "Llama-4-Scout" in model_setup[1] and attn_backend == "FLASH_ATTN":
+        if current_platform.is_rocm():
+            print(
+                "FLASH_ATTN for spec_decode not supported on "
+                "ROCm currently. Changing to FLEX_ATTENTION backend."
+            )
+            attention_config = {"backend": "FLEX_ATTENTION"}
+        else:
+            attention_config = None
     else:
         attention_config = {"backend": attn_backend}
 
