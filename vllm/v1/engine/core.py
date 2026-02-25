@@ -1767,7 +1767,6 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def _eep_scale_up_before_kv_init(self):
         from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
-        from vllm.v1.executor.ray_distributed_executor import RayDistributedExecutor
 
         self.eep_scaling_state = ElasticEPScalingState(
             model_executor=self.model_executor,
@@ -1779,11 +1778,6 @@ class DPEngineCoreProc(EngineCoreProc):
             reconfig_request=None,
         )
         self.model_executor.collective_rpc("init_device")
-        kwargs = {}
-        if isinstance(self.model_executor, RayDistributedExecutor):
-            kwargs["max_concurrent_workers"] = (
-                self.vllm_config.parallel_config.max_parallel_loading_workers
-            )
         self.model_executor.collective_rpc("load_model")
         self._eep_send_engine_core_notification(
             EEPNotificationType.NEW_CORE_ENGINES_WEIGHTS_INIT_READY
