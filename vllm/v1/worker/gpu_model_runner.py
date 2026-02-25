@@ -3535,7 +3535,6 @@ class GPUModelRunner(
 
         # Run the model.
         # Use persistent buffers for CUDA graphs.
-        print(f"Putting positions: {positions}.")
         with (
             set_forward_context(
                 attn_metadata,
