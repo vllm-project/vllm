@@ -53,6 +53,12 @@ def _transformers_v4_compatibility_init() -> Any:
 
     This can be removed if `Molmo2ForConditionalGeneration` is upstreamed to
     Transformers."""
+    # Transformers v4
+    if hasattr(ProcessorMixin, "optional_attributes"):
+        return
+    # Transformers v5
+    if hasattr(ProcessorMixin.__init__, "_vllm_patched"):
+        return
 
     original_init = ProcessorMixin.__init__
 
@@ -65,6 +71,7 @@ def _transformers_v4_compatibility_init() -> Any:
 
     # Only patch if ProcessorMixin is not mocked (for docs builds)
     if not hasattr(ProcessorMixin, "_mock_name"):
+        __init__._vllm_patched = True  # type: ignore[attr-defined]
         ProcessorMixin.__init__ = __init__
 
 
