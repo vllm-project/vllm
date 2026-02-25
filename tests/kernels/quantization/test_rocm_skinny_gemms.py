@@ -289,12 +289,23 @@ def test_rocm_wvsplitk_invalid_k_dimension_mismatch():
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_bias_bx_does_not_divide_m():
-    """Bias Bx must be 1 or divide M for (m % Bx) indexing."""
+    """1D bias: Bx must be 1 or divide M for (m % Bx) indexing."""
     cu_count = get_cu_count()
     A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
     BIAS = torch.rand(7, dtype=torch.float16, device="cuda")
     with pytest.raises(RuntimeError, match="bias Bx"):
+        ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+def test_rocm_wvsplitk_invalid_bias_2d_bx_must_equal_m():
+    """2D bias (By > 1): Bx must equal M because kernel uses stride M."""
+    cu_count = get_cu_count()
+    A = torch.rand(2, 16, dtype=torch.float16, device="cuda")
+    B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
+    BIAS = torch.rand(2, 8, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="bias Bx must be M if By"):
         ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
 

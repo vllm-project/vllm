@@ -1156,9 +1156,13 @@ torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
           ? in_bias->size(0)
           : 1;
 
-  // Bias uses (m % Bx) + (n % By) * M indexing; Bx/By must be 1 or divide M/N.
-  TORCH_CHECK(Bx_in >= 1 && (Bx_in == 1 || M_in % Bx_in == 0),
-              "bias Bx must be 1 or divide M");
+  // Bias indexing: BIAS[(m+i)%Bx + (n%By)*M]. Kernel uses stride M for the n
+  // dimension. If By > 1 (2D bias [By,Bx]), PyTorch row stride is Bx so we
+  // require Bx == M. If By == 1 (1D bias), only (m+i)%Bx is used so Bx may be 1
+  // or divide M.
+  TORCH_CHECK(
+      Bx_in >= 1 && (By_in == 1 ? (M_in % Bx_in == 0) : (Bx_in == M_in)),
+      "bias Bx must be M if By > 1, or divide M if By is 1");
   TORCH_CHECK(By_in >= 1 && (By_in == 1 || N_in % By_in == 0),
               "bias By must be 1 or divide N");
 
