@@ -3120,7 +3120,7 @@ steps:
 
 - label: Qwen3-30B-A3B-FP8-block Accuracy (B200/MI355)
   mirror_hardwares: [amdexperimental, amdproduction, amdmi355]
-  agent_pool: mi325_2
+  agent_pool: mi35dd5_2
   timeout_in_minutes: 60
   gpu: b200
   optional: true
