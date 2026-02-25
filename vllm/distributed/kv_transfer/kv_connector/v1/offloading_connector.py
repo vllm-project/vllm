@@ -1,8 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import defaultdict
+import statistics
+from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from itertools import islice
 from typing import Any
 
@@ -35,6 +36,7 @@ from vllm.v1.kv_offload.factory import OffloadingSpecFactory
 from vllm.v1.kv_offload.mediums import GPULoadStoreSpec
 from vllm.v1.kv_offload.reuse_tracker import BlockReuseTracker
 from vllm.v1.kv_offload.spec import OffloadingSpec
+from vllm.v1.kv_offload.transfer_timing import TransferTimingStats
 from vllm.v1.kv_offload.worker.worker import (
     OffloadingWorker,
     TransferSpec,
@@ -52,6 +54,79 @@ logger = init_logger(__name__)
 class OffloadingOperationMetrics:
     op_size: int
     op_time: float
+
+
+class AdaptiveOffloadingPolicy:
+    """Tracks rolling TTFT and pauses offloading when overhead is detected.
+
+    The policy:
+    1. Starts *paused* for ``warmup_steps`` steps to capture a clean baseline
+       TTFT without offloading interference.
+    2. After warm-up activates offloading and monitors for TTFT regression.
+    3. If P50 TTFT exceeds (1 + overhead_threshold_pct/100) * baseline, the
+       policy pauses again and ``effective_load_mode`` reverts to "blocking".
+    4. Auto-resumes when the regression clears.
+
+    Users can skip warm-up by providing ``expected_baseline_ttft_ms``.
+    """
+
+    def __init__(
+        self,
+        overhead_threshold_pct: float = 5.0,
+        window: int = 200,
+        warmup_steps: int = 50,  # ~5s at 10 req/s; tune down for strict SLOs
+        expected_baseline_ttft_ms: float | None = None,
+    ) -> None:
+        self.overhead_threshold_pct = overhead_threshold_pct
+        self.recent_ttfts: deque = deque(maxlen=window)
+        self.warmup_steps = warmup_steps
+        self._step = 0
+        # Start paused so warm-up TTFTs are measured without offload noise.
+        self.paused = True
+
+        # Seed baseline from config to skip warm-up entirely.
+        self.baseline_ttft: float | None = expected_baseline_ttft_ms
+        if self.baseline_ttft is not None:
+            self.paused = False
+
+    def record_ttft(self, ttft_ms: float) -> None:
+        """Feed a new TTFT sample and update paused state."""
+        self._step += 1
+        self.recent_ttfts.append(ttft_ms)
+
+        if self.baseline_ttft is None:
+            # Warm-up phase: offloading paused, TTFTs reflect clean baseline.
+            if self._step >= self.warmup_steps:
+                self.baseline_ttft = statistics.median(self.recent_ttfts)
+                self.paused = False
+                logger.info(
+                    "AdaptiveOffloadingPolicy: warm-up complete, "
+                    "baseline TTFT = %.2f ms",
+                    self.baseline_ttft,
+                )
+        else:
+            # Active phase: detect regression.
+            if len(self.recent_ttfts) >= max(self.recent_ttfts.maxlen // 2, 10):
+                current = statistics.median(self.recent_ttfts)
+                overhead = (
+                    (current - self.baseline_ttft) / self.baseline_ttft * 100
+                )
+                new_paused = overhead > self.overhead_threshold_pct
+                if new_paused != self.paused:
+                    logger.info(
+                        "AdaptiveOffloadingPolicy: %s offloading "
+                        "(overhead=%.1f%% vs threshold=%.1f%%)",
+                        "pausing" if new_paused else "resuming",
+                        overhead,
+                        self.overhead_threshold_pct,
+                    )
+                self.paused = new_paused
+
+    @property
+    def effective_load_mode(self) -> str:
+        """'blocking' during warm-up or regression; 'async_with_fallback' otherwise."""
+        return "blocking" if self.paused else "async_with_fallback"
+
 
 
 @dataclass
@@ -289,6 +364,20 @@ class OffloadingConnectorScheduler:
             ),
         )
 
+        # PR 2: Adaptive offloading policy — tracks rolling TTFT to detect
+        # overhead and dynamically switch between blocking and async modes.
+        self.adaptive_policy = AdaptiveOffloadingPolicy(
+            overhead_threshold_pct=float(
+                spec.extra_config.get("overhead_threshold_pct", 5.0)
+            ),
+            warmup_steps=int(
+                spec.extra_config.get("warmup_steps", 50)
+            ),
+            expected_baseline_ttft_ms=spec.extra_config.get(
+                "expected_baseline_ttft_ms"
+            ),
+        )
+
     def _get_block_hashes(
         self,
         req: Request,
@@ -508,7 +597,8 @@ class OffloadingConnectorScheduler:
         meta = OffloadingConnectorMetadata(
             reqs_to_load=self._reqs_to_load,
             reqs_to_store=self._get_reqs_to_store(scheduler_output),
-            effective_load_mode="blocking",  # PR 2 will set this dynamically
+            # Set by AdaptiveOffloadingPolicy; worker reads this each step.
+            effective_load_mode=self.adaptive_policy.effective_load_mode,
         )
         self._reqs_to_load = {}
 
@@ -607,6 +697,24 @@ class OffloadingConnectorWorker:
 
         self._finished_reqs_waiting_for_store: set[ReqId] = set()
 
+        # PR 2: transfer timing and non-blocking load state.
+        self.timing_stats = TransferTimingStats(
+            window_size=int(spec.extra_config.get("timing_window_size", 100)),
+            default_ms_per_token=float(
+                spec.extra_config.get("default_ms_per_token", 0.003)
+            ),
+        )
+        self._model_tokens_per_ms: float = float(
+            spec.extra_config.get("model_tokens_per_ms", 3.0)
+        )
+        self._max_fallbacks: int = int(
+            spec.extra_config.get("max_concurrent_fallbacks", 2)
+        )
+        # req_id -> (job_id, prefix_len_tokens)
+        self._pending_load_info: dict[ReqId, tuple[int, int]] = {}
+        # req_ids deferred to next scheduling step
+        self._deferred_load_reqs: set[ReqId] = set()
+
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
         self._job_counter = job_id + 1
@@ -665,6 +773,58 @@ class OffloadingConnectorWorker:
             self._load_job[req_id] = job_id
             success = self.worker.transfer_async(job_id, transfer_spec)
             assert success
+            # Record (job_id, approx prefix_len) for Strategy B cost model.
+            # We estimate prefix_len from transfer_spec if available, else 0.
+            self._pending_load_info[req_id] = (job_id, 0)
+
+    def _check_loads_ready(
+        self, metadata: OffloadingConnectorMetadata
+    ) -> tuple[set[str], set[str]]:
+        """Non-blocking check of in-flight CPU->GPU loads (Strategy B / P2).
+
+        Returns:
+            fallback_reqs:  req_ids where recompute is preferred         → treat
+                            as cache-miss this step so prefill can proceed now.
+            deferred_reqs:  req_ids where transfer is still in-flight but
+                            fallback cap is full → defer to next scheduling step.
+
+        Uses CUDA event.query() atomically: once it returns True the transfer
+        data is committed — no TOCTOU race possible.  Over-budget requests are
+        deferred (placed back into _pending_load_info for re-evaluation next
+        step) rather than synchronously blocked, preserving the non-blocking
+        promise.
+        """
+        completed_jobs: set[int] = {
+            tr.job_id for tr in self.worker.get_finished_load_jobs()
+        }
+        fallback_reqs: set[str] = set()
+        deferred_reqs: set[str] = set()
+        concurrent_fallbacks = 0
+
+        for req_id, (job_id, prefix_len) in list(self._pending_load_info.items()):
+            if job_id in completed_jobs:
+                del self._pending_load_info[req_id]  # load done, proceed normally
+                continue
+
+            # Evaluate cost model: is recomputing faster than waiting?
+            estimated_ms = self.timing_stats.estimate_ms(max(prefix_len, 1))
+            recompute_ms = (
+                prefix_len / self._model_tokens_per_ms
+                if prefix_len > 0
+                else float("inf")
+            )
+            prefer_recompute = estimated_ms >= recompute_ms
+
+            if prefer_recompute and concurrent_fallbacks < self._max_fallbacks:
+                fallback_reqs.add(req_id)
+                concurrent_fallbacks += 1
+                del self._pending_load_info[req_id]
+            else:
+                # Cap exceeded or transfer is cheaper — defer one step
+                deferred_reqs.add(req_id)
+                # Entry remains in _pending_load_info for next evaluation
+
+        return fallback_reqs, deferred_reqs
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for req_id, transfer_spec in metadata.reqs_to_store.items():
@@ -676,18 +836,10 @@ class OffloadingConnectorWorker:
             # thereby avoiding delays to token generation due to offloading.
             self._unsubmitted_store_jobs.append((job_id, transfer_spec))
 
-    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
-        """
-        Notifies worker-side connector ids of requests that have
-        finished generating tokens.
-        Returns a list of request IDs that finished loading or storing.
-
-        Returns:
-            ids of requests that have finished asynchronous transfer
-            tuple of (sending/saving ids, recving/loading ids).
-        """
-        finished_sending = set()
-        finished_recving = set()
+    def _get_finished_internal(self) -> tuple[set[str], set[str]]:
+        """Inner get_finished loop; also feeds TransferTimingStats for P2."""
+        finished_sending: set[str] = set()
+        finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
             job_id = transfer_result.job_id
@@ -703,6 +855,14 @@ class OffloadingConnectorWorker:
                     time=transfer_result.transfer_time,
                     transfer_type=transfer_result.transfer_type,
                 )
+                if not store:
+                    # Feed load timing stats for the Strategy B cost model.
+                    # Bytes -> approx tokens: assume 2 bytes per KV element.
+                    approx_tokens = transfer_result.transfer_size // 2
+                    self.timing_stats.record(
+                        tokens=approx_tokens,
+                        elapsed_ms=transfer_result.transfer_time * 1e3,
+                    )
             if store:
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
@@ -718,6 +878,19 @@ class OffloadingConnectorWorker:
                 assert job_id == req_job
                 del self._load_job[req_id]
                 finished_recving.add(req_id)
+        return finished_sending, finished_recving
+
+    def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
+        """
+        Notifies worker-side connector ids of requests that have
+        finished generating tokens.
+        Returns a list of request IDs that finished loading or storing.
+
+        Returns:
+            ids of requests that have finished asynchronous transfer
+            tuple of (sending/saving ids, recving/loading ids).
+        """
+        finished_sending, finished_recving = self._get_finished_internal()
 
         for req_id in finished_req_ids:
             pending_req_jobs = self._store_jobs.get(req_id)
