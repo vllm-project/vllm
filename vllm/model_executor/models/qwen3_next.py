@@ -36,6 +36,19 @@ from vllm.model_executor.layers.fla.ops import (
 from vllm.model_executor.layers.fla.ops import (
     fused_recurrent_gated_delta_rule,
 )
+
+# Try to import FlashInfer GDN decode and MTP kernels
+try:
+    from flashinfer.gdn_decode import (
+        gated_delta_rule_decode_pretranspose,
+        gated_delta_rule_mtp,
+    )
+
+    _FLASHINFER_GDN_DECODE_AVAILABLE = True
+except ImportError:
+    _FLASHINFER_GDN_DECODE_AVAILABLE = False
+    gated_delta_rule_decode_pretranspose = None
+    gated_delta_rule_mtp = None
 from vllm.model_executor.layers.fla.ops.chunk import l2norm_fwd
 from vllm.model_executor.layers.fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.layernorm import (
@@ -121,6 +134,10 @@ def fi_chunk_gated_delta_rule(
         chunk_gated_delta_rule as chunk_gated_delta_rule_fi,
     )
 
+    logger.info_once(
+        "[GDN-FI] Prefill kernel active: flashinfer.gdn_prefill.chunk_gated_delta_rule"
+    )
+
     if use_qk_l2norm_in_kernel:
         q = l2norm_fwd(q)
         k = l2norm_fwd(k)
@@ -149,13 +166,132 @@ def fi_chunk_gated_delta_rule(
     return output.unsqueeze(0), final_state
 
 
+def fi_gated_delta_rule_decode(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    initial_state: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    use_qk_l2norm_in_kernel: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    FlashInfer GDN decode kernel wrapper (pretranspose version for K-last layout).
+
+    Args:
+        q: [B, 1, H, K] - queries (float16/bfloat16)
+        k: [B, 1, H, K] - keys (float16/bfloat16)
+        v: [B, 1, HV, V] - values (float16/bfloat16)
+        a: [B, 1, HV] - decay gate input
+        b: [B, 1, HV] - update gate input
+        initial_state: [B, HV, V, K] - initial states in K-last layout (float32)
+        A_log: [HV] - log decay parameter (float32)
+        dt_bias: [HV] - decay bias (float32)
+        use_qk_l2norm_in_kernel: whether to apply L2 normalization
+
+    Returns:
+        output: [B, 1, HV, V] - output tensor
+        state: updated state tensor in K-last layout [B, HV, V, K]
+    """
+    # Ensure correct shapes
+    logger.info_once(
+        "[GDN-FI] Decode kernel active: "
+        "flashinfer.gdn_decode.gated_delta_rule_decode_pretranspose"
+    )
+    if a.dim() == 2:
+        a = a.unsqueeze(1)  # [B, 1, HV]
+    if b.dim() == 2:
+        b = b.unsqueeze(1)  # [B, 1, HV]
+
+    # Ensure state is float32 and contiguous
+    state_f32 = initial_state.to(torch.float32).contiguous()
+
+    output, updated_state = gated_delta_rule_decode_pretranspose(
+        q=q.contiguous(),
+        k=k.contiguous(),
+        v=v.contiguous(),
+        state=state_f32,
+        A_log=A_log.float(),
+        a=a.contiguous(),
+        dt_bias=dt_bias.float(),
+        b=b.contiguous(),
+        use_qk_l2norm=use_qk_l2norm_in_kernel,
+    )
+
+    return output, updated_state
+
+
+def fi_gated_delta_rule_mtp(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+    initial_state: torch.Tensor,
+    initial_state_indices: torch.Tensor,
+    A_log: torch.Tensor,
+    dt_bias: torch.Tensor,
+    intermediate_states_buffer: torch.Tensor | None = None,
+    disable_state_update: bool = True,
+    use_qk_l2norm_in_kernel: bool = True,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    FlashInfer GDN MTP (Multi-Token Processing) kernel wrapper.
+
+    Args:
+        q: [B, T, H, K] - queries for T tokens
+        k: [B, T, H, K] - keys for T tokens
+        v: [B, T, HV, V] - values for T tokens
+        a: [B, T, HV] - decay gate input
+        b: [B, T, HV] - update gate input
+        initial_state: [pool_size, HV, V, K] - initial states
+        initial_state_indices: [B] - indices to map batch to initial states
+        A_log: [HV] - log decay parameter
+        dt_bias: [HV] - decay bias
+        intermediate_states_buffer: optional [B, T, HV, V, K] state cache buffer
+        disable_state_update: whether to disable writing final state back in kernel
+        use_qk_l2norm_in_kernel: whether to apply L2 normalization
+
+    Returns:
+        output: [B, T, HV, V] - output tensor
+        state: updated state tensor
+    """
+    # Reshape a and b to [B, T, HV] if needed
+    logger.info_once(
+        "[GDN-FI] MTP kernel active: flashinfer.gdn_decode.gated_delta_rule_mtp"
+    )
+    if a.dim() == 2:
+        a = a.unsqueeze(1)  # [B, 1, HV]
+    if b.dim() == 2:
+        b = b.unsqueeze(1)  # [B, 1, HV]
+
+    output, updated_state = gated_delta_rule_mtp(
+        q=q.contiguous(),
+        k=k.contiguous(),
+        v=v.contiguous(),
+        initial_state=initial_state.to(torch.float32).contiguous(),
+        initial_state_indices=initial_state_indices,
+        A_log=A_log,
+        a=a.contiguous(),
+        dt_bias=dt_bias,
+        b=b.contiguous(),
+        intermediate_states_buffer=intermediate_states_buffer,
+        disable_state_update=disable_state_update,
+        use_qk_l2norm=use_qk_l2norm_in_kernel,
+    )
+    return output, updated_state
+
+
 @CustomOp.register("chunk_gated_delta_rule")
 class ChunkGatedDeltaRule(CustomOp):
     def __init__(self) -> None:
         super().__init__()
         if current_platform.is_cuda() and current_platform.is_device_capability(90):
             logger.info_once(
-                "Using FlashInfer GDN prefill kernel on CUDA compute capability 90"
+                "Using FlashInfer GDN prefill/decode/MTP kernels on CUDA "
+                "compute capability 90"
             )
             self._forward_method = self.forward_cuda
         else:
@@ -750,22 +886,124 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             beta_non_spec = beta
 
         # 2. Recurrent attention
-
-        # 2.1: Process the multi-query part
+        # 2.1: Process the multi-query part (speculative decoding)
         if spec_sequence_masks is not None:
-            core_attn_out_spec, last_recurrent_state = fused_recurrent_gated_delta_rule(
-                q=query_spec,
-                k=key_spec,
-                v=value_spec,
-                g=g_spec,
-                beta=beta_spec,
-                initial_state=ssm_state,
-                inplace_final_state=True,
-                cu_seqlens=spec_query_start_loc[: attn_metadata.num_spec_decodes + 1],
-                ssm_state_indices=spec_state_indices_tensor,
-                num_accepted_tokens=num_accepted_tokens,
-                use_qk_l2norm_in_kernel=True,
+            # Use FlashInfer GDN MTP when speculative tokens can be reshaped to [B, T]
+            use_flashinfer_mtp = (
+                _FLASHINFER_GDN_DECODE_AVAILABLE
+                and current_platform.is_device_capability(90)
+                and query_spec is not None
+                and spec_state_indices_tensor is not None
+                and num_accepted_tokens is not None
+                and attn_metadata.num_spec_decodes > 0
             )
+            if use_flashinfer_mtp:
+                B = attn_metadata.num_spec_decodes
+                T = spec_state_indices_tensor.shape[1]
+                num_spec_tokens = query_spec.shape[1]
+                use_flashinfer_mtp = T > 1 and num_spec_tokens == B * T
+
+            if use_flashinfer_mtp:
+                logger.info_once(
+                    "[GDN-FI] Spec decode path uses FlashInfer MTP kernel."
+                )
+                B = attn_metadata.num_spec_decodes
+                T = spec_state_indices_tensor.shape[1]
+
+                # Reshape flattened speculative tokens [1, B*T, ...] -> [B, T, ...]
+                q_4d = query_spec.squeeze(0).reshape(
+                    B, T, query_spec.shape[2], query_spec.shape[3]
+                )
+                k_4d = key_spec.squeeze(0).reshape(
+                    B, T, key_spec.shape[2], key_spec.shape[3]
+                )
+                v_4d = value_spec.squeeze(0).reshape(
+                    B, T, value_spec.shape[2], value_spec.shape[3]
+                )
+
+                if spec_token_indx is None:
+                    a_spec_for_mtp = a
+                    b_spec_for_mtp = b
+                else:
+                    a_spec_for_mtp = a.index_select(0, spec_token_indx)
+                    b_spec_for_mtp = b.index_select(0, spec_token_indx)
+                a_4d = a_spec_for_mtp.reshape(B, T, a_spec_for_mtp.shape[-1])
+                b_4d = b_spec_for_mtp.reshape(B, T, b_spec_for_mtp.shape[-1])
+
+                # Match fused_recurrent speculative behavior:
+                # load initial state from spec_state_indices[num_accepted_tokens - 1].
+                accepted_idx = (num_accepted_tokens[:B].to(torch.long) - 1).clamp_(
+                    min=0, max=T - 1
+                )
+                initial_state_indices = (
+                    spec_state_indices_tensor[:B]
+                    .gather(1, accepted_idx.unsqueeze(1))
+                    .squeeze(1)
+                )
+
+                # Cache per-step intermediate states and scatter them back to
+                # the corresponding speculative state slots.
+                intermediate_states_buffer = torch.empty(
+                    (B, T, v_4d.shape[2], v_4d.shape[3], q_4d.shape[3]),
+                    dtype=torch.float32,
+                    device=ssm_state.device,
+                )
+
+                output_4d, _ = fi_gated_delta_rule_mtp(
+                    q=q_4d.contiguous(),
+                    k=k_4d.contiguous(),
+                    v=v_4d.contiguous(),
+                    a=a_4d.contiguous(),
+                    b=b_4d.contiguous(),
+                    initial_state=ssm_state,
+                    initial_state_indices=initial_state_indices.contiguous(),
+                    A_log=self.A_log.float(),
+                    dt_bias=self.dt_bias.float(),
+                    intermediate_states_buffer=intermediate_states_buffer,
+                    disable_state_update=True,
+                    use_qk_l2norm_in_kernel=True,
+                )
+
+                # Vectorized state scatter for speculative tokens to avoid
+                # Python loop overhead in MTP decode.
+                step_state_indices = spec_state_indices_tensor[:B, :T].to(torch.long)
+                valid = step_state_indices >= 0
+                safe_state_indices = torch.where(
+                    valid, step_state_indices, initial_state_indices[:, None]
+                )
+                step_states = intermediate_states_buffer[:, :T].to(ssm_state.dtype)
+                current_states = ssm_state[safe_state_indices]
+                step_states = torch.where(
+                    valid[..., None, None, None], step_states, current_states
+                )
+                ssm_state[safe_state_indices] = step_states
+
+                # Reshape output from [B, T, HV, V] to [1, B*T, HV, V]
+                core_attn_out_spec = output_4d.reshape(
+                    1, B * T, -1, output_4d.shape[-1]
+                )
+            else:
+                logger.info_once(
+                    "[GDN-FI] Spec decode path falls back to "
+                    "fused_recurrent_gated_delta_rule."
+                )
+                core_attn_out_spec, last_recurrent_state = (
+                    fused_recurrent_gated_delta_rule(
+                        q=query_spec,
+                        k=key_spec,
+                        v=value_spec,
+                        g=g_spec,
+                        beta=beta_spec,
+                        initial_state=ssm_state,
+                        inplace_final_state=True,
+                        cu_seqlens=spec_query_start_loc[
+                            : attn_metadata.num_spec_decodes + 1
+                        ],
+                        ssm_state_indices=spec_state_indices_tensor,
+                        num_accepted_tokens=num_accepted_tokens,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                )
         else:
             core_attn_out_spec, last_recurrent_state = None, None
 
@@ -792,22 +1030,75 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 ssm_state.dtype
             )
         elif attn_metadata.num_decodes > 0:
-            core_attn_out_non_spec, last_recurrent_state = (
-                fused_recurrent_gated_delta_rule(
-                    q=query_non_spec,
-                    k=key_non_spec,
-                    v=value_non_spec,
-                    g=g_non_spec,
-                    beta=beta_non_spec,
-                    initial_state=ssm_state,
-                    inplace_final_state=True,
-                    cu_seqlens=non_spec_query_start_loc[
-                        : attn_metadata.num_decodes + 1
-                    ],
-                    ssm_state_indices=non_spec_state_indices_tensor,
+            # Use FlashInfer GDN decode kernel when available on Hopper
+            use_flashinfer_decode = (
+                _FLASHINFER_GDN_DECODE_AVAILABLE
+                and current_platform.is_device_capability(90)
+                and query_non_spec is not None
+                and non_spec_state_indices_tensor is not None
+            )
+            if use_flashinfer_decode:
+                logger.info_once("[GDN-FI] Decode path uses FlashInfer decode kernel.")
+                # Get batch size from query shape
+                B = query_non_spec.shape[1]  # T=1 for decode
+                # Reshape to [B, 1, H, K] and [B, 1, HV, V]
+                q_4d = query_non_spec.transpose(0, 1).contiguous()  # [B, 1, H, K]
+                k_4d = key_non_spec.transpose(0, 1).contiguous()  # [B, 1, H, K]
+                v_4d = value_non_spec.transpose(0, 1).contiguous()  # [B, 1, HV, V]
+                if spec_sequence_masks is None:
+                    a_non_spec_for_decode = a
+                    b_non_spec_for_decode = b
+                else:
+                    assert non_spec_token_indx is not None
+                    a_non_spec_for_decode = a.index_select(0, non_spec_token_indx)
+                    b_non_spec_for_decode = b.index_select(0, non_spec_token_indx)
+                a_4d = a_non_spec_for_decode[:B].unsqueeze(1).contiguous()  # [B, 1, HV]
+                b_4d = b_non_spec_for_decode[:B].unsqueeze(1).contiguous()  # [B, 1, HV]
+
+                # Extract state for current batch from state pool
+                # non_spec_state_indices_tensor contains the indices for current batch
+                state_batch = ssm_state[non_spec_state_indices_tensor[:B]].contiguous()
+
+                # Call FlashInfer GDN decode
+                # Note: FlashInfer requires A_log and dt_bias to be float32
+                output_4d, updated_state = fi_gated_delta_rule_decode(
+                    q=q_4d,
+                    k=k_4d,
+                    v=v_4d,
+                    a=a_4d,
+                    b=b_4d,
+                    initial_state=state_batch,
+                    A_log=self.A_log.float(),
+                    dt_bias=self.dt_bias.float(),
                     use_qk_l2norm_in_kernel=True,
                 )
-            )
+                # Write updated state back to pool
+                ssm_state[non_spec_state_indices_tensor[:B]] = updated_state.to(
+                    ssm_state.dtype
+                )
+                # Reshape output from [B, 1, HV, V] to [1, B, HV, V]
+                core_attn_out_non_spec = output_4d.squeeze(1).unsqueeze(0)
+            else:
+                logger.info_once(
+                    "[GDN-FI] Decode path falls back to "
+                    "fused_recurrent_gated_delta_rule."
+                )
+                core_attn_out_non_spec, last_recurrent_state = (
+                    fused_recurrent_gated_delta_rule(
+                        q=query_non_spec,
+                        k=key_non_spec,
+                        v=value_non_spec,
+                        g=g_non_spec,
+                        beta=beta_non_spec,
+                        initial_state=ssm_state,
+                        inplace_final_state=True,
+                        cu_seqlens=non_spec_query_start_loc[
+                            : attn_metadata.num_decodes + 1
+                        ],
+                        ssm_state_indices=non_spec_state_indices_tensor,
+                        use_qk_l2norm_in_kernel=True,
+                    )
+                )
         else:
             core_attn_out_non_spec, last_recurrent_state = None, None
 
