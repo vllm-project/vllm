@@ -649,6 +649,7 @@ class SpecDecodeBaseProposer:
         # Rationale: Synchronous generation requires all requests to proceed together.
         dsl_enabled = self.spec_confidence_threshold > 0
         initial_tokens_requested = self.num_speculative_tokens - 1
+        dsl_did_early_exit = False  # Tracks whether early exit fired this proposal
         
         # Update metrics only when DSL is enabled
         if dsl_enabled:
@@ -826,8 +827,8 @@ class SpecDecodeBaseProposer:
 
                 if should_exit_gpu.item():
                     self.dsl_early_exits += 1
-                    tokens_generated = (token_index + 1) * batch_size
-                    self.dsl_tokens_generated += tokens_generated
+                    self.dsl_tokens_generated += (token_index + 1) * batch_size
+                    dsl_did_early_exit = True
 
                     logger.debug(
                         f"[SpecDecode] Early exit at token {token_index + 1}/{self.num_speculative_tokens - 1}: "
@@ -839,8 +840,8 @@ class SpecDecodeBaseProposer:
         # [batch_size, num_speculative_tokens]
         draft_token_ids = torch.stack(draft_token_ids_list, dim=1)
         
-        # Update metrics only if we completed without early exit (and DSL is enabled)
-        if dsl_enabled:
+        # Update token count only on full completion (early exit already counted above)
+        if dsl_enabled and not dsl_did_early_exit:
             actual_tokens_generated = len(draft_token_ids_list) - 1  # Exclude first token
             self.dsl_tokens_generated += actual_tokens_generated * batch_size
         
