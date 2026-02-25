@@ -121,8 +121,21 @@ class EngineClient(ABC):
         ...
 
     @abstractmethod
-    async def start_profile(self) -> None:
-        """Start profiling the engine"""
+    async def start_profile(
+        self,
+        profile_prefix: str | None = None,
+        num_steps: int | None = None,
+        delay_steps: int | None = None,
+    ) -> None:
+        """Start profiling the engine.
+
+        Args:
+            profile_prefix: If provided, used as a prefix for the trace name.
+            num_steps: If provided, overrides max_iterations for this session.
+                0 means unlimited.
+            delay_steps: If provided, overrides delay_iterations for this
+                session.
+        """
         ...
 
     @abstractmethod
