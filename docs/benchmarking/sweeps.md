@@ -6,7 +6,7 @@
 
 ### Basic
 
-`vllm bench sweep serve` starts `vllm serve` and iteratively runs `vllm bench serve for each server configuration.
+`vllm bench sweep serve` starts `vllm serve` and iteratively runs `vllm bench serve` for each server configuration.
 
 !!! tip
     If you only need to run benchmarks for a single server configuration, consider using [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
