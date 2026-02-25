@@ -35,14 +35,10 @@ class Qwen3ReasoningParser(BaseThinkingReasoningParser):
     it is stripped before extraction (non-streaming) or skipped (streaming).
     """
 
-    def __init__(
-        self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs
-    ):
+    def __init__(self, tokenizer: PreTrainedTokenizerBase, *args, **kwargs):
         super().__init__(tokenizer, *args, **kwargs)
         chat_kwargs = kwargs.get("chat_template_kwargs", {}) or {}
-        self._thinking_enabled = bool(
-            chat_kwargs.get("enable_thinking", True)
-        )
+        self._thinking_enabled = bool(chat_kwargs.get("enable_thinking", True))
 
     @property
     def start_token(self) -> str:
