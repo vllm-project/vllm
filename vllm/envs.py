@@ -1148,7 +1148,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # The activation dtype config for humming kernel
     "VLLM_HUMMING_INPUT_QUANT_CONFIG": lambda: maybe_convert_json_str_or_file(
-        os.environ.get("VLLM_HUMMING_ONLINE_QUANT_CONFIG", None)
+        os.environ.get("VLLM_HUMMING_INPUT_QUANT_CONFIG", None)
     ),
     # Whether to use fp16 accumulator mma
     "VLLM_HUMMING_USE_F16_ACCUM": lambda: maybe_convert_bool(
