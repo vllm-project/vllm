@@ -209,9 +209,9 @@ class DefaultMoERunner(MoERunner):
                 self.moe_forward = _moe_forward_shared
         else:
             if self.shared_experts is None:
-                self.moe_forward = current_platform.get_moe_forward_op()
+                self.moe_forward = torch.ops.vllm.moe_forward
             else:
-                self.moe_forward = current_platform.get_moe_forward_shared_op()
+                self.moe_forward = torch.ops.vllm.moe_forward_shared
 
         # Chunked all2all staging tensor
         self.batched_hidden_states: torch.Tensor | None = None

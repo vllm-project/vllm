@@ -5,7 +5,6 @@ import enum
 import os
 import platform
 import sys
-from collections.abc import Callable
 from datetime import timedelta
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -565,26 +564,6 @@ class Platform:
         on the current platform
         """
         return False
-
-    @classmethod
-    def get_moe_forward_op(cls) -> Callable[..., torch.Tensor]:
-        """
-        Return the platform-specific custom op for the MoE forward pass
-        (without shared experts). Platforms that need a different op can
-        override this method.
-        """
-        return torch.ops.vllm.moe_forward
-
-    @classmethod
-    def get_moe_forward_shared_op(
-        cls,
-    ) -> Callable[..., tuple[torch.Tensor, torch.Tensor]]:
-        """
-        Return the platform-specific custom op for the MoE forward pass
-        (with shared experts). Platforms that need a different op can
-        override this method.
-        """
-        return torch.ops.vllm.moe_forward_shared
 
     @classmethod
     def validate_request(
