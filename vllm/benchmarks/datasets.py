@@ -327,17 +327,11 @@ def process_image(image: Any) -> Mapping[str, Any]:
         }
 
     if isinstance(image, str):
-        # Check if it's already a base64 data URL
-        if image.startswith("data:image/"):
-            return {"type": "image_url", "image_url": {"url": image}}
-        
-        # Check if it's a URL or file path
-        if image.startswith(("http://", "https://", "file://")):
-            image_url = image
-        else:
-            # Treat as local file path
-            image_url = f"file://{image}"
-        
+        image_url = (
+            image
+            if image.startswith(("http://", "https://", "file://", "data:image/"))
+            else f"file://{image}"
+        )
         return {"type": "image_url", "image_url": {"url": image_url}}
 
     raise ValueError(
