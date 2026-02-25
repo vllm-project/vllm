@@ -14,7 +14,6 @@ from transformers.utils import SAFE_WEIGHTS_INDEX_NAME
 from vllm.config import ModelConfig
 from vllm.config.load import LoadConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 from vllm.model_executor.model_loader.base_loader import BaseModelLoader
 from vllm.model_executor.model_loader.weight_utils import (
@@ -305,9 +304,12 @@ class DefaultModelLoader(BaseModelLoader):
             for name, module in model.named_modules():
                 quant_method = getattr(module, "quant_method", None)
                 has_online_quant = getattr(quant_method, "uses_meta_device", False)
+                has_postprocess_quant = getattr(
+                    quant_method, "process_weights_after_loading", None
+                )
                 # ignore kv_cache scale and online quant scale,
                 # which can be missing in checkpoints
-                if isinstance(quant_method, BaseKVCacheMethod) or has_online_quant:
+                if has_online_quant or has_postprocess_quant:
                     for param_name, _ in module.named_parameters():
                         full_name = f"{name}.{param_name}" if name else param_name
                         loaded_weights.add(full_name)
