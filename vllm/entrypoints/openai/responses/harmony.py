@@ -6,12 +6,6 @@ Harmony ↔ Responses API conversion utilities.
 Handles two directions:
   1. Response Input → Harmony Messages  (input parsing)
   2. Harmony Messages → Response Output Items  (output parsing)
-
-The file is organized as:
-  1. Private helpers for input parsing
-  2. Public input parsing functions
-  3. Private helpers for output parsing
-  4. Public output parsing functions
 """
 
 import json
