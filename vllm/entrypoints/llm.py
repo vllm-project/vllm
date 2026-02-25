@@ -963,17 +963,17 @@ class LLM:
         tokenizer: TokenizerLike,
     ) -> tuple[StructuredOutputBackend, tuple, torch.Tensor]:
         """Initialize the structured output backend for beam search."""
-        temp_params = SamplingParams(
-            max_tokens=1,
-            structured_outputs=structured_outputs,
-        )
         vllm_config = self.llm_engine.vllm_config
-        temp_params.verify(
-            model_config=vllm_config.model_config,
-            speculative_config=vllm_config.speculative_config,
-            structured_outputs_config=vllm_config.structured_outputs_config,
-            tokenizer=tokenizer,
-        )
+        so_config = vllm_config.structured_outputs_config
+        if so_config is None:
+            raise ValueError(
+                "structured_outputs_config is required for beam search "
+                "with structured outputs"
+            )
+
+        # Resolve the backend name from engine config if not already set.
+        if not structured_outputs._backend:
+            structured_outputs._backend = so_config.backend
 
         backend_name = structured_outputs._backend
         vocab_size = self.model_config.get_vocab_size()
