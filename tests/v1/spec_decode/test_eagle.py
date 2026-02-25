@@ -383,6 +383,9 @@ def test_set_inputs_first_pass_default_eagle():
 
     num_speculative_tokens = 3
     proposer = _create_proposer("eagle", num_speculative_tokens)
+    kv_cache_group_id = 0
+    proposer.attn_layer_names = ["layer0"]
+    proposer.layer_names_to_kv_cache_gid = {"layer0": kv_cache_group_id}
 
     # Setup batch with 3 requests
     batch_spec = BatchSpec(
@@ -395,6 +398,7 @@ def test_set_inputs_first_pass_default_eagle():
         block_size=16,
         device=device,
     )
+    cm_by_gid = {kv_cache_group_id: common_attn_metadata}
 
     # Input tensors
     # Request 0: tokens [10, 11, 12] at positions [7, 8, 9]
@@ -411,14 +415,16 @@ def test_set_inputs_first_pass_default_eagle():
     )
     next_token_ids = torch.tensor([100, 200, 300], dtype=torch.int32, device=device)
 
-    num_tokens, token_indices_to_sample, output_cad = proposer.set_inputs_first_pass(
-        target_token_ids=target_token_ids,
-        next_token_ids=next_token_ids,
-        target_positions=target_positions,
-        target_hidden_states=target_hidden_states,
-        token_indices_to_sample=None,
-        cad=common_attn_metadata,
-        num_rejected_tokens_gpu=None,
+    num_tokens, token_indices_to_sample, output_cm_by_gid = (
+        proposer.set_inputs_first_pass(
+            target_token_ids=target_token_ids,
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=None,
+            cm_by_gid=cm_by_gid,
+            num_rejected_tokens_gpu=None,
+        )
     )
 
     assert num_tokens == 9  # Total tokens unchanged
@@ -428,7 +434,7 @@ def test_set_inputs_first_pass_default_eagle():
     )
     assert torch.equal(token_indices_to_sample, expected_token_indices_to_sample)
 
-    assert output_cad is common_attn_metadata
+    assert output_cm_by_gid is cm_by_gid
 
     # Verify input_ids are rotated and next_tokens inserted
     # Original: [10, 11, 12, 20, 21, 30, 31, 32, 33]
@@ -488,6 +494,9 @@ def test_set_inputs_first_pass_draft_model():
     # Create a proposer configured as a draft model (pass_hidden_states=False)
     # We need to mock this since _create_proposer defaults to EAGLE
     proposer = _create_proposer("draft_model", num_speculative_tokens)
+    kv_cache_group_id = 0
+    proposer.attn_layer_names = ["layer0"]
+    proposer.layer_names_to_kv_cache_gid = {"layer0": kv_cache_group_id}
 
     proposer.parallel_drafting_token_id = 0
     proposer.is_rejected_token_mask = torch.zeros(
@@ -504,6 +513,12 @@ def test_set_inputs_first_pass_draft_model():
     mock_builder.kv_cache_spec = mock_kv_cache_spec
     proposer.attn_metadata_builder = mock_builder
 
+    # Also mock _get_metadata_builder for per-group slot mapping
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.get_metadata_builder.return_value = mock_builder
+    proposer.runner = mock.MagicMock()
+    proposer.runner.attn_groups = [[mock_attn_group]]
+
     # Request 0: query_len=3 (but 1 rejected), Request 1: query_len=2
     batch_spec = BatchSpec(
         seq_lens=[3, 2],
@@ -516,6 +531,7 @@ def test_set_inputs_first_pass_draft_model():
         device=device,
         arange_block_indices=True,  # Use predictable block indices
     )
+    cm_by_gid = {kv_cache_group_id: common_attn_metadata}
 
     # Input tensors
     target_token_ids = torch.tensor(
@@ -529,14 +545,16 @@ def test_set_inputs_first_pass_draft_model():
 
     num_rejected_tokens_gpu = torch.tensor([1, 0], dtype=torch.int32, device=device)
 
-    num_tokens, token_indices_to_sample, output_cad = proposer.set_inputs_first_pass(
-        target_token_ids=target_token_ids,
-        next_token_ids=next_token_ids,
-        target_positions=target_positions,
-        target_hidden_states=target_hidden_states,
-        token_indices_to_sample=None,
-        cad=common_attn_metadata,
-        num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+    num_tokens, token_indices_to_sample, output_cm_by_gid = (
+        proposer.set_inputs_first_pass(
+            target_token_ids=target_token_ids,
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=None,
+            cm_by_gid=cm_by_gid,
+            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+        )
     )
 
     assert proposer.net_num_new_slots_per_request == 1
@@ -584,6 +602,7 @@ def test_set_inputs_first_pass_draft_model():
 
     # Verify the new CAD has updated query_start_loc
     # Original: [0, 3, 5] -> New: [0, 4, 7] (each request gains 1 slot)
+    output_cad = output_cm_by_gid[kv_cache_group_id]
     expected_query_start_loc = torch.tensor([0, 4, 7], dtype=torch.int32, device=device)
     assert torch.equal(output_cad.query_start_loc, expected_query_start_loc)
 
@@ -624,6 +643,9 @@ def test_set_inputs_first_pass_parallel_drafting():
     block_size = 16
 
     proposer = _create_proposer("eagle", num_speculative_tokens, parallel_drafting=True)
+    kv_cache_group_id = 0
+    proposer.attn_layer_names = ["layer0"]
+    proposer.layer_names_to_kv_cache_gid = {"layer0": kv_cache_group_id}
 
     # Override to simulate parallel drafting behavior
     proposer.parallel_drafting_token_id = -2
@@ -644,6 +666,12 @@ def test_set_inputs_first_pass_parallel_drafting():
     mock_builder.kv_cache_spec = mock_kv_cache_spec
     proposer.attn_metadata_builder = mock_builder
 
+    # Also mock _get_metadata_builder for per-group slot mapping
+    mock_attn_group = mock.MagicMock()
+    mock_attn_group.get_metadata_builder.return_value = mock_builder
+    proposer.runner = mock.MagicMock()
+    proposer.runner.attn_groups = [[mock_attn_group]]
+
     # Request 0: query_len=4 (1 rejected), Request 1: query_len=4 (all valid)
     batch_spec = BatchSpec(
         seq_lens=[9, 14],
@@ -656,6 +684,7 @@ def test_set_inputs_first_pass_parallel_drafting():
         device=device,
         arange_block_indices=True,
     )
+    cm_by_gid = {kv_cache_group_id: common_attn_metadata}
 
     # Input tensors
     target_token_ids = torch.tensor(
@@ -671,14 +700,16 @@ def test_set_inputs_first_pass_parallel_drafting():
 
     num_rejected_tokens_gpu = torch.tensor([1, 0], dtype=torch.int32, device=device)
 
-    num_tokens, token_indices_to_sample, output_cad = proposer.set_inputs_first_pass(
-        target_token_ids=target_token_ids,
-        next_token_ids=next_token_ids,
-        target_positions=target_positions,
-        target_hidden_states=target_hidden_states,
-        token_indices_to_sample=None,
-        cad=common_attn_metadata,
-        num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+    num_tokens, token_indices_to_sample, output_cm_by_gid = (
+        proposer.set_inputs_first_pass(
+            target_token_ids=target_token_ids,
+            next_token_ids=next_token_ids,
+            target_positions=target_positions,
+            target_hidden_states=target_hidden_states,
+            token_indices_to_sample=None,
+            cm_by_gid=cm_by_gid,
+            num_rejected_tokens_gpu=num_rejected_tokens_gpu,
+        )
     )
 
     # total_output_tokens = total_input_tokens + net_num_new_slots * batch_size
@@ -730,6 +761,7 @@ def test_set_inputs_first_pass_parallel_drafting():
 
     # Verify the new CAD has updated query_start_loc
     # Original query_lens: [4, 4] -> Output: [6, 6]
+    output_cad = output_cm_by_gid[kv_cache_group_id]
     expected_query_start_loc = torch.tensor(
         [0, 6, 12], dtype=torch.int32, device=device
     )
