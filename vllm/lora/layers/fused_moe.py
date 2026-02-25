@@ -162,7 +162,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 moe_state_dict["apply_router_weight_on_input"] = kwargs[
                     "apply_router_weight_on_input"
                 ]
-                # TODO: global_num_experts/shared_experts_input?
                 result = func(*args, **kwargs)
                 return result
 
@@ -589,10 +588,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
         return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
-
-    # @property
-    # def _shared_experts(self):
-    #    return self.base_layer._shared_experts
 
     @property
     def quant_method(self):
