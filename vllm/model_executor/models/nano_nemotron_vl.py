@@ -13,6 +13,7 @@ import warnings
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
 import einops
@@ -22,11 +23,7 @@ import torch
 import torch.nn as nn
 import torchvision.transforms as T
 from PIL import Image
-from transformers import (
-    BatchFeature,
-    PretrainedConfig,
-    TensorType,
-)
+from transformers import BatchFeature, PretrainedConfig, TensorType
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
@@ -47,10 +44,7 @@ from vllm.model_executor.models.internvl import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.nemotron_h import NemotronHForCausalLM
-from vllm.model_executor.models.parakeet import (
-    ParakeetExtractor,
-    ProjectedParakeet,
-)
+from vllm.model_executor.models.parakeet import ParakeetExtractor, ProjectedParakeet
 from vllm.model_executor.models.radio import RadioModel, calc_seq_lens
 from vllm.model_executor.models.utils import (
     init_vllm_registered_model,
@@ -746,26 +740,17 @@ class BaseNanoNemotronVLProcessor(ABC):
             for idx, image in enumerate(images)
         ]
 
-    def use_dynamic_tiler(
-        self, max_num_tiles: int | None = None
-    ) -> DynamicResolutionImageTiler | None:
-        """If `max_num_tiles` is explicitly defined on a request, e.g.:
-        `"mm_processor_kwargs": { "max_num_tiles": 1 }`, force static resolution"""
-        if max_num_tiles is not None:
-            return None
-        return self.dynamic_tiler
-
     def _preprocess_image(
         self,
         text: list[str],
         images: list[Image.Image],
-        max_num_tiles: int | None,
+        max_num_tiles: int,
     ) -> tuple[list[str], dict[str, Any]]:
         if len(images) == 0:
             image_inputs = {}
             return text, image_inputs
 
-        if tiler := self.use_dynamic_tiler(max_num_tiles):
+        if tiler := self.dynamic_tiler:
             sans_images = text[0].replace("<image>", "")
             text_prompt_length = len(
                 self.tokenizer(sans_images, add_special_tokens=False).input_ids
@@ -786,7 +771,6 @@ class BaseNanoNemotronVLProcessor(ABC):
                 "num_tokens_per_image": num_tokens_per_image,
             }
         else:
-            max_num_tiles = max_num_tiles or self.max_num_tiles
             pixel_values_lst = self._images_to_pixel_values_lst(images, max_num_tiles)
             image_num_patches = torch.tensor([len(item) for item in pixel_values_lst])
             pixel_values_flat = input_conditioner(
@@ -1050,6 +1034,10 @@ class NanoNemotronVLProcessor(BaseNanoNemotronVLProcessor):
         return_tensors: str | TensorType | None = None,
         max_num_tiles: int | None = None,
     ) -> BatchFeature:
+        # Use default if not provided
+        if max_num_tiles is None:
+            max_num_tiles = self.max_num_tiles
+
         text, images, videos, audios = [
             self._make_batch_input(x) for x in (text, images, videos, audios)
         ]
@@ -1292,17 +1280,16 @@ class NanoNemotronVLProcessingInfo(BaseNanoNemotronVLProcessingInfo):
 class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
     """Basic image-only MultiModalProcessor for InternVL-style models."""
 
-    def use_dynamic_tiler(self, hf_processor_mm_kwargs: dict[str, Any]):
-        return self.info.get_hf_processor().use_dynamic_tiler(
-            hf_processor_mm_kwargs.get("max_num_tiles")
-        )
+    @cached_property
+    def is_dynamic_tiler(self) -> bool:
+        return self.info.get_hf_processor().dynamic_tiler is not None
 
     def _get_mm_fields_config(
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        if self.use_dynamic_tiler(hf_processor_mm_kwargs):
+        if self.is_dynamic_tiler:
             pixel_values_flat = MultiModalFieldConfig.batched("image")
         else:
             image_num_patches = hf_inputs.get("image_num_patches", torch.empty(0))
@@ -1344,7 +1331,7 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
 
             if isinstance(images, ImageEmbeddingItems):
                 feature_size = images.get_feature_size(item_idx)
-            elif tiler := self.use_dynamic_tiler(hf_processor_mm_kwargs):
+            elif tiler := hf_processor.dynamic_tiler:
                 image = images.get(item_idx)
                 feature_size = tiler.get_cached_feature_size(image)
             else:
@@ -1796,6 +1783,7 @@ class NemotronH_Nano_VL_V2(
         self.ps_version = config.ps_version
         self.image_tag_type = config.image_tag_type
         self.video_pruning_rate = multimodal_config.video_pruning_rate
+
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
@@ -1971,15 +1959,7 @@ class NemotronH_Nano_VL_V2(
                 data=image_embeds,
             )
 
-        has_static = "image_num_patches" in kwargs
-        has_dynamic = "imgs_sizes" in kwargs and "num_tokens_per_image" in kwargs
-        assert has_static != has_dynamic, (
-            "Expected either static or dynamic resolution in batch, "
-            f"but got keys={list(kwargs.keys())} indicating both"
-        )
-
-        if has_dynamic:
-            assert self.dynamic_resolution
+        if self.dynamic_resolution:
             pixel_values_flat = DynamicResolutionImageTiler.stack(
                 kwargs.pop("pixel_values_flat"), self.patch_size
             )
@@ -2268,7 +2248,8 @@ class NemotronH_Nano_VL_V2(
                 image_input = modalities["images"]
                 if image_input["type"] == "image_embeds":
                     image_embeddings = image_input["data"]
-                elif image_input["type"] == "pixel_values_dynamic":
+                elif self.dynamic_resolution:
+                    assert image_input["type"] == "pixel_values_dynamic"
                     image_embeddings = self._process_image_input_dynamic(image_input)
                 else:
                     image_embeddings = self._process_image_input(image_input)
