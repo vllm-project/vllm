@@ -7,17 +7,14 @@ import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionMetadataBuilder,
-    CommonAttentionMetadata,
-)
+from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    UniformTypeKVCacheSpecs,
 )
-from vllm.v1.worker.utils import bind_kv_cache
+from vllm.v1.worker.utils import AttentionGroup, bind_kv_cache
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
@@ -32,43 +29,62 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
 
 
 def init_attn_backend(
-    kv_cache_config: KVCacheConfig,
-    vllm_config: VllmConfig,
-    device: torch.device,
+    kv_cache_config: KVCacheConfig, vllm_config: VllmConfig, device: torch.device
 ):
     attn_backends: dict[str, type[AttentionBackend]] = {}
-    attn_metadata_builders: list[AttentionMetadataBuilder] = []
-    flashinfer_workspace: torch.Tensor | None = None
-    for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
+    attn_groups: list[list[AttentionGroup]] = []
+    attn_backend_workspace: torch.Tensor | None = None
+    for kv_cache_group_id, kv_cache_group_spec in enumerate(
+        kv_cache_config.kv_cache_groups
+    ):
         layer_names = kv_cache_group_spec.layer_names
-        any_layer_name = next(iter(layer_names))
 
         layer_type = cast(type[Any], AttentionLayerBase)
         attn_layers = get_layers_from_vllm_config(vllm_config, layer_type, layer_names)
-        attn_backend = attn_layers[any_layer_name].get_attn_backend()
+
+        group_map: dict[tuple[tuple[str, str], KVCacheSpec], AttentionGroup] = {}
+        group_order: list[tuple[tuple[str, str], KVCacheSpec]] = []
+
         for layer_name in layer_names:
+            attn_backend = attn_layers[layer_name].get_attn_backend()
             attn_backends[layer_name] = attn_backend
 
-        attn_metadata_builder = attn_backend.get_builder_cls()(
-            kv_cache_group_spec.kv_cache_spec,
-            layer_names,
-            vllm_config,
-            device,
-        )
-        attn_metadata_builders.append(attn_metadata_builder)  # type: ignore
+            layer_kv_cache_spec: KVCacheSpec = kv_cache_group_spec.kv_cache_spec
+            if isinstance(layer_kv_cache_spec, UniformTypeKVCacheSpecs):
+                layer_kv_cache_spec = layer_kv_cache_spec.kv_cache_specs[layer_name]
 
-        if attn_backend.get_name() == "FLASHINFER":
-            if flashinfer_workspace is None:
-                flashinfer_workspace = attn_metadata_builder._get_workspace_buffer()
+            key = (attn_backend.full_cls_name(), layer_kv_cache_spec)
+            if key not in group_map:
+                group_map[key] = AttentionGroup(
+                    attn_backend,
+                    [layer_name],
+                    layer_kv_cache_spec,
+                    kv_cache_group_id,
+                )
+                group_order.append(key)
             else:
-                attn_metadata_builder.set_workspace_buffer(flashinfer_workspace)
-    return attn_backends, attn_metadata_builders
+                group_map[key].layer_names.append(layer_name)
+
+        groups = [group_map[key] for key in group_order]
+        for group in groups:
+            group.create_metadata_builders(
+                vllm_config=vllm_config,
+                device=device,
+                kernel_block_size=None,
+                num_metadata_builders=1,
+            )
+            builder = group.get_metadata_builder(0)
+            if attn_backend_workspace is None:
+                if hasattr(builder, "_get_workspace_buffer"):
+                    attn_backend_workspace = builder._get_workspace_buffer()
+            else:
+                if hasattr(builder, "set_workspace_buffer"):
+                    builder.set_workspace_buffer(attn_backend_workspace)
+        attn_groups.append(groups)
+    return attn_backends, attn_groups
 
 
-def _allocate_kv_cache(
-    kv_cache_config: KVCacheConfig,
-    device: torch.device,
-):
+def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
     kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
     for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
         tensor = torch.zeros(kv_cache_tensor.size, dtype=torch.int8, device=device)
@@ -141,35 +157,37 @@ def init_kv_cache(
 
 
 def build_slot_mappings_by_layer(
-    slot_mappings: torch.Tensor,
-    kv_cache_config: KVCacheConfig,
+    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
 ) -> dict[str, torch.Tensor]:
     slot_mappings_by_layer: dict[str, torch.Tensor] = {}
-    for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
-        slot_mapping = slot_mappings[i]
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+    for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
         for layer_name in kv_cache_group.layer_names:
             slot_mappings_by_layer[layer_name] = slot_mapping
     return slot_mappings_by_layer
 
 
 def build_attn_metadata(
-    attn_metadata_builders: list[AttentionMetadataBuilder],
+    attn_groups: list[list[AttentionGroup]],
     num_reqs: int,
     num_tokens: int,
     query_start_loc_gpu: torch.Tensor,
     query_start_loc_cpu: torch.Tensor,
+    max_query_len: int,
     seq_lens: torch.Tensor,
     max_seq_len: int,
     block_tables: Sequence[torch.Tensor],
     slot_mappings: torch.Tensor,
     kv_cache_config: KVCacheConfig,
+    dcp_local_seq_lens: torch.Tensor | None = None,
 ) -> dict[str, Any]:
-    max_query_len = int(query_start_loc_cpu.max())
     seq_lens = seq_lens[:num_reqs]
+    if dcp_local_seq_lens is not None:
+        dcp_local_seq_lens = dcp_local_seq_lens[:num_reqs]
 
     attn_metadata: dict[str, Any] = {}
-    kv_cache_groups = kv_cache_config.kv_cache_groups
-    for i, kv_cache_spec in enumerate(kv_cache_groups):
+    num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+    for i in range(num_kv_cache_groups):
         block_table = block_tables[i]
         slot_mapping = slot_mappings[i]
 
@@ -184,13 +202,14 @@ def build_attn_metadata(
             block_table_tensor=block_table,
             slot_mapping=slot_mapping,
             causal=True,
+            dcp_local_seq_lens=dcp_local_seq_lens,
         )
 
-        attn_metadata_builder = attn_metadata_builders[i]
-        metadata = attn_metadata_builder.build(
-            common_prefix_len=0,
-            common_attn_metadata=common_attn_metadata,
-        )
-        for layer_name in kv_cache_spec.layer_names:
-            attn_metadata[layer_name] = metadata
+        for attn_group in attn_groups[i]:
+            attn_metadata_builder = attn_group.get_metadata_builder(0)
+            metadata = attn_metadata_builder.build(
+                common_prefix_len=0, common_attn_metadata=common_attn_metadata
+            )
+            for layer_name in attn_group.layer_names:
+                attn_metadata[layer_name] = metadata
     return attn_metadata

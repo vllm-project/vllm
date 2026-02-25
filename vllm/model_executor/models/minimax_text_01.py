@@ -14,7 +14,6 @@ import torch
 from torch import nn
 from transformers import MiniMaxConfig
 
-from vllm.attention.layer import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, VllmConfig
 from vllm.distributed.parallel_state import (
@@ -24,6 +23,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import FusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -495,7 +495,6 @@ class MiniMaxText01Model(nn.Module):
         cache_config = vllm_config.cache_config
         scheduler_config = vllm_config.scheduler_config
 
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.decoder_attention_types = getattr(
