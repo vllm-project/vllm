@@ -99,7 +99,11 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_num_scheduled_tokens = (
+            self.scheduler_config.max_num_scheduled_tokens
+            if self.scheduler_config.max_num_scheduled_tokens
+            else self.scheduler_config.max_num_batched_tokens
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -200,14 +204,6 @@ class Scheduler(SchedulerInterface):
             EncoderDecoderCacheManager(cache_size=encoder_cache_size)
             if self.is_encoder_decoder
             else EncoderCacheManager(cache_size=encoder_cache_size)
-        )
-        # For encoder-decoder models, allocate the maximum number of tokens for Cross
-        # Attn blocks, as for Whisper its input is always padded to the maximum length.
-        # TODO (NickLucche): Generalize to models with variable-length encoder inputs.
-        self._num_encoder_max_input_tokens = (
-            mm_budget.mm_max_toks_per_item[mm_budget.get_modality_with_max_tokens()]
-            if mm_budget and mm_budget.mm_max_toks_per_item
-            else 0
         )
 
         speculative_config = vllm_config.speculative_config
@@ -715,11 +711,17 @@ class Scheduler(SchedulerInterface):
                     0 if request.num_computed_tokens == 0 else self.num_lookahead_tokens
                 )
 
-                num_encoder_tokens = (
-                    self._num_encoder_max_input_tokens
-                    if self.is_encoder_decoder and request.has_encoder_inputs
-                    else 0
-                )
+                # Determine if we need to allocate cross-attention blocks.
+                num_encoder_tokens = 0
+                if (
+                    self.is_encoder_decoder
+                    and request.has_encoder_inputs
+                    and encoder_inputs_to_schedule
+                ):
+                    num_encoder_tokens = sum(
+                        request.get_num_encoder_embeds(i)
+                        for i in encoder_inputs_to_schedule
+                    )
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
@@ -947,7 +949,7 @@ class Scheduler(SchedulerInterface):
                 request.num_tokens + request.num_output_placeholders
             )
             scheduler_output.has_structured_output_requests |= (
-                request.use_structured_output
+                request.use_structured_output and not request.is_prefill_chunk
             )
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
@@ -1234,14 +1236,14 @@ class Scheduler(SchedulerInterface):
     ) -> GrammarOutput | None:
         # Collect list of scheduled request ids that use structured output.
         # The corresponding rows of the bitmask will be in this order.
-        # PERF: in case of chunked prefill,
-        # request might not include any new tokens.
-        # Therefore, we might introduce some additional
-        # cycle to fill in the bitmask, which could be a big no-op.
+        if not scheduler_output.has_structured_output_requests:
+            return None
+
         structured_output_request_ids = [
             req_id
             for req_id in scheduler_output.num_scheduled_tokens
-            if (req := self.requests.get(req_id)) and req.use_structured_output
+            if (req := self.requests.get(req_id))
+            and (req.use_structured_output and not req.is_prefill_chunk)
         ]
         if not structured_output_request_ids:
             return None
