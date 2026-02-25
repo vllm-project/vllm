@@ -19,6 +19,7 @@ else:
 
 logger = init_logger(__name__)
 
+BlockSize = Literal[1, 8, 16, 32, 64, 128, 256]
 CacheDType = Literal[
     "auto",
     "bfloat16",
@@ -38,11 +39,13 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 class CacheConfig:
     """Configuration for the KV cache."""
 
-    block_size: SkipValidation[int] = None  # type: ignore[assignment]
-    """Size of a contiguous cache block in number of tokens.
+    block_size: SkipValidation[BlockSize] = None  # type: ignore[assignment]
+    """Size of a contiguous cache block in number of tokens. On CUDA devices,
+    only block sizes up to 32 are supported.
 
-    This is None until `Platform.check_and_update_config()` sets it based on
-    the current platform. Always an int by the time the engine starts."""
+    This config has no static default. If left unspecified by the user, it will
+    be set in `Platform.check_and_update_config()` based on the current
+    platform."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
