@@ -94,6 +94,7 @@ from vllm.sampling_params import SamplingType
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
+from vllm.triton_utils import tl, triton
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
@@ -365,6 +366,42 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+
+
+@triton.jit
+def _zero_kv_blocks_kernel(
+    raw_ptr,
+    buf_offsets_ptr,
+    block_ids_ptr,
+    n_blocks,
+    N_BUFFERS: tl.constexpr,
+    PAGE_SIZE_EL: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+):
+    """Zero KV cache blocks across *all* buffers in a single launch.
+
+    Programs are mapped as (block_index, buf_index, chunk_index).
+    Every divisor is constexpr → compile-time multiply-shift, no mask.
+    Buffer selection uses a precomputed int32-element offset from raw_ptr.
+    """
+    pid = tl.program_id(0)
+    chunks = PAGE_SIZE_EL // BLOCK_SIZE
+    work_per_block = N_BUFFERS * chunks
+    block_index = pid // work_per_block
+    if block_index >= n_blocks:
+        return
+    remainder = pid % work_per_block
+    buf_index = remainder // chunks
+    chunk_index = remainder % chunks
+    block_id = tl.load(block_ids_ptr + block_index)
+    buf_offset = tl.load(buf_offsets_ptr + buf_index)
+    base = (
+        buf_offset
+        + block_id.to(tl.int64) * PAGE_SIZE_EL
+        + chunk_index.to(tl.int64) * BLOCK_SIZE
+    )
+    cols = tl.arange(0, BLOCK_SIZE).to(tl.int64)
+    tl.store(raw_ptr + base + cols, tl.zeros([BLOCK_SIZE], dtype=tl.int32))
 
 
 class GPUModelRunner(
@@ -909,12 +946,75 @@ class GPUModelRunner(
                 decode_threshold=self.reorder_batch_threshold,
             )
 
+    def _init_kv_zero_meta(self) -> None:
+        """One-time precomputation for _zero_block_ids.
+
+        Builds a device tensor of int32-element offsets from the first
+        buffer's base pointer so the Triton kernel can reach every buffer
+        via pure pointer arithmetic — no Python loop at zero-time.
+        Also pre-allocates pinned + device buffers for block-id transfer
+        so the hot path does zero allocation and the H2D copy is async.
+        """
+        page_sizes = {ps for _, ps in self.kv_cache_raw_buffers}
+        assert len(page_sizes) == 1, (
+            f"Expected uniform page size across KV cache buffers, got {page_sizes}"
+        )
+        page_size = page_sizes.pop()
+        assert page_size % 4 == 0
+        page_size_el = page_size // 4
+        alignment = page_size_el & (-page_size_el)
+        blk_size = min(alignment, 1024)
+        base_ptr = self.kv_cache_raw_buffers[0][0].data_ptr()
+        buf_offsets = torch.tensor(
+            [(t.data_ptr() - base_ptr) // 4 for t, _ in self.kv_cache_raw_buffers],
+            dtype=torch.int64,
+            device=self.device,
+        )
+        n_bufs = len(self.kv_cache_raw_buffers)
+        # Initial capacity for the block-id transfer buffers. Grows on
+        # demand in _zero_block_ids if a scheduler step ever exceeds this.
+        self._kv_zero_id_cap = 8192
+        self._kv_zero_ids_pinned = torch.empty(
+            self._kv_zero_id_cap, dtype=torch.int64, pin_memory=True
+        )
+        self._kv_zero_ids_gpu = torch.empty(
+            self._kv_zero_id_cap, dtype=torch.int64, device=self.device
+        )
+        self._kv_zero_raw_i32 = self.kv_cache_raw_buffers[0][0].view(torch.int32)
+        self._kv_zero_meta = (buf_offsets, page_size_el, blk_size, n_bufs)
+
     def _zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the raw KV cache memory for the given block IDs."""
-        for raw_tensor, page_size in self.kv_cache_raw_buffers:
-            for bid in block_ids:
-                start = bid * page_size
-                raw_tensor[start : start + page_size] = 0
+        if not block_ids:
+            return
+        if not hasattr(self, "_kv_zero_meta"):
+            self._init_kv_zero_meta()
+        buf_offsets, page_size_el, blk_size, n_bufs = self._kv_zero_meta
+        n_blocks = len(block_ids)
+        if n_blocks > self._kv_zero_id_cap:
+            self._kv_zero_id_cap = n_blocks * 2
+            self._kv_zero_ids_pinned = torch.empty(
+                self._kv_zero_id_cap, dtype=torch.int64, pin_memory=True
+            )
+            self._kv_zero_ids_gpu = torch.empty(
+                self._kv_zero_id_cap, dtype=torch.int64, device=self.device
+            )
+        # Fast list→pinned copy (numpy C-speed), then async H2D.
+        # The Triton dispatch overlaps with the H2D on the GPU stream,
+        # eliminating the idle gap between the copy and the kernel.
+        self._kv_zero_ids_pinned[:n_blocks].numpy()[:] = block_ids
+        idx = self._kv_zero_ids_gpu[:n_blocks]
+        idx.copy_(self._kv_zero_ids_pinned[:n_blocks], non_blocking=True)
+        grid = (n_blocks * n_bufs * (page_size_el // blk_size),)
+        _zero_kv_blocks_kernel[grid](
+            self._kv_zero_raw_i32,
+            buf_offsets,
+            idx,
+            n_blocks,
+            N_BUFFERS=n_bufs,
+            PAGE_SIZE_EL=page_size_el,
+            BLOCK_SIZE=blk_size,
+        )
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
