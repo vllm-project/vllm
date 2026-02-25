@@ -357,15 +357,13 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
-        mm_processor_kwargs: Mapping[str, object] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
 
-        mm_processor_kwargs = mm_processor_kwargs or {}
-        feature_extractor = self.info.get_feature_extractor(**mm_processor_kwargs)
+        feature_extractor = self.info.get_feature_extractor()
 
         target_audio_length = (
             min(
@@ -375,16 +373,14 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
             * feature_extractor.sampling_rate
         )
 
-        target_width, target_height = self.info.get_image_size_with_most_features(
-            max_pixels=mm_processor_kwargs.get("max_pixels", None),
-        )
+        target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
+        audio_overrides = mm_options.get("audio")
 
         mm_data = {
             "audio": self._get_dummy_audios(
