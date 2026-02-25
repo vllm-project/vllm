@@ -511,8 +511,8 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     # For some FI kernels, the input scales are shared by all experts.
     if is_global_sf_supported_for_nvfp4_backend(backend):
         num_experts = w13.shape[0]
-        a13_scale = a13_scale.max().to(torch.float32).expand(num_experts)
-        a2_scale = a2_scale.max().to(torch.float32).expand(num_experts)
+        a13_scale = a13_scale.max().to(torch.float32).expand(num_experts).contiguous()
+        a2_scale = a2_scale.max().to(torch.float32).expand(num_experts).contiguous()
     else:
         a13_scale = a13_scale.max(dim=1).values.to(torch.float32)
 
