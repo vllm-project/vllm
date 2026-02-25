@@ -203,7 +203,7 @@ steps:
 
 - label: Model strategy test
   gpu: h100
-  num_gpus: 1
+  num_gpus: 4
   source_file_dependencies: []
   commands:
     - pytest -v -s models/nightly/gptoss.py
