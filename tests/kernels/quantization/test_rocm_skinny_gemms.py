@@ -228,6 +228,26 @@ def test_rocm_wvsplitk_kernel(
 
 
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+def test_rocm_wvsplitk_invalid_in_a_not_2d():
+    """wvSplitK requires in_a (weight) to be 2D."""
+    cu_count = get_cu_count()
+    A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
+    B_1d = torch.rand(16, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="in_a must be 2D"):
+        ops.wvSplitK(B_1d, A.view(-1, A.size(-1)), cu_count)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+def test_rocm_wvsplitk_invalid_in_b_not_2d():
+    """wvSplitK requires in_b (activations) to be 2D."""
+    cu_count = get_cu_count()
+    A_1d = torch.rand(16, dtype=torch.float16, device="cuda")
+    B = torch.rand(16, 16, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="in_b must be 2D"):
+        ops.wvSplitK(B, A_1d, cu_count)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 def test_rocm_wvsplitk_invalid_dtype_mismatch():
     """wvSplitK rejects A and B with different dtypes."""
     cu_count = get_cu_count()
@@ -254,6 +274,16 @@ def test_rocm_wvsplitk_invalid_k_not_div8():
     A = torch.rand(1, 10, dtype=torch.float16, device="cuda")
     B = torch.rand(16, 10, dtype=torch.float16, device="cuda")
     with pytest.raises(RuntimeError, match="k % 8"):
+        ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+def test_rocm_wvsplitk_invalid_k_dimension_mismatch():
+    """K dimension (inner) of in_a and in_b must match for correct matmul."""
+    cu_count = get_cu_count()
+    A = torch.rand(1, 16, dtype=torch.float16, device="cuda")
+    B = torch.rand(16, 24, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="K dimension.*must match"):
         ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count)
 
 

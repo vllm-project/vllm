@@ -1121,12 +1121,17 @@ int mindiv(int N, int div1, int div2) {
 torch::Tensor wvSplitK(const at::Tensor& in_a, const at::Tensor& in_b,
                        const std::optional<at::Tensor>& in_bias,
                        const int64_t CuCount) {
+  TORCH_CHECK(in_a.dim() == 2, "in_a must be 2D, got ", in_a.dim(), "D");
+  TORCH_CHECK(in_b.dim() == 2, "in_b must be 2D, got ", in_b.dim(), "D");
   TORCH_CHECK(in_a.dtype() == in_b.dtype(),
               "in_a and in_b must have the same dtype");
   TORCH_CHECK(
       in_a.dtype() == torch::kFloat16 || in_a.dtype() == torch::kBFloat16,
       "wvSplitK supports only float16 and bfloat16; got ", in_a.scalar_type());
   TORCH_CHECK(in_a.size(1) % 8 == 0, "k % 8 == 0");
+  TORCH_CHECK(in_a.size(1) == in_b.size(1),
+              "K dimension (inner) must match: in_a has ", in_a.size(1),
+              ", in_b has ", in_b.size(1));
 
   auto M_in = in_a.size(0);
   auto K_in = in_a.size(1);
