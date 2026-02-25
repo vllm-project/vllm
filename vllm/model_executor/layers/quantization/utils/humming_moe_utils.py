@@ -42,19 +42,18 @@ def humming_moe_align(
     expert_ids = make_empty_tensor(max_expert_ids_size)
     num_tokens_post_pad = make_empty_tensor(1)
 
-    if not topk_ids.is_meta:
-        sorted_ids_size, experts_ids_size = get_tensor_size(block_size)
+    sorted_ids_size, experts_ids_size = get_tensor_size(block_size)
 
-        moe_align_block_size(
-            topk_ids=topk_ids,
-            block_size=block_size,
-            num_experts=num_experts,
-            expert_map=expert_map,
-            pad_sorted_ids=False,
-            ignore_invalid_experts=True,
-            sorted_ids=sorted_ids[:sorted_ids_size],
-            expert_ids=expert_ids[:experts_ids_size],
-            num_tokens_post_pad=num_tokens_post_pad,
-        )
+    moe_align_block_size(
+        topk_ids=topk_ids,
+        block_size=block_size,
+        num_experts=num_experts,
+        expert_map=expert_map,
+        pad_sorted_ids=False,
+        ignore_invalid_experts=True,
+        sorted_ids=sorted_ids[:sorted_ids_size],
+        expert_ids=expert_ids[:experts_ids_size],
+        num_tokens_post_pad=num_tokens_post_pad,
+    )
 
     return sorted_ids, expert_ids, num_tokens_post_pad
