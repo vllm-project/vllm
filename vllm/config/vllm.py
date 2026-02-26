@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -37,6 +37,7 @@ from .load import LoadConfig
 from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
+from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
@@ -74,6 +75,8 @@ class OptimizationLevel(IntEnum):
     O3 = 3
     """O3: Currently the same as -O2s."""
 
+
+PerformanceMode = Literal["balanced", "interactivity", "throughput"]
 
 IS_QUANTIZED = False
 IS_DENSE = False
@@ -259,6 +262,8 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
+    offload_config: OffloadConfig = Field(default_factory=OffloadConfig)
+    """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -308,6 +313,13 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -O2 is used by default. See OptimizationLevel for full
     description."""
+
+    performance_mode: PerformanceMode = "balanced"
+    """Performance mode for runtime behavior, 'balanced' is the default.
+    'interactivity' favors low end-to-end per-request latency at small batch
+    sizes (fine-grained CUDA graphs, latency-oriented kernels).
+    'throughput' favors aggregate tokens/sec at high concurrency (larger CUDA
+    graphs, more aggressive batching, throughput-oriented kernels)."""
 
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
@@ -359,6 +371,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.load_config:
             vllm_factors.append(self.load_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.offload_config:
+            vllm_factors.append(self.offload_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.attention_config:
@@ -635,6 +651,11 @@ class VllmConfig:
 
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
+
+        if self.performance_mode != "balanced":
+            logger.info_once(
+                "Performance mode set to '%s'.", self.performance_mode, scope="local"
+            )
 
         self.try_verify_and_update_config()
 
@@ -1350,9 +1371,15 @@ class VllmConfig:
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
-                cudagraph_capture_sizes = [
-                    i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-                ]
+                if self.performance_mode == "interactivity":
+                    # Fine-grained CUDA graphs at small batch sizes
+                    # for minimal padding overhead
+                    interactivity_max = min(max_cudagraph_capture_size, 32)
+                    cudagraph_capture_sizes = list(range(1, interactivity_max + 1))
+                else:
+                    cudagraph_capture_sizes = [
+                        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+                    ]
                 if max_cudagraph_capture_size >= 8:
                     # Step size 8 for small batch sizes, up to 256(not included)
                     cudagraph_capture_sizes += list(
@@ -1363,6 +1390,8 @@ class VllmConfig:
                     cudagraph_capture_sizes += list(
                         range(256, max_cudagraph_capture_size + 1, 16)
                     )
+                # de-duplicate and sort the sizes
+                cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
             if (
                 self.parallel_config.tensor_parallel_size > 1
