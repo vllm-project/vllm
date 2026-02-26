@@ -35,6 +35,11 @@ MEDIA_CONNECTOR_REGISTRY = ExtensionManager()
 
 @MEDIA_CONNECTOR_REGISTRY.register("http")
 class MediaConnector:
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     def __init__(
         self,
         media_io_kwargs: dict[str, dict[str, Any]] | None = None,

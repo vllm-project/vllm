@@ -44,6 +44,11 @@ class MediaWithBytes(Generic[_T]):
 
 
 class MediaIO(ABC, Generic[_T]):
+    """Configuration values can be user-provided either by --media-io-kwargs or
+    by the runtime API field "media_io_kwargs". Ensure proper validation and
+    error handling.
+    """
+
     @abstractmethod
     def load_bytes(self, data: bytes) -> _T:
         raise NotImplementedError
