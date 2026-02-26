@@ -24,6 +24,7 @@ logger = init_logger(__name__)
 
 class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     accept_output_buffer: bool = True
+    forward_includes_kv_cache_update: bool = False
 
     forward_includes_kv_cache_update: bool = False
 
@@ -93,6 +94,46 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
         from aiter.ops.triton.unified_attention import unified_attention
 
         self.unified_attention = unified_attention
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+    ) -> None:
+        """Update KV cache with new key and value tensors.
+
+        Args:
+            layer: The attention layer (for scales).
+            key: New key tensor to cache.
+            value: New value tensor to cache.
+            kv_cache: The KV cache tensor to update.
+            attn_metadata: Attention metadata containing slot_mapping.
+        """
+        if key is None or value is None:
+            # Cross attention case - skip update
+            return
+
+        if self.kv_sharing_target_layer_name is not None:
+            # Sharing KV cache with another layer - skip update
+            return
+
+        # Unbind the cache
+        key_cache, value_cache = kv_cache.unbind(0)
+
+        # Update the cache
+        ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            attn_metadata.slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
 
     def forward(
         self,
