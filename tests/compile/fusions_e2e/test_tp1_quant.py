@@ -116,6 +116,8 @@ def test_tp1_fp8_fusions(
 
     if use_aiter:
         matches_check[0] = "aiter_rms_quant_fusion"
+
+        matches = matches._replace(aiter_rms_quant_fusion=matches.rms_quant_fusion)
         # TODO: enable the `norm_rope_fusion` test,
         # On ROCm norm_rope_fusion is only supported without
         # enabling AITER.
