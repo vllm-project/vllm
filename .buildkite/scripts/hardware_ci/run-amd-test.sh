@@ -6,6 +6,26 @@
 # Multi-node detection: Instead of matching on fragile group names, we detect
 # multi-node jobs structurally by looking for the bracket command syntax
 # "[node0_cmds] && [node1_cmds]" or via the NUM_NODES environment variable.
+#
+###############################################################################
+# QUOTING / COMMAND PASSING
+#
+# Passing commands as positional arguments ($*) is fragile when the command
+# string itself contains double quotes, e.g.:
+#
+#   bash run-amd-test.sh "export FLAGS="value" && pytest -m "not slow""
+#
+# The outer shell resolves the nested quotes *before* this script runs, so
+# the script receives mangled input it cannot fully recover.
+#
+# Preferred: pass commands via the VLLM_TEST_COMMANDS environment variable:
+#
+#   export VLLM_TEST_COMMANDS='export FLAGS="value" && pytest -m "not slow"'
+#   bash run-amd-test.sh
+#
+# Single-quoted assignment preserves all inner double quotes verbatim.
+# The $* path is kept for backward compatibility but callers should migrate.
+###############################################################################
 set -o pipefail
 
 # Export Python path
@@ -104,6 +124,10 @@ is_multi_node() {
 # Already-quoted expressions (containing literal single quotes) are passed
 # through untouched to avoid double-quoting values injected by
 # apply_rocm_test_overrides.
+#
+# NOTE: This ONLY fixes -m/-k flags. It cannot recover arbitrary inner
+# double-quotes stripped by the calling shell (see header comment).
+# Use VLLM_TEST_COMMANDS to avoid the problem entirely.
 ###############################################################################
 re_quote_pytest_markers() {
   local input="$1"
@@ -342,7 +366,29 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
-commands="$*"
+# ---- Command source selection ----
+# Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
+# Fall back to $* for backward compatibility, but warn that inner
+# double-quotes will have been stripped by the calling shell.
+if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
+  commands="${VLLM_TEST_COMMANDS}"
+  echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
+else
+  commands="$*"
+  if [[ -z "$commands" ]]; then
+    echo "Error: No test commands provided." >&2
+    echo "Usage:" >&2
+    echo "  Preferred:  VLLM_TEST_COMMANDS='...' bash $0" >&2
+    echo "  Legacy:     bash $0 \"commands here\"" >&2
+    exit 1
+  fi
+  echo "Commands sourced from positional args (legacy mode)"
+  echo "WARNING: Inner double-quotes in the command string may have been"
+  echo "  stripped by the calling shell. If you see syntax errors, switch to:"
+  echo "  export VLLM_TEST_COMMANDS='your commands here'"
+  echo "  bash $0"
+fi
+
 echo "Raw commands: $commands"
 
 # Fix quoting before ROCm overrides (so overrides see correct structure)
