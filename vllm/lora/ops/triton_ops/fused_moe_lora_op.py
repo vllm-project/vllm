@@ -10,7 +10,7 @@ from vllm.distributed import (
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .utils import supports_pdl, supports_tma
+from .utils import set_triton_allocator, supports_pdl, supports_tma
 
 
 @triton.jit
@@ -144,13 +144,6 @@ def _adjust_kernel_inputs(
     return grid_lora_dim, stride_tl, stride_el
 
 
-def _set_triton_allocator(device: torch.device):
-    def alloc_fn(size: int, alignment: int, stream: int | None):
-        return torch.empty(size, device=device, dtype=torch.int8)
-
-    triton.set_allocator(alloc_fn)
-
-
 @triton.jit(
     do_not_specialize=[
         "num_valid_tokens",
@@ -219,9 +212,15 @@ def _fused_moe_lora_kernel(
     IS_PRIMARY: tl.constexpr,
     USE_TMA: tl.constexpr,
     # sort_c determines whether tokens are stored in C in the order determined
-    # by sorted_token_ids to enabled later TMA loads from this tensor.
-    # During shrink kernel, sort_c=True and a_desc=None;
-    # during expand, sort_c=False and a_desc is not None.
+    # by sorted_token_ids to enable later TMA loads from this tensor.
+    #
+    # When USE_TMA is enabled, the parameter combinations are:
+    #   a_desc  | b_desc  | sort_c | Use Case
+    #   --------|---------|--------|-----------------------------
+    #   yes     | yes     | False  | expand kernel (num_slices=1)
+    #   no      | yes     | True   | shrink kernel (num_slices=1)
+    #   yes     | no      | False  | expand kernel (num_slices>1)
+    #   no      | no      | True   | shrink kernel (num_slices>1)
     sort_c: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -754,7 +753,7 @@ def _fused_moe_lora(
         if num_slices > 1:
             # if num_slices > 1, we construct TMA descriptors for LoRA
             # weights within the kernel, which requires us to first set an allocator
-            _set_triton_allocator(device)
+            set_triton_allocator(device)
 
         # When storing intermediate data in sorted order for TMA, we
         # need an extra 'num_active_loras' dim in the cache to avoid conflicts
