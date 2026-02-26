@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 # Cutlass bench utils
-from collections.abc import Iterable
 
 import torch
 
@@ -86,15 +85,3 @@ def make_rand_sparse_tensors(
 
     # Compressed B, Metadata, Original A, B
     return b_compressed, e, a, b
-
-
-def make_n_rand_sparse_tensors(
-    num_tensors: int, dtype: torch.dtype, m: int, n: int, k: int
-) -> tuple[Iterable[torch.Tensor], Iterable[torch.Tensor]]:
-    ABs = []
-    for _ in range(num_tensors):
-        b_comp, e, a, b = make_rand_sparse_tensors(dtype, m, n, k)
-        if b_comp is not None:
-            ABs.append(make_rand_sparse_tensors(dtype, m, n, k))
-    BComps, Es, As, Bs = zip(*ABs)
-    return list(BComps), list(Es), list(As), list(Bs)
