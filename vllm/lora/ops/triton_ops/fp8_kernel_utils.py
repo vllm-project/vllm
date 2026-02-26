@@ -20,8 +20,6 @@ def _accumulate_mm(
     group_k: tl.constexpr,
     group_n: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
 ):
     """
     Core matrix multiplication and accumulation logic with quantization support.
@@ -38,15 +36,12 @@ def _accumulate_mm(
         group_k: Block size for K dimension in block-wise quantization
         group_n: Block size for N dimension in block-wise quantization
         use_fp8_w8a8: Whether using FP8 W8A8 quantization
-        use_int8_w8a8: Whether using INT8 W8A8 quantization
-        use_int8_w8a16: Whether using INT8 W8A16 quantization
 
     Returns:
         tl.tensor: Updated accumulator
     """
-    if use_int8_w8a16:
-        accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
-    elif use_fp8_w8a8 or use_int8_w8a8:
+
+    if use_fp8_w8a8:
         if group_k > 0 and group_n > 0:
             # Block-wise quantization: scales are loaded per block
             offs_ks = iter_k // group_k
@@ -59,7 +54,7 @@ def _accumulate_mm(
             accumulator += (
                 tl.dot(tiled_a, tiled_b) * a_scale[:, None] * b_scale[None, :]
             )
-        elif use_fp8_w8a8:
+        else:
             # Tensor-wise or per-channel: accumulate and scale at end
             accumulator = tl.dot(tiled_a, tiled_b, acc=accumulator)
     else:
@@ -87,8 +82,6 @@ def fp8_mm_k(
     group_k: tl.constexpr,
     group_n: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     CAST_TYPE: tl.constexpr,
     b_dtype: tl.constexpr,
@@ -124,8 +117,6 @@ def fp8_mm_k(
         group_k: Block size for K dimension in block-wise quantization
         group_n: Block size for N dimension in block-wise quantization
         use_fp8_w8a8: Whether using FP8 W8A8 quantization
-        use_int8_w8a8: Whether using INT8 W8A8 quantization
-        use_int8_w8a16: Whether using INT8 W8A16 quantization
         per_channel_quant: Whether using per-channel quantization
         CAST_TYPE: if True, cast the values from the A matrix to the B
             matrix dtype.
@@ -171,8 +162,6 @@ def fp8_mm_k(
                 group_k,
                 group_n,
                 use_fp8_w8a8,
-                use_int8_w8a8,
-                use_int8_w8a16,
             )
         else:
             # Partial block at the tail: mask out-of-bounds elements
@@ -197,8 +186,6 @@ def fp8_mm_k(
                 group_k,
                 group_n,
                 use_fp8_w8a8,
-                use_int8_w8a8,
-                use_int8_w8a16,
             )
 
         a_ptr += STEP_K * ak_stride
@@ -251,8 +238,6 @@ def do_shrink_kernel_fp8(
     SLICE_NUM: tl.constexpr,
     USE_GDC: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
@@ -299,7 +284,7 @@ def do_shrink_kernel_fp8(
 
     # Load scales for tensor-wise or per-channel quantization (outside the loop)
     # Block-wise scales are loaded inside fp8_mm_k
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         if group_k > 0 and group_n > 0:
             # Block-wise: compute scale pointers for fp8_mm_k
             # a_scale: per-row base pointers, shape (BLOCK_M,)
@@ -334,14 +319,6 @@ def do_shrink_kernel_fp8(
             # For non-block-wise, pass original pointers (not used in mm loop)
             mm_a_scale_ptr = a_scale_ptr
             mm_b_scale_ptr = cur_b_scale_ptr
-    elif use_int8_w8a16:
-        # INT8 weights with FP16 activations - only need weight scales
-        b_scale_ptrs = (
-            cur_b_scale_ptr + lora_index * b_scale_l_stride + rbn * b_scale_n_stride
-        )
-        b_scale = tl.load(b_scale_ptrs)
-        mm_a_scale_ptr = a_scale_ptr
-        mm_b_scale_ptr = cur_b_scale_ptr
     else:
         # Non-quantized path
         mm_a_scale_ptr = a_scale_ptr
@@ -367,8 +344,6 @@ def do_shrink_kernel_fp8(
         group_k,
         group_n,
         use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
         per_channel_quant,
         False,
         cur_lora_ptr.dtype.element_ty,
@@ -380,16 +355,13 @@ def do_shrink_kernel_fp8(
         tl.extra.cuda.gdc_launch_dependents()
 
     # Apply dequantization scales for tensor-wise/per-channel quantization
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         if group_k > 0 and group_n > 0:
             # Block-wise: already applied in fp8_mm_k
             pass
         else:
             # Tensor-wise or per-channel: apply scales after accumulation
             accumulator = accumulator * a_scale * b_scale
-    elif use_int8_w8a16:
-        # INT8 weights with FP16 activations - only apply weight scale
-        accumulator = accumulator * b_scale
 
     # Apply LoRA scaling factor
     accumulator *= scaling
@@ -461,8 +433,6 @@ def do_expand_kernel_fp8(
     ADD_INPUTS: tl.constexpr,
     USE_GDC: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
 ):
     """
@@ -540,7 +510,7 @@ def do_expand_kernel_fp8(
     )
 
     # Setup scale pointers for FP8/INT8 quantization
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         if group_k > 0 and group_n > 0:
             # Block-wise quantization - compute scale pointers for fp8_mm_k
             # a_scale: per-row base pointers, shape (BLOCK_M,)
@@ -573,14 +543,6 @@ def do_expand_kernel_fp8(
             # For non-block-wise, pass original pointers (not used in mm loop)
             mm_a_scale_ptr = a_scale_ptr
             mm_b_scale_ptr = cur_b_scale_ptr
-    elif use_int8_w8a16:
-        # INT8 weights with FP16 activations - only need weight scales
-        b_scale_ptrs = (
-            cur_b_scale_ptr + lora_index * b_scale_l_stride + rbn * b_scale_n_stride
-        )
-        b_scale = tl.load(b_scale_ptrs)
-        mm_a_scale_ptr = a_scale_ptr
-        mm_b_scale_ptr = cur_b_scale_ptr
     else:
         # Non-quantized path
         mm_a_scale_ptr = a_scale_ptr
@@ -607,8 +569,6 @@ def do_expand_kernel_fp8(
         group_k,
         group_n,
         use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
         per_channel_quant,
         CAST_TYPE,  # CAST_TYPE - cast FP8 B to A's dtype
         cur_lora_ptr.dtype.element_ty,
@@ -617,15 +577,12 @@ def do_expand_kernel_fp8(
     )
 
     # Apply dequantization scales for non-block-wise quantization
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         if group_k > 0 and group_n > 0:
             pass  # Already applied per block in fp8_mm_k
         else:
             # Tensor-wise or per-channel: apply scales after accumulation
             accumulator = accumulator * a_scale * b_scale
-    elif use_int8_w8a16:
-        # INT8 weights with FP16 activations - only apply weight scale
-        accumulator = accumulator * b_scale
 
     tiled_c = accumulator.to(out_ptr.dtype.element_ty)
     if SLICE_NUM == 1:

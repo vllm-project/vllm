@@ -123,8 +123,6 @@ def _lora_shrink_kernel_fp8(
     SLICE_NUM: tl.constexpr,
     USE_GDC: tl.constexpr,  ## should always be false in shrink kernel
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
@@ -216,8 +214,6 @@ def _lora_shrink_kernel_fp8(
         SLICE_NUM,
         USE_GDC,
         use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
         per_channel_quant,
         launch_pdl,
     )
@@ -243,8 +239,6 @@ def _lora_shrink_fp8(
     group_k: int = 0,  # Block size for K in block-wise quantization (0 = tensor-wise)
     group_n: int = 0,  # Block size for N in block-wise quantization
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
 ) -> None:
     """
@@ -263,8 +257,6 @@ def _lora_shrink_fp8(
         group_k: Block size for K dimension quantization
         group_n: Block size for N dimension quantization
         use_fp8_w8a8: Whether to use FP8 weights and activations
-        use_int8_w8a8: Whether to use INT8 weights and activations
-        use_int8_w8a16: Whether to use INT8 weights and FP16 activations
         per_channel_quant: Whether to use per-channel quantization
     """
     assert no_lora_flag_cpu.numel() == 1
@@ -291,11 +283,9 @@ def _lora_shrink_fp8(
     )
 
     # Get scale pointers if using FP8
-    if use_fp8_w8a8 or use_int8_w8a8 or use_int8_w8a16:
-        assert a_scale is not None or use_int8_w8a16, (
-            "a_scale required for FP8/INT8 w8a8"
-        )
-        assert b_scale is not None, "b_scale required for FP8/INT8"
+    if use_fp8_w8a8:
+        assert a_scale is not None, "a_scale required for FP8 w8a8"
+        assert b_scale is not None, "b_scale required for FP8"
 
         b_scale_ptr_tensor, b_scale_l_stride, b_scale_n_stride, b_scale_k_stride = (
             _get_shrink_lora_scale_ptr(b_scale, inputs.device)
@@ -342,7 +332,7 @@ def _lora_shrink_fp8(
     )
 
     # Determine scale strides
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         if a_scale is not None and a_scale.ndim == 2:
             a_scale_m_stride = a_scale.stride(0)
             a_scale_k_stride = a_scale.stride(1)
@@ -394,8 +384,6 @@ def _lora_shrink_fp8(
         NUM_SLICES,
         use_gdc,
         use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
         per_channel_quant,
         use_gdc,
         num_warps=NUM_WARPS,
@@ -423,8 +411,6 @@ def _lora_shrink_fp8_fake(
     group_k: int = 0,  # Block size for K in block-wise quantization (0 = tensor-wise)
     group_n: int = 0,  # Block size for N in block-wise quantization
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
 ) -> None:
     return

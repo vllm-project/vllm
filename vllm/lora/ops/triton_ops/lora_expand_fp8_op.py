@@ -88,8 +88,6 @@ def _lora_expand_kernel_fp8(
     SAME_STRIDE: tl.constexpr,
     USE_GDC: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
     launch_pdl: tl.constexpr,
 ):
@@ -169,8 +167,6 @@ def _lora_expand_kernel_fp8(
         ADD_INPUTS,
         USE_GDC,
         use_fp8_w8a8,
-        use_int8_w8a8,
-        use_int8_w8a16,
         per_channel_quant,
     )
 
@@ -194,8 +190,6 @@ def _lora_expand_fp8(
     group_k: int = 0,
     group_n: int = 0,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
 ) -> None:
     """
@@ -221,8 +215,6 @@ def _lora_expand_fp8(
         group_k (int, optional): Block size for K in block-wise quantization.
         group_n (int, optional): Block size for N in block-wise quantization.
         use_fp8_w8a8 (bool, optional): Whether to use FP8 W8A8 quantization.
-        use_int8_w8a8 (bool, optional): Whether to use INT8 W8A8 quantization.
-        use_int8_w8a16 (bool, optional): Whether to use INT8 W8A16 quantization.
         per_channel_quant (bool, optional): Whether to use per-channel quantization.
     """
     assert no_lora_flag_cpu.numel() == 1
@@ -365,8 +357,6 @@ def _lora_expand_fp8(
         same_stride,
         use_gdc,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
-        use_int8_w8a8=use_int8_w8a8,
         per_channel_quant=per_channel_quant,
         num_warps=NUM_WARPS,
         num_ctas=NUM_CTAS,
@@ -395,8 +385,6 @@ def _lora_expand_fp8_fake(
     group_k: int = 0,
     group_n: int = 0,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
 ) -> None:
     return
