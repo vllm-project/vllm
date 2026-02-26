@@ -80,6 +80,7 @@ def _get_backend_priorities(
     else:
         if device_capability.major == 10:
             return [
+                AttentionBackendEnum.TRTLLM_ATTN,
                 AttentionBackendEnum.FLASHINFER,
                 AttentionBackendEnum.FLASH_ATTN,
                 AttentionBackendEnum.TRITON_ATTN,
