@@ -151,7 +151,8 @@ class NemotronHMoE(nn.Module):
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
+            out_dtype=torch.float32,
+            force_fp32_compute=True,
             prefix=f"{prefix}.gate",
         )
 

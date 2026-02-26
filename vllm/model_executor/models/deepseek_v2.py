@@ -252,8 +252,6 @@ class DeepseekV2MoE(nn.Module):
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
-            out_dtype=None,  # set after experts init
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
