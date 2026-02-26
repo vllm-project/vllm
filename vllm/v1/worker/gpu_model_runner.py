@@ -691,6 +691,9 @@ class GPUModelRunner(
 
         self.uniform_decode_query_len = 1 + self.num_spec_tokens
 
+        # If this model has mamba2 layers, we handle num_accepted_tokens_cpu differently
+        self.is_mamba2_hybrid: bool = False
+
         # Cudagraph dispatcher for runtime cudagraph dispatching.
         self.cudagraph_dispatcher = CudagraphDispatcher(self.vllm_config)
 
@@ -1201,7 +1204,36 @@ class GPUModelRunner(
             .numpy()
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
+            # if not self.is_mamba2_hybrid:
+            if True:
+                self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+                continue
+
+            # When spec decode is active, the mamba backend classifies requests
+            # with query_len <= reorder_batch_threshold as "decodes". Prefill
+            # chunks that fall under this threshold get processed via the decode
+            # path, which stores intermediate states at sequential slots. We must
+            # set num_accepted_tokens to the chunk's query_len for those requests
+            # so the next iteration reads from the correct final-state slot.
+            # Prefills that went through the actual prefill path should keep the
+            # default value of 1 (the prefill path stores state at slot 0 only).
+            spec_decode_active = bool(scheduler_output.scheduled_spec_decode_tokens)
+            threshold = self.reorder_batch_threshold
+            num_computed = self.input_batch.num_computed_tokens_cpu[i]
+            num_prompt = self.input_batch.num_prompt_tokens[i]
+            is_prefill = num_computed < num_prompt
+            req_id = self.input_batch.req_ids[i]
+            query_len = scheduler_output.num_scheduled_tokens[req_id]
+
+            if is_prefill:
+                classified_as_decode = (
+                    spec_decode_active
+                    and threshold is not None
+                    and query_len <= threshold
+                )
+                num_tokens = query_len if classified_as_decode else 1
             self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
+
         if self.cache_config.mamba_cache_mode == "align":
             mamba_utils.postprocess_mamba(
                 scheduler_output,
@@ -1854,6 +1886,8 @@ class GPUModelRunner(
                 else 0
             )
 
+            if isinstance(builder, Mamba2AttentionMetadataBuilder):
+                self.is_mamba2_hybrid = True
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
                 builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
