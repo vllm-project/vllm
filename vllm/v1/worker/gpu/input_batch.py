@@ -27,6 +27,10 @@ class InputBuffers:
             max_num_reqs + 1, dtype=torch.int32, device=device
         )
         self.seq_lens = torch.zeros(max_num_reqs, dtype=torch.int32, device=device)
+        # DCP: per-request local seq_lens buffer
+        self.dcp_local_seq_lens = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
 
 
 @dataclass
@@ -108,7 +112,7 @@ class InputBatch:
         query_start_loc_np = np.empty(num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np[1:])
-        input_buffers.query_start_loc[0] = 0
+        input_buffers.query_start_loc[:1] = 0
         torch.cumsum(
             seq_lens, dim=0, out=input_buffers.query_start_loc[1 : num_reqs + 1]
         )
@@ -156,8 +160,8 @@ def _prepare_prefill_inputs_kernel(
     next_prefill_tokens_ptr,
     idx_mapping_ptr,
     query_start_loc_ptr,
-    prefill_token_ids_ptr,
-    prefill_token_ids_stride,
+    all_token_ids_ptr,
+    all_token_ids_stride,
     prefill_lens_ptr,
     num_computed_tokens_ptr,
     BLOCK_SIZE: tl.constexpr,
@@ -174,16 +178,16 @@ def _prepare_prefill_inputs_kernel(
     query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
     query_len = query_end - query_start
 
-    prefill_ptr = prefill_token_ids_ptr + req_state_idx * prefill_token_ids_stride
+    request_ptr = all_token_ids_ptr + req_state_idx * all_token_ids_stride
     for i in range(0, query_len, BLOCK_SIZE):
         block = i + tl.arange(0, BLOCK_SIZE)
         mask = block < query_len
-        tokens = tl.load(prefill_ptr + num_computed + block, mask=mask)
+        tokens = tl.load(request_ptr + num_computed + block, mask=mask)
         tl.store(input_ids_ptr + query_start + block, tokens, mask=mask)
 
     next_pos = num_computed + query_len
     if next_pos < prefill_len:
-        next_token = tl.load(prefill_ptr + next_pos)
+        next_token = tl.load(request_ptr + next_pos)
         tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
 
 
@@ -192,7 +196,7 @@ def prepare_prefill_inputs(
     next_prefill_tokens: torch.Tensor,
     idx_mapping: torch.Tensor,
     query_start_loc: torch.Tensor,
-    prefill_token_ids: torch.Tensor,
+    all_token_ids: torch.Tensor,
     prefill_len: torch.Tensor,
     num_computed_tokens: torch.Tensor,
 ) -> None:
@@ -202,8 +206,8 @@ def prepare_prefill_inputs(
         next_prefill_tokens,
         idx_mapping,
         query_start_loc,
-        prefill_token_ids,
-        prefill_token_ids.stride(0),
+        all_token_ids,
+        all_token_ids.stride(0),
         prefill_len,
         num_computed_tokens,
         BLOCK_SIZE=1024,
@@ -423,16 +427,21 @@ def _post_update_kernel(
     num_sampled_ptr,
     num_rejected_ptr,
     query_start_loc_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    total_len_ptr,
 ):
     req_id = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_id)
 
+    total_len = tl.load(total_len_ptr + req_state_idx)
     num_sampled = tl.load(num_sampled_ptr + req_id)
     if num_sampled > 0:
         token_id = tl.load(
             sampled_tokens_ptr + req_id * sampled_tokens_stride + num_sampled - 1
         )
         tl.store(last_sampled_tokens_ptr + req_state_idx, token_id)
+        tl.store(total_len_ptr + req_state_idx, total_len + num_sampled)
 
     for i in range(num_sampled):
         token_id = tl.load(sampled_tokens_ptr + req_id * sampled_tokens_stride + i)
@@ -442,6 +451,10 @@ def _post_update_kernel(
         count = tl.load(token_ptr)
         count += 1
         tl.store(token_ptr, count)
+        tl.store(
+            all_token_ids_ptr + req_state_idx * all_token_ids_stride + total_len + i,
+            token_id,
+        )
 
     query_start = tl.load(query_start_loc_ptr + req_id)
     query_end = tl.load(query_start_loc_ptr + req_id + 1)
@@ -470,6 +483,10 @@ def post_update(
     num_rejected: torch.Tensor,
     # [num_reqs + 1]
     query_start_loc: torch.Tensor,
+    # [max_num_reqs, max_model_len]
+    all_token_ids: torch.Tensor,
+    # [max_num_reqs]
+    total_len: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
     _post_update_kernel[(num_reqs,)](
@@ -483,6 +500,9 @@ def post_update(
         num_sampled,
         num_rejected,
         query_start_loc,
+        all_token_ids,
+        all_token_ids.stride(0),
+        total_len,
         num_warps=1,
     )
 

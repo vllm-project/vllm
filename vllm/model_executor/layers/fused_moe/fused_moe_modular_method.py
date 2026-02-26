@@ -37,7 +37,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             not self.moe_mk.supports_expert_map(),
         )
         self.old_quant_method = old_quant_method
-        assert not self.old_quant_method.is_monolithic
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
     @staticmethod

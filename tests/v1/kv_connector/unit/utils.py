@@ -5,7 +5,7 @@ from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import chain, count
-from typing import Any
+from typing import Any, Literal
 
 import torch
 
@@ -96,6 +96,7 @@ def create_vllm_config(
     cache_dtype: str = "auto",
     hf_overrides: dict[str, Any] | None = None,
     attention_backend: str | None = None,
+    kv_load_failure_policy: Literal["recompute", "fail"] = "fail",
 ) -> VllmConfig:
     """Initialize VllmConfig For Testing."""
     model_config = ModelConfig(
@@ -125,6 +126,7 @@ def create_vllm_config(
         kv_role="kv_both",
         enable_permute_local_kv=enable_permute_local_kv,
         kv_connector_extra_config=kv_connector_extra_config or {},
+        kv_load_failure_policy=kv_load_failure_policy,
     )
     attention_config = AttentionConfig(backend=attention_backend)
     return VllmConfig(
@@ -212,6 +214,7 @@ def create_request(
 
     max_tokens = 1 if do_remote_decode else max_tokens
     sampling_params = SamplingParams(max_tokens=max_tokens)
+    sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
 
     common_prefix = [1] * common_prefix_len if common_prefix_len > 0 else []
     suffix = [i * request_id for i in range(num_tokens - common_prefix_len)]
@@ -223,7 +226,6 @@ def create_request(
         sampling_params=sampling_params,
         pooling_params=None,
         mm_features=None,
-        eos_token_id=EOS_TOKEN_ID,
         block_hasher=get_request_block_hasher(block_size, hash_fn),
     )
     req.kv_transfer_params = kv_transfer_params

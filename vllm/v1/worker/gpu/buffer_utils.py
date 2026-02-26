@@ -22,7 +22,6 @@ def async_copy_to_gpu(
     if isinstance(x, np.ndarray):
         x = torch.from_numpy(x)
     assert x.is_cpu
-    assert not x.is_pinned()
 
     if out is None:
         assert device is not None
@@ -30,6 +29,8 @@ def async_copy_to_gpu(
 
     # CPU-to-CPU copy
     tmp = x.pin_memory()
+    assert tmp is not x
+
     # CPU-to-GPU copy
     return out.copy_(tmp, non_blocking=True)
 
@@ -75,11 +76,8 @@ class UvaBufferPool:
         out: torch.Tensor | None = None,
     ) -> torch.Tensor:
         uva = self.copy_to_uva(x)
-        if out is None:
-            # CPU-to-GPU copy
-            return uva.clone()
         # CPU-to-GPU copy
-        return out.copy_(uva, non_blocking=True)
+        return uva.clone() if out is None else out.copy_(uva, non_blocking=True)
 
 
 class UvaBackedTensor:

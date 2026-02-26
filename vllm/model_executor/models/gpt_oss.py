@@ -140,7 +140,6 @@ class OAIAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self.rotary_emb(positions, q, k)
-        v = v.contiguous()
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
         return output
@@ -587,7 +586,7 @@ class GptOssModel(nn.Module):
                 parts = name.split(".")
                 ids = [s for s in parts if s.isdigit()]
 
-                # for amd-quark format that each expert is seperated
+                # for amd-quark format that each expert is separated
                 # need to extract the parameter name with experts fused.
                 # example model: amd/gpt-oss-20b-MoE-Quant-W-MXFP4-A-FP8-KV-FP8
                 if len(ids) == 2:

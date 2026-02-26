@@ -72,7 +72,7 @@ class PoolingParams(
         """Returns a deep copy of the PoolingParams instance."""
         return deepcopy(self)
 
-    def verify(self, model_config: "ModelConfig") -> None:
+    def verify(self, model_config: ModelConfig) -> None:
         # plugin task uses io_processor.parse_request to verify inputs,
         # skipping PoolingParams verify
         if self.task == "plugin":
@@ -87,12 +87,7 @@ class PoolingParams(
         self._set_default_parameters(model_config)
         self._verify_valid_parameters()
 
-    def _merge_default_parameters(
-        self, model_config: "ModelConfig | None" = None
-    ) -> None:
-        if model_config is None:
-            return
-
+    def _merge_default_parameters(self, model_config: ModelConfig) -> None:
         pooler_config = model_config.pooler_config
         if pooler_config is None:
             return
@@ -119,7 +114,9 @@ class PoolingParams(
         self._verify_step_pooling(pooler_config, valid_parameters)
 
     def _verify_step_pooling(
-        self, pooler_config: "PoolerConfig", valid_parameters: list[str]
+        self,
+        pooler_config: PoolerConfig,
+        valid_parameters: list[str],
     ):
         step_pooling_parameters = ["step_tag_id", "returned_token_ids"]
         if pooler_config.tok_pooling_type != "STEP":
@@ -142,12 +139,12 @@ class PoolingParams(
                 if getattr(self, k, None) is None:
                     setattr(self, k, getattr(pooler_config, k))
 
-    def _set_default_parameters(self, model_config: "ModelConfig | None"):
+    def _set_default_parameters(self, model_config: ModelConfig):
         if self.task in ["embed", "token_embed"]:
             if self.use_activation is None:
                 self.use_activation = True
 
-            if self.dimensions is not None and model_config is not None:
+            if self.dimensions is not None:
                 if not model_config.is_matryoshka:
                     raise ValueError(
                         f'Model "{model_config.served_model_name}" does not '
