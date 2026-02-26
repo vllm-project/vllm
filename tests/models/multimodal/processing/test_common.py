@@ -23,7 +23,7 @@ from vllm.multimodal.cache import MultiModalProcessorOnlyCache
 from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
-from vllm.tokenizers.mistral import MistralTokenizer
+from vllm.utils.mistral import is_mistral_tokenizer
 
 from ....multimodal.utils import random_audio, random_image, random_video
 from ...registry import (
@@ -183,7 +183,7 @@ def get_text_token_prompts(
 
     text_prompt: str | None
     token_prompt: list[int]
-    if isinstance(tokenizer, MistralTokenizer):
+    if is_mistral_tokenizer(tokenizer):
         # ChatCompletionRequest only supports ImageChunk natively;
         # for other modalities (e.g. audio), fall back to the model's
         # own dummy inputs builder which knows the right placeholders.
@@ -195,6 +195,7 @@ def get_text_token_prompts(
             inputs = dummy_inputs.get_dummy_processor_inputs(
                 model_config.max_model_len,
                 mm_counts,
+                mm_options={},
             )
             text_prompt = None
             token_prompt = (
@@ -224,6 +225,7 @@ def get_text_token_prompts(
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
+            mm_options={},
         )
         assert isinstance(inputs.prompt, str)
 
@@ -331,10 +333,12 @@ def _test_processing_correctness(
 
     rng = np.random.RandomState(0)
 
+    # GLM-ASR requires a minimum audio length of 70ms
+    min_audio_len = 512 if model_config.hf_config.model_type != "glmasr" else 1120
     input_to_hit = {
         "image": Image.new("RGB", size=(128, 128)),
         "video": np.zeros((4, 128, 128, 3), dtype=np.uint8),
-        "audio": (np.zeros((512,)), 16000),
+        "audio": (np.zeros((min_audio_len,)), 16000),
         "vision_chunk": {"type": "image", "image": Image.new("RGB", size=(128, 128))},
     }
     input_factory = {
@@ -342,7 +346,13 @@ def _test_processing_correctness(
         "video": partial(
             random_video, rng, min_frames=2, max_frames=16, min_wh=128, max_wh=256
         ),
-        "audio": partial(random_audio, rng, min_len=512, max_len=1024, sr=16000),
+        "audio": partial(
+            random_audio,
+            rng,
+            min_len=min_audio_len,
+            max_len=min_audio_len + 512,
+            sr=16000,
+        ),
         "vision_chunk": partial(
             random_vision_chunk, rng, min_wh=128, max_wh=256, min_frames=1, max_frames=1
         ),
@@ -387,13 +397,13 @@ def _test_processing_correctness_one(
     mm_items = baseline_processor.info.parse_mm_data(mm_data)
     ignore_mm_keys = _IGNORE_MM_KEYS.get(model_type, set[str]())
 
-    baseline_tokenized_result = baseline_processor.apply(
+    baseline_tokenized_result = baseline_processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
     )
 
-    cached_tokenized_result = cached_processor.apply(
+    cached_tokenized_result = cached_processor(
         token_prompt,
         mm_items=mm_items,
         hf_processor_mm_kwargs={},
@@ -407,12 +417,12 @@ def _test_processing_correctness_one(
     )
 
     if text_prompt is not None:
-        baseline_text_result = baseline_processor.apply(
+        baseline_text_result = baseline_processor(
             text_prompt,
             mm_items=mm_items,
             hf_processor_mm_kwargs={},
         )
-        cached_text_result = cached_processor.apply(
+        cached_text_result = cached_processor(
             text_prompt,
             mm_items=mm_items,
             hf_processor_mm_kwargs={},
@@ -450,8 +460,6 @@ def test_processing_correctness(
     num_batches: int,
     simplify_rate: float,
 ):
-    if model_id == "allendou/Fun-ASR-Nano-2512-vllm":
-        pytest.skip("Cached audio `input_features` not matched. Fix later.")
     if model_id == "google/gemma-3n-E2B-it":
         pytest.skip("Fix later")
     if model_id == "OpenGVLab/InternVL2-2B":

@@ -151,7 +151,8 @@ def run_benchmark(
     print(f"Output file: {output_path}")
 
     if output_path.exists():
-        print("Found existing results. Skipping.")
+        print("Found existing results.")
+        print("[SKIPPED BENCHMARK]")
 
         with output_path.open("r", encoding="utf-8") as f:
             run_data = json.load(f)
