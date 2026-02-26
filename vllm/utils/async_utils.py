@@ -11,6 +11,7 @@ import contextlib
 from asyncio import FIRST_COMPLETED, AbstractEventLoop, Future, Task
 from collections.abc import AsyncGenerator, Awaitable, Callable
 from concurrent.futures import Executor, ThreadPoolExecutor
+from concurrent.futures import Future as ConcFuture
 from functools import partial
 from typing import TYPE_CHECKING, TypeVar
 
@@ -246,6 +247,18 @@ def make_async(
         return loop.run_in_executor(executor=executor, func=p_func)
 
     return _async_wrapper
+
+
+class InlineExecutor(Executor):
+    """Executor that runs callables synchronously in the calling thread."""
+
+    def submit(self, fn, /, *args, **kwargs):
+        f: ConcFuture = ConcFuture()
+        try:
+            f.set_result(fn(*args, **kwargs))
+        except Exception as e:
+            f.set_exception(e)
+        return f
 
 
 def run_in_loop(loop: AbstractEventLoop, function: Callable, *args):

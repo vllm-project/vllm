@@ -4,7 +4,7 @@ import asyncio
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from concurrent.futures import Executor, Future, ThreadPoolExecutor
+from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import cached_property
 from typing import TYPE_CHECKING, Any, Generic, overload
 
@@ -23,7 +23,11 @@ from vllm.inputs import (
 from vllm.inputs.data import build_enc_dec_inputs, embeds_inputs, token_inputs
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike
-from vllm.utils.async_utils import AsyncMicrobatchTokenizer, make_async
+from vllm.utils.async_utils import (
+    AsyncMicrobatchTokenizer,
+    InlineExecutor,
+    make_async,
+)
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
 from vllm.v1.metrics.stats import MultiModalCacheStats
@@ -61,18 +65,6 @@ logger = init_logger(__name__)
 _T = TypeVar("_T", bound=TokenizerLike, default=TokenizerLike)
 
 
-class _InlineExecutor(Executor):
-    """Executor that runs callables synchronously in the calling thread."""
-
-    def submit(self, fn, /, *args, **kwargs):
-        f: Future = Future()
-        try:
-            f.set_result(fn(*args, **kwargs))
-        except BaseException as e:
-            f.set_exception(e)
-        return f
-
-
 class BaseRenderer(ABC, Generic[_T]):
     @classmethod
     @abstractmethod
@@ -104,7 +96,7 @@ class BaseRenderer(ABC, Generic[_T]):
         if mm_config and mm_config.async_mm_input_processing:
             self._mm_executor: Executor = self._executor
         else:
-            self._mm_executor = _InlineExecutor()
+            self._mm_executor = InlineExecutor()
 
         # Lazy initialization since offline LLM doesn't use async
         self._async_tokenizer: AsyncMicrobatchTokenizer | None = None
@@ -147,8 +139,7 @@ class BaseRenderer(ABC, Generic[_T]):
     def get_async_tokenizer(self) -> AsyncMicrobatchTokenizer:
         if self._async_tokenizer is None:
             self._async_tokenizer = AsyncMicrobatchTokenizer(
-                self.get_tokenizer(),
-                executor=self._executor,
+                self.get_tokenizer(), executor=self._executor
             )
 
         return self._async_tokenizer
@@ -818,10 +809,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        return list(
-            await asyncio.gather(
-                *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
-            )
+        return await asyncio.gather(
+            *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
         )
 
     def render_chat(
@@ -886,10 +875,8 @@ class BaseRenderer(ABC, Generic[_T]):
 
         self._apply_prompt_extras(tok_prompts, prompt_extras)
 
-        eng_prompts = list(
-            await asyncio.gather(
-                *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
-            )
+        eng_prompts = await asyncio.gather(
+            *(self.process_for_engine_async(p, arrival_time) for p in tok_prompts)
         )
 
         return out_conversations, eng_prompts

@@ -619,8 +619,7 @@ class HfRenderer(BaseRenderer[HfTokenizer]):
         )
 
         self._apply_chat_template_async = make_async(
-            safe_apply_chat_template,
-            executor=self._executor,
+            safe_apply_chat_template, executor=self._executor
         )
 
     def render_messages(
