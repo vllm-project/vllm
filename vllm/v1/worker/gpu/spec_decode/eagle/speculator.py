@@ -182,6 +182,8 @@ class EagleSpeculator:
     def propose(
         self,
         input_batch: InputBatch,
+        attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
         # num_layers x [num_tokens, hidden_size]
@@ -229,8 +231,8 @@ class EagleSpeculator:
         # TODO(woosuk): Support CUDA graph for prefill.
         last_hidden_states, hidden_states = self.run_model(
             num_tokens,
-            input_batch.attn_metadata,
-            input_batch.slot_mappings,
+            attn_metadata,
+            slot_mappings,
             num_tokens_across_dp=None,  # FIXME
         )
         sample_hidden_states = last_hidden_states[last_token_indices]
