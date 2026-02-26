@@ -725,7 +725,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # CUTLASS MoE kernels
 
   # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and ONLY works
-  # on Hopper). get_cutlass_(pplx_)moe_mm_data should only be compiled
+  # on Hopper). get_cutlass_(batched_)moe_mm_data should only be compiled
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
@@ -783,7 +783,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${DSV3_FUSED_A_GEMM_SRC}"
       CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
     list(APPEND VLLM_EXT_SRC ${DSV3_FUSED_A_GEMM_SRC})
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_DSV3_FUSED_A_GEMM=1")
     message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
   else()
     message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
