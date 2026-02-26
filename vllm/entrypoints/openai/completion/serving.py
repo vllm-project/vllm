@@ -141,7 +141,8 @@ class OpenAIServingCompletion(OpenAIServing):
         result = await self.render_completion_request(request)
         if isinstance(result, ErrorResponse):
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type="BadRequestError",
                 error_message=result.error.message,
                 span_name="completion_error",
@@ -162,7 +163,8 @@ class OpenAIServingCompletion(OpenAIServing):
         except (ValueError, TypeError, RuntimeError) as e:
             logger.exception("Error preparing request components")
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type=type(e).__name__,
                 error_message=str(e),
                 span_name="completion_error",
@@ -287,7 +289,8 @@ class OpenAIServingCompletion(OpenAIServing):
             )
         except asyncio.CancelledError:
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type="CancelledError",
                 error_message="Client disconnected",
                 span_name="completion_error",
@@ -295,7 +298,8 @@ class OpenAIServingCompletion(OpenAIServing):
             return self.create_error_response("Client disconnected")
         except GenerationError as e:
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type="GenerationError",
                 error_message=str(e),
                 span_name="completion_error",
@@ -303,7 +307,8 @@ class OpenAIServingCompletion(OpenAIServing):
             return self._convert_generation_error_to_response(e)
         except ValueError as e:
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type=type(e).__name__,
                 error_message=str(e),
                 span_name="completion_error",

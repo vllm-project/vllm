@@ -125,7 +125,6 @@ from vllm.tracing import (
     extract_trace_context,
     extract_trace_headers,
     instrument_manual,
-    is_tracing_available,
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid

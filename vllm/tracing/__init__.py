@@ -142,7 +142,12 @@ def instrument_manual(
     is_available, _, _, _, manual_instrument_fn = _REGISTERED_TRACING_BACKENDS["otel"]
     if is_available():
         return manual_instrument_fn(
-            span_name, start_time, end_time, attributes, context, kind,
+            span_name,
+            start_time,
+            end_time,
+            attributes,
+            context,
+            kind,
             set_status_on_error,
         )
     else:

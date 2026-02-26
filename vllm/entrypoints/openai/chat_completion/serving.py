@@ -345,7 +345,8 @@ class OpenAIServingChat(OpenAIServing):
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type=type(e).__name__,
                 error_message=str(e),
                 span_name="chat_completion_error",
@@ -354,7 +355,8 @@ class OpenAIServingChat(OpenAIServing):
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type="BadRequestError",
                 error_message=result.error.message,
                 span_name="chat_completion_error",
@@ -380,7 +382,8 @@ class OpenAIServingChat(OpenAIServing):
         except (ValueError, TypeError, RuntimeError) as e:
             logger.exception("Error preparing request components")
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type=type(e).__name__,
                 error_message=str(e),
                 span_name="chat_completion_error",
@@ -497,7 +500,8 @@ class OpenAIServingChat(OpenAIServing):
             )
         except GenerationError as e:
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type="GenerationError",
                 error_message=str(e),
                 span_name="chat_completion_error",
@@ -505,7 +509,8 @@ class OpenAIServingChat(OpenAIServing):
             return self._convert_generation_error_to_response(e)
         except ValueError as e:
             await self._trace_error_request(
-                raw_request, request_start_time_ns,
+                raw_request,
+                request_start_time_ns,
                 error_type=type(e).__name__,
                 error_message=str(e),
                 span_name="chat_completion_error",
