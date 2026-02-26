@@ -510,9 +510,9 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
-        # (raw_tensor, page_size_bytes) pairs for zeroing newly allocated blocks.
+        # Raw KV cache tensors for zeroing newly allocated blocks.
         # Populated by _allocate_kv_cache_tensors.
-        self.kv_cache_raw_buffers: list[tuple[torch.Tensor, int]] = []
+        self.kv_cache_raw_buffers: list[torch.Tensor] = []
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
@@ -955,7 +955,8 @@ class GPUModelRunner(
         Also pre-allocates pinned + device buffers for block-id transfer
         so the hot path does zero allocation and the H2D copy is async.
         """
-        page_sizes = {ps for _, ps in self.kv_cache_raw_buffers}
+        num_blocks = self.kv_cache_config.num_blocks
+        page_sizes = {t.numel() // num_blocks for t in self.kv_cache_raw_buffers}
         assert len(page_sizes) == 1, (
             f"Expected uniform page size across KV cache buffers, got {page_sizes}"
         )
@@ -964,9 +965,9 @@ class GPUModelRunner(
         page_size_el = page_size // 4
         alignment = page_size_el & (-page_size_el)
         blk_size = min(alignment, 1024)
-        base_ptr = self.kv_cache_raw_buffers[0][0].data_ptr()
+        base_ptr = self.kv_cache_raw_buffers[0].data_ptr()
         buf_offsets = torch.tensor(
-            [(t.data_ptr() - base_ptr) // 4 for t, _ in self.kv_cache_raw_buffers],
+            [(t.data_ptr() - base_ptr) // 4 for t in self.kv_cache_raw_buffers],
             dtype=torch.int64,
             device=self.device,
         )
@@ -980,7 +981,7 @@ class GPUModelRunner(
         self._kv_zero_ids_gpu = torch.empty(
             self._kv_zero_id_cap, dtype=torch.int64, device=self.device
         )
-        self._kv_zero_raw_i32 = self.kv_cache_raw_buffers[0][0].view(torch.int32)
+        self._kv_zero_raw_i32 = self.kv_cache_raw_buffers[0].view(torch.int32)
         self._kv_zero_meta = (buf_offsets, page_size_el, blk_size, n_bufs)
 
     def _zero_block_ids(self, block_ids: list[int]) -> None:
@@ -5930,15 +5931,13 @@ class GPUModelRunner(
             corresponding memory buffer for KV cache.
         """
         kv_cache_raw_tensors: dict[str, torch.Tensor] = {}
-        num_blocks = kv_cache_config.num_blocks
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             tensor = torch.zeros(
                 kv_cache_tensor.size, dtype=torch.int8, device=self.device
             )
             for layer_name in kv_cache_tensor.shared_by:
                 kv_cache_raw_tensors[layer_name] = tensor
-            page_size = kv_cache_tensor.size // num_blocks
-            self.kv_cache_raw_buffers.append((tensor, page_size))
+            self.kv_cache_raw_buffers.append(tensor)
 
         layer_names = set()
         for group in kv_cache_config.kv_cache_groups:
