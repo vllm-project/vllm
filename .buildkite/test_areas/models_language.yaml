@@ -1,5 +1,5 @@
 group: Models - Language
-depends_on: 
+depends_on:
   - image-build
 steps:
 - label: Language Models Tests (Standard)
@@ -62,7 +62,7 @@ steps:
       - image-build-amd
       commands:
       - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
-      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.6.0'
       - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
