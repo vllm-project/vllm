@@ -149,6 +149,11 @@ RUN cd /usr/local/src && \
     git checkout ${UCX_BRANCH} && \
     ./autogen.sh && \
     mkdir build && cd build && \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        export CC="sccache gcc" \
+        && export CXX="sccache g++" \
+        && sccache --show-stats; \
+    fi && \
     ../configure \
         --prefix=/usr/local/ucx \
         --enable-shared \
@@ -161,7 +166,8 @@ RUN cd /usr/local/src && \
         --with-dm \
         --enable-mt && \
     make -j && \
-    make install
+    make install && \
+    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
 ENV PATH=/usr/local/ucx/bin:$PATH
 ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
@@ -169,12 +175,24 @@ ENV LD_LIBRARY_PATH=${UCX_HOME}/lib:${LD_LIBRARY_PATH}
 RUN git clone ${RIXL_REPO} /opt/rixl && \
     cd /opt/rixl && \
     git checkout ${RIXL_BRANCH} && \
-    meson setup build --prefix=${RIXL_HOME} \
-                     -Ducx_path=${UCX_HOME} \
-                     -Drocm_path=${ROCM_PATH} && \
+    if [ "$USE_SCCACHE" = "1" ]; then \
+        echo "[binaries]" > native-file.ini \
+        && echo "c = ['sccache', 'gcc']" >> native-file.ini \
+        && echo "cpp = ['sccache', 'g++']" >> native-file.ini \
+        && sccache --show-stats \
+        && meson setup build --prefix=${RIXL_HOME} \
+                         --native-file=native-file.ini \
+                         -Ducx_path=${UCX_HOME} \
+                         -Drocm_path=${ROCM_PATH}; \
+    else \
+        meson setup build --prefix=${RIXL_HOME} \
+                         -Ducx_path=${UCX_HOME} \
+                         -Drocm_path=${ROCM_PATH}; \
+    fi && \
     cd build && \
     ninja && \
-    ninja install
+    ninja install && \
+    if [ "$USE_SCCACHE" = "1" ]; then sccache --show-stats; fi
 
 # Generate RIXL wheel
 RUN cd /opt/rixl && mkdir -p /app/install && \
