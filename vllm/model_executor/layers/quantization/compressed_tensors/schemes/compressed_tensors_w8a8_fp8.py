@@ -165,7 +165,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             assert self.is_static_input_scheme is False
             self.fp8_linear.process_weights_after_loading(layer)
 
-            input_scale = None
+            layer.input_scale = None
+            # fp8_linear.process_weights_after_loading applies the post process
+            # and reassigns the weight and weight_scale buffers to layer attributes.
+            return
 
         else:
             raise ValueError(
