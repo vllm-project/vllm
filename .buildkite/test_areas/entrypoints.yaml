@@ -65,6 +65,11 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (Responses API)
   timeout_in_minutes: 50

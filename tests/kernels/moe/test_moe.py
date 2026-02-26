@@ -26,9 +26,7 @@ from tests.kernels.moe.utils import (
 from tests.kernels.utils import opcheck, stack_and_dev, torch_experts, torch_moe
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig, set_current_vllm_config
-from vllm.distributed.parallel_state import (
-    init_distributed_environment,
-)
+from vllm.distributed.parallel_state import init_distributed_environment
 from vllm.forward_context import get_forward_context, set_forward_context
 from vllm.model_executor.layers.fused_moe import (
     MoEActivation,
