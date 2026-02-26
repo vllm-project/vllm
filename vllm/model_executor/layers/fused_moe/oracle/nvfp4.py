@@ -376,6 +376,19 @@ def make_nvfp4_moe_quant_config(
 
     g1_alphas = a13_scale * w13_scale_2
     g2_alphas = a2_scale * w2_scale_2
+
+    if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        return nvfp4_moe_quant_config(
+            g1_alphas=g1_alphas,
+            g2_alphas=g2_alphas,
+            a1_gscale=(1.0 / a13_scale),
+            a2_gscale=(1.0 / a2_scale),
+            w1_scale=w13_scale,
+            w2_scale=w2_scale,
+            is_nvfp4_scale_swizzled=False,
+            g1_scale_c=(g1_alphas / a2_scale),
+        )
+
     return nvfp4_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
@@ -383,10 +396,7 @@ def make_nvfp4_moe_quant_config(
         a2_gscale=(1.0 / a2_scale),
         w1_scale=w13_scale,
         w2_scale=w2_scale,
-        # NOTE(rob): this is a hack until the MoE kernels
-        # create their own quant configs. TRTLLM kernel
-        # does not accept swizzled input quant scales.
-        is_nvfp4_scale_swizzled=(backend != NvFp4MoeBackend.FLASHINFER_TRTLLM),
+        is_nvfp4_scale_swizzled=True,
     )
 
 
