@@ -279,25 +279,6 @@ class CudaPlatformBase(Platform):
                         "backend."
                     )
 
-        # DCP is incompatible with FULL CUDA graphs for GQA models because
-        # dcp_context_kv_lens tensor gets captured as a static constant
-        # during graph capture, causing incorrect output during decode.
-        # MLA models are not affected (they handle DCP differently).
-        dcp_size = parallel_config.decode_context_parallel_size
-        if dcp_size > 1 and model_config is not None:
-            from vllm.config.compilation import CUDAGraphMode
-
-            compilation_config = vllm_config.compilation_config
-            if (
-                not model_config.use_mla
-                and compilation_config.cudagraph_mode != CUDAGraphMode.PIECEWISE
-            ):
-                logger.info(
-                    "DCP with GQA requires PIECEWISE CUDA graphs. "
-                    "Forcing cudagraph_mode=PIECEWISE."
-                )
-                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
-
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
         if (

@@ -175,7 +175,7 @@ class BatchDCPPrefillWrapper:
         dcp_a2a: bool = False,
     ):
         if dcp_a2a:
-            self._dcp_combine = dcp_a2a_lse_reduce
+            self._dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self._dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
         self._context = BatchPrefillWithPagedKVCacheWrapper(
@@ -1246,7 +1246,7 @@ class FlashInferImpl(AttentionImpl):
         except AttributeError:
             dcp_a2a = False
         if dcp_a2a:
-            self.dcp_combine = dcp_a2a_lse_reduce
+            self.dcp_combine = partial(dcp_a2a_lse_reduce, is_lse_base_on_e=False)
         else:
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 

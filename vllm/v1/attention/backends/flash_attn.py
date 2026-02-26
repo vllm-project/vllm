@@ -607,10 +607,7 @@ class FlashAttentionImpl(AttentionImpl):
             parallel_config.decode_context_parallel_size > 1
             and parallel_config.dcp_comm_backend == "a2a"
         )
-        if dcp_a2a:
-            self.dcp_combine = dcp_a2a_lse_reduce
-        else:
-            self.dcp_combine = cp_lse_ag_out_rs
+        self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
     def forward(
         self,
@@ -859,11 +856,10 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
         )
-        # FA returns LSE in shape [ H, B ] but combine functions want [ B, H ]
-        context_lse_bh = context_lse.transpose(0, 1)
+        # FA returns LSE in shape [ H, B ] but DCP combine wants [ B, H ]
         context_attn_out_cor, context_lse_cor = self.dcp_combine(
             context_attn_out,
-            context_lse_bh,
+            context_lse.transpose(0, 1),
             get_dcp_group(),
             return_lse=True,
         )
