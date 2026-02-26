@@ -751,16 +751,14 @@ def test_compressed_tensors_fp8_block_enabled(vllm_runner):
             qkv_proj = layer.self_attn.qkv_proj
             assert isinstance(qkv_proj.quant_method, CompressedTensorsLinearMethod)
             assert isinstance(qkv_proj.scheme, CompressedTensorsW8A8Fp8)
-            assert isinstance(
-                qkv_proj.scheme.w8a8_block_fp8_linear, Fp8BlockScaledMMLinearKernel
-            )
+            assert isinstance(qkv_proj.scheme.fp8_linear, Fp8BlockScaledMMLinearKernel)
 
             assert qkv_proj.weight.dtype is fp8_dtype
             assert qkv_proj.weight_scale.dtype is torch.float32
             assert len(qkv_proj.weight.shape) == 2
             assert len(qkv_proj.weight_scale.shape) == 2
 
-            input_quant_op = qkv_proj.scheme.w8a8_block_fp8_linear.quant_fp8
+            input_quant_op = qkv_proj.scheme.fp8_linear.quant_fp8
             assert isinstance(input_quant_op, QuantFP8)
             assert input_quant_op._forward_method in (
                 input_quant_op.forward_cuda,

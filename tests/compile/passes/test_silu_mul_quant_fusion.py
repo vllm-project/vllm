@@ -159,7 +159,7 @@ class TestSiluMulGroupFp8QuantModel(torch.nn.Module):
 
     def forward(self, x):
         y = self.silu_and_mul(x)
-        x2 = self.w8a8_block_fp8_linear.apply(y, self.w, self.wscale)
+        x2 = self.w8a8_block_fp8_linear(y, self.w, self.wscale)
         return x2
 
     def ops_in_model_before(self):
