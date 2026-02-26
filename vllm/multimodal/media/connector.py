@@ -82,6 +82,33 @@ class MediaConnector:
             allowed_media_domains = []
         self.allowed_media_domains = allowed_media_domains
 
+        # Pre-create MediaIO instances to avoid repeated construction
+        self._audio_io = AudioMediaIO(
+            **self.media_io_kwargs.get("audio", {})
+        )
+        self._image_io_cache: dict[str, ImageMediaIO] = {}
+        self._video_io_cache: dict[str, VideoMediaIO] = {}
+        self._audio_embedding_io = AudioEmbeddingMediaIO()
+        self._image_embedding_io = ImageEmbeddingMediaIO()
+
+    def _get_image_io(self, image_mode: str = "RGB") -> ImageMediaIO:
+        if image_mode not in self._image_io_cache:
+            self._image_io_cache[image_mode] = ImageMediaIO(
+                image_mode=image_mode,
+                **self.media_io_kwargs.get("image", {}),
+            )
+        return self._image_io_cache[image_mode]
+
+    def _get_video_io(self, image_mode: str = "RGB") -> VideoMediaIO:
+        # VideoMediaIO wraps an ImageMediaIO, so cache key is image_mode
+        key = image_mode
+        if key not in self._video_io_cache:
+            self._video_io_cache[key] = VideoMediaIO(
+                self._get_image_io(image_mode),
+                **self.media_io_kwargs.get("video", {}),
+            )
+        return self._video_io_cache[key]
+
     def _load_data_url(
         self,
         url_spec: Url,
@@ -205,7 +232,7 @@ class MediaConnector:
         """
         Load audio from a URL.
         """
-        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
+        audio_io = self._audio_io
 
         return self.load_from_url(
             audio_url,
@@ -220,7 +247,7 @@ class MediaConnector:
         """
         Asynchronously fetch audio from a URL.
         """
-        audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
+        audio_io = self._audio_io
 
         return await self.load_from_url_async(
             audio_url,
@@ -239,9 +266,7 @@ class MediaConnector:
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
-        )
+        image_io = self._get_image_io(image_mode)
 
         try:
             return self.load_from_url(
@@ -264,9 +289,7 @@ class MediaConnector:
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
-        )
+        image_io = self._get_image_io(image_mode)
 
         try:
             return await self.load_from_url_async(
@@ -287,10 +310,7 @@ class MediaConnector:
         """
         Load video from an HTTP or base64 data URL.
         """
-        image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
-        )
-        video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+        video_io = self._get_video_io(image_mode)
 
         return self.load_from_url(
             video_url,
@@ -309,10 +329,7 @@ class MediaConnector:
 
         By default, the image is converted into RGB format.
         """
-        image_io = ImageMediaIO(
-            image_mode=image_mode, **self.media_io_kwargs.get("image", {})
-        )
-        video_io = VideoMediaIO(image_io, **self.media_io_kwargs.get("video", {}))
+        video_io = self._get_video_io(image_mode)
 
         return await self.load_from_url_async(
             video_url,
@@ -327,7 +344,7 @@ class MediaConnector:
         """
         Load image embedding from a URL.
         """
-        image_embedding_io = ImageEmbeddingMediaIO()
+        image_embedding_io = self._image_embedding_io
 
         return image_embedding_io.load_base64("", data)
 
@@ -338,6 +355,6 @@ class MediaConnector:
         """
         Load audio embedding from a URL.
         """
-        audio_embedding_io = AudioEmbeddingMediaIO()
+        audio_embedding_io = self._audio_embedding_io
 
         return audio_embedding_io.load_base64("", data)
