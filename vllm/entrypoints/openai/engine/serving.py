@@ -119,8 +119,13 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.tool_parsers import ToolParser
 from vllm.tracing import (
+    SpanAttributes,
+    SpanKind,
     contains_trace_headers,
+    extract_trace_context,
     extract_trace_headers,
+    instrument_manual,
+    is_tracing_available,
     log_tracing_disabled_warning,
 )
 from vllm.utils import random_uuid
@@ -1168,6 +1173,45 @@ class OpenAIServing:
             log_tracing_disabled_warning()
 
         return None
+
+    async def _trace_error_request(
+        self,
+        raw_request: Request | None,
+        request_start_time_ns: int,
+        error_type: str,
+        error_message: str,
+        span_name: str,
+    ) -> None:
+        """Create a trace span for a failed request.
+
+        Only creates a span when tracing is enabled and the incoming request
+        carries W3C trace-context headers, so there is zero overhead on the
+        normal (non-traced) path.
+        """
+        if raw_request is None:
+            return
+
+        trace_headers = await self._get_trace_headers(raw_request.headers)
+        if trace_headers is None:
+            return
+
+        trace_context = extract_trace_context(trace_headers)
+        end_time_ns = time.time_ns()
+
+        attributes: dict[str, str] = {
+            SpanAttributes.GEN_AI_ERROR_TYPE: error_type,
+            SpanAttributes.GEN_AI_ERROR_MESSAGE: error_message,
+        }
+
+        instrument_manual(
+            span_name=span_name,
+            start_time=request_start_time_ns,
+            end_time=end_time_ns,
+            attributes=attributes,
+            context=trace_context,
+            kind=SpanKind.SERVER,
+            set_status_on_error=error_message,
+        )
 
     @staticmethod
     def _base_request_id(

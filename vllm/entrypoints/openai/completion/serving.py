@@ -136,8 +136,16 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        request_start_time_ns = time.time_ns()
+
         result = await self.render_completion_request(request)
         if isinstance(result, ErrorResponse):
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type="BadRequestError",
+                error_message=result.error.message,
+                span_name="completion_error",
+            )
             return result
 
         engine_prompts = result
@@ -153,6 +161,12 @@ class OpenAIServingCompletion(OpenAIServing):
             lora_request = self._maybe_get_adapters(request)
         except (ValueError, TypeError, RuntimeError) as e:
             logger.exception("Error preparing request components")
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                span_name="completion_error",
+            )
             return self.create_error_response(e)
 
         # Extract data_parallel_rank from header (router can inject it)
@@ -272,10 +286,28 @@ class OpenAIServingCompletion(OpenAIServing):
                 request_metadata,
             )
         except asyncio.CancelledError:
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type="CancelledError",
+                error_message="Client disconnected",
+                span_name="completion_error",
+            )
             return self.create_error_response("Client disconnected")
         except GenerationError as e:
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type="GenerationError",
+                error_message=str(e),
+                span_name="completion_error",
+            )
             return self._convert_generation_error_to_response(e)
         except ValueError as e:
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                span_name="completion_error",
+            )
             return self.create_error_response(e)
 
         # When user requests streaming but we don't stream, we still need to

@@ -325,6 +325,8 @@ class OpenAIServingChat(OpenAIServing):
         for the API specification. This API mimics the OpenAI
         Chat Completion API.
         """
+        request_start_time_ns = time.time_ns()
+
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -342,9 +344,21 @@ class OpenAIServingChat(OpenAIServing):
                 )
         except RuntimeError as e:
             logger.exception("Error in reasoning parser creation.")
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                span_name="chat_completion_error",
+            )
             return self.create_error_response(str(e))
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type="BadRequestError",
+                error_message=result.error.message,
+                span_name="chat_completion_error",
+            )
             return result
 
         conversation, engine_prompts = result
@@ -365,6 +379,12 @@ class OpenAIServingChat(OpenAIServing):
             model_name = self.models.model_name(lora_request)
         except (ValueError, TypeError, RuntimeError) as e:
             logger.exception("Error preparing request components")
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                span_name="chat_completion_error",
+            )
             return self.create_error_response(e)
 
         # Extract data_parallel_rank from header (router can inject it)
@@ -476,8 +496,20 @@ class OpenAIServingChat(OpenAIServing):
                 reasoning_parser,
             )
         except GenerationError as e:
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type="GenerationError",
+                error_message=str(e),
+                span_name="chat_completion_error",
+            )
             return self._convert_generation_error_to_response(e)
         except ValueError as e:
+            await self._trace_error_request(
+                raw_request, request_start_time_ns,
+                error_type=type(e).__name__,
+                error_message=str(e),
+                span_name="chat_completion_error",
+            )
             return self.create_error_response(e)
 
     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:

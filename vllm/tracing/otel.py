@@ -187,8 +187,20 @@ def manual_instrument_otel(
     attributes: dict[str, Any] | None = None,
     context: Context | None = None,
     kind: Any = None,  # SpanKind, but typed as Any for when OTEL unavailable
+    set_status_on_error: str | None = None,
 ):
-    """Manually create and end a span with explicit timestamps."""
+    """Manually create and end a span with explicit timestamps.
+
+    Args:
+        span_name: Name of the span to create.
+        start_time: Start time in nanoseconds since epoch.
+        end_time: Optional end time in nanoseconds. If None, ends immediately.
+        attributes: Optional dict of span attributes.
+        context: Optional trace context (e.g., from extract_trace_context).
+        kind: Optional SpanKind (e.g., SpanKind.SERVER).
+        set_status_on_error: If provided, sets the span status to ERROR with
+            this string as the description.
+    """
     if not _IS_OTEL_AVAILABLE:
         return
 
@@ -207,6 +219,10 @@ def manual_instrument_otel(
     span = tracer.start_span(**span_kwargs)
     if attributes:
         span.set_attributes(attributes)
+    if set_status_on_error is not None:
+        from opentelemetry.trace import StatusCode
+
+        span.set_status(StatusCode.ERROR, set_status_on_error)
     if end_time is not None:
         span.end(end_time=end_time)
     else:

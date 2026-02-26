@@ -44,6 +44,10 @@ class SpanAttributes:
     GEN_AI_LATENCY_TIME_IN_MODEL_DECODE = "gen_ai.latency.time_in_model_decode"
     GEN_AI_LATENCY_TIME_IN_MODEL_INFERENCE = "gen_ai.latency.time_in_model_inference"
 
+    # Error attributes for failed request tracing
+    GEN_AI_ERROR_TYPE = "gen_ai.error.type"
+    GEN_AI_ERROR_MESSAGE = "gen_ai.error.message"
+
 
 class LoadingSpanAttributes:
     """Custom attributes for code-level tracing (file, line number)."""
