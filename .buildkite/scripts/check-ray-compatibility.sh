@@ -18,12 +18,9 @@ RAY_LOCK_FILES=(
 
 cd /vllm-workspace/
 
-# Locate the pre-built wheel; fall back to the source tree for --dry-run.
-INSTALL_TARGET=$(find /vllm-workspace/dist/ -name '*.whl' 2>/dev/null | head -1)
-if [ -z "$INSTALL_TARGET" ]; then
-    echo "No pre-built wheel found in /vllm-workspace/dist/, using source tree."
-    INSTALL_TARGET="."
-fi
+# Use the source tree directly — pip install --dry-run only needs metadata,
+# not a compiled wheel.
+INSTALL_TARGET="."
 
 OVERALL_EXIT=0
 FAILED_LOCKS=()
