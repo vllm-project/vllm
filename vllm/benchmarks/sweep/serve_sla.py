@@ -1,306 +1,162 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
-import contextlib
-import json
+import math
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import ClassVar, Literal, get_args
 
+import numpy as np
+from typing_extensions import assert_never
+
 from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
-from .serve import SweepServeArgs, run_benchmark, run_server
+from .serve import (
+    SweepServeArgs,
+    _get_comb_base_path,
+    run_comb,
+    server_ctx,
+)
 from .server import ServerProcess
-from .sla_sweep import SLASweep, SLASweepItem
-from .utils import sanitize_filename
 
 try:
     import pandas as pd
 except ImportError:
     pd = PlaceholderModule("pandas")
 
-try:
-    from scipy.interpolate import PchipInterpolator
-except ImportError:
-    PchipInterpolator = (
-        PlaceholderModule("scipy")
-        .placeholder_attr("interpolate")
-        .placeholder_attr("PchipInterpolator")
-    )
-
-
-def _get_sla_base_path(
-    output_dir: Path,
-    serve_comb: ParameterSweepItem,
-    bench_comb: ParameterSweepItem,
-):
-    parts = list[str]()
-    if serve_comb:
-        parts.extend(("SERVE-", serve_comb.as_text(sep="-")))
-    if bench_comb:
-        parts.extend(("BENCH-", bench_comb.as_text(sep="-")))
-
-    return output_dir / sanitize_filename("-".join(parts))
-
-
-def _get_sla_iter_path(
-    base_path: Path,
-    sla_comb: SLASweepItem,
-    sla_variable: str,
-    sla_value: int | None,
-):
-    if sla_value is None:
-        prefix = sla_comb.as_text(sep="-")
-        return base_path / f"SLA--{prefix}.json"
-
-    return base_path / f"{sla_variable}={sla_value}"
-
-
-def _get_sla_run_path(iter_path: Path, run_number: int | None):
-    if run_number is None:
-        return iter_path / "summary.json"
-
-    return iter_path / f"run={run_number}.json"
-
-
-def _iter_sla_val_paths(base_path: Path, sla_variable: str):
-    for iter_path in base_path.glob(f"{sla_variable}=*"):
-        sla_value = int(iter_path.name.removeprefix(f"{sla_variable}="))
-        summary_path = iter_path / "summary.json"
-        if summary_path.exists():
-            yield sla_value, summary_path
-
-
-def _sla_needs_server(
-    serve_comb: ParameterSweepItem,
-    bench_combs: ParameterSweep,
-    sla_combs: SLASweep,
-    sla_variable: str,
-    output_dir: Path,
-):
-    for bench_comb in bench_combs:
-        base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb)
-        for sla_comb in sla_combs:
-            if not _get_sla_iter_path(
-                base_path,
-                sla_comb,
-                sla_variable,
-                sla_value=None,
-            ).exists():
-                return True
-
-    return False
-
-
-def run_sla(
-    server: ServerProcess | None,
-    bench_cmd: list[str],
-    *,
-    serve_comb: ParameterSweepItem,
-    bench_comb: ParameterSweepItem,
-    iter_path: Path,
-    num_runs: int,
-    dry_run: bool,
-):
-    iter_data = list[dict[str, object]]()
-
-    for run_number in range(num_runs):
-        run_data = run_benchmark(
-            server,
-            bench_cmd,
-            serve_overrides=serve_comb,
-            bench_overrides=bench_comb,
-            run_number=run_number,
-            output_path=_get_sla_run_path(iter_path, run_number),
-            dry_run=dry_run,
-        )
-
-        if run_data is not None:
-            iter_data.append(run_data)
-
-    if dry_run:
-        return None
-
-    with _get_sla_run_path(iter_path, run_number=None).open("w") as f:
-        json.dump(iter_data, f, indent=4)
-
-    return iter_data
-
 
 SLAVariable = Literal["request_rate", "max_concurrency"]
 
 
-class SLAHistory(dict[int, float]):
-    def __init__(self, min_value: int, max_value: int) -> None:
-        super().__init__()
+def _estimate_sla_value(run_data: dict[str, object], sla_variable: SLAVariable):
+    request_throughput = float(run_data["request_throughput"])  # type: ignore
+    if sla_variable == "request_rate":
+        return request_throughput
+    if sla_variable == "max_concurrency":
+        mean_latency_ms = float(run_data["mean_e2el_ms"])  # type: ignore
+        return request_throughput * mean_latency_ms / 1000
 
-        self.min_value = min_value
-        self.max_value = max_value
-
-    def get_xy(self) -> tuple[list[int], list[float]]:
-        xs = list[int]()
-        ys = list[float]()
-        for x, y in sorted(self.items()):
-            xs.append(x)
-            ys.append(y)
-
-        return xs, ys
-
-    def get_max_passing(self) -> float:
-        return max(
-            (val for val, margin in self.items() if margin <= 0),
-            default=self.min_value,
-        )
-
-    def get_min_failing(self) -> float:
-        return min(
-            (val for val, margin in self.items() if margin > 0),
-            default=self.max_value,
-        )
+    assert_never(sla_variable)
 
 
-def _compute_margin(
-    sla_comb: SLASweepItem,
-    iter_data: list[dict[str, object]],
-):
-    assert iter_data, "Summary should not be empty"
-
-    iter_data_mean = {
-        k: sum(float(run_data[k]) for run_data in iter_data) / len(iter_data)  # type: ignore
-        for k in sla_comb
-    }
-
-    sla_margins = [
-        criterion.print_and_compute_margin(iter_data_mean, k)
-        for k, criterion in sla_comb.items()
-    ]
-
-    return max(sla_margins)
+def _estimate_sla_avg(runs: list[dict[str, object]], sla_variable: SLAVariable):
+    return sum(_estimate_sla_value(run, sla_variable) for run in runs) / len(runs)
 
 
-def solve_sla(
+def run_comb_sla(
     server: ServerProcess | None,
     bench_cmd: list[str],
     *,
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
-    sla_comb: SLASweepItem,
-    base_path: Path,
+    output_dir: Path,
     num_runs: int,
     dry_run: bool,
+    link_vars: list[tuple[str, str]],
     sla_variable: SLAVariable,
-    sla_min_value: int = 1,
-    sla_max_value: int = 8192,  # The value that represents infinite QPS
-):
-    sla_data = list[dict[str, object]]()
-    history = SLAHistory(min_value=sla_min_value, max_value=sla_max_value)
+    sla_value: int,
+) -> list[dict[str, object]] | None:
+    bench_comb_sla = bench_comb | {sla_variable: sla_value}
 
-    # Use results from previous runs
-    for past_sla_value, path in _iter_sla_val_paths(base_path, sla_variable):
-        with path.open("rb") as f:
-            past_iter_data = json.load(f)
-
-        sla_data.append(past_iter_data)
-        history[past_sla_value] = _compute_margin(sla_comb, past_iter_data)
-
-    # NOTE: We don't use equality here to be more robust against noisy results
-    while history.get_max_passing() + 1 < history.get_min_failing():
-        if max(history, default=sla_min_value) < sla_max_value:
-            val = sla_max_value
-        elif min(history, default=sla_max_value) > sla_min_value:
-            val = sla_min_value
-        else:
-            spl = PchipInterpolator(*history.get_xy(), extrapolate=False)
-            spl_roots = spl.solve()
-            if len(spl_roots) == 0:
-                # Fallback to binary search
-                val = int((history.get_max_passing() + history.get_min_failing()) / 2)
-            else:
-                val = int(spl_roots[0])
-
-            if val in history:
-                # Cover both sides (floor and ceil) of the root to be sure
-                # that it is indeed the target value
-                val += 1
-
-        val = max(sla_min_value, min(val, sla_max_value))
-        print(f"Testing {sla_variable}: {val} req/s")
-
-        iter_data = run_sla(
-            server,
-            bench_cmd,
-            serve_comb=serve_comb,
-            bench_comb=bench_comb | {sla_variable: val},
-            iter_path=_get_sla_iter_path(base_path, sla_comb, sla_variable, val),
-            num_runs=num_runs,
-            dry_run=dry_run,
-        )
-        if iter_data is None:
-            return None
-
-        margin = _compute_margin(sla_comb, iter_data)
-        if margin <= 0:
-            print(f"SLA criteria are met. ({margin=:.2f})")
-        else:
-            print(f"SLA criteria are not met. ({margin=:.2f})")
-
-        sla_data.extend(iter_data)
-        history[val] = margin
-
-    return sla_data, history
+    return run_comb(
+        server,
+        bench_cmd,
+        serve_comb=serve_comb,
+        bench_comb=bench_comb_sla,
+        base_path=_get_comb_base_path(output_dir, serve_comb, bench_comb_sla),
+        num_runs=num_runs,
+        dry_run=dry_run,
+        link_vars=link_vars,
+    )
 
 
-def search_sla(
+def explore_sla(
     server: ServerProcess | None,
     bench_cmd: list[str],
     *,
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
-    sla_comb: SLASweepItem,
     sla_variable: SLAVariable,
-    base_path: Path,
+    sla_iters: int,
+    output_dir: Path,
     num_runs: int,
     dry_run: bool,
+    link_vars: list[tuple[str, str]],
 ):
     print("[SLA START]")
     print(f"Serve parameters: {serve_comb.as_text() or '(None)'}")
     print(f"Bench parameters: {bench_comb.as_text() or '(None)'}")
-    print(f"SLA criteria: {sla_comb.as_text()}")
+    print(f"Number of SLA iterations: {sla_iters}")
 
-    result = solve_sla(
+    if sla_iters < 2:
+        raise ValueError("`sla_iters` should be at least 2")
+
+    serial_comb_data = run_comb_sla(
         server,
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb,
-        sla_comb=sla_comb,
-        base_path=base_path,
+        output_dir=output_dir,
         num_runs=num_runs,
         dry_run=dry_run,
+        link_vars=link_vars,
         sla_variable=sla_variable,
+        sla_value=1,
     )
-    if result is None:
-        assert dry_run
-        print("Omitting SLA search.")
-        print("[SLA END]")
+    batch_comb_data = run_comb_sla(
+        server,
+        bench_cmd,
+        serve_comb=serve_comb,
+        bench_comb=bench_comb,
+        output_dir=output_dir,
+        num_runs=num_runs,
+        dry_run=dry_run,
+        link_vars=link_vars,
+        sla_variable=sla_variable,
+        sla_value=int(bench_comb.get("num_prompts", 1000)),  # type: ignore
+    )
+
+    if serial_comb_data is None or batch_comb_data is None:
+        if dry_run:
+            print("Omitting intermediate SLA iterations.")
+            print("[SLA END]")
+
         return
 
-    sla_data, sla_history = result
-    sla_value = sla_history.get_max_passing()
-    print(f"Maximum {sla_variable} for SLA: {sla_value} req/s.")
+    serial_sla_value = math.ceil(_estimate_sla_avg(serial_comb_data, sla_variable))
+    print(f"Serial inference: {sla_variable}={serial_sla_value}")
 
-    with _get_sla_iter_path(
-        base_path,
-        sla_comb,
-        sla_variable,
-        sla_value=None,
-    ).open("w") as f:
-        json.dump(sla_data, f, indent=4)
+    batch_sla_value = math.floor(_estimate_sla_avg(batch_comb_data, sla_variable))
+    print(f"Batch inference: {sla_variable}={batch_sla_value}")
+
+    # Avoid duplicated runs for intermediate values if the range between
+    # `serial_sla_value` and `batch_sla_value` is small
+    inter_sla_values = np.linspace(serial_sla_value, batch_sla_value, sla_iters)[1:-1]
+    inter_sla_values = sorted(set(map(round, inter_sla_values)))
+
+    inter_combs_data: list[dict[str, object]] = []
+    for inter_sla_value in inter_sla_values:
+        print(f"Exploring: {sla_variable}={inter_sla_value}")
+        inter_comb_data = run_comb_sla(
+            server,
+            bench_cmd,
+            serve_comb=serve_comb,
+            bench_comb=bench_comb,
+            output_dir=output_dir,
+            num_runs=num_runs,
+            dry_run=dry_run,
+            link_vars=link_vars,
+            sla_variable=sla_variable,
+            sla_value=inter_sla_value,
+        )
+        if inter_comb_data is not None:
+            inter_combs_data.extend(inter_comb_data)
 
     print("[SLA END]")
 
-    return sla_data
+    return serial_comb_data + inter_combs_data + batch_comb_data
 
 
 def run_slas(
@@ -309,13 +165,15 @@ def run_slas(
     after_bench_cmd: list[str],
     *,
     show_stdout: bool,
+    server_ready_timeout: int,
     serve_params: ParameterSweep,
     bench_params: ParameterSweep,
-    sla_params: SLASweep,
     sla_variable: SLAVariable,
+    sla_iters: int,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
+    link_vars: list[tuple[str, str]],
 ):
     if any(bench_comb.has_param(sla_variable) for bench_comb in bench_params):
         raise ValueError(
@@ -325,41 +183,32 @@ def run_slas(
 
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
-        with (
-            run_server(
-                serve_cmd,
-                after_bench_cmd,
-                show_stdout=show_stdout,
-                serve_overrides=serve_comb,
-                dry_run=dry_run,
-            )
-            if _sla_needs_server(
-                serve_comb,
-                bench_params,
-                sla_params,
-                sla_variable,
-                output_dir,
-            )
-            else contextlib.nullcontext()
+        with server_ctx(
+            serve_cmd,
+            after_bench_cmd,
+            show_stdout=show_stdout,
+            server_ready_timeout=server_ready_timeout,
+            serve_comb=serve_comb,
+            bench_params=bench_params,
+            output_dir=output_dir,
+            dry_run=dry_run,
         ) as server:
             for bench_comb in bench_params:
-                for sla_comb in sla_params:
-                    base_path = _get_sla_base_path(output_dir, serve_comb, bench_comb)
+                comb_data = explore_sla(
+                    server,
+                    bench_cmd,
+                    serve_comb=serve_comb,
+                    bench_comb=bench_comb,
+                    sla_variable=sla_variable,
+                    sla_iters=sla_iters,
+                    output_dir=output_dir,
+                    num_runs=num_runs,
+                    dry_run=dry_run,
+                    link_vars=link_vars,
+                )
 
-                    comb_data = search_sla(
-                        server,
-                        bench_cmd,
-                        serve_comb=serve_comb,
-                        bench_comb=bench_comb,
-                        sla_comb=sla_comb,
-                        sla_variable=sla_variable,
-                        base_path=base_path,
-                        num_runs=num_runs,
-                        dry_run=dry_run,
-                    )
-
-                    if comb_data is not None:
-                        all_data.extend(comb_data)
+                if comb_data is not None:
+                    all_data.extend(comb_data)
 
     if dry_run:
         return None
@@ -372,26 +221,23 @@ def run_slas(
 
 @dataclass
 class SweepServeSLAArgs(SweepServeArgs):
-    sla_params: SLASweep
     sla_variable: SLAVariable
+    sla_iters: int
 
     parser_name: ClassVar[str] = "serve_sla"
-    parser_help: ClassVar[str] = "Tune a variable to meet SLAs under multiple settings."
+    parser_help: ClassVar[str] = (
+        "Explore the latency-throughput space for determining SLAs."
+    )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         # NOTE: Don't use super() as `from_cli_args` calls `cls()`
         base_args = SweepServeArgs.from_cli_args(args)
 
-        if args.sla_params:
-            sla_params = SLASweep.read_json(args.sla_params)
-        else:
-            sla_params = SLASweep.from_records([])
-
         return cls(
             **asdict(base_args),
-            sla_params=sla_params,
             sla_variable=args.sla_variable,
+            sla_iters=args.sla_iters,
         )
 
     @classmethod
@@ -400,24 +246,19 @@ class SweepServeSLAArgs(SweepServeArgs):
 
         sla_group = parser.add_argument_group("sla options")
         sla_group.add_argument(
-            "--sla-params",
-            type=str,
-            required=True,
-            help="Path to JSON file containing a list of SLA constraints to satisfy. "
-            'Each constraint is expressed in `{"<KEY>": "<OP><VALUE>"}` format, '
-            'e.g.: `{"p99_e2el_ms": "<=500"}` means that '
-            "the E2E latency should be less than 500ms 99%% of the time. "
-            "Setting this option runs this script in SLA mode, which searches for "
-            "the maximum `sla_variable` that satisfies the constraints for "
-            "each combination of `serve_params`, `bench_params`, and `sla_params`.",
-        )
-        sla_group.add_argument(
             "--sla-variable",
             type=str,
             choices=get_args(SLAVariable),
             default="request_rate",
-            help="Whether to tune request rate or maximum concurrency to satisfy "
-            "the SLA constraints.",
+            help="The variable to adjust in each iteration.",
+        )
+        sla_group.add_argument(
+            "--sla-iters",
+            type=int,
+            default=10,
+            help="Number of iterations used to explore the latency-throughput space. "
+            "This includes the first two iterations used to interpolate the value of "
+            "`sla_variable` for remaining iterations.",
         )
 
         return parser
@@ -436,13 +277,15 @@ def run_main(args: SweepServeSLAArgs):
             bench_cmd=args.bench_cmd,
             after_bench_cmd=args.after_bench_cmd,
             show_stdout=args.show_stdout,
+            server_ready_timeout=args.server_ready_timeout,
             serve_params=args.serve_params,
             bench_params=args.bench_params,
-            sla_params=args.sla_params,
             sla_variable=args.sla_variable,
+            sla_iters=args.sla_iters,
             output_dir=output_dir,
             num_runs=args.num_runs,
             dry_run=args.dry_run,
+            link_vars=args.link_vars,
         )
     except BaseException as exc:
         raise RuntimeError(
