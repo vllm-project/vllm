@@ -1037,37 +1037,21 @@ def unified_attention_td(
         q.element_size(),
         is_prefill=False,
     )
-    # TILE_SIZE_PREFILL = TILE_SIZE_DECODE = block_size
 
     # Original
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
     # 2. The batch includes at least one prefill request, or
     # 3. The number of sequences exceeds the configured threshold
-    # if (
-    #     seq_threshold_3D is None
-    #     or num_par_softmax_segments is None
-    #     or softmax_segm_output is None
-    #     or softmax_segm_max is None
-    #     or softmax_segm_expsum is None
-    #     or max_seqlen_q > 1
-    #     or num_seqs > seq_threshold_3D
-    # ):
-    TILE_SIZE_PREFILL = TILE_SIZE_DECODE = 16
-    assert block_size >= TILE_SIZE_PREFILL, "TILE_SIZE_PREFILL must be <= block_size"
-    assert block_size >= TILE_SIZE_DECODE, "TILE_SIZE_DECODE must be <= block_size"
-    assert block_size % TILE_SIZE_PREFILL == 0, (
-        "block_size must be multiple of TILE_SIZE_PREFILL"
-    )
-    assert block_size % TILE_SIZE_DECODE == 0, (
-        "block_size must be multiple of TILE_SIZE_DECODE"
-    )
-    seq_threshold_3D = 32
+    # 4. todo: verify batch invariant
     if (
-        max_seqlen_q > 1
+        seq_threshold_3D is None
+        or num_par_softmax_segments is None
+        or softmax_segm_output is None
+        or softmax_segm_max is None
+        or softmax_segm_expsum is None
+        or max_seqlen_q > 1
         or num_seqs > seq_threshold_3D
-        # 2d kernel includes crucial optimizations for models with sliding window
-        or 0 < sliding_window_val <= 1024
     ):
         kernel_unified_attention_2d_td[
             (
