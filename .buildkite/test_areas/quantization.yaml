@@ -2,7 +2,7 @@ group: Quantization
 depends_on: 
   - image-build
 steps:
-- label: Quantization
+- label: Quantization Basic Test
   timeout_in_minutes: 90
   source_file_dependencies:
   - csrc/
