@@ -59,12 +59,16 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
             )
 
             frame_data_list = data.split(",")
-            with ThreadPoolExecutor() as executor:
-                frames = list(
-                    executor.map(
-                        lambda fd: np.asarray(load_frame(fd)), frame_data_list
-                    )
-                )
+            if len(frame_data_list) == 1:
+                return np.asarray(load_frame(frame_data_list[0]))[np.newaxis], {}
+
+            def _decode_frame(fd: str) -> npt.NDArray:
+                return np.asarray(load_frame(fd))
+
+            with ThreadPoolExecutor(
+                max_workers=envs.VLLM_MEDIA_LOADING_THREAD_COUNT,
+            ) as executor:
+                frames = list(executor.map(_decode_frame, frame_data_list))
             return np.stack(frames), {}
 
         return self.load_bytes(base64.b64decode(data))
