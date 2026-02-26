@@ -301,9 +301,10 @@ class SparseAttnIndexer(CustomOp):
         self.topk_indices_buffer = topk_indices_buffer
         if current_platform.is_cuda() and not is_deep_gemm_supported():
             logger.warning_once(
-                "DeepGEMM is not available. SparseAttnIndexer will use PyTorch "
-                "fallback which may have performance issues. For better performance, "
-                "please install DeepGEMM: pip install deep_gemm"
+                "DeepGEMM is not supported or available. SparseAttnIndexer will use a "
+                "less efficient PyTorch implementation. "
+                "Please make sure you have the required hardware and software setup "
+                "for DeepGEMM to achieve optimal performance."
             )
 
     def forward_native(
