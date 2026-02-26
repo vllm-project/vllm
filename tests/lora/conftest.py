@@ -103,14 +103,14 @@ def dummy_model(default_vllm_config) -> nn.Module:
                 ("output", ColumnParallelLinear(50, 10)),
                 ("outact", nn.Sigmoid()),
                 # Special handling for lm_head & sampler
-                ("lm_head", ParallelLMHead(512, 10)),
-                ("logits_processor", LogitsProcessor(512)),
+                ("lm_head", ParallelLMHead(32064, 10)),
+                ("logits_processor", LogitsProcessor(32064)),
             ]
         )
     )
     model.config = MagicMock()
     model.embedding_modules = {"lm_head": "lm_head"}
-    model.unpadded_vocab_size = 32000
+    model.unpadded_vocab_size = 32064
     return model
 
 
@@ -136,8 +136,8 @@ def dummy_model_gate_up(default_vllm_config) -> nn.Module:
                 ("gate_up_proj", MergedColumnParallelLinear(50, [5, 5])),
                 ("outact", nn.Sigmoid()),
                 # Special handling for lm_head & sampler
-                ("lm_head", ParallelLMHead(512, 10)),
-                ("logits_processor", LogitsProcessor(512)),
+                ("lm_head", ParallelLMHead(32064, 10)),
+                ("logits_processor", LogitsProcessor(32064)),
             ]
         )
     )
@@ -149,7 +149,7 @@ def dummy_model_gate_up(default_vllm_config) -> nn.Module:
         ],
     }
     model.embedding_modules = {"lm_head": "lm_head"}
-    model.unpadded_vocab_size = 32000
+    model.unpadded_vocab_size = 32064
 
     return model
 
@@ -231,6 +231,18 @@ def qwen25vl_vision_lora_files():
 @pytest.fixture(scope="session")
 def qwen3vl_vision_lora_files():
     return snapshot_download(repo_id="EpochEcho/qwen3-4b-vl-lora-vision-connector")
+
+
+@pytest.fixture(scope="session")
+def qwen3_meowing_lora_files():
+    """Download Qwen3 Meow LoRA files once per test session."""
+    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Meow-LoRA")
+
+
+@pytest.fixture(scope="session")
+def qwen3_woofing_lora_files():
+    """Download Qwen3 Woof LoRA files once per test session."""
+    return snapshot_download(repo_id="Jackmin108/Qwen3-0.6B-Woof-LoRA")
 
 
 @pytest.fixture(scope="session")

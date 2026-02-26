@@ -8,11 +8,10 @@ from dataclasses import field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import ConfigDict, Field, TypeAdapter, field_validator
-from pydantic.dataclasses import dataclass
+from pydantic import Field, TypeAdapter, field_validator
 
 import vllm.envs as envs
-from vllm.compilation.inductor_pass import CallableInductorPass, InductorPass
+from vllm.compilation.passes.inductor_pass import CallableInductorPass, InductorPass
 from vllm.config.utils import (
     Range,
     config,
@@ -31,9 +30,6 @@ else:
     VllmConfig = object
 
 logger = init_logger(__name__)
-
-# Explicitly exports Range
-__all__ = ["Range"]
 
 
 class CompilationMode(enum.IntEnum):
@@ -99,7 +95,6 @@ class CUDAGraphMode(enum.Enum):
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class PassConfig:
     """Configuration for custom Inductor passes.
 
@@ -120,14 +115,29 @@ class PassConfig:
     """Fuse the custom SiluMul + quant ops."""
     fuse_attn_quant: bool = Field(default=None)
     """Fuse the custom attention + quant ops."""
-    eliminate_noops: bool = Field(default=None)
+    eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
-    """Enable sequence parallelism."""
+    """Enable sequence parallelism. Requires TP>1. Automatically disabled
+    if the model's hidden_size is too small for SP to be beneficial
+    (threshold is device-capability dependent)."""
     fuse_gemm_comms: bool = Field(default=None)
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
     """Enable flashinfer allreduce fusion."""
+    enable_qk_norm_rope_fusion: bool = False
+    """Enable fused Q/K RMSNorm + RoPE pass."""
+
+    # ROCm/AITER specific fusions
+    fuse_act_padding: bool = Field(default=None)
+    """Fuse the custom RMSNorm + padding ops."""
+    fuse_rope_kvcache: bool = Field(default=None)
+    """Fuse the QK rope + KV cache ops."""
+
+    rope_kvcache_fusion_max_token_num: int = 256
+    """The threshold for ROCm AITER RoPE+KVCache fusion e.g. for small batch decode.
+    Larger batch sizes e.g. during prefill will use the unfused kernels.
+    """
 
     fi_allreduce_fusion_max_size_mb: float | None = None
     """The threshold of the communicated tensor sizes under which
@@ -147,8 +157,11 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
-    enable_qk_norm_rope_fusion: bool = False
-    """Enable fused Q/K RMSNorm + RoPE pass."""
+    sp_min_token_num: int | None = None
+    """The minimum number of tokens above which vllm should use
+    sequence parallelism. Specified as an integer token count.
+    Unspecified will fallback to default values which are compute
+    capability and world size dependent."""
 
     # TODO(luka) better pass enabling system.
 
@@ -171,7 +184,9 @@ class PassConfig:
 
     @staticmethod
     def default_fi_allreduce_fusion_max_size_mb() -> dict[int, float]:
-        from vllm.compilation.collective_fusion import FI_ALLREDUCE_FUSION_MAX_SIZE_MB
+        from vllm.compilation.passes.fusion.allreduce_rms_fusion import (
+            FI_ALLREDUCE_FUSION_MAX_SIZE_MB,
+        )
         from vllm.platforms import current_platform
 
         if not current_platform.is_cuda():
@@ -193,10 +208,11 @@ class PassConfig:
         "fuse_norm_quant",
         "fuse_act_quant",
         "fuse_attn_quant",
-        "eliminate_noops",
         "enable_sp",
         "fuse_gemm_comms",
         "fuse_allreduce_rms",
+        "fuse_act_padding",
+        "fuse_rope_kvcache",
         mode="wrap",
     )
     @classmethod
@@ -225,12 +241,29 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "Allreduce + rms norm + quant (fp8) fusion might not work"
                 )
+            if self.fuse_act_padding:
+                logger.warning_once(
+                    "Fusion enabled but reshape elimination disabled. "
+                    "RMSNorm + padding fusion might not work"
+                )
         if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
             logger.warning_once(
                 "QK Norm + RoPE fusion enabled but the current platform is not "
                 "CUDA or ROCm. The fusion will be disabled."
             )
             self.enable_qk_norm_rope_fusion = False
+        if self.fuse_act_padding and not current_platform.is_rocm():
+            logger.warning_once(
+                "Padding fusion enabled but the current platform is not ROCm. "
+                "The fusion will be disabled."
+            )
+            self.fuse_act_padding = False
+        if self.fuse_rope_kvcache and not current_platform.is_rocm():
+            logger.warning_once(
+                "KV cache fusion currently only enabled on ROCm. "
+                "The fusion will be disabled."
+            )
+            self.fuse_rope_kvcache = False
 
 
 class DynamicShapesType(str, enum.Enum):
@@ -254,7 +287,6 @@ class DynamicShapesType(str, enum.Enum):
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class DynamicShapesConfig:
     """Configuration to control/debug torch compile dynamic shapes."""
 
@@ -280,9 +312,10 @@ class DynamicShapesConfig:
     until this change picked up https://github.com/pytorch/pytorch/pull/169239.
     """
 
-    assume_32_bit_indexing: bool = True
+    assume_32_bit_indexing: bool = False
     """
     whether all tensor sizes can use 32 bit indexing.
+    `True` requires PyTorch 2.10+
     """
 
     def compute_hash(self) -> str:
@@ -297,7 +330,6 @@ class DynamicShapesConfig:
 
 
 @config
-@dataclass(config=ConfigDict(extra="forbid"))
 class CompilationConfig:
     """Configuration for compilation.
 
@@ -556,7 +588,7 @@ class CompilationConfig:
     pass_config: PassConfig = field(default_factory=PassConfig)
     """Custom inductor passes, see PassConfig for more details"""
 
-    max_cudagraph_capture_size: int | None = field(default=None)
+    max_cudagraph_capture_size: int = field(default=None)
     """The maximum cudagraph capture size.
 
     If cudagraph_capture_sizes is specified, this will be set to the largest
@@ -581,14 +613,29 @@ class CompilationConfig:
     local_cache_dir: str = field(default=None, init=False)  # type: ignore
     """local cache dir for each rank"""
 
-    bs_to_padded_graph_size: list[int] = field(
-        default=None,  # type: ignore
-        init=False,
-    )
-    """optimization:
-    Intuitively, bs_to_padded_graph_size should be dict[int, int].
-    since we know all keys are in a range [0, max_cudagraph_capture_size],
-    we can optimize it to list[int] for better lookup performance."""
+    fast_moe_cold_start: bool | None = None
+    """Optimization for fast MOE cold start.
+
+    This is a bit of a hack that assumes that:
+    1. the only decoder forward pass being run is the current model
+    2. the decoder forward pass runs all of the MOEs in the order in which they
+       are initialized
+
+    When the above two conditions hold, this option greatly decreases cold start
+    time for MOE models.
+
+    The options are:
+    - True: optimization is always on
+    - False: optimization is always off
+    - None: optimization is on usually but off for speculative decoding
+
+    If conditions 1&2 don't hold then this option will lead to silent
+    incorrectness.
+    The only condition in which this doesn't hold is speculative
+    decoding, where there is a draft model that may have MOEs in them.
+
+    NB: We're working on a longer-term solution that doesn't need these assumptions.
+    """
 
     # keep track of enabled and disabled custom ops
     enabled_custom_ops: Counter[str] = field(default_factory=Counter, init=False)
@@ -604,6 +651,10 @@ class CompilationConfig:
     """Per-model forward context
     Map from layer name to layer objects that need to be accessed outside
     model code, e.g., Attention, FusedMOE when dp_size>1."""
+
+    static_all_moe_layers: list[str] = field(default_factory=list, init=False)
+    """The names of all the MOE layers in the model
+    """
 
     # Attention ops; used for piecewise cudagraphs
     # Use PyTorch operator format: "namespace::name"
@@ -621,6 +672,7 @@ class CompilationConfig:
         "vllm::olmo3_2_hybrid_gdn_attention_core",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
+        "vllm::rocm_aiter_sparse_attn_indexer",
     ]
 
     def compute_hash(self) -> str:
@@ -640,7 +692,6 @@ class CompilationConfig:
             "debug_dump_path",
             "cache_dir",
             "local_cache_dir",
-            "bs_to_padded_graph_size",
             "traced_files",
             "compilation_time",
             "static_forward_context",
@@ -662,7 +713,6 @@ class CompilationConfig:
             "enabled_custom_ops": True,
             "disabled_custom_ops": True,
             "compilation_time": True,
-            "bs_to_padded_graph_size": True,
             "traced_files": True,
             "inductor_compile_config": {
                 "post_grad_custom_post_pass": True,
@@ -736,6 +786,7 @@ class CompilationConfig:
         "level",
         "mode",
         "cudagraph_mode",
+        "max_cudagraph_capture_size",
         "use_inductor_graph_partition",
         mode="wrap",
     )
@@ -770,10 +821,9 @@ class CompilationConfig:
         #    and it is not yet a priority. RFC here:
         #    https://github.com/vllm-project/vllm/issues/14703
 
-        if is_torch_equal_or_newer("2.6"):
-            KEY = "enable_auto_functionalized_v2"
-            if KEY not in self.inductor_compile_config:
-                self.inductor_compile_config[KEY] = False
+        KEY = "enable_auto_functionalized_v2"
+        if KEY not in self.inductor_compile_config:
+            self.inductor_compile_config[KEY] = False
 
         for k, v in self.inductor_passes.items():
             if not isinstance(v, str):
@@ -792,8 +842,18 @@ class CompilationConfig:
                 func if isinstance(func, InductorPass) else CallableInductorPass(func)
             )
 
-        if self.pass_config.enable_qk_norm_rope_fusion:
+        if (
+            self.pass_config.enable_qk_norm_rope_fusion
+            and "+rotary_embedding" not in self.custom_ops
+        ):
             # TODO(zhuhaoran): support rope native forward match and remove this.
+            # Linked issue: https://github.com/vllm-project/vllm/issues/28042
+            self.custom_ops.append("+rotary_embedding")
+        if (
+            self.pass_config.fuse_rope_kvcache
+            and "+rotary_embedding" not in self.custom_ops
+        ):
+            # TODO(Rohan138): support rope native forward match and remove this.
             # Linked issue: https://github.com/vllm-project/vllm/issues/28042
             self.custom_ops.append("+rotary_embedding")
 
@@ -883,7 +943,6 @@ class CompilationConfig:
         """To complete the initialization after cudagraph related
         configs are set. This includes:
         - initialize compile_sizes
-        - pre-compute the mapping bs_to_padded_graph_size
         """
 
         computed_compile_sizes = []
@@ -906,23 +965,6 @@ class CompilationConfig:
         self.cudagraph_capture_sizes.sort()
         if self.cudagraph_capture_sizes:
             assert self.cudagraph_capture_sizes[-1] == self.max_cudagraph_capture_size
-
-        # May get recomputed in the model runner if adjustment is needed for spec-decode
-        self.compute_bs_to_padded_graph_size()
-
-        # Validate that compile_sizes won't be changed by padding.
-        # Only validate when cudagraphs are actually being used.
-        if self.compile_sizes and self.cudagraph_mode != CUDAGraphMode.NONE:
-            for size in self.compile_sizes:
-                if size <= self.max_cudagraph_capture_size:
-                    padded = self.bs_to_padded_graph_size[size]
-                    if padded != size:
-                        raise ValueError(
-                            f"compile_sizes contains {size} which would be "
-                            f"padded to {padded}. All compile_sizes must be "
-                            "values that won't be changed by cudagraph padding. "
-                            "Use values from cudagraph_capture_sizes."
-                        )
 
     def set_splitting_ops_for_v1(
         self, all2all_backend: str, data_parallel_size: int = 1
@@ -954,6 +996,15 @@ class CompilationConfig:
                 # for details. Make a copy to avoid mutating the class-level
                 # list via reference.
                 self.splitting_ops = list(self._attention_ops)
+
+                # unified_kv_cache_update has a string param that prevents Inductor
+                # from reusing piecewise graphs. Remove it from the compiled graph.
+                # This has the side-effect of excluding cache from cudagraphs but
+                # that doesn't seem to affect performance.
+                # https://github.com/vllm-project/vllm/issues/33267
+                if not self.use_inductor_graph_partition:
+                    self.splitting_ops.append("vllm::unified_kv_cache_update")
+
             elif len(self.splitting_ops) == 0:
                 if (
                     self.cudagraph_mode == CUDAGraphMode.PIECEWISE
@@ -995,7 +1046,7 @@ class CompilationConfig:
                 "are optimized for prefill and are incompatible with CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
                 "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
+                "deepep_low_latency or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
@@ -1062,13 +1113,13 @@ class CompilationConfig:
             # check if op name exists in model
             op_name = op[1:]
             if op_name not in all_ops_in_model:
-                from vllm.model_executor.custom_op import CustomOp
+                from vllm.model_executor.custom_op import op_registry
 
                 # Does op exist at all or is it just not present in this model?
                 # Note: Only imported op classes appear in the registry.
                 missing_str = (
                     "doesn't exist (or wasn't imported/registered)"
-                    if op_name not in CustomOp.op_registry
+                    if op_name not in op_registry
                     else "not present in model"
                 )
 
@@ -1134,24 +1185,6 @@ class CompilationConfig:
 
         self.max_cudagraph_capture_size = rounded_sizes[-1]
         self.cudagraph_capture_sizes = rounded_sizes
-
-        # Recompute after adjusting the cudagraph sizes
-        self.compute_bs_to_padded_graph_size()
-
-    def compute_bs_to_padded_graph_size(self):
-        # pre-compute the mapping from batch size to padded graph size
-        self.bs_to_padded_graph_size = [
-            0 for i in range(self.max_cudagraph_capture_size + 1)
-        ]
-        for end, start in zip(
-            self.cudagraph_capture_sizes + [self.max_cudagraph_capture_size + 1],
-            [0] + self.cudagraph_capture_sizes,
-        ):
-            for bs in range(start, end):
-                if bs == start:
-                    self.bs_to_padded_graph_size[bs] = start
-                else:
-                    self.bs_to_padded_graph_size[bs] = end
 
     def get_compile_ranges(self) -> list[Range]:
         """Get the compile ranges for the compilation config."""

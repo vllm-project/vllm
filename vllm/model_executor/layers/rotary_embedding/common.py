@@ -129,7 +129,7 @@ class ApplyRotaryEmb(CustomOp):
         is_neox_style: bool = True,
         enable_fp32_compute: bool = False,
     ) -> None:
-        super().__init__(enforce_enable)
+        super().__init__(enforce_enable=enforce_enable)
         self.is_neox_style = is_neox_style
         self.enable_fp32_compute = enable_fp32_compute
 

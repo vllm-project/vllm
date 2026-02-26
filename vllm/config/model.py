@@ -9,7 +9,6 @@ from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 
 import torch
 from pydantic import ConfigDict, Field, field_validator, model_validator
-from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
 from vllm.config.model_arch import (
@@ -75,7 +74,7 @@ else:
 logger = init_logger(__name__)
 
 RunnerOption = Literal["auto", RunnerType]
-ConvertType = Literal["none", "embed", "classify", "reward", "mm_encoder_only"]
+ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
 TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32"]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
@@ -97,8 +96,7 @@ AttnTypeStr = Literal[
 ]
 
 
-@config
-@dataclass(config=ConfigDict(arbitrary_types_allowed=True))
+@config(config=ConfigDict(arbitrary_types_allowed=True))
 class ModelConfig:
     """Configuration for the model."""
 
@@ -107,8 +105,8 @@ class ModelConfig:
     content for `model_name` tag in metrics output when `served_model_name` is
     not specified."""
     model_weights: str = ""
-    """Original model weights path. Used when the model is pulled from object 
-    storage (e.g., RunAI) to preserve the original URI while `model` points to 
+    """Original model weights path. Used when the model is pulled from object
+    storage (e.g., RunAI) to preserve the original URI while `model` points to
     the local directory."""
     runner: RunnerOption = "auto"
     """The type of model runner to use. Each vLLM instance only supports one
@@ -249,15 +247,11 @@ class ModelConfig:
     - "mistral" will load the config in mistral format."""
     hf_token: bool | str | None = None
     """The token to use as HTTP bearer authorization for remote files . If
-    `True`, will use the token generated when running `huggingface-cli login`
-    (stored in `~/.huggingface`)."""
+    `True`, will use the token generated when running `hf auth login`
+    (stored in `~/.cache/huggingface/token`)."""
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
-    logits_processor_pattern: str | None = None
-    """Optional regex pattern specifying valid logits processor qualified names
-    that can be passed with the `logits_processors` extra completion argument.
-    Defaults to `None`, which allows no processors."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -299,6 +293,7 @@ class ModelConfig:
     multimodal_config: MultiModalConfig | None = None
     """Configuration for multimodal model. If `None`, this will be inferred
     from the architecture of `self.model`."""
+    language_model_only: InitVar[bool] = False
     limit_mm_per_prompt: InitVar[dict[str, int | dict[str, int]] | None] = None
     enable_mm_embeds: InitVar[bool | None] = None
     media_io_kwargs: InitVar[dict[str, dict[str, Any]] | None] = None
@@ -306,6 +301,7 @@ class ModelConfig:
     mm_processor_cache_gb: InitVar[float | None] = None
     mm_processor_cache_type: InitVar[MMCacheType | None] = None
     mm_shm_cache_max_object_size_mb: InitVar[int | None] = None
+    mm_encoder_only: InitVar[bool | None] = None
     mm_encoder_tp_mode: InitVar[MMEncoderTPMode | None] = None
     mm_encoder_attn_backend: InitVar[AttentionBackendEnum | str | None] = None
     interleave_mm_strings: InitVar[bool | None] = None
@@ -325,7 +321,6 @@ class ModelConfig:
         the final hidden states.
         """
         ignored_factors = {
-            "runner",
             "convert",
             "tokenizer",
             "tokenizer_mode",
@@ -343,7 +338,6 @@ class ModelConfig:
             "config_format",
             "hf_token",
             "hf_overrides",
-            "logits_processor_pattern",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
@@ -363,6 +357,12 @@ class ModelConfig:
         from vllm.config.utils import get_hash_factors, hash_factors
 
         factors = get_hash_factors(self, ignored_factors)
+
+        # NOTE: For some models (e.g, Qwen3-VL), whether the MM code path is enabled
+        # affects the computation graph of the language model, therefore we add it
+        # here early.
+        if self.multimodal_config:
+            factors["language_model_only"] = self.multimodal_config.language_model_only
         return hash_factors(factors)
 
     def _update_nested(
@@ -413,6 +413,7 @@ class ModelConfig:
     def __post_init__(
         self,
         # Multimodal config init vars
+        language_model_only: bool,
         limit_mm_per_prompt: dict[str, int | dict[str, int]] | None,
         enable_mm_embeds: bool | None,
         media_io_kwargs: dict[str, dict[str, Any]] | None,
@@ -420,6 +421,7 @@ class ModelConfig:
         mm_processor_cache_gb: float | None,
         mm_processor_cache_type: MMCacheType | None,
         mm_shm_cache_max_object_size_mb: int | None,
+        mm_encoder_only: bool | None,
         mm_encoder_tp_mode: MMEncoderTPMode | None,
         mm_encoder_attn_backend: AttentionBackendEnum | str | None,
         interleave_mm_strings: bool | None,
@@ -554,13 +556,14 @@ class ModelConfig:
             self.dtype,
             is_pooling_model=self.runner_type == "pooling",
             revision=self.revision,
+            config_format=self.config_format,
         )
 
         self.original_max_model_len = self.max_model_len
         self.max_model_len = self.get_and_verify_max_len(self.max_model_len)
 
         if self.is_encoder_decoder:
-            self.mm_processor_cache_gb = 0
+            mm_processor_cache_gb = 0
             logger.info("Encoder-decoder model detected, disabling mm processor cache.")
 
         # Init multimodal config if needed
@@ -576,6 +579,7 @@ class ModelConfig:
                 mm_encoder_tp_mode = "weights"
 
             mm_config_kwargs = dict(
+                language_model_only=language_model_only,
                 limit_per_prompt=limit_mm_per_prompt,
                 enable_mm_embeds=enable_mm_embeds,
                 media_io_kwargs=media_io_kwargs,
@@ -583,6 +587,7 @@ class ModelConfig:
                 mm_processor_cache_gb=mm_processor_cache_gb,
                 mm_processor_cache_type=mm_processor_cache_type,
                 mm_shm_cache_max_object_size_mb=mm_shm_cache_max_object_size_mb,
+                mm_encoder_only=mm_encoder_only,
                 mm_encoder_tp_mode=mm_encoder_tp_mode,
                 mm_encoder_attn_backend=mm_encoder_attn_backend,
                 interleave_mm_strings=interleave_mm_strings,
@@ -755,7 +760,7 @@ class ModelConfig:
             )
             self.tokenizer = object_storage_tokenizer.dir
 
-    def _get_encoder_config(self):
+    def _get_encoder_config(self) -> dict[str, Any] | None:
         model = self.model
         if is_remote_gguf(model):
             model, _ = split_remote_gguf(model)
@@ -842,13 +847,6 @@ class ModelConfig:
         runner_type: RunnerType,
         convert: ConvertOption,
     ) -> ConvertType:
-        if convert == "reward":
-            logger.warning(
-                "`--convert reward` is deprecated and will be removed in v0.15. "
-                "Please use `--convert embed` instead."
-            )
-            return "embed"
-
         if convert != "auto":
             return convert
 
@@ -878,16 +876,14 @@ class ModelConfig:
             # `override_quantization_method` method) must be checked in order
             # of preference (this is particularly important for GPTQ).
             overrides = [
-                "bitblas",
-                "gptq_marlin_24",
                 "gptq_marlin",
-                "gptq_bitblas",
                 "awq_marlin",
-                "ipex",
                 "inc",
                 "moe_wna16",
                 "modelopt",
                 "modelopt_fp4",
+                "modelopt_mxfp8",
+                "modelopt_mixed",
                 "petit_nvfp4",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -1125,6 +1121,9 @@ class ModelConfig:
     @cached_property
     def is_mm_prefix_lm(self) -> bool:
         """Whether to use bidirectional attention for mm positions."""
+        if hasattr(self.hf_config, "is_mm_prefix_lm"):
+            return bool(self.hf_config.is_mm_prefix_lm)
+        # fallback to list of known models
         MM_PREFIX_LM_MODELS = (
             "gemma3",
             "molmo2",
@@ -1227,8 +1226,8 @@ class ModelConfig:
             if attn_type_list:
                 return sum(t == 1 for t in attn_type_list[start:end])
 
-            # Hybrid model Qwen3Next
-            layer_types_value = getattr(self.hf_config, "layer_types", None)
+            # Hybrid model Qwen3Next Qwen3.5 Series
+            layer_types_value = getattr(self.hf_text_config, "layer_types", None)
             if layer_types_value is not None:
                 if block_type == "attention":
                     return sum(
@@ -1327,10 +1326,9 @@ class ModelConfig:
         Returns:
             A dictionary containing the non-default sampling parameters.
         """
-        if self.generation_config == "vllm":
-            config = {}
-        else:
-            config = self.try_get_generation_config()
+        src = self.generation_config
+
+        config = {} if src == "vllm" else self.try_get_generation_config()
 
         # Overriding with given generation config
         config.update(self.override_generation_config)
@@ -1356,16 +1354,19 @@ class ModelConfig:
         else:
             diff_sampling_param = {}
 
-        if diff_sampling_param:
+        if diff_sampling_param and src != "vllm":
             logger.warning_once(
-                "Default sampling parameters have been overridden by the "
-                "model's Hugging Face generation config recommended from the "
-                "model creator. If this is not intended, please relaunch "
-                "vLLM instance with `--generation-config vllm`."
+                "Default vLLM sampling parameters have been overridden by %s: `%s`. "
+                "If this is not intended, please relaunch vLLM instance "
+                "with `--generation-config vllm`.",
+                "the model's `generation_config.json`" if src == "auto" else src,
+                str(diff_sampling_param),
+                scope="local",
             )
+
         return diff_sampling_param
 
-    @property
+    @cached_property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)
@@ -1418,6 +1419,11 @@ class ModelConfig:
         return (
             self._model_info.supports_cross_encoding or self.convert_type == "classify"
         )
+
+    @property
+    def is_late_interaction(self) -> bool:
+        """Check if model uses late interaction (ColBERT-style) scoring."""
+        return self._model_info.supports_late_interaction
 
     @property
     def is_pp_supported(self) -> bool:
@@ -1516,6 +1522,10 @@ class ModelConfig:
 
     @property
     def embedding_size(self):
+        # Check for embedding_size set by model config (e.g., Voyage models)
+        override = getattr(self.hf_config, "embedding_size", None)
+        if override is not None:
+            return override
         dense_modules = try_get_dense_modules(self.model, revision=self.revision)
         if dense_modules is not None:
             return dense_modules[-1]["out_features"]
@@ -1549,6 +1559,7 @@ class ModelConfig:
 
     @property
     def attn_type(self) -> AttnTypeStr:
+        """Determine the attention type based on model configuration."""
         if self.pooler_config is not None:
             seq_pooling_type = self._model_info.default_seq_pooling_type
             if seq_pooling_type == "CLS":
@@ -1676,6 +1687,20 @@ class ModelConfig:
     @property
     def is_quantized(self) -> bool:
         return getattr(self.hf_config, "quantization_config", None) is not None
+
+    def is_nvfp4_quantized(self) -> bool:
+        # ModelOpt NVFP4 checkpoints resolve to modelopt_fp4 quantization method
+        if self.quantization in ("modelopt_fp4",):
+            return True
+
+        # For Compressed Tensors we look for `"format": "nvfp4-pack-quantized"`
+        # in the quantization config
+        quant_config = self.model_arch_config.quantization_config
+        return (
+            self.quantization == "compressed-tensors"
+            and quant_config is not None
+            and "nvfp4" in quant_config.get("format", "").lower()
+        )
 
 
 def get_served_model_name(model: str, served_model_name: str | list[str] | None):
@@ -1833,9 +1858,10 @@ def _get_and_verify_dtype(
     *,
     is_pooling_model: bool,
     revision: str | None = None,
+    config_format: ConfigFormat = "hf",
 ) -> torch.dtype:
     config_dtype = ModelArchConfigConvertorBase.get_torch_dtype(
-        config, model_id, revision=revision
+        config, model_id, revision=revision, config_format=config_format
     )
     model_type = config.model_type
 
@@ -1905,7 +1931,7 @@ def _get_and_verify_max_len(
     disable_sliding_window: bool,
     sliding_window: int | None,
     spec_target_max_model_len: int | None = None,
-    encoder_config: Any | None = None,
+    encoder_config: dict[str, Any] | None = None,
 ) -> int:
     """Get and verify the model's maximum length."""
     (derived_max_model_len, max_len_key) = (

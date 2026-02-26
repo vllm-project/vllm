@@ -10,7 +10,6 @@ from collections.abc import Iterable
 import torch
 from torch import nn
 
-from vllm.attention.layer import Attention, AttentionType
 from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
@@ -18,6 +17,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.activation import SiluAndMul
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -41,6 +41,7 @@ from vllm.model_executor.models.utils import (
     maybe_prefix,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backend import AttentionType
 
 STEP_PACKED_MODULES_MAPPING = {
     "qkv_proj": ["q_proj", "k_proj", "v_proj"],

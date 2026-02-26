@@ -5,9 +5,9 @@ import ast
 from typing import TYPE_CHECKING, Any, Literal, get_args
 
 from pydantic import Field, SkipValidation, model_validator
-from pydantic.dataclasses import dataclass
 from typing_extensions import Self
 
+from vllm.config import LoadConfig
 from vllm.config.model import ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
@@ -33,12 +33,17 @@ MTPModelTypes = Literal[
     "deepseek_mtp",
     "mimo_mtp",
     "glm4_moe_mtp",
+    "glm4_moe_lite_mtp",
+    "glm_ocr_mtp",
     "ernie_mtp",
+    "nemotron_h_mtp",
     "exaone_moe_mtp",
     "qwen3_next_mtp",
+    "qwen3_5_mtp",
     "longcat_flash_mtp",
     "mtp",
     "pangu_ultra_moe_mtp",
+    "step3p5_mtp",
 ]
 EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
 SpeculativeMethod = Literal[
@@ -52,7 +57,6 @@ SpeculativeMethod = Literal[
 
 
 @config
-@dataclass
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
 
@@ -76,6 +80,9 @@ class SpeculativeConfig:
     draft_tensor_parallel_size: int | None = Field(default=None, ge=1)
     """The degree of the tensor parallelism for the draft model. Can only be 1
     or the same as the target model's tensor parallel size."""
+    tensor_parallel_size: int | None = None
+    """Users should pass "draft_tensor_parallel_size". This parameter's purpose is to
+    warn users when they mistakenly provide the wrong argument."""
 
     # Draft model configuration
     quantization: me_quant.QuantizationMethods | None = None
@@ -95,14 +102,16 @@ class SpeculativeConfig:
     will use the default version."""
 
     # Advanced control
-    disable_by_batch_size: int | None = Field(default=None, ge=2)
-    """Disable speculative decoding for new incoming requests when the number
-    of enqueued requests is larger than this value, if provided."""
     disable_padded_drafter_batch: bool = False
     """Disable input padding for speculative decoding. If set to True,
     speculative input batches can contain sequences of different lengths,
     which may only be supported by certain attention backends. This currently
     only affects the EAGLE method of speculation."""
+    use_local_argmax_reduction: bool = False
+    """Use vocab-parallel local argmax instead of all-gathering full logits
+    for draft token generation. Reduces communication from O(vocab_size) to
+    O(2 * tp_size) per token. Only applies to greedy draft selection in
+    non-tree speculation."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -112,9 +121,16 @@ class SpeculativeConfig:
     """Minimum size of ngram token window when using Ngram proposer, if
     provided. Defaults to 1."""
 
+    # Alternative drafting strategies
     speculative_token_tree: str | None = None
     """Specifies the tree structure for speculative token generation.
     """
+    parallel_drafting: bool = False
+    """Enable parallel drafting, where all speculative tokens are generated
+    in parallel rather than sequentially. This can improve performance but
+    requires the speculative model be trained to support parallel drafting.
+    Only compatible with EAGLE and draft model methods."""
+
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""
@@ -148,6 +164,10 @@ class SpeculativeConfig:
     tokens with estimated probability (based on frequency counts) greater than
     or equal to this value."""
 
+    draft_load_config: LoadConfig | None = None
+    """Load config for the draft model. If not specified, will use the load
+    config from the target model."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -170,7 +190,7 @@ class SpeculativeConfig:
     @staticmethod
     def hf_config_override(hf_config: PretrainedConfig) -> PretrainedConfig:
         initial_architecture = hf_config.architectures[0]
-        if hf_config.model_type in ("deepseek_v3", "deepseek_v32"):
+        if hf_config.model_type in ("deepseek_v3", "deepseek_v32", "glm_moe_dsa"):
             hf_config.model_type = "deepseek_mtp"
         if hf_config.model_type == "deepseek_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
@@ -206,12 +226,47 @@ class SpeculativeConfig:
                 }
             )
 
+        if hf_config.architectures[0] == "Glm4MoeLiteForCausalLM":
+            hf_config.model_type = "glm4_moe_lite_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["Glm4MoeLiteMTPModel"],
+                }
+            )
+
+        if hf_config.architectures[0] == "GlmOcrForConditionalGeneration":
+            hf_config.model_type = "glm_ocr_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {
+                    "num_hidden_layers": 0,
+                    "n_predict": n_predict,
+                    "architectures": ["GlmOcrMTPModel"],
+                }
+            )
+
         if hf_config.model_type == "ernie4_5_moe":
             hf_config.model_type = "ernie_mtp"
         if hf_config.model_type == "ernie_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
+            )
+
+        if (
+            hf_config.model_type == "nemotron_h"
+            and hasattr(hf_config, "num_nextn_predict_layers")
+            and hf_config.num_nextn_predict_layers > 0
+        ):
+            # Check if this is an MTP variant
+            hf_config.model_type = "nemotron_h_mtp"
+        if hf_config.model_type == "nemotron_h_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["NemotronHMTPModel"]}
             )
 
         if hf_config.model_type == "qwen3_next":
@@ -230,12 +285,27 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ExaoneMoeMTP"]}
             )
 
+        if hf_config.model_type in ("qwen3_5", "qwen3_5_moe"):
+            is_moe = hf_config.model_type == "qwen3_5_moe"
+            hf_config.model_type = "qwen3_5_mtp"
+            n_predict = getattr(hf_config, "mtp_num_hidden_layers", None)
+            hf_config.update(
+                {
+                    "n_predict": n_predict,
+                    "architectures": ["Qwen3_5MoeMTP" if is_moe else "Qwen3_5MTP"],
+                }
+            )
         if hf_config.model_type == "longcat_flash":
             hf_config.model_type = "longcat_flash_mtp"
             n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["LongCatFlashMTPModel"]}
             )
+
+        if hf_config.model_type == "step3p5":
+            hf_config.model_type = "step3p5_mtp"
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
+            hf_config.update({"n_predict": n_predict, "architectures": ["Step3p5MTP"]})
 
         if initial_architecture == "MistralLarge3ForCausalLM":
             hf_config.update({"architectures": ["EagleMistralLarge3ForCausalLM"]})
@@ -251,6 +321,13 @@ class SpeculativeConfig:
         # can not be detected, it will be considered as the "draft_model" by
         # default.
 
+        # infer method from user args
+        if self.method is None:
+            if self.model in ("ngram", "[ngram]"):
+                self.method = "ngram"
+            else:
+                self.method = "draft_model"
+
         if self.method in get_args(MTPModelTypes) and self.method != "mtp":
             logger.warning(
                 "method `%s` is deprecated and replaced with mtp.", self.method
@@ -262,7 +339,7 @@ class SpeculativeConfig:
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
                 if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
-                    # FIXME(luccafong): cudgraph with v32 MTP is not supported,
+                    # FIXME(luccafong): cudagraph with v32 MTP is not supported,
                     # remove this when the issue is fixed.
                     self.enforce_eager = True
                 # use the draft model from the same model:
@@ -279,13 +356,6 @@ class SpeculativeConfig:
                 raise ValueError(
                     "num_speculative_tokens was provided but without speculative model."
                 )
-
-        # Automatically configure the method for ngram when "model" is used
-        # instead of "method"
-        if self.method is None and (
-            self.model is not None and self.model in ("ngram", "[ngram]")
-        ):
-            self.method = "ngram"
 
         if self.method in ("ngram", "[ngram]"):
             # Unified to "ngram" internally
@@ -371,7 +441,7 @@ class SpeculativeConfig:
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run"
+                            "Enabling num_speculative_tokens > 1 will run "
                             "multiple times of forward on same MTP layer"
                             ",which may result in lower acceptance rate"
                         )
@@ -385,13 +455,11 @@ class SpeculativeConfig:
                             "one layer. Might need some code changes "
                             "to support multiple layers."
                         )
+                elif self.method == "draft_model":
+                    pass
                 else:
-                    self.method = "draft_model"
                     raise NotImplementedError(
-                        "Speculative decoding with draft model is not "
-                        "supported yet. Please consider using other "
-                        "speculative decoding methods such as ngram, medusa, "
-                        "eagle, or mtp."
+                        f"Unsupported speculative method: '{self.method}'"
                     )
 
                 # Replace hf_config for EAGLE draft_model
@@ -453,6 +521,13 @@ class SpeculativeConfig:
                         )
 
                 if self.speculative_token_tree is None:
+                    if self.num_speculative_tokens is None:
+                        raise ValueError(
+                            "A speculative model was provided, but neither "
+                            "`speculative_token_tree` nor `num_speculative_tokens` "
+                            "was provided"
+                        )
+
                     # Generate chain of tokens.
                     self.speculative_token_tree = str(
                         [(i + 1) * (0,) for i in range(self.num_speculative_tokens)]
@@ -619,6 +694,12 @@ class SpeculativeConfig:
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
+        if self.tensor_parallel_size is not None:
+            raise ValueError(
+                "'tensor_parallel_size' is not a valid argument in the "
+                "speculative_config. Please pass 'draft_tensor_parallel_size' instead."
+            )
+
         if self.num_speculative_tokens is None:
             raise ValueError(
                 "num_speculative_tokens must be provided with "
@@ -637,14 +718,16 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.disable_by_batch_size is not None and self.disable_by_batch_size < 2:
-            raise ValueError(
-                "Expect the batch size threshold of disabling "
-                "speculative decoding is > 1, but got "
-                f"{self.disable_by_batch_size=}"
-            )
-
-        eagle3_target_supported = ["llama", "qwen", "minicpm", "gpt_oss"]
+        eagle3_target_supported = [
+            "llama",
+            "qwen",
+            "minicpm",
+            "gpt_oss",
+            "hunyuan_vl",
+            "hunyuan_v1_dense",
+            "afmoe",
+            "nemotron_h",
+        ]
         if (
             self.method == "eagle3"
             and self.target_model_config
@@ -657,11 +740,47 @@ class SpeculativeConfig:
                 f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
                 f"Got {self.target_model_config.hf_text_config.model_type=}"
             )
-
+        self.verify_equal_vocab_size_if_draft_model()
         return self
+
+    def verify_equal_vocab_size_if_draft_model(self):
+        if (
+            self.method == "draft_model"
+            and self.target_model_config is not None
+            and self.draft_model_config is not None
+        ):
+            target_vocab_size = self.target_model_config.get_vocab_size()
+            draft_vocab_size = self.draft_model_config.get_vocab_size()
+            if target_vocab_size != draft_vocab_size:
+                raise ValueError(
+                    f"Target and draft model should have the same vocabulary size. "
+                    f"Target model vocab_size={target_vocab_size}. "
+                    f"Draft model vocab_size={draft_vocab_size}. "
+                    f"Using models with different tokenizers can cause out-of-bounds "
+                    f"errors during speculative decoding."
+                )
+
+    @property
+    def max_num_new_slots_for_drafting(self) -> int:
+        """
+        Calculate the maximum number of new slots that might be added to the batch
+        when drafting.
+        """
+        slots_per_req = 0  # for serial non-draft-model methods, no change needed
+        if self.parallel_drafting:
+            # For parallel drafting, we need one new slot per 'masked' token
+            slots_per_req = self.num_speculative_tokens - 1
+        if self.uses_draft_model():
+            # For draft model-based speculation, we need one new slot per request
+            # Since we do not slice the draft tokens
+            slots_per_req += 1
+        return slots_per_req
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp")
+
+    def uses_draft_model(self) -> bool:
+        return self.method == "draft_model"
 
     def __repr__(self) -> str:
         method = self.method

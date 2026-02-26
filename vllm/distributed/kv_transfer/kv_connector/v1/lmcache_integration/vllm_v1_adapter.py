@@ -5,7 +5,7 @@ import os
 import uuid
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import torch
 from lmcache import utils
@@ -274,7 +274,7 @@ class ReqMeta:
         load_spec: LoadSpec | None = None,
         discard_partial_chunks: bool = True,
         save_decode_cache: bool = False,
-    ) -> Optional["ReqMeta"]:
+    ) -> "ReqMeta | None":
         """Create the request metadata from a request tracker.
 
         Args:

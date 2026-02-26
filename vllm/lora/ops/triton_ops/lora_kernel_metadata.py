@@ -4,7 +4,8 @@
 LoRA kernels metadata preparation utilities.
 """
 
-from dataclasses import dataclass
+import bisect
+from dataclasses import dataclass, field
 
 import torch
 
@@ -28,9 +29,22 @@ class LoRAKernelMeta:
     # to early exit from inside the lora_expand / lora_shrink torch operation.
     no_lora_flag_cpu: torch.Tensor
 
+    # Number of active LoRAs (unique non-(-1) values in token_lora_mapping)
+    # Stored as a Python int to avoid GPU->CPU sync during forward pass
+    num_active_loras: int = 0
+
+    # Captured LoRA counts for cudagraph specialization (sorted list).
+    # When specialize_active_lora is enabled, num_active_loras is rounded up
+    # to the nearest value in this list to match cudagraph capture keys.
+    # Empty list means no specialization (use actual count).
+    captured_lora_counts: list[int] = field(default_factory=list)
+
     @staticmethod
     def make(
-        max_loras: int, max_num_tokens: int, device: torch.device | str
+        max_loras: int,
+        max_num_tokens: int,
+        device: torch.device | str,
+        captured_lora_counts: list[int] | None = None,
     ) -> "LoRAKernelMeta":
         token_lora_mapping = torch.empty(
             max_num_tokens, dtype=torch.int32, device=device
@@ -66,6 +80,9 @@ class LoRAKernelMeta:
             num_tokens_per_lora=num_tokens_per_lora,
             lora_token_start_loc=lora_token_start_loc,
             no_lora_flag_cpu=no_lora_flag_cpu,
+            captured_lora_counts=sorted(captured_lora_counts)
+            if captured_lora_counts
+            else [],
         )
 
     def _reset(self):
@@ -73,6 +90,8 @@ class LoRAKernelMeta:
         self.num_tokens_per_lora.fill_(0)
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
+        self.num_active_loras = 0
+        self.captured_lora_counts = []
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
@@ -118,6 +137,15 @@ class LoRAKernelMeta:
             num_tokens_per_lora, non_blocking=True
         )
 
+        self.num_active_loras = lora_ids.size(0)
+
+        # Round up num_active_loras to match cudagraph capture keys.
+        # This ensures the kernel grid dimension matches the captured graph.
+        if self.captured_lora_counts and self.num_active_loras > 0:
+            idx = bisect.bisect_left(self.captured_lora_counts, self.num_active_loras)
+            if idx < len(self.captured_lora_counts):
+                self.num_active_loras = self.captured_lora_counts[idx]
+
         # lora_token_start_loc
         lora_token_start_loc = torch.cumsum(num_tokens_per_lora, dim=0)
         self.lora_token_start_loc[1 : 1 + lora_token_start_loc.size(0)].copy_(
@@ -125,7 +153,9 @@ class LoRAKernelMeta:
         )
 
     def meta_args(
-        self, token_nums: int
+        self,
+        token_nums: int,
+        specialize_active_lora: bool,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -133,6 +163,7 @@ class LoRAKernelMeta:
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        int,
     ]:
         """
         This function returns the kernel metadata required for the current
@@ -144,6 +175,7 @@ class LoRAKernelMeta:
             token_nums (int): Number of input tokens in the current forward
                 pass of the kernel.
         """
+        max_loras = self.active_lora_ids.size(0) - 1
         return (
             self.token_lora_mapping[:token_nums],
             self.token_indices_sorted_by_lora_ids[:token_nums],
@@ -151,4 +183,5 @@ class LoRAKernelMeta:
             self.lora_token_start_loc,
             self.active_lora_ids,
             self.no_lora_flag_cpu,
+            self.num_active_loras if specialize_active_lora else max_loras + 1,
         )

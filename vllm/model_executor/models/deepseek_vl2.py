@@ -24,7 +24,6 @@ from vllm.multimodal.inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -37,8 +36,10 @@ from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     MultiModalProcessingInfo,
+    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.tokenizers import cached_tokenizer_from_config
@@ -214,13 +215,13 @@ class DeepseekVL2DummyInputsBuilder(BaseDummyInputsBuilder[DeepseekVL2Processing
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         max_image_size = self.info.get_image_size_with_most_features()
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(
@@ -310,32 +311,17 @@ class DeepseekVL2MultiModalProcessor(
 
     def _cached_apply_hf_processor(
         self,
-        prompt: str | list[int],
-        mm_data_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object],
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> tuple[list[int], MultiModalProcessingInfo, bool]:
         # The processor logic is different for len(images) <= 2 vs > 2
         # Since the processing cache assumes that the processor output is
         # invariant of how many images are passed per prompt, we only
         # perform caching for the most common case
-        if mm_data_items.get_count("image", strict=False) > 2:
-            return self._apply_hf_processor(
-                prompt=prompt,
-                mm_data_items=mm_data_items,
-                hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-                tokenization_kwargs=tokenization_kwargs,
-                mm_uuids=mm_uuids,
-            )
+        if inputs.mm_data_items.get_count("image", strict=False) > 2:
+            return self._apply_hf_processor(inputs, timing_ctx)
 
-        return super()._cached_apply_hf_processor(
-            prompt=prompt,
-            mm_data_items=mm_data_items,
-            hf_processor_mm_kwargs=hf_processor_mm_kwargs,
-            tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
-        )
+        return super()._cached_apply_hf_processor(inputs, timing_ctx)
 
 
 @MULTIMODAL_REGISTRY.register_processor(
@@ -374,37 +360,39 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         tokenizer = cached_tokenizer_from_config(model_config)
         self.image_token_id: int = tokenizer.vocab[_IMAGE_TOKEN]
 
-        self.vision = self._init_vision_module(
-            self.vision_config, quant_config, maybe_prefix(prefix, "vision")
-        )
-
-        self.projector = MlpProjector(self.projector_config)
-        self.tile_tag = config.tile_tag
-        self.global_view_pos = config.global_view_pos
-
-        # special token for image token sequence format
-        embed_std = 1 / torch.sqrt(
-            torch.tensor(self.projector_config.n_embed, dtype=torch.float32)
-        )
-        if self.tile_tag == "2D":
-            # <|view_seperator|>, <|\n|>
-            self.image_newline = nn.Parameter(
-                torch.randn(self.projector_config.n_embed) * embed_std
-            )
-            # This is a typo in original implementation
-            self.view_seperator = nn.Parameter(
-                torch.randn(self.projector_config.n_embed) * embed_std
-            )
-        else:
-            raise ValueError(
-                f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
+        with self._mark_tower_model(vllm_config, "image"):
+            self.vision = self._init_vision_module(
+                self.vision_config, quant_config, maybe_prefix(prefix, "vision")
             )
 
-        self.language_model = init_vllm_registered_model(
-            vllm_config=vllm_config,
-            hf_config=self.text_config,
-            prefix=maybe_prefix(prefix, "language"),
-        )
+            self.projector = MlpProjector(self.projector_config)
+            self.tile_tag = config.tile_tag
+            self.global_view_pos = config.global_view_pos
+
+            # special token for image token sequence format
+            embed_std = 1 / torch.sqrt(
+                torch.tensor(self.projector_config.n_embed, dtype=torch.float32)
+            )
+            if self.tile_tag == "2D":
+                # <|view_seperator|>, <|\n|>
+                self.image_newline = nn.Parameter(
+                    torch.randn(self.projector_config.n_embed) * embed_std
+                )
+                # This is a typo in original implementation
+                self.view_seperator = nn.Parameter(
+                    torch.randn(self.projector_config.n_embed) * embed_std
+                )
+            else:
+                raise ValueError(
+                    f"Only 2D tile_tag is supported currently, got: {self.tile_tag}"
+                )
+
+        with self._mark_language_model(vllm_config):
+            self.language_model = init_vllm_registered_model(
+                vllm_config=vllm_config,
+                hf_config=self.text_config,
+                prefix=maybe_prefix(prefix, "language"),
+            )
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
@@ -603,9 +591,6 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
             pixel_values=pixel_values, images_spatial_crop=images_spatial_crop
         )
 
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
-
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
         if image_input is None:
@@ -615,7 +600,7 @@ class DeepseekVLV2ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
 
     def forward(
         self,
-        input_ids: torch.Tensor,
+        input_ids: torch.Tensor | None,
         positions: torch.Tensor,
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,

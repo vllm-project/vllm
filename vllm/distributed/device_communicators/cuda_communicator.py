@@ -34,18 +34,24 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # custom allreduce or torch symm mem can be used only by tp
             use_custom_allreduce = False
             use_torch_symm_mem = False
+            use_flashinfer_allreduce = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
+            use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
+        self.use_flashinfer_allreduce = use_flashinfer_allreduce
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
+        )
+        from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+            FlashInferAllReduce,
         )
         from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
         from vllm.distributed.device_communicators.quick_all_reduce import (
@@ -65,8 +71,16 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.ca_comm: CustomAllreduce | None = None
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
+        self.fi_ar_comm: FlashInferAllReduce | None = None
+
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
+        if self.use_flashinfer_allreduce and self.world_size > 1:
+            self.fi_ar_comm = FlashInferAllReduce(
                 group=self.cpu_group,
                 device=self.device,
             )
@@ -98,10 +112,6 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
-            elif self.all2all_backend == "pplx":
-                from .all2all import PPLXAll2AllManager
-
-                self.all2all_manager = PPLXAll2AllManager(self.cpu_group)
             elif self.all2all_backend == "deepep_high_throughput":
                 from .all2all import DeepEPHTAll2AllManager
 
@@ -110,6 +120,10 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 from .all2all import DeepEPLLAll2AllManager
 
                 self.all2all_manager = DeepEPLLAll2AllManager(self.cpu_group)
+            elif self.all2all_backend == "mori":
+                from .all2all import MoriAll2AllManager
+
+                self.all2all_manager = MoriAll2AllManager(self.cpu_group)
             elif self.all2all_backend == "flashinfer_all2allv":
                 from .all2all import FlashInferAllToAllManager
 
@@ -132,7 +146,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
-        # always try quick reduce first, then custom allreduce,
+        # always try quick reduce first, then flashinfer, then custom allreduce,
         # and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
         if (
@@ -141,6 +155,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and qr_comm.should_quick_allreduce(input_)
         ):
             out = qr_comm.quick_all_reduce(input_)
+            assert out is not None
+            return out
+        fi_ar_comm = self.fi_ar_comm
+        if (
+            fi_ar_comm is not None
+            and not fi_ar_comm.disabled
+            and fi_ar_comm.should_use_fi_ar(input_)
+        ):
+            out = fi_ar_comm.all_reduce(input_)
             assert out is not None
             return out
         ca_comm = self.ca_comm
@@ -266,9 +289,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.fi_ar_comm is not None:
+            self.fi_ar_comm.destroy()
+            self.fi_ar_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
-            self.all2all_manager = None
+            self.all2all_manager = None  # type: ignore[assignment]
 
     def all_gatherv(
         self,
@@ -318,7 +344,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
 
         return output_list
 
-    def dispatch(  # type: ignore[override]
+    def dispatch_router_logits(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
@@ -328,19 +354,52 @@ class CudaCommunicator(DeviceCommunicatorBase):
         tuple[torch.Tensor, torch.Tensor]
         | tuple[torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
+        """
+        Dispatch the hidden states and router logits to the appropriate device.
+        This is a no-op in the base class.
+        """
+
         assert self.all2all_manager is not None
-        return self.all2all_manager.dispatch(
+        return self.all2all_manager.dispatch_router_logits(
             hidden_states,
             router_logits,
             is_sequence_parallel,
-            extra_tensors,  # type: ignore[call-arg]
+            extra_tensors,
+        )
+
+    def dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_sequence_parallel: bool = False,
+        extra_tensors: list[torch.Tensor] | None = None,
+    ) -> (
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
+    ):
+        """
+        Dispatch the hidden states and topk weights/ids to the appropriate device.
+        This is a no-op in the base class.
+        """
+        assert self.all2all_manager is not None
+        return self.all2all_manager.dispatch(
+            hidden_states,
+            topk_weights,
+            topk_ids,
+            is_sequence_parallel,
+            extra_tensors=extra_tensors,
         )
 
     def combine(
         self, hidden_states: torch.Tensor, is_sequence_parallel: bool = False
     ) -> torch.Tensor:
+        """
+        Combine the hidden states and router logits from the appropriate device.
+        This is a no-op in the base class.
+        """
         assert self.all2all_manager is not None
-        hidden_states = self.all2all_manager.combine(
-            hidden_states, is_sequence_parallel
+        return self.all2all_manager.combine(
+            hidden_states,
+            is_sequence_parallel,
         )
-        return hidden_states

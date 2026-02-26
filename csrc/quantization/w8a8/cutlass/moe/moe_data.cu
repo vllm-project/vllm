@@ -130,26 +130,6 @@ inline void launch_compute_problem_sizes(const torch::Tensor& topk_ids,
 }
 }  // namespace
 
-void get_cutlass_moe_mm_problem_sizes_caller(
-    const torch::Tensor& topk_ids, torch::Tensor& problem_sizes1,
-    torch::Tensor& problem_sizes2, const int64_t num_experts, const int64_t n,
-    const int64_t k, const std::optional<torch::Tensor>& blockscale_offsets,
-    std::optional<bool> force_swap_ab = std::nullopt) {
-  auto stream = at::cuda::getCurrentCUDAStream(topk_ids.device().index());
-  auto options_int32 =
-      torch::TensorOptions().dtype(torch::kInt32).device(topk_ids.device());
-  torch::Tensor atomic_buffer = torch::zeros(num_experts, options_int32);
-
-  // Swap-AB should be disabled for FP4 path
-  bool may_swap_ab =
-      force_swap_ab.value_or((!blockscale_offsets.has_value()) &&
-                             (topk_ids.numel() <= SWAP_AB_THRESHOLD));
-
-  launch_compute_problem_sizes(topk_ids, problem_sizes1, problem_sizes2,
-                               atomic_buffer, num_experts, n, k, stream,
-                               may_swap_ab);
-}
-
 template <bool SWAP_AB>
 __global__ void compute_problem_sizes_from_expert_offsets(
     const int64_t* __restrict__ expert_first_token_offset,
@@ -283,12 +263,10 @@ void get_cutlass_moe_mm_data_caller(
 }
 
 template <bool SWAP_AB>
-__global__ void compute_pplx_data(int32_t* expert_offsets,
-                                  int32_t* problem_sizes1,
-                                  int32_t* problem_sizes2,
-                                  const int32_t* __restrict__ expert_num_tokens,
-                                  const int padded_m, const int n,
-                                  const int k) {
+__global__ void compute_batched_moe_data(
+    int32_t* expert_offsets, int32_t* problem_sizes1, int32_t* problem_sizes2,
+    const int32_t* __restrict__ expert_num_tokens, const int padded_m,
+    const int n, const int k) {
   int expert_idx = threadIdx.x;
   expert_offsets[expert_idx] = expert_idx * padded_m;
 
@@ -309,24 +287,22 @@ __global__ void compute_pplx_data(int32_t* expert_offsets,
   }
 }
 
-void get_cutlass_pplx_moe_mm_data_caller(torch::Tensor& expert_offsets,
-                                         torch::Tensor& problem_sizes1,
-                                         torch::Tensor& problem_sizes2,
-                                         const torch::Tensor& expert_num_tokens,
-                                         const int64_t num_local_experts,
-                                         const int64_t padded_m,
-                                         const int64_t n, const int64_t k) {
+void get_cutlass_batched_moe_mm_data_caller(
+    torch::Tensor& expert_offsets, torch::Tensor& problem_sizes1,
+    torch::Tensor& problem_sizes2, const torch::Tensor& expert_num_tokens,
+    const int64_t num_local_experts, const int64_t padded_m, const int64_t n,
+    const int64_t k) {
   auto stream = at::cuda::getCurrentCUDAStream(expert_offsets.device().index());
 
   if (num_local_experts * padded_m > SWAP_AB_THRESHOLD) {
-    compute_pplx_data<false><<<1, num_local_experts, 0, stream>>>(
+    compute_batched_moe_data<false><<<1, num_local_experts, 0, stream>>>(
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(problem_sizes2.data_ptr()),
         static_cast<const int32_t*>(expert_num_tokens.data_ptr()), padded_m, n,
         k);
   } else {
-    compute_pplx_data<true><<<1, num_local_experts, 0, stream>>>(
+    compute_batched_moe_data<true><<<1, num_local_experts, 0, stream>>>(
         static_cast<int32_t*>(expert_offsets.data_ptr()),
         static_cast<int32_t*>(problem_sizes1.data_ptr()),
         static_cast<int32_t*>(problem_sizes2.data_ptr()),

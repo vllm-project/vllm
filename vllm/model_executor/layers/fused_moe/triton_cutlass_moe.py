@@ -5,7 +5,11 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEQuantConfig,
+)
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fallback import FallbackExperts
 from vllm.model_executor.layers.fused_moe.fused_moe import TritonExperts
@@ -17,18 +21,21 @@ class TritonOrCutlassExperts(FallbackExperts):
 
     def __init__(
         self,
-        e: int,
-        n: int,
-        k: int,
-        out_dtype: torch.dtype | None,
+        moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        device: torch.dtype,
     ):
         self.is_sm100 = current_platform.has_device_capability(100)
         super().__init__(
-            experts=CutlassExpertsFp8(e, n, k, out_dtype, quant_config, device),
-            fallback_experts=TritonExperts(quant_config),
+            experts=CutlassExpertsFp8(moe_config, quant_config),
+            fallback_experts=TritonExperts(moe_config, quant_config),
         )
+
+    @staticmethod
+    def get_clses() -> tuple[
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+    ]:
+        return (CutlassExpertsFp8, TritonExperts)
 
     def workspace_shapes(
         self,
@@ -39,7 +46,7 @@ class TritonOrCutlassExperts(FallbackExperts):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         # Small batch fallback for sm100.
         if self.is_sm100 and M <= 8:

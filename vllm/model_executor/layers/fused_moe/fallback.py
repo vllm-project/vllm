@@ -6,6 +6,9 @@ from abc import ABC, abstractmethod
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import FusedMoEParallelConfig
+from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 
 
 class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
@@ -16,18 +19,78 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         experts: mk.FusedMoEPermuteExpertsUnpermute,
         fallback_experts: mk.FusedMoEPermuteExpertsUnpermute,
     ):
-        super().__init__(experts.quant_config)
+        super().__init__(
+            moe_config=experts.moe_config, quant_config=experts.quant_config
+        )
         self.fallback_experts = fallback_experts
         self.experts = experts
 
-    @property
-    def activation_formats(
-        self,
-    ) -> tuple[mk.FusedMoEActivationFormat, mk.FusedMoEActivationFormat]:
-        assert (
-            self.fallback_experts.activation_formats == self.experts.activation_formats
+    @staticmethod
+    def get_clses() -> tuple[
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+        type[mk.FusedMoEPermuteExpertsUnpermute],
+    ]:
+        """
+        Get the cls for the experts and fallback experts.
+
+        Subclasses should implement this method, so that
+        we have a consistent way to call the _supports_*
+        class methods below.
+        """
+        raise NotImplementedError(
+            "Subclasses must return the cls for the experts and fallback experts."
         )
-        return self.fallback_experts.activation_formats
+
+    @classmethod
+    def activation_format(
+        cls: type["FallbackExperts"],
+    ) -> mk.FusedMoEActivationFormat:
+        experts_cls, fallback_cls = cls.get_clses()
+        assert experts_cls.activation_format() == fallback_cls.activation_format()
+        return experts_cls.activation_format()
+
+    @classmethod
+    def _supports_current_device(cls) -> bool:
+        experts_cls, fallback_cls = cls.get_clses()
+        return (
+            experts_cls._supports_current_device()
+            and fallback_cls._supports_current_device()
+        )
+
+    @classmethod
+    def _supports_no_act_and_mul(cls) -> bool:
+        experts_cls, fallback_cls = cls.get_clses()
+        return (
+            experts_cls._supports_no_act_and_mul()
+            and fallback_cls._supports_no_act_and_mul()
+        )
+
+    @classmethod
+    def _supports_quant_scheme(
+        cls,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+    ) -> bool:
+        experts_cls, fallback_cls = cls.get_clses()
+        return experts_cls._supports_quant_scheme(
+            weight_key, activation_key
+        ) and fallback_cls._supports_quant_scheme(weight_key, activation_key)
+
+    @classmethod
+    def _supports_activation(cls, activation: MoEActivation) -> bool:
+        experts_cls, fallback_cls = cls.get_clses()
+        return experts_cls._supports_activation(
+            activation
+        ) and fallback_cls._supports_activation(activation)
+
+    @classmethod
+    def _supports_parallel_config(
+        cls, moe_parallel_config: FusedMoEParallelConfig
+    ) -> bool:
+        experts_cls, fallback_cls = cls.get_clses()
+        return experts_cls._supports_parallel_config(
+            moe_parallel_config
+        ) and fallback_cls._supports_parallel_config(moe_parallel_config)
 
     def supports_chunking(self) -> bool:
         assert (
@@ -76,7 +139,7 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         raise NotImplementedError
 
@@ -97,7 +160,7 @@ class FallbackExperts(mk.FusedMoEPermuteExpertsUnpermute, ABC):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,

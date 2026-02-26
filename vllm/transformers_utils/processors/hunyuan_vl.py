@@ -23,7 +23,6 @@ class HunYuanVLProcessor(ProcessorMixin):
         self,
         image_processor=None,
         tokenizer=None,
-        video_processor=None,
         chat_template=None,
         **kwargs,
     ):
@@ -42,9 +41,7 @@ class HunYuanVLProcessor(ProcessorMixin):
         )
         self.pad_id = 120002  # self.tokenizer.pad_token_id
 
-        super().__init__(
-            image_processor, tokenizer, video_processor, chat_template=chat_template
-        )
+        super().__init__(image_processor, tokenizer, chat_template=chat_template)
 
     def __call__(
         self,
@@ -148,8 +145,8 @@ class HunYuanVLProcessor(ProcessorMixin):
         assert 0
 
     def apply_chat_template(self, *args, **kwargs):
-        token_ids = self.tokenizer.apply_chat_template(*args, **kwargs)
-        return token_ids
+        kwargs["return_dict"] = False
+        return self.tokenizer.apply_chat_template(*args, **kwargs)
 
     def get_imgs_pos(self, doc_ids):
         doc_ids = np.array(doc_ids, dtype=np.int64)

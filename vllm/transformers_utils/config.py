@@ -23,6 +23,7 @@ from transformers.utils import CONFIG_NAME as HF_CONFIG_NAME
 
 from vllm import envs
 from vllm.logger import init_logger
+from vllm.transformers_utils.repo_utils import is_mistral_model_repo
 from vllm.transformers_utils.utils import parse_safetensors_file_metadata
 
 from .config_parser_base import ConfigParserBase
@@ -33,7 +34,6 @@ from .gguf_utils import (
     split_remote_gguf,
 )
 from .repo_utils import (
-    _get_hf_token,
     file_or_path_exists,
     get_hf_file_to_dict,
     list_repo_files,
@@ -49,7 +49,6 @@ except ImportError:
     from transformers.configuration_utils import (
         ALLOWED_LAYER_TYPES as ALLOWED_ATTENTION_LAYER_TYPES,
     )
-
 
 if envs.VLLM_USE_MODELSCOPE:
     from modelscope import AutoConfig
@@ -75,13 +74,20 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
     bagel="BagelConfig",
     chatglm="ChatGLMConfig",
+    colmodernvbert="ColModernVBertConfig",
+    colqwen3="ColQwen3Config",
+    ops_colqwen3="OpsColQwen3Config",
+    qwen3_vl_nemotron_embed="Qwen3VLNemotronEmbedConfig",
     deepseek_vl_v2="DeepseekVLV2Config",
     deepseek_v32="DeepseekV3Config",
     flex_olmo="FlexOlmoConfig",
+    funaudiochat="FunAudioChatConfig",
+    glm_ocr="GlmOcrConfig",
     hunyuan_vl="HunYuanVLConfig",
     isaac="IsaacConfig",
     kimi_linear="KimiLinearConfig",
     kimi_vl="KimiVLConfig",
+    kimi_k25="KimiK25Config",
     RefinedWeb="RWConfig",  # For tiiuae/falcon-40b(-instruct)
     RefinedWebModel="RWConfig",  # For tiiuae/falcon-7b(-instruct)
     jais="JAISConfig",
@@ -97,7 +103,11 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     ultravox="UltravoxConfig",
     step3_vl="Step3VLConfig",
     step3_text="Step3TextConfig",
+    step3p5="Step3p5Config",
+    qwen3_asr="Qwen3ASRConfig",
     qwen3_next="Qwen3NextConfig",
+    qwen3_5="Qwen3_5Config",
+    qwen3_5_moe="Qwen3_5MoeConfig",
     lfm2_moe="Lfm2MoeConfig",
     tarsier2="Tarsier2Config",
 )
@@ -136,7 +146,6 @@ class HFConfigParser(ConfigParserBase):
             revision=revision,
             code_revision=code_revision,
             trust_remote_code=trust_remote_code,
-            token=_get_hf_token(),
             **kwargs,
         )
         # Use custom model class if it's in our registry
@@ -158,7 +167,6 @@ class HFConfigParser(ConfigParserBase):
                 revision=revision,
                 code_revision=code_revision,
                 trust_remote_code=trust_remote_code,
-                token=_get_hf_token(),
                 **kwargs,
             )
         else:
@@ -169,7 +177,6 @@ class HFConfigParser(ConfigParserBase):
                     trust_remote_code=trust_remote_code,
                     revision=revision,
                     code_revision=code_revision,
-                    token=_get_hf_token(),
                     **kwargs,
                 )
             except ValueError as e:
@@ -219,26 +226,12 @@ class MistralConfigParser(ConfigParserBase):
                 model,
                 revision=revision,
                 code_revision=code_revision,
-                token=_get_hf_token(),
                 **kwargs,
             )
         except OSError:  # Not found
             hf_config_dict = {}
 
         config = adapt_config_dict(config_dict, defaults=hf_config_dict)
-
-        # Mistral configs may define sliding_window as list[int]. Convert it
-        # to int and add the layer_types list[str] to make it HF compatible
-        if (sliding_window := getattr(config, "sliding_window", None)) and isinstance(
-            sliding_window, list
-        ):
-            pattern_repeats = config.num_hidden_layers // len(sliding_window)
-            layer_types = sliding_window * pattern_repeats
-            config.layer_types = [
-                "full_attention" if layer_type is None else "sliding_attention"
-                for layer_type in layer_types
-            ]
-            config.sliding_window = next(filter(None, sliding_window), None)
 
         return config_dict, config
 
@@ -334,7 +327,7 @@ def patch_rope_parameters(config: PretrainedConfig) -> None:
     partial_rotary_factor = getattr_iter(config, names, None, warn=True)
     ompe = getattr(config, "original_max_position_embeddings", None)
 
-    if Version(version("transformers")) < Version("5.0.0.dev0"):
+    if Version(version("transformers")) < Version("5.0.0"):
         # Transformers v4 installed, legacy config fields may be present
         if (rope_scaling := getattr(config, "rope_scaling", None)) is not None:
             config.rope_parameters = rope_scaling
@@ -530,7 +523,6 @@ def maybe_override_with_speculators(
         model if gguf_model_repo is None else gguf_model_repo,
         revision=revision,
         trust_remote_code=trust_remote_code,
-        token=_get_hf_token(),
         **kwargs,
     )
     speculators_config = config_dict.get("speculators_config")
@@ -585,7 +577,11 @@ def get_config(
         try:
             # First check for Mistral to avoid defaulting to
             # Transformers implementation.
-            if file_or_path_exists(model, MISTRAL_CONFIG_NAME, revision=revision):
+            if is_mistral_model_repo(
+                model_name_or_path=str(model), revision=revision
+            ) and file_or_path_exists(
+                model=model, config_name=MISTRAL_CONFIG_NAME, revision=revision
+            ):
                 config_format = "mistral"
             elif (_is_gguf and not _is_remote_gguf) or file_or_path_exists(
                 model, HF_CONFIG_NAME, revision=revision
@@ -834,7 +830,7 @@ def parse_pooling_type(pooling_name: str):
 @cache
 def get_sentence_transformer_tokenizer_config(
     model: str | Path, revision: str | None = "main"
-):
+) -> dict[str, Any] | None:
     """
     Returns the tokenization configuration dictionary for a
     given Sentence Transformer BERT model.
@@ -872,9 +868,7 @@ def get_sentence_transformer_tokenizer_config(
     if not encoder_dict and not Path(model).is_absolute():
         try:
             # If model is on HuggingfaceHub, get the repo files
-            repo_files = list_repo_files(
-                model, revision=revision, token=_get_hf_token()
-            )
+            repo_files = list_repo_files(model, revision=revision)
         except Exception:
             repo_files = []
 
@@ -1043,10 +1037,7 @@ def try_get_safetensors_metadata(
     revision: str | None = None,
 ):
     get_safetensors_metadata_partial = partial(
-        get_safetensors_metadata,
-        model,
-        revision=revision,
-        token=_get_hf_token(),
+        get_safetensors_metadata, model, revision=revision
     )
 
     try:
@@ -1085,9 +1076,11 @@ def try_get_dense_modules(
         if isinstance(modules, dict):
             modules = modules.get("modules", [])
 
-        dense_modules = [
-            m for m in modules if m.get("type") == "sentence_transformers.models.Dense"
-        ]
+        _DENSE_MODULE_TYPES = {
+            "sentence_transformers.models.Dense",
+            "pylate.models.Dense.Dense",
+        }
+        dense_modules = [m for m in modules if m.get("type") in _DENSE_MODULE_TYPES]
         if not dense_modules:
             return None
 

@@ -29,6 +29,7 @@ def run_server(
     show_stdout: bool,
     serve_overrides: ParameterSweepItem,
     dry_run: bool,
+    server_ready_timeout: int = 300,
 ):
     server_cmd = serve_overrides.apply_to_cmd(serve_cmd)
 
@@ -42,6 +43,7 @@ def run_server(
         return
 
     with ServerProcess(server_cmd, after_bench_cmd, show_stdout=show_stdout) as server:
+        server.wait_until_ready(timeout=server_ready_timeout)
         yield server
 
     print("[END SERVER]")
@@ -90,7 +92,8 @@ def run_benchmark(
     run_data: dict[str, object]
 
     if output_path.exists():
-        print("Found existing results. Skipping.")
+        print("Found existing results.")
+        print("[SKIPPED BENCHMARK]")
 
         with output_path.open("rb") as f:
             run_data = json.load(f)
@@ -165,6 +168,43 @@ def _comb_needs_server(
     return False
 
 
+def server_ctx(
+    serve_cmd: list[str],
+    after_bench_cmd: list[str],
+    *,
+    show_stdout: bool,
+    serve_comb: ParameterSweepItem,
+    bench_params: ParameterSweep,
+    output_dir: Path,
+    dry_run: bool,
+    server_ready_timeout: int = 300,
+):
+    if not _comb_needs_server(serve_comb, bench_params, output_dir):
+        return contextlib.nullcontext()
+
+    return run_server(
+        serve_cmd,
+        after_bench_cmd,
+        show_stdout=show_stdout,
+        serve_overrides=serve_comb,
+        dry_run=dry_run,
+        server_ready_timeout=server_ready_timeout,
+    )
+
+
+def _comb_is_valid(
+    serve_comb: ParameterSweepItem,
+    bench_comb: ParameterSweepItem,
+    link_vars: list[tuple[str, str]],
+) -> bool:
+    return all(
+        serve_key in serve_comb
+        and bench_key in bench_comb
+        and serve_comb[serve_key] == bench_comb[bench_key]
+        for serve_key, bench_key in link_vars
+    )
+
+
 def run_comb(
     server: ServerProcess | None,
     bench_cmd: list[str],
@@ -174,7 +214,11 @@ def run_comb(
     base_path: Path,
     num_runs: int,
     dry_run: bool,
+    link_vars: list[tuple[str, str]],
 ):
+    if not _comb_is_valid(serve_comb, bench_comb, link_vars):
+        return None
+
     comb_data = list[dict[str, object]]()
 
     for run_number in range(num_runs):
@@ -206,35 +250,27 @@ def run_combs(
     after_bench_cmd: list[str],
     *,
     show_stdout: bool,
+    server_ready_timeout: int,
     serve_params: ParameterSweep,
     bench_params: ParameterSweep,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
-    links: list[tuple[str, str]],
+    link_vars: list[tuple[str, str]],
 ):
     all_data = list[dict[str, object]]()
     for serve_comb in serve_params:
-        with (
-            run_server(
-                serve_cmd,
-                after_bench_cmd,
-                show_stdout=show_stdout,
-                serve_overrides=serve_comb,
-                dry_run=dry_run,
-            )
-            if _comb_needs_server(serve_comb, bench_params, output_dir)
-            else contextlib.nullcontext()
+        with server_ctx(
+            serve_cmd,
+            after_bench_cmd,
+            show_stdout=show_stdout,
+            serve_comb=serve_comb,
+            bench_params=bench_params,
+            output_dir=output_dir,
+            dry_run=dry_run,
+            server_ready_timeout=server_ready_timeout,
         ) as server:
             for bench_comb in bench_params:
-                should_run = all(
-                    serve_key in serve_comb
-                    and bench_key in bench_comb
-                    and serve_comb[serve_key] == bench_comb[bench_key]
-                    for serve_key, bench_key in links
-                )
-                if not should_run:
-                    continue
                 base_path = _get_comb_base_path(output_dir, serve_comb, bench_comb)
 
                 comb_data = run_comb(
@@ -245,6 +281,7 @@ def run_combs(
                     base_path=base_path,
                     num_runs=num_runs,
                     dry_run=dry_run,
+                    link_vars=link_vars,
                 )
 
                 if comb_data is not None:
@@ -265,13 +302,14 @@ class SweepServeArgs:
     bench_cmd: list[str]
     after_bench_cmd: list[str]
     show_stdout: bool
+    server_ready_timeout: int
     serve_params: ParameterSweep
     bench_params: ParameterSweep
     output_dir: Path
     num_runs: int
     dry_run: bool
     resume: str | None
-    link_vars: list[tuple[str, str]] | None
+    link_vars: list[tuple[str, str]]
 
     parser_name: ClassVar[str] = "serve"
     parser_help: ClassVar[str] = "Run vLLM server benchmark under multiple settings."
@@ -295,7 +333,9 @@ class SweepServeArgs:
         else:
             # i.e.: run bench_cmd without any modification
             bench_params = ParameterSweep.from_records([{}])
+
         link_vars = cls.parse_link_vars(args.link_vars)
+
         num_runs = args.num_runs
         if num_runs < 1:
             raise ValueError("`num_runs` should be at least 1.")
@@ -312,6 +352,7 @@ class SweepServeArgs:
             dry_run=args.dry_run,
             resume=args.resume,
             link_vars=link_vars,
+            server_ready_timeout=args.server_ready_timeout,
         )
 
     @classmethod
@@ -340,6 +381,12 @@ class SweepServeArgs:
             action="store_true",
             help="If set, logs the standard output of subcommands. "
             "Useful for debugging but can be quite spammy.",
+        )
+        parser.add_argument(
+            "--server-ready-timeout",
+            type=int,
+            default=300,
+            help="Timeout in seconds to wait for the server to become ready.",
         )
         parser.add_argument(
             "--serve-params",
@@ -425,12 +472,13 @@ def run_main(args: SweepServeArgs):
             bench_cmd=args.bench_cmd,
             after_bench_cmd=args.after_bench_cmd,
             show_stdout=args.show_stdout,
+            server_ready_timeout=args.server_ready_timeout,
             serve_params=args.serve_params,
             bench_params=args.bench_params,
             output_dir=output_dir,
             num_runs=args.num_runs,
             dry_run=args.dry_run,
-            links=args.link_vars,
+            link_vars=args.link_vars,
         )
     except BaseException as exc:
         raise RuntimeError(

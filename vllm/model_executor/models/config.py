@@ -112,6 +112,42 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
+class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
+    """Config handler for LlamaNemotronVL embedding models."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        from vllm.config.pooler import SequencePoolingType
+
+        hf_config = model_config.hf_config
+
+        # Set bidirectional attention on the language model config
+        hf_config.is_causal = False
+        if hasattr(hf_config, "llm_config"):
+            hf_config.llm_config.is_causal = False
+
+        if hasattr(hf_config, "vision_config"):
+            hf_config.patch_size = hf_config.vision_config.patch_size
+
+        # Set up pooling type
+        pooling_type_map: dict[str, SequencePoolingType] = {
+            "avg": "MEAN",
+            "cls": "CLS",
+            "last": "LAST",
+        }
+
+        # Get pooling type from config (check both top-level and llm_config)
+        pooling = getattr(hf_config, "pooling", None)
+        if pooling is None and hasattr(hf_config, "llm_config"):
+            pooling = getattr(hf_config.llm_config, "pooling", "avg")
+
+        pooling_type = pooling_type_map.get(pooling)
+        if pooling_type is None:
+            raise ValueError(f"pool_type {pooling!r} not supported")
+
+        model_config.pooler_config.seq_pooling_type = pooling_type
+
+
 class NomicBertModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -233,8 +269,8 @@ class Qwen2ForRewardModelConfig(VerifyAndUpdateConfig):
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
         pooler_config = model_config.pooler_config
 
-        if pooler_config.softmax is None:
-            pooler_config.softmax = False
+        if pooler_config.use_activation is None:
+            pooler_config.use_activation = False
 
 
 class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
@@ -330,26 +366,50 @@ class MambaModelConfig(VerifyAndUpdateConfig):
         cache_config = vllm_config.cache_config
 
         if cache_config.enable_prefix_caching:
-            if model_config.supports_mamba_prefix_caching:
-                logger.info(
-                    "Warning: Prefix caching is currently enabled. "
-                    "Its support for Mamba layers is experimental. "
-                    "Please report any issues you may observe."
+            if cache_config.mamba_cache_mode == "none":
+                cache_config.mamba_cache_mode = (
+                    "all" if model_config.supports_mamba_prefix_caching else "align"
                 )
-                # By default, mamba block size will be set to max_model_len (see
-                # below). When enabling prefix caching, we align mamba block size
-                # to the block size as the basic granularity for prefix caching.
-                if cache_config.mamba_block_size is None:
-                    cache_config.mamba_block_size = cache_config.block_size
-            else:
-                logger.info(
-                    "Hybrid or mamba-based model detected without "
-                    "support for prefix caching: disabling."
+                logger.warning(
+                    "Mamba cache mode is set to '%s' for %s by default "
+                    "when prefix caching is enabled",
+                    cache_config.mamba_cache_mode,
+                    model_config.architecture,
                 )
-                cache_config.enable_prefix_caching = False
-
-        if cache_config.mamba_block_size is None:
-            cache_config.mamba_block_size = model_config.max_model_len
+            if (
+                cache_config.mamba_cache_mode == "all"
+                and not model_config.supports_mamba_prefix_caching
+            ):
+                cache_config.mamba_cache_mode = "align"
+                logger.warning(
+                    "Hybrid or mamba-based model detected without support "
+                    "for prefix caching with Mamba cache 'all' mode: "
+                    "falling back to 'align' mode."
+                )
+            if cache_config.mamba_cache_mode == "align":
+                assert vllm_config.scheduler_config.enable_chunked_prefill, (
+                    "Chunked prefill is required for mamba cache mode 'align'."
+                )
+            logger.info(
+                "Warning: Prefix caching in Mamba cache '%s' "
+                "mode is currently enabled. "
+                "Its support for Mamba layers is experimental. "
+                "Please report any issues you may observe.",
+                cache_config.mamba_cache_mode,
+            )
+            # By default, mamba block size will be set to max_model_len (see
+            # below). When enabling prefix caching, we align mamba block size
+            # to the block size as the basic granularity for prefix caching.
+            if cache_config.mamba_block_size is None:
+                cache_config.mamba_block_size = cache_config.block_size
+        else:
+            if cache_config.mamba_cache_mode != "none":
+                cache_config.mamba_cache_mode = "none"
+                logger.warning(
+                    "Mamba cache mode is set to 'none' when prefix caching is disabled"
+                )
+            if cache_config.mamba_block_size is None:
+                cache_config.mamba_block_size = model_config.max_model_len
 
 
 class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
@@ -426,7 +486,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
             dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),
-            block_size=model_config.max_model_len,
+            block_size=-1,  # block_size doesn't matter for mamba page size
         ).page_size_bytes
 
         # Model may be marked as is_hybrid
@@ -435,7 +495,7 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         if mamba_page_size == 0:
             return
 
-        if cache_config.enable_prefix_caching:
+        if cache_config.mamba_cache_mode == "all":
             # With prefix caching, select attention block size to
             # optimize for mamba kernel performance
 
@@ -478,6 +538,13 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 "to ensure that attention page size is >= mamba page size.",
                 attn_block_size,
             )
+
+        # By default, mamba block size will be set to max_model_len.
+        # When enabling prefix caching and using align mamba cache
+        # mode, we align mamba block size to the block size as the
+        # basic granularity for prefix caching.
+        if cache_config.mamba_cache_mode == "align":
+            cache_config.mamba_block_size = cache_config.block_size
 
         # compute new attention page size
         attn_page_size = cache_config.block_size * attn_page_size_1_token
@@ -547,6 +614,40 @@ class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
             cache_config.mamba_ssm_cache_dtype = mamba_ssm_cache_dtype
 
 
+class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Update mamba_ssm_cache_dtype for Qwen3.5 models when set to 'auto'
+        (or not explicitly set), to the value specified in the HF config's
+        mamba_ssm_dtype field. Warn if the user explicitly overrides it to a
+        different value.
+        """
+        cache_config = vllm_config.cache_config
+        hf_text_config = vllm_config.model_config.hf_text_config
+        mamba_ssm_dtype = getattr(hf_text_config, "mamba_ssm_dtype", None)
+        if cache_config.mamba_ssm_cache_dtype == "auto":
+            if mamba_ssm_dtype is not None:
+                cache_config.mamba_ssm_cache_dtype = mamba_ssm_dtype
+        elif (
+            mamba_ssm_dtype is not None
+            and cache_config.mamba_ssm_cache_dtype != mamba_ssm_dtype
+        ):
+            logger.warning(
+                "Qwen3.5 model specifies mamba_ssm_dtype='%s' in its config, "
+                "but --mamba-ssm-cache-dtype='%s' was passed. "
+                "Using the user-specified value.",
+                mamba_ssm_dtype,
+                cache_config.mamba_ssm_cache_dtype,
+            )
+
+
+class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.is_causal = False
+        model_config.hf_config.embedding_size = model_config.hf_config.num_labels
+
+
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "GteModel": SnowflakeGteNewModelConfig,
     "GteNewModel": GteNewModelConfig,
@@ -554,12 +655,14 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma3TextModel": Gemma3TextModelConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
+    "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
+    "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "GptOssForCausalLM": GptOssForCausalLMConfig,
@@ -568,4 +671,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "FalconMambaForCausalLM": MambaModelConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "NemotronHForCausalLM": NemotronHForCausalLMConfig,
+    "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
+    "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
 }

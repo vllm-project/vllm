@@ -5,7 +5,6 @@ import numpy as np
 import pytest
 import torch
 
-from vllm.attention.layer import Attention
 from vllm.config import (
     AttentionConfig,
     CacheConfig,
@@ -19,6 +18,7 @@ from vllm.distributed.parallel_state import (
     init_distributed_environment,
     initialize_model_parallel,
 )
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
@@ -543,7 +543,7 @@ def test_load_model_weights_inplace(dist_init, model_runner, model_runner_2):
 
 
 def test_reload_weights_before_load_model(model_runner):
-    with pytest.raises(AssertionError):
+    with pytest.raises(ValueError):
         model_runner.reload_weights()
 
 

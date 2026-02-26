@@ -6,33 +6,31 @@ from typing import TYPE_CHECKING
 
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
-    FusedMoEQuantConfig,
+    FusedMoEParallelConfig,
     RoutingMethodType,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutedsl_moe import (
-    FlashInferCuteDSLExperts,
+from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+    activation_to_flashinfer_int,
+    align_fp4_moe_weights_for_fi,
 )
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_moe import (
-    FlashInferExperts,
-)
-from vllm.model_executor.layers.fused_moe.flashinfer_cutlass_prepare_finalize import (  # noqa: E501
-    create_flashinfer_prepare_finalize,
-)
-from vllm.model_executor.layers.quantization.utils.quant_utils import (
+from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     swizzle_blockscale,
 )
-from vllm.platforms import current_platform
-from vllm.utils.flashinfer import (
-    has_flashinfer_cutedsl_grouped_gemm_nt_masked,
-    has_flashinfer_cutlass_fused_moe,
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+    kNvfp4Dynamic,
+    kNvfp4Static,
 )
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.layer import FusedMoE
     from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
         NvFp4MoeBackend,
     )
@@ -41,31 +39,95 @@ logger = init_logger(__name__)
 
 
 __all__ = [
-    "is_flashinfer_fp4_cutlass_moe_available",
-    "is_flashinfer_fp4_cutedsl_moe_available",
     "reorder_w1w3_to_w3w1",
-    "build_flashinfer_fp4_cutlass_moe_prepare_finalize",
 ]
 
-
-def is_flashinfer_fp4_cutlass_moe_available() -> bool:
-    """Return `True` when FlashInfer CUTLASS NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutlass_fused_moe()
-        and current_platform.is_cuda()
-        and current_platform.has_device_capability(100)
-    )
+#
+# Methods used by the oracle for kernel selection.
+#
 
 
-def is_flashinfer_fp4_cutedsl_moe_available() -> bool:
-    """Return ``True`` when FlashInfer CUTEDSL NV-FP4 kernels can be used."""
-    return (
-        envs.VLLM_USE_FLASHINFER_MOE_FP4
-        and has_flashinfer_cutedsl_grouped_gemm_nt_masked()
-        and current_platform.is_cuda()
-        and current_platform.is_device_capability_family(100)
-    )
+def _supports_current_device() -> bool:
+    """Supports only Blackwell-family GPUs."""
+    p = current_platform
+    return p.is_cuda() and p.is_device_capability_family(100)
+
+
+def _supports_no_act_and_mul() -> bool:
+    """Supports non-gated MoE."""
+    return True
+
+
+def _supports_quant_scheme(
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+) -> bool:
+    """Supports Nvfp4 quantization."""
+    SUPPORTED_W_A = [
+        (kNvfp4Static, kNvfp4Dynamic),
+    ]
+    return (weight_key, activation_key) in SUPPORTED_W_A
+
+
+def _supports_activation(activation: MoEActivation) -> bool:
+    return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+
+
+def _supports_routing_method(
+    routing_method: RoutingMethodType,
+) -> bool:
+    """Monolithic kernels need to express router support."""
+    # NOTE(rob): potentially allow others here. This is a conservative list.
+    return routing_method in [
+        RoutingMethodType.DeepSeekV3,
+        RoutingMethodType.Renormalize,
+        RoutingMethodType.RenormalizeNaive,
+        RoutingMethodType.Llama4,
+    ]
+
+
+def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+    """
+    TRTLLM is a monolithic kernel that requires dispatch_router_logits() for
+    the naive dispatch/combine path. DeepEP HT only implements dispatch() for
+    the modular kernel path, so TRTLLM is incompatible with DeepEP HT.
+    """
+    return not moe_parallel_config.use_deepep_ht_kernels
+
+
+def is_supported_config_trtllm(
+    moe_config: FusedMoEConfig,
+    weight_key: QuantKey | None,
+    activation_key: QuantKey | None,
+    activation_format: mk.FusedMoEActivationFormat,
+) -> tuple[bool, str | None]:
+    """
+    This method mirrors mk.FusedMoEPermuteExpertsUnpermute.is_supported_config
+    """
+
+    def _make_reason(reason: str) -> str:
+        return f"kernel does not support {reason}"
+
+    if not _supports_current_device():
+        return False, _make_reason(f"current device {current_platform.device_name}")
+    elif not (moe_config.is_act_and_mul or _supports_no_act_and_mul()):
+        return False, _make_reason("no act_and_mul MLP layer")
+    elif not _supports_activation(moe_config.activation):
+        return False, _make_reason(f"{moe_config.activation} activation")
+    elif not _supports_quant_scheme(weight_key, activation_key):
+        return False, _make_reason(f"quantization scheme {weight_key}x{activation_key}")
+    elif not _supports_parallel_config(moe_config.moe_parallel_config):
+        return False, _make_reason(f"parallel config {moe_config.moe_parallel_config}")
+    elif not _supports_routing_method(moe_config.routing_method):
+        return False, _make_reason(f"routing method {moe_config.routing_method}")
+    elif activation_format != mk.FusedMoEActivationFormat.Standard:
+        return False, _make_reason(f"activation format {activation_format}")
+    elif moe_config.hidden_dim % 512 != 0:
+        return False, _make_reason(
+            f"hidden_dim must be divisible by 512, found {moe_config.hidden_dim}"
+        )
+
+    return True, None
 
 
 def reorder_w1w3_to_w3w1(
@@ -85,48 +147,6 @@ def reorder_w1w3_to_w3w1(
     )
 
 
-def build_flashinfer_fp4_cutlass_moe_prepare_finalize(
-    moe: FusedMoEConfig,
-) -> mk.FusedMoEPrepareAndFinalize:
-    """Create a FlashInfer CUTLASS fused-MoE prepare finalize kernel"""
-    use_dp = moe.moe_parallel_config.dp_size > 1
-    enable_alltoallv = moe.moe_parallel_config.all2all_backend == "flashinfer_all2allv"
-    return create_flashinfer_prepare_finalize(
-        use_dp=use_dp, use_nvfp4=True, enable_alltoallv=enable_alltoallv
-    )
-
-
-def select_nvfp4_gemm_impl(
-    moe: FusedMoEConfig,
-    moe_quant_config: FusedMoEQuantConfig,
-    allow_flashinfer: bool,
-) -> mk.FusedMoEPermuteExpertsUnpermute:
-    """Return a GEMM *experts* implementation for NV-FP4 fused-MoE layers"""
-
-    if allow_flashinfer:
-        if envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm":
-            return FlashInferCuteDSLExperts(
-                out_dtype=moe.in_dtype,
-                quant_config=moe_quant_config,
-            )
-        elif envs.VLLM_FLASHINFER_MOE_BACKEND == "throughput":
-            return FlashInferExperts(
-                out_dtype=moe.in_dtype,
-                quant_config=moe_quant_config,
-                ep_rank=moe.moe_parallel_config.ep_rank,
-                ep_size=moe.moe_parallel_config.ep_size,
-                tp_rank=moe.moe_parallel_config.tp_rank,
-                tp_size=moe.moe_parallel_config.tp_size,
-                use_dp=moe.moe_parallel_config.dp_size > 1,
-            )
-
-    # native cutlass experts currently don't support DP; TP case won't call this
-    raise ValueError(
-        "CutlassExpertsFp4 doesn't support DP. Use flashinfer CUTLASS "
-        "Fused MoE backend instead (set VLLM_USE_FLASHINFER_MOE_FP4=1)"
-    )
-
-
 def prepare_static_weights_for_trtllm_fp4_moe(
     # args_dequant,
     # args,
@@ -137,6 +157,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     hidden_size,
     intermediate_size,
     num_experts,
+    is_gated_activation: bool,
 ):
     from flashinfer import nvfp4_block_scale_interleave
     from flashinfer.fused_moe.core import (
@@ -147,15 +168,18 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     _cache_permute_indices: dict[torch.Size, torch.Tensor] = {}
     """Prepare quantized weights for kernel (done offline with weights)."""
     epilogue_tile_m = 128  # FIXME: this depends on the kernel internals
+    gemm1_intermediate_size = (
+        2 * intermediate_size if is_gated_activation else intermediate_size
+    )
 
     # Convert quantized weights to proper formats
     gemm1_weights_fp4 = gemm1_weights.view(torch.float8_e4m3fn).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 2
+        num_experts, gemm1_intermediate_size, hidden_size // 2
     )  # packed fp4
     gemm1_scales_linear_fp4 = gemm1_scales_linear_fp4_bytes.view(
         torch.float8_e4m3fn
     ).reshape(
-        num_experts, 2 * intermediate_size, hidden_size // 16
+        num_experts, gemm1_intermediate_size, hidden_size // 16
     )  # fp8 scaling factors
 
     gemm2_weights_fp4 = gemm2_weights.view(torch.float8_e4m3fn).reshape(
@@ -178,6 +202,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
             _cache_permute_indices,
             gemm1_weights_fp4[i].view(torch.uint8),
             epilogue_tile_m,
+            is_gated_act_gemm=is_gated_activation,
         )
         gemm1_weights_fp4_shuffled.append(
             gemm1_weights_fp4[i]
@@ -190,6 +215,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
             gemm1_scales_linear_fp4[i].view(torch.uint8),
             epilogue_tile_m,
             num_elts_per_sf=16,
+            is_gated_act_gemm=is_gated_activation,
         )
         gemm1_scales_fp4_shuffled.append(
             nvfp4_block_scale_interleave(
@@ -233,7 +259,7 @@ def prepare_static_weights_for_trtllm_fp4_moe(
     gemm1_scales_fp4_shuffled = (
         torch.stack(gemm1_scales_fp4_shuffled)
         .view(torch.float8_e4m3fn)
-        .reshape(num_experts, 2 * intermediate_size, hidden_size // 16)
+        .reshape(num_experts, gemm1_intermediate_size, hidden_size // 16)
     )
 
     gemm2_weights_fp4_shuffled = torch.stack(gemm2_weights_fp4_shuffled)
@@ -255,7 +281,7 @@ def flashinfer_trtllm_fp4_moe(
     x: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
     router_logits: torch.Tensor,
     top_k: int,
-    activation: str,
+    activation: MoEActivation,
     global_num_experts: int,
     num_expert_group: int | None,
     topk_group: int | None,
@@ -284,10 +310,10 @@ def flashinfer_trtllm_fp4_moe(
 
     from vllm.model_executor.models.llama4 import Llama4MoE
 
-    # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2404
-    assert activation == "silu", (
-        "Only SiLU activation is supported for FlashInfer TRTLLM FP4 MoE. "
-        f"{activation} found instead."
+    SUPPORTED_ACTIVATIONS = [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+    assert activation in SUPPORTED_ACTIVATIONS, (
+        f"Only {SUPPORTED_ACTIVATIONS} activations are supported for FlashInfer "
+        f"TRTLLM FP4 MoE, {activation} found instead."
     )
 
     # Quantize input to FP4
@@ -295,10 +321,8 @@ def flashinfer_trtllm_fp4_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # hidden_states is the already quantized
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
+            x, layer.a1_gscale, is_sf_swizzled_layout=False
         )
 
     # Determine routing method type
@@ -307,25 +331,24 @@ def flashinfer_trtllm_fp4_moe(
     if use_llama4_routing:
         routing_method_type = flashinfer.RoutingMethodType.Llama4
 
-    # Prepare routing bias
-    routing_bias = e_score_correction_bias
-    if routing_bias is not None:
-        routing_bias = routing_bias.to(torch.bfloat16)
-
+    # Cast to Fp32 (required by kernel).
     router_logits = (
         router_logits.to(torch.float32)
         if routing_method_type == RoutingMethodType.DeepSeekV3
         else router_logits
     )
 
+    # Determine activation type
+    activation_type = activation_to_flashinfer_int(layer.activation)
+
     # Call TRT-LLM FP4 block-scale MoE kernel
     out = flashinfer.fused_moe.trtllm_fp4_block_scale_moe(
         routing_logits=router_logits,
-        routing_bias=routing_bias,
+        routing_bias=e_score_correction_bias,
         hidden_states=hidden_states_fp4,
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
-        ).flatten(),
+        ).reshape(*hidden_states_fp4.shape[:-1], -1),
         gemm1_weights=layer.w13_weight.data,
         gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
@@ -346,9 +369,9 @@ def flashinfer_trtllm_fp4_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         routed_scaling_factor=None,
-        tile_tokens_dim=None,
         routing_method_type=routing_method_type,
         do_finalize=True,
+        activation_type=activation_type,
     )[0]
 
     return out
@@ -360,7 +383,7 @@ def flashinfer_trtllm_fp4_routed_moe(
     topk_ids: torch.Tensor,
     topk_weights: torch.Tensor,
     top_k: int,
-    activation: str,
+    activation: MoEActivation,
     global_num_experts: int,
 ) -> torch.Tensor:
     """
@@ -382,7 +405,7 @@ def flashinfer_trtllm_fp4_routed_moe(
     import flashinfer
 
     # https://github.com/flashinfer-ai/flashinfer/blob/f0277fd1bff90e309e5c19cab36c5dae056d685d/flashinfer/fused_moe/core.py#L2535
-    assert activation == "silu", (
+    assert activation == MoEActivation.SILU, (
         "Only SiLU activation is supported for FlashInfer TRTLLM FP4 Routed MoE. "
         f"{activation} found instead."
     )
@@ -398,10 +421,8 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states_fp4, hidden_states_scale_linear_fp4 = x
     else:
         # Quantize input to FP4
-        (hidden_states_fp4, hidden_states_scale_linear_fp4) = flashinfer.fp4_quantize(
-            x,
-            layer.a1_gscale,
-            is_sf_swizzled_layout=False,
+        (hidden_states_fp4, hidden_states_scale_linear_fp4) = ops.scaled_fp4_quant(
+            x, layer.a1_gscale, is_sf_swizzled_layout=False
         )
 
     # Call TRT-LLM FP4 block-scale MoE kernel
@@ -411,7 +432,7 @@ def flashinfer_trtllm_fp4_routed_moe(
         hidden_states=hidden_states_fp4,
         hidden_states_scale=hidden_states_scale_linear_fp4.view(
             torch.float8_e4m3fn
-        ).flatten(),
+        ).reshape(*hidden_states_fp4.shape[:-1], -1),
         gemm1_weights=layer.w13_weight.data,
         gemm1_weights_scale=layer.w13_weight_scale.data.view(torch.float8_e4m3fn),
         gemm1_bias=None,
@@ -432,7 +453,6 @@ def flashinfer_trtllm_fp4_routed_moe(
         local_expert_offset=layer.ep_rank * layer.local_num_experts,
         local_num_experts=layer.local_num_experts,
         routed_scaling_factor=None,
-        tile_tokens_dim=None,
         routing_method_type=1,
         do_finalize=True,
     )[0]
@@ -442,7 +462,7 @@ def flashinfer_trtllm_fp4_routed_moe(
 
 def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     backend: "NvFp4MoeBackend",
-    layer: torch.nn.Module,
+    layer: "FusedMoE",
     w13: torch.Tensor,
     w13_scale: torch.Tensor,
     w13_scale_2: torch.Tensor,
@@ -476,10 +496,16 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
     ]
 
     # Reorder [w1, w3] to [w3, w1] for FI NVFP4 MoE kernels.
-    if is_act_and_mul and backend in [
-        NvFp4MoeBackend.FLASHINFER_CUTLASS,
-        NvFp4MoeBackend.FLASHINFER_TRTLLM,
-    ]:
+    is_gated = layer.activation.is_gated
+    if (
+        is_gated
+        and is_act_and_mul
+        and backend
+        in [
+            NvFp4MoeBackend.FLASHINFER_CUTLASS,
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        ]
+    ):
         w13, w13_scale = reorder_w1w3_to_w3w1(w13, w13_scale)
 
     # For some FI kernels, the input scales are shared by all experts.
@@ -492,19 +518,32 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
     # Shuffle weights and scales for FI TRTLLM NVFP4 MoE kernels.
     if backend == NvFp4MoeBackend.FLASHINFER_TRTLLM:
+        # Align weights for FI NVFP4 MoE kernels.
+        min_alignment = 16 if is_gated else 128
+        w13, w13_scale, w2, w2_scale, padded_intermediate = (
+            align_fp4_moe_weights_for_fi(
+                w13, w13_scale, w2, w2_scale, is_act_and_mul, min_alignment
+            )
+        )
+        layer.intermediate_size_per_partition = padded_intermediate
+
         w13, w13_scale, w2, w2_scale = prepare_static_weights_for_trtllm_fp4_moe(
             w13,
             w2,
             w13_scale,
             w2_scale,
-            w2.size(-2),  # hidden_size
-            w13.size(-2) // 2,  # intermediate_size
-            w13.size(0),  # num_experts
+            hidden_size=w2.size(-2),
+            intermediate_size=w13.size(-2) // 2 if is_gated else w13.size(-2),
+            num_experts=w13.size(0),
+            is_gated_activation=is_gated,
         )
 
         # We do not need to make this a parameter, because
         # it is not used during the weight (re)-loading process.
-        layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+        if is_gated:
+            layer.g1_scale_c = a13_scale * w13_scale_2 / a2_scale
+        else:
+            layer.g1_scale_c = torch.ones_like(a13_scale) / a2_scale
         layer.a1_gscale = 1.0 / a13_scale
         layer.g1_alphas = a13_scale * w13_scale_2
         layer.g2_alphas = a2_scale * w2_scale_2

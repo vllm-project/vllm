@@ -14,7 +14,7 @@ steps:
 
 - label: LoRA TP (Distributed)
   timeout_in_minutes: 30
-  num_gpus: 4
+  num_devices: 4
   source_file_dependencies:
   - vllm/lora
   - tests/lora

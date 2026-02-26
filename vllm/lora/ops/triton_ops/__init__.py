@@ -2,6 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from vllm.lora.ops.triton_ops.fused_moe_lora_fp8_op import (
+    fused_moe_lora_expand_fp8,
+    fused_moe_lora_fp8,
+    fused_moe_lora_shrink_fp8,
+)
 from vllm.lora.ops.triton_ops.fused_moe_lora_op import (
     fused_moe_lora,
     fused_moe_lora_expand,
@@ -18,4 +23,7 @@ __all__ = [
     "fused_moe_lora",
     "fused_moe_lora_shrink",
     "fused_moe_lora_expand",
+    "fused_moe_lora_fp8",
+    "fused_moe_lora_shrink_fp8",
+    "fused_moe_lora_expand_fp8",
 ]
