@@ -152,6 +152,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
                 ),
             )
 
+        # TODO: could be incorrect due to monolithic kernel? or add assert it
+        # is modular?
         if quant_config.use_mxfp4_w4a16:
             assert isinstance(
                 m_fused_moe_fn.fused_experts, (MarlinExperts, UnfusedOAITritonExperts)
@@ -338,6 +340,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             return wrapper
 
         fused_experts = m_fused_moe_fn.fused_experts
+
+        # TODO: seems like this could be done with modular kernel subclasses?
 
         m_fused_moe_fn.forward = fwd_decorator(self.base_layer, m_fused_moe_fn.forward)
         fused_experts.activation = act_decorator(
@@ -592,10 +596,6 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
         return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
-
-    @property
-    def _shared_experts(self):
-        return self.base_layer._shared_experts
 
     @property
     def quant_method(self):
