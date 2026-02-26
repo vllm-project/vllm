@@ -255,17 +255,26 @@ class CompletionRequest(OpenAIBaseModel):
                 structured_outputs_kwargs["json_object"] = True
             elif response_format.type == "json_schema":
                 json_schema = response_format.json_schema
-                assert json_schema is not None
+                if json_schema is None:
+                    raise ValueError(
+                        "When response_format type is 'json_schema', the "
+                        "'json_schema' field must be provided."
+                    )
                 structured_outputs_kwargs["json"] = json_schema.json_schema
             elif response_format.type == "structural_tag":
                 structural_tag = response_format
-                assert structural_tag is not None and isinstance(
+                if not isinstance(
                     structural_tag,
                     (
                         LegacyStructuralTagResponseFormat,
                         StructuralTagResponseFormat,
                     ),
-                )
+                ):
+                    raise ValueError(
+                        "When response_format type is 'structural_tag', "
+                        "the request must conform to the structural tag "
+                        "format."
+                    )
                 s_tag_obj = structural_tag.model_dump(by_alias=True)
                 structured_outputs_kwargs["structural_tag"] = json.dumps(s_tag_obj)
 

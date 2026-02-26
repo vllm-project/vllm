@@ -221,6 +221,23 @@ async def test_completion_error_stream():
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
+def test_json_schema_response_format_missing_schema():
+    """When response_format type is 'json_schema' but the json_schema field
+    is not provided, to_sampling_params should raise ValueError instead of
+    AssertionError so the API returns 400 instead of 500."""
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        response_format={"type": "json_schema"},
+    )
+    with pytest.raises(ValueError, match="json_schema.*must be provided"):
+        request.to_sampling_params(
+            default_sampling_params={},
+            default_max_tokens=100,
+        )
+
+
 def test_negative_prompt_token_ids_nested():
     """Negative token IDs in prompt (nested list) should raise validation error."""
     with pytest.raises(Exception, match="greater than or equal to 0"):
