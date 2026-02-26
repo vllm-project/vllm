@@ -209,11 +209,6 @@ class Eagle2_5_VLForConditionalGeneration(
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
-        self.configure_mm_token_handling(
-            vocab_size=config.text_config.vocab_size,
-            mm_token_ids=[config.image_token_index],
-        )
-
         # Image configuration
         image_size = (
             getattr(config, "force_image_size", None) or config.vision_config.image_size

@@ -507,6 +507,11 @@ class Gemma3ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
 
+        self.configure_mm_token_handling(
+            vocab_size=config.text_config.vocab_size,
+            mm_token_ids=[config.image_token_index],
+        )
+
         with self._mark_tower_model(vllm_config, "image"):
             self.vision_tower = SiglipVisionModel(
                 config.vision_config,
