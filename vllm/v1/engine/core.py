@@ -1011,6 +1011,11 @@ class EngineCoreProc(EngineCore):
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 
+        # Temporary: dump traceback if subprocess hangs during init.
+        import faulthandler
+
+        faulthandler.dump_traceback_later(300, exit=True)
+
         def signal_handler(signum, frame):
             nonlocal shutdown_requested
             if not shutdown_requested:
@@ -1069,6 +1074,7 @@ class EngineCoreProc(EngineCore):
                 engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
 
             assert engine_core is not None
+            faulthandler.cancel_dump_traceback_later()
             engine_core.run_busy_loop()
 
         except SystemExit:
