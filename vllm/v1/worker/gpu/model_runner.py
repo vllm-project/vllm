@@ -1021,22 +1021,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     aux_hidden_states = None
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
-
-        if not self.is_last_pp_rank:
-            # Non-last PP rank: return IntermediateTensors for sending.
-            assert isinstance(hidden_states, IntermediateTensors)
-            hidden_states.kv_connector_output = kv_connector_output
-            self.execute_model_state = (None, None, input_batch, kv_connector_output)
-            return hidden_states
-
-        # Last rank (or no PP): hidden_states is a tensor for sampling.
-        assert isinstance(hidden_states, torch.Tensor)
         self.execute_model_state = (
             hidden_states,
             aux_hidden_states,
             input_batch,
             kv_connector_output,
         )  # type: ignore
+
+        if not self.is_last_pp_rank:
+            # Non-last PP rank: return IntermediateTensors for sending.
+            assert isinstance(hidden_states, IntermediateTensors)
+            hidden_states.kv_connector_output = kv_connector_output
+            return hidden_states
+        # Last rank (or no PP): hidden_states is a tensor for sampling.
+        assert isinstance(hidden_states, torch.Tensor)
         return None
 
     @torch.inference_mode()
