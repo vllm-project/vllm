@@ -8,11 +8,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.config import ParallelConfig
-from vllm.distributed import (
-    get_dp_group,
-    get_pcp_group,
-    get_tensor_model_parallel_rank,
-)
+from vllm.distributed import get_dp_group, get_pcp_group, get_tensor_model_parallel_rank
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import (
@@ -126,20 +122,31 @@ class RoutingMethodType(IntEnum):
 
 
 def get_routing_method_type(
-    scoring_func: str, top_k: int, renormalize: bool
+    scoring_func: str,
+    top_k: int,
+    renormalize: bool,
+    num_expert_group: int | None,
+    has_e_score_bias: bool,
 ) -> RoutingMethodType:
+    if has_e_score_bias:
+        if (num_expert_group or 0) > 0 and scoring_func == "sigmoid":
+            return RoutingMethodType.DeepSeekV3
+        else:
+            return RoutingMethodType.Unspecified
+
     if scoring_func == "sigmoid":
         if top_k == 1:
             return RoutingMethodType.Llama4
         else:
-            return RoutingMethodType.DeepSeekV3
-    elif scoring_func == "softmax":
+            return RoutingMethodType.Unspecified
+
+    if scoring_func == "softmax":
         if renormalize:
             return RoutingMethodType.Renormalize
         else:
             return RoutingMethodType.Default
-    else:
-        return RoutingMethodType.Unspecified
+
+    return RoutingMethodType.Unspecified
 
 
 @dataclass
@@ -234,6 +241,10 @@ class FusedMoEQuantConfig:
     @property
     def quant_dtype(self) -> torch.dtype | str | None:
         return self._a1.dtype
+
+    @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return self._w1.dtype
 
     @property
     def is_quantized(self) -> bool:
@@ -1055,7 +1066,6 @@ class FusedMoEParallelConfig:
             - Comment: There are 2 engine instances and the experts are split
                 between the 4 devices.
         """
-
         use_ep = (
             dp_size_ * pcp_size_ * tp_size_ > 1
             and vllm_parallel_config.enable_expert_parallel
@@ -1144,6 +1154,7 @@ class FusedMoEConfig:
     # Defaults to in_dtype if not specified.
     router_logits_dtype: torch.dtype | None = None
 
+    moe_backend: str = "auto"
     max_num_tokens: int = envs.VLLM_MOE_DP_CHUNK_SIZE
     has_bias: bool = False
     is_act_and_mul: bool = True

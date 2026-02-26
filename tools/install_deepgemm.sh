@@ -65,7 +65,7 @@ fi
 
 # Extract major and minor version numbers
 CUDA_MAJOR="${CUDA_VERSION%%.*}"
-CUDA_MINOR="${CUDA_VERSION#${CUDA_MAJOR}.}"
+CUDA_MINOR="${CUDA_VERSION#"${CUDA_MAJOR}".}"
 CUDA_MINOR="${CUDA_MINOR%%.*}"
 echo "CUDA version: $CUDA_VERSION (major: $CUDA_MAJOR, minor: $CUDA_MINOR)"
 
@@ -92,7 +92,7 @@ git checkout "$DEEPGEMM_GIT_REF"
 
 # Clean previous build artifacts
 # (Based on https://github.com/deepseek-ai/DeepGEMM/blob/main/install.sh)
-rm -rf build dist *.egg-info
+rm -rf -- build dist *.egg-info 2>/dev/null || true
 
 # Build wheel
 echo "🏗️  Building DeepGEMM wheel..."

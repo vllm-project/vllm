@@ -95,23 +95,11 @@ cleanup_instances() {
   sleep 2
 }
 
-# Handle to get model-specific arguments for deepseek
-get_model_args() {
-  local model_name=$1
-  local extra_args=""
-
-  if [[ "$model_name" == "deepseek-ai/deepseek-vl2-tiny" ]]; then
-    extra_args="--hf_overrides '{\"architectures\": [\"DeepseekVLV2ForCausalLM\"]}' --trust-remote-code"
-  fi
-
-  echo "$extra_args"
-}
-
 get_num_gpus() {
   if [[ "$SMI_BIN" == *"nvidia"* ]]; then
-    echo "$($SMI_BIN --query-gpu=name --format=csv,noheader | wc -l)"
+    $SMI_BIN --query-gpu=name --format=csv,noheader | wc -l
   elif [[ "$SMI_BIN" == *"rocm"* ]]; then
-    echo "$($SMI_BIN -l | grep GPU | wc -l)"
+    $SMI_BIN -l | grep -c GPU
   else
     # works for non-cuda platforms,
     # assuming at least 1 device and
@@ -126,9 +114,6 @@ run_tests_for_model() {
   echo "================================"
   echo "Testing model: $model_name"
   echo "================================"
-
-  # Get model-specific arguments
-  local model_args=$(get_model_args "$model_name")
 
   # Arrays to store all hosts and ports
   PREFILL_HOSTS=()
@@ -172,17 +157,13 @@ run_tests_for_model() {
       BASE_CMD="${BASE_CMD} --attention-backend=$ATTENTION_BACKEND"
     fi
 
-    if [ -n "$model_args" ]; then
-    FULL_CMD="$BASE_CMD $model_args"
-    else
     FULL_CMD="$BASE_CMD"
-    fi
 
     eval "$FULL_CMD &"
 
     # Store host and port for proxy configuration
     PREFILL_HOSTS+=("localhost")
-    PREFILL_PORTS+=($PORT)
+    PREFILL_PORTS+=("$PORT")
   done
 
   # Start decode instances
@@ -227,40 +208,36 @@ run_tests_for_model() {
     --tensor-parallel-size 1 --enable-expert-parallel"
   fi
 
-    if [ -n "$model_args" ]; then
-    FULL_CMD="$BASE_CMD $model_args"
-    else
     FULL_CMD="$BASE_CMD"
-    fi
 
     eval "$FULL_CMD &"
 
     # Store host and port for proxy configuration
     DECODE_HOSTS+=("localhost")
-    DECODE_PORTS+=($PORT)
+    DECODE_PORTS+=("$PORT")
   done
 
   # Wait for all instances to start
   for PORT in "${PREFILL_PORTS[@]}"; do
     echo "Waiting for prefill instance on port $PORT to start..."
-    wait_for_server $PORT
+    wait_for_server "$PORT"
   done
 
   for PORT in "${DECODE_PORTS[@]}"; do
     echo "Waiting for decode instance on port $PORT to start..."
-    wait_for_server $PORT
+    wait_for_server "$PORT"
   done
 
   # Build the command for the proxy server with all the hosts and ports
   PROXY_CMD="python3 ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py --port 8192"
 
   # Add all prefill hosts and ports
-  PROXY_CMD+=" --prefiller-hosts ${PREFILL_HOSTS[@]}"
-  PROXY_CMD+=" --prefiller-ports ${PREFILL_PORTS[@]}"
+  PROXY_CMD+=" --prefiller-hosts ${PREFILL_HOSTS[*]}"
+  PROXY_CMD+=" --prefiller-ports ${PREFILL_PORTS[*]}"
 
   # Add all decode hosts and ports
-  PROXY_CMD+=" --decoder-hosts ${DECODE_HOSTS[@]}"
-  PROXY_CMD+=" --decoder-ports ${DECODE_PORTS[@]}"
+  PROXY_CMD+=" --decoder-hosts ${DECODE_HOSTS[*]}"
+  PROXY_CMD+=" --decoder-ports ${DECODE_PORTS[*]}"
 
   # Start the proxy server
   echo "Starting proxy server with command: $PROXY_CMD"
@@ -271,7 +248,7 @@ run_tests_for_model() {
 
   # Run lm eval for this model
   echo "Running tests for $model_name"
-  TEST_MODEL=$model_name python3 -m pytest -s -x ${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/test_accuracy.py
+  TEST_MODEL=$model_name python3 -m pytest -s -x "${GIT_ROOT}"/tests/v1/kv_connector/nixl_integration/test_accuracy.py
 
   # Clean up before running next model
   cleanup_instances

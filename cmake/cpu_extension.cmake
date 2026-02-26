@@ -18,6 +18,7 @@ set(ENABLE_AVX512 $ENV{VLLM_CPU_AVX512})
 set(ENABLE_AVX512BF16 $ENV{VLLM_CPU_AVX512BF16})
 set(ENABLE_AVX512VNNI $ENV{VLLM_CPU_AVX512VNNI})
 set(ENABLE_AMXBF16 $ENV{VLLM_CPU_AMXBF16})
+set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -114,6 +115,10 @@ else()
     if (ENABLE_AVX512)
         set(AVX512_FOUND ON)
         message(STATUS "AVX512 support enabled via VLLM_CPU_AVX512 environment variable")
+    endif()
+    if (ENABLE_ARM_BF16)
+        set(ARM_BF16_FOUND ON)
+        message(STATUS "ARM BF16 support enabled via VLLM_CPU_ARM_BF16 environment variable")
     endif()
 endif()
 

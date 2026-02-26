@@ -67,25 +67,20 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, TokensPrompt
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.parser import ParserManager
 from vllm.reasoning import ReasoningParser
-from vllm.renderers.inputs import TokPrompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import (
-    MistralTokenizer,
-    maybe_serialize_tool_calls,
-    truncate_tool_call_ids,
-    validate_request_params,
-)
 from vllm.tool_parsers import ToolParser
 from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 from vllm.tool_parsers.utils import partial_json_loads
 from vllm.utils.collection_utils import as_list
+from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
 
@@ -145,6 +140,12 @@ class OpenAIServingChat(OpenAIServing):
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
+        mc = self.model_config
+        self.override_max_tokens = (
+            self.default_sampling_params.get("max_tokens")
+            if mc.generation_config not in ("auto", "vllm")
+            else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
+        )
         self.use_harmony = self.model_config.hf_config.model_type == "gpt_oss"
         if self.use_harmony:
             if "stop_token_ids" not in self.default_sampling_params:
@@ -215,7 +216,7 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[TokPrompt]] | ErrorResponse:
+    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
         """
         render chat request by validating and preprocessing inputs.
 
@@ -239,18 +240,18 @@ class OpenAIServingChat(OpenAIServing):
 
             tool_parser = self.tool_parser
 
-            if isinstance(tokenizer, MistralTokenizer):
+            if is_mistral_tokenizer(tokenizer):
                 # because of issues with pydantic we need to potentially
                 # re-serialize the tool_calls field of the request
                 # for more info: see comment in `maybe_serialize_tool_calls`
-                maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
-                truncate_tool_call_ids(request)  # type: ignore[arg-type]
-                validate_request_params(request)
+                _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
+                _mt.truncate_tool_call_ids(request)  # type: ignore[arg-type]
+                _mt.validate_request_params(request)
 
             # Check if tool parsing is unavailable (common condition)
             tool_parsing_unavailable = (
                 tool_parser is None
-                and not isinstance(tokenizer, MistralTokenizer)
+                and not is_mistral_tokenizer(tokenizer)
                 and not self.use_harmony
             )
 
@@ -374,7 +375,9 @@ class OpenAIServingChat(OpenAIServing):
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
             for i, engine_prompt in enumerate(engine_prompts):
-                prompt_text = self._extract_prompt_text(engine_prompt)
+                prompt_token_ids = self._extract_prompt_components(
+                    engine_prompt
+                ).token_ids
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
@@ -389,6 +392,7 @@ class OpenAIServingChat(OpenAIServing):
                     else request.max_tokens,
                     self._extract_prompt_len(engine_prompt),
                     self.default_sampling_params,
+                    self.override_max_tokens,
                 )
 
                 sampling_params: SamplingParams | BeamSearchParams
@@ -424,35 +428,21 @@ class OpenAIServingChat(OpenAIServing):
                         trace_headers=trace_headers,
                     )
                 else:
-                    tok_params = request.build_tok_params(self.model_config)
-                    tokenization_kwargs = tok_params.get_encode_kwargs()
+                    reasoning_ended = (
+                        reasoning_parser.is_reasoning_end(prompt_token_ids or [])
+                        if reasoning_parser
+                        else None
+                    )
 
-                    engine_request = self.input_processor.process_inputs(
-                        sub_request_id,
+                    generator = self.engine_client.generate(
                         engine_prompt,
                         sampling_params,
-                        lora_request=lora_request,
-                        tokenization_kwargs=tokenization_kwargs,
-                        trace_headers=trace_headers,
-                        priority=request.priority,
-                        data_parallel_rank=data_parallel_rank,
-                    )
-                    reasoning_ended = None
-                    if reasoning_parser:
-                        reasoning_ended = reasoning_parser.is_reasoning_end(
-                            engine_request.prompt_token_ids or []  # type: ignore[attr-defined]
-                        )
-                        engine_request.reasoning_ended = reasoning_ended
-                    generator = self.engine_client.generate(
-                        engine_request,
-                        sampling_params,
                         sub_request_id,
                         lora_request=lora_request,
                         trace_headers=trace_headers,
                         priority=request.priority,
-                        prompt_text=prompt_text,
-                        tokenization_kwargs=tokenization_kwargs,
                         data_parallel_rank=data_parallel_rank,
+                        reasoning_ended=reasoning_ended,
                     )
 
                 generators.append(generator)
@@ -645,8 +635,6 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata: RequestResponseMetadata,
         reasoning_parser: ReasoningParser | None = None,
     ) -> AsyncGenerator[str, None]:
-        from vllm.tokenizers.mistral import MistralTokenizer
-
         created_time = int(time.time())
         chunk_object_type: Final = "chat.completion.chunk"
         first_iteration = True
@@ -906,6 +894,17 @@ class OpenAIServingChat(OpenAIServing):
                         harmony_tools_streamed[i] |= tools_streamed_flag
                     # handle streaming deltas for tools with named tool_choice
                     elif tool_choice_function_name:
+                        # When encountering think end id in prompt_token_ids
+                        # i.e {"enable_thinking": False},
+                        # check BEFORE calling the parser to avoid a spurious
+                        # reasoning delta on the first chunk.
+                        if (
+                            reasoning_parser
+                            and not reasoning_end_arr[i]
+                            and prompt_is_reasoning_end_arr[i]
+                        ):
+                            reasoning_end_arr[i] = True
+
                         if (
                             reasoning_parser
                             and not reasoning_end_arr[i]
@@ -924,16 +923,11 @@ class OpenAIServingChat(OpenAIServing):
                                     output.token_ids,
                                 )
                             )
-                            # When encountering think end id in delta_token_ids
-                            # or think end id in prompt_token_ids
-                            # i.e {"enable_thinking": False},
+                            # When encountering think end id in delta_token_ids,
                             # set reasoning status to end.
                             # Only keep 'content', remove 'reasoning'.
-                            if (
-                                reasoning_parser.is_reasoning_end(
-                                    as_list(output.token_ids)
-                                )
-                                or prompt_is_reasoning_end_arr[i]
+                            if reasoning_parser.is_reasoning_end(
+                                as_list(output.token_ids)
                             ):
                                 reasoning_end_arr[i] = True
                                 if delta_message and delta_message.content:
@@ -955,7 +949,7 @@ class OpenAIServingChat(OpenAIServing):
                                 )
                             else:
                                 # Generate ID based on tokenizer type
-                                if isinstance(tokenizer, MistralTokenizer):
+                                if is_mistral_tokenizer(tokenizer):
                                     tool_call_id = MistralToolCall.generate_random_id()
                                 else:
                                     tool_call_id = make_tool_call_id(
@@ -1122,14 +1116,23 @@ class OpenAIServingChat(OpenAIServing):
 
                     # when only reasoning
                     elif reasoning_parser:
-                        delta_message = reasoning_parser.extract_reasoning_streaming(
-                            previous_text,
-                            current_text,
-                            delta_text,
-                            previous_token_ids,
-                            current_token_ids,
-                            output.token_ids,
-                        )
+                        # When encountering think end id in prompt_token_ids
+                        # i.e {"enable_thinking": False},
+                        # set reasoning status to end.
+                        # Route all generated tokens as content directly.
+                        if prompt_is_reasoning_end_arr[i]:
+                            delta_message = DeltaMessage(content=delta_text)
+                        else:
+                            delta_message = (
+                                reasoning_parser.extract_reasoning_streaming(
+                                    previous_text,
+                                    current_text,
+                                    delta_text,
+                                    previous_token_ids,
+                                    current_token_ids,
+                                    output.token_ids,
+                                )
+                            )
                     # handle streaming just a content delta
                     else:
                         delta_message = DeltaMessage(content=delta_text)
@@ -1507,7 +1510,7 @@ class OpenAIServingChat(OpenAIServing):
                 tool_parser_cls=self.tool_parser,
             )
             tool_call_class = (
-                MistralToolCall if isinstance(tokenizer, MistralTokenizer) else ToolCall
+                MistralToolCall if is_mistral_tokenizer(tokenizer) else ToolCall
             )
             if self.use_harmony:
                 # Harmony models already have parsed content and tool_calls
@@ -1942,7 +1945,7 @@ class OpenAIServingChat(OpenAIServing):
         # because of issues with pydantic we need to potentially
         # re-serialize the tool_calls field of the request
         # for more info: see comment in `maybe_serialize_tool_calls`
-        maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
+        _mt.maybe_serialize_tool_calls(request)  # type: ignore[arg-type]
 
         # Add system message.
         # NOTE: In Chat Completion API, browsing is enabled by default

@@ -550,6 +550,7 @@ class FusedMoE(CustomOp):
             num_logical_experts=self.logical_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
+            moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
@@ -655,6 +656,16 @@ class FusedMoE(CustomOp):
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
         )
 
+    # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
+    # can safely swap out the quant_method. We should figure out a less
+    # intrusive way to do this.
+    def _replace_quant_method(self, mk: FusedMoEMethodBase):
+        self.quant_method = mk
+        # We need to force reconstruction of runner because we're swapping out
+        # the quant_method with a FusedMoEModularMethod. This logic can go
+        # away once the FusedMoEModularMethod is eliminated.
+        self.runner = self._init_runner()
+
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
     # This is called after all weight loading and post-processing, so it
@@ -676,17 +687,15 @@ class FusedMoE(CustomOp):
             logger.debug(
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
-            self.quant_method = FusedMoEModularMethod.make(
-                self,
-                self.quant_method,
-                prepare_finalize,
-                self.shared_experts,
-                inplace=not self.moe_config.disable_inplace,
+            self._replace_quant_method(
+                FusedMoEModularMethod.make(
+                    self,
+                    self.quant_method,
+                    prepare_finalize,
+                    self.shared_experts,
+                    inplace=not self.moe_config.disable_inplace,
+                )
             )
-            # We need to force reconstruction of runner because we're swapping out
-            # the quant_method with a FusedMoEModularMethod. This logic can go
-            # away once the FusedMoEModularMethod is eliminated.
-            self.runner = self._init_runner()
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
