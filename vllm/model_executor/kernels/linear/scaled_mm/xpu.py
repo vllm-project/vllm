@@ -43,6 +43,10 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
     ) -> torch.Tensor:
         weight = layer.weight
         weight_scale = layer.weight_scale
+        # In case of pooler models, pooled_data may change to head_dtype like float
+        # which fp8_gemm_w8a16 doesn't support
+        if x.dtype == torch.float:
+            x = x.to(torch.bfloat16)
         return torch.ops._xpu_C.fp8_gemm_w8a16(x, weight, weight_scale, bias)
 
     def apply_scaled_mm(
