@@ -28,3 +28,11 @@ steps:
     - pytest -v -s v1/engine/test_preprocess_error_handling.py
     # Run the rest of v1/engine tests
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
+  mirror:
+    amd:
+      device: mi325_8
+      depends_on:
+      - image-build-amd
+      commands:
+      - pytest -v -s v1/e2e
+      - pytest -v -s v1/engine

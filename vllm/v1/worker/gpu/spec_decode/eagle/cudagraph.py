@@ -7,7 +7,6 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.block_table import BlockTables
 from vllm.v1.worker.gpu.cudagraph_utils import (
@@ -17,6 +16,7 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 )
 from vllm.v1.worker.gpu.dp_utils import make_num_tokens_across_dp
 from vllm.v1.worker.gpu.input_batch import InputBuffers
+from vllm.v1.worker.utils import AttentionGroup
 
 
 class EagleCudaGraphManager:
@@ -60,7 +60,7 @@ class EagleCudaGraphManager:
         generate_fn: Callable,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
     ) -> None:
         assert capture_cg_mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL], (
@@ -77,7 +77,7 @@ class EagleCudaGraphManager:
             num_tokens,
             input_buffers,
             block_tables,
-            attn_metadata_builders,
+            attn_groups,
             self.max_model_len,
             kv_cache_config,
             uniform_decode_query_len=1,
@@ -150,7 +150,7 @@ class EagleCudaGraphManager:
         generate_fn: Callable,
         input_buffers: InputBuffers,
         block_tables: BlockTables,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
     ) -> None:
         if self.cudagraph_mode == CUDAGraphMode.NONE:
@@ -165,7 +165,7 @@ class EagleCudaGraphManager:
             generate_fn=generate_fn,
             input_buffers=input_buffers,
             block_tables=block_tables,
-            attn_metadata_builders=attn_metadata_builders,
+            attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
         )
 

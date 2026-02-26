@@ -13,6 +13,7 @@ import vllm_xpu_kernels._moe_C  # noqa
 import vllm_xpu_kernels._xpu_C  # noqa
 
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -89,6 +90,7 @@ class XPUPlatform(Platform):
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
         return [
             AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TRITON_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
         ]
 
@@ -151,9 +153,14 @@ class XPUPlatform(Platform):
         return torch.no_grad()
 
     @classmethod
+    def get_static_graph_wrapper_cls(cls) -> str:
+        return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
+        parallel_config = vllm_config.parallel_config
         # in V1(or with chunked prefill) block_size is 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
@@ -165,9 +172,32 @@ class XPUPlatform(Platform):
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
-        assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, (
-            "CUDA graph mode should be NONE on XPU"
-        )
+        attention_config = vllm_config.attention_config
+        if attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+        if not supports_xpu_graph():
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(
+                "XPU Graph is not supported in the current PyTorch version, "
+                "disabling cudagraph_mode."
+            )
+        elif parallel_config.world_size_across_dp > 1:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(
+                "XPU Graph doesn't support capture communication ops, "
+                "disabling cudagraph_mode."
+            )
+        else:
+            if (
+                attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+                and compilation_config.cudagraph_mode
+                not in {CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE}
+            ):
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                logger.warning(
+                    "FMHA sycl-tla kernels cannot be captured with XPU graphs, "
+                    "falling back to PIECEWISE graph mode on XPU platform."
+                )
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
@@ -200,7 +230,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        return False
+        return True
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -276,3 +306,7 @@ class XPUPlatform(Platform):
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[:, src_block_indices]
         dst_cache[:, dst_block_indices] = _src_cache.cpu()
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        return torch.xpu.get_device_properties(device_id).max_compute_units

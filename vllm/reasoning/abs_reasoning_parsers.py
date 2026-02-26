@@ -4,7 +4,7 @@
 import importlib
 import os
 from abc import abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
@@ -68,7 +68,7 @@ class ReasoningParser:
         """
 
     def is_reasoning_end_streaming(
-        self, input_ids: Sequence[int], delta_ids: Sequence[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         """
         Check if the reasoning content ends in the input_ids on a
