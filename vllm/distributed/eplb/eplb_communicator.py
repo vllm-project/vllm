@@ -21,6 +21,7 @@ from vllm.distributed.device_communicators.pynccl_wrapper import (
 )
 from vllm.distributed.parallel_state import get_ep_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -450,6 +451,14 @@ def create_eplb_communicator(
             logger.warning(
                 "EPLB communicator 'symm_mem' requested but torch symmetric memory "
                 "is unavailable; falling back to torch.distributed."
+            )
+            return TorchDistributedEplbCommunicator(ep_group=ep_group)
+        if not (
+            current_platform.is_cuda() and current_platform.has_device_capability(90)
+        ):
+            logger.warning(
+                "EPLB communicator 'symm_mem' requested but device capability "
+                " is below 90; falling back to torch.distributed."
             )
             return TorchDistributedEplbCommunicator(ep_group=ep_group)
         if not hasattr(torch.ops.symm_mem, "all_to_all_vdev"):
