@@ -1325,6 +1325,24 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
+        maybe_im_patch_id = getattr(self.config, "im_patch_id", None)
+        visual_token_ids = [
+            token_id
+            for token_id in [
+                maybe_im_patch_id,
+                getattr(self.config, "image_start_token_id", None),
+                getattr(self.config, "image_end_token_id", None),
+                getattr(self.config, "video_start_token_id", None),
+                getattr(self.config, "video_end_token_id", None),
+            ]
+            if token_id is not None
+        ]
+
+        self.configure_mm_token_handling(
+            vocab_size=config.vocab_size,
+            mm_token_ids=visual_token_ids,
+        )
+
         with self._mark_tower_model(vllm_config, {"image", "video"}):
             self.vision_model = Ernie4_5_VisionTransformer(
                 config.vision_config,
@@ -1351,18 +1369,8 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-        if getattr(self.config, "im_patch_id", None):
-            visual_token_ids = [
-                token_id
-                for token_id in [
-                    self.config.im_patch_id,
-                    getattr(self.config, "image_start_token_id", None),
-                    getattr(self.config, "image_end_token_id", None),
-                    getattr(self.config, "video_start_token_id", None),
-                    getattr(self.config, "video_end_token_id", None),
-                ]
-                if token_id is not None
-            ]
+
+        if maybe_im_patch_id:
             self._visual_token_ids_tensor_cache = torch.tensor(
                 visual_token_ids, dtype=torch.long
             )
@@ -1664,7 +1672,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -1677,7 +1684,6 @@ class Ernie4_5_VLMoeForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
