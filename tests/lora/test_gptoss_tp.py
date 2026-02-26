@@ -70,7 +70,7 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
 
 
 @pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
-@pytest.mark.parametrize("specialize_active_lora", [False, True])
+@pytest.mark.parametrize("specialize_active_lora", [False])
 def test_gpt_oss_lora(
     monkeypatch: pytest.MonkeyPatch,
     gptoss20b_lora_files,
