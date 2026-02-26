@@ -183,7 +183,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Explicitly set the list to avoid issues with torch 2.2
 # See https://github.com/pytorch/pytorch/pull/123243
 # From versions.json: .torch.cuda_arch_list
-ARG torch_cuda_arch_list='7.5 8.0 8.6 8.9 9.0 10.0 12.0'
+ARG torch_cuda_arch_list='7.5 8.0 8.9 9.0 10.0 12.0'
 ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 #################### BUILD BASE IMAGE ####################
 

@@ -29,7 +29,7 @@
       "default": "false"
     },
     "TORCH_CUDA_ARCH_LIST": {
-      "default": "7.5 8.0 8.6 8.9 9.0 10.0 12.0"
+      "default": "7.5 8.0 8.9 9.0 10.0 12.0"
     },
     "MAX_JOBS": {
       "default": "2"
