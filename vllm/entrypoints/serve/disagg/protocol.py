@@ -21,7 +21,7 @@ from vllm.utils import random_uuid
 
 class GenerateMultiModalFeature(BaseModel):
     """JSON-serializable metadata for a multimodal item, with optional
-    tensor data for full-data transfer to tokens-only workers."""
+    tensor data for full-data transfer to workers."""
 
     modality: str
     mm_hash: str
