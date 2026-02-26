@@ -160,7 +160,7 @@ class Qwen3ASRDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3ASRProcessingInfo])
             * feature_extractor.sampling_rate
         )
 
-        audio_overrides = mm_options.get("audio")
+        audio_overrides = (mm_options or {}).get("audio")
 
         return {
             "audio": self._get_dummy_audios(
