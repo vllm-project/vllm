@@ -300,14 +300,6 @@ def _lora_shrink_fp8(
         b_scale_ptr_tensor, b_scale_l_stride, b_scale_n_stride, b_scale_k_stride = (
             _get_shrink_lora_scale_ptr(b_scale, inputs.device)
         )
-        # Get strides from the first scale tensor
-        # b_scale_strides = (
-        #     b_scale[0].stride(0),  # stride for lora dimension
-        #     b_scale[0].stride(-1)
-        #     if b_scale[0].ndim > 1
-        #     else 1,  # stride for n dimension
-        #     0,  # Not used for 2D scale tensors
-        # )
         a_scale_ptr = (
             a_scale if a_scale is not None else torch.tensor(1.0, device=inputs.device)
         )
@@ -317,7 +309,6 @@ def _lora_shrink_fp8(
         b_scale_n_stride = 0
         b_scale_k_stride = 0
         a_scale_ptr = torch.tensor(0, device=inputs.device)
-        # b_scale_strides = (0, 0, 0)
 
     N, K = lora_a_weights[0].shape[-2:]  # K=hidden_size, N=rank
     NUM_SLICES = len(lora_a_weights)
