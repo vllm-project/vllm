@@ -18,6 +18,7 @@ from vllm.v1.sample.logits_processor.builtin import (
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
     MinTokensLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor,
     process_dict_updates,
 )
 from vllm.v1.sample.logits_processor.interface import (
@@ -50,6 +51,7 @@ BUILTIN_LOGITS_PROCESSORS: list[type[LogitsProcessor]] = [
     MinTokensLogitsProcessor,
     LogitBiasLogitsProcessor,
     MinPLogitsProcessor,
+    ThinkingTokenBudgetLogitsProcessor,
 ]
 
 
@@ -205,7 +207,13 @@ def build_logitsprocs(
             "min_p, logit_bias, and min_tokens parameters won't currently work "
             "with speculative decoding enabled."
         )
-        return LogitsProcessors()
+        # Exception: Allow ThinkingTokenBudgetLogitsProcessor to run with speculative decoding
+        thinking_budget_processors = [
+            ctor(vllm_config, device, is_pin_memory)
+            for ctor in BUILTIN_LOGITS_PROCESSORS
+            if ctor is ThinkingTokenBudgetLogitsProcessor
+        ]
+        return LogitsProcessors(thinking_budget_processors)
 
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(
@@ -349,4 +357,5 @@ __all__ = [
     "STR_POOLING_REJECTS_LOGITSPROCS",
     "LOGITSPROCS_GROUP",
     "AdapterLogitsProcessor",
+    "ThinkingTokenBudgetLogitsProcessor",
 ]
