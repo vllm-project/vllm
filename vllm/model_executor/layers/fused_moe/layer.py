@@ -552,6 +552,7 @@ class FusedMoE(CustomOp):
             num_logical_experts=self.logical_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
+            moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
