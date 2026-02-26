@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
+from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from typing import TYPE_CHECKING, Any, cast
 
@@ -26,9 +27,12 @@ def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
     # lazy import cv2 to avoid bothering users who only use text models
     import cv2
 
-    for i, frame in enumerate(frames):
-        resized_frame = cv2.resize(frame, (new_width, new_height))
-        resized_frames[i] = resized_frame
+    def _resize_one(i_frame):
+        i, frame = i_frame
+        resized_frames[i] = cv2.resize(frame, (new_width, new_height))
+
+    with ThreadPoolExecutor() as executor:
+        list(executor.map(_resize_one, enumerate(frames)))
     return resized_frames
 
 
