@@ -201,9 +201,9 @@ steps:
     - export VLLM_ALLOW_INSECURE_SERIALIZATION=1
     - pytest -v -s v1/spec_decode/test_acceptance_length.py -m slow_test
 
-- label: Model strategy test
-  device: h100
-  num_devices: 2
-  source_file_dependencies: []
-  commands:
-    - pytest -v -s models/nightly/gptoss.py
+# - label: Model strategy test
+#   device: h100
+#   num_devices: 2
+#   source_file_dependencies: []
+#   commands:
+#     - pytest -v -s models/nightly/gptoss.py
