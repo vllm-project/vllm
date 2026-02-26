@@ -123,6 +123,7 @@ def _adjust_kernel_inputs(
         "stride_tl",
         "stride_el",
         "slice_a_size",
+        "slice_a_scale_size",
         "slice_c_size",
     ]
 )
@@ -167,6 +168,7 @@ def _fused_moe_lora_kernel_fp8(
     group_n: tl.constexpr,
     group_k: tl.constexpr,
     slice_a_size,
+    slice_a_scale_size,
     slice_c_size,
     # Meta-parameters
     num_slice_a: tl.constexpr,
@@ -259,7 +261,12 @@ def _fused_moe_lora_kernel_fp8(
     )
     # get a_ptr,b_ptr,c_ptr
     cur_a_ptr = a_ptr + (slice_id % num_slice_a) * slice_a_size
-    cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(c_ptr.dtype.element_ty))
+    if use_fp8_w8a8:
+        cur_b_ptr = tl.load(b_ptr + slice_id).to(tl.pointer_type(tl.float8e4nv))
+    else:
+        cur_b_ptr = tl.load(b_ptr + slice_id).to(
+            tl.pointer_type(c_ptr.dtype.element_ty)
+        )
     cur_c_ptr = c_ptr + (slice_id % num_slice_c) * slice_c_size
 
     # remove modulo wrap-around
@@ -281,6 +288,37 @@ def _fused_moe_lora_kernel_fp8(
         + offs_bn[None, :] * stride_bn
     )
 
+    if use_fp8_w8a8:
+        cur_b_scale_ptr = tl.load(b_scale_ptr + slice_id).to(
+            tl.pointer_type(tl.float32)
+        )
+        cur_a_scale_ptr = a_scale_ptr + (slice_id % num_slice_a) * slice_a_scale_size
+        # block-wise scale ptrs
+        if group_k > 0 and group_n > 0:
+            a_scale_ptrs = cur_a_scale_ptr + (offs_token // top_k_num) * stride_asm
+            offs_bsn = offs_bn // group_n
+            b_scale_ptrs = (
+                cur_b_scale_ptr
+                + lora_id * stride_bsl
+                + expert_id * stride_bse
+                + offs_bsn * stride_bsn
+            )
+        elif per_channel_quant:
+            b_scale_ptrs = (
+                cur_b_scale_ptr
+                + lora_id * stride_bsl
+                + expert_id * stride_bse
+                + offs_bn[None, :] * stride_bsn
+            )
+            b_scale = tl.load(b_scale_ptrs)
+            # load per-token scale for activations
+            a_scale_ptrs = cur_a_scale_ptr + (offs_token // top_k_num) * stride_asm
+            a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
+        # tensor-wise
+        else:
+            a_scale = tl.load(cur_a_scale_ptr)
+            b_scale = tl.load(cur_b_scale_ptr + lora_id * stride_bsl + expert_id)
+
     if USE_GDC and IS_PRIMARY:
         # GDC launch dependents hints the runtime system to launch dependent kernels.
         tl.extra.cuda.gdc_launch_dependents()
@@ -293,6 +331,16 @@ def _fused_moe_lora_kernel_fp8(
 
     for k in range(0, grid_k):
         k_remaining = K - k * (BLOCK_SIZE_K * SPLIT_K)
+        # Pre-load scales before dot product to overlap memory latency
+        # with the weight/activation loads below. This reduces stall waits
+        # by allowing scale data to arrive while dot product is computing.
+        if use_fp8_w8a8 and group_n > 0 and group_k > 0:
+            k_start = k * BLOCK_SIZE_K * SPLIT_K
+            offs_ks = k_start // group_k
+            a_scale = tl.load(
+                a_scale_ptrs + offs_ks * stride_ask, mask=token_mask, other=0.0
+            )
+            b_scale = tl.load(b_scale_ptrs + offs_ks * stride_bsk)
         # GDC wait waits for ALL programs in the prior kernel to complete
         # before continuing.
         # pre-fetch lora weight
@@ -305,12 +353,26 @@ def _fused_moe_lora_kernel_fp8(
 
         if USE_GDC and not IS_PRIMARY:
             tl.extra.cuda.gdc_wait()
+
         a = tl.load(
             a_ptrs,
             mask=token_mask[:, None] & (offs_k[None, :] < k_remaining),
             other=0.0,
         )
-        accumulator += tl.dot(a, b)
+
+        # GDC wait waits for ALL programs in the the prior kernel to complete
+        # before continuing.
+        if USE_GDC and not IS_PRIMARY:
+            tl.extra.cuda.gdc_wait()
+        if use_fp8_w8a8:
+            if group_n > 0 and group_k > 0:
+                # Pre-compute combined scale to reduce dependency chain
+                scale = a_scale[:, None] * b_scale[None, :]
+                accumulator += tl.dot(a, b) * scale
+            else:
+                accumulator = tl.dot(a, b, acc=accumulator)
+        else:
+            accumulator += tl.dot(a, b)
         # Advance the ptrs to the next K block.
         a_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * SPLIT_K * stride_bk
@@ -318,7 +380,15 @@ def _fused_moe_lora_kernel_fp8(
     if MUL_ROUTED_WEIGHT:
         moe_weight = tl.load(topk_weights_ptr + offs_token, mask=token_mask, other=0.0)
         accumulator = accumulator * moe_weight[:, None]
-    accumulator = accumulator.to(c_ptr.dtype.element_ty)
+
+    if use_fp8_w8a8:
+        if group_k > 0 and group_n > 0:
+            accumulator = accumulator.to(c_ptr.dtype.element_ty)
+        else:
+            accumulator = (accumulator * a_scale * b_scale).to(c_ptr.dtype.element_ty)
+    else:
+        accumulator = accumulator.to(c_ptr.dtype.element_ty)
+
     # Write back the block of the output
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     c_ptrs = cur_c_ptr + stride_cm * offs_token[:, None] + stride_cn * offs_cn[None, :]
@@ -473,6 +543,7 @@ def _fused_moe_lora_shrink_fp8(
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         slice_a_size=qcurr_hidden_states.numel(),
+        slice_a_scale_size=act_scale.numel() if act_scale is not None else 0,
         slice_c_size=a_intermediate_cache1.numel() // num_slices,
         num_slice_a=1,
         num_slice_c=num_slices,
@@ -639,6 +710,7 @@ def _fused_moe_lora_expand_fp8(
         0 if block_shape is None else block_shape[0],
         0 if block_shape is None else block_shape[1],
         slice_a_size=a_intermediate_cache1.numel() // num_slices,
+        slice_a_scale_size=act_scale.numel() if act_scale is not None else 0,
         slice_c_size=slice_c_size,
         num_slice_a=num_slices,
         num_slice_c=num_slices,
