@@ -78,6 +78,7 @@ async def test_bge_m3_sparse_plugin_online(server: RemoteOpenAIServer):
     """Test BGE-M3 sparse plugin in online mode via API."""
     request_payload = {
         "model": model_config["model_name"],
+        "task": "token_classify",
         "data": {"input": model_config["test_input"], "return_tokens": True},
     }
 
@@ -92,22 +93,25 @@ async def test_bge_m3_sparse_plugin_online(server: RemoteOpenAIServer):
     assert (parsed_response := IOProcessorResponse(**response).data)
 
     # Verify the output is formatted as expected for this plugin
-    assert parsed_response.data
-    assert len(parsed_response.data) > 0
+    assert _get_attr_or_val(parsed_response, "data")
+    assert len(_get_attr_or_val(parsed_response, "data")) > 0
 
-    data_entry = parsed_response.data[0]
-    assert data_entry.object == "sparse-embedding"
-    assert hasattr(data_entry, "sparse_embedding")
+    data_entry = _get_attr_or_val(parsed_response, "data")[0]
+    assert _get_attr_or_val(data_entry, "object") == "sparse-embedding"
+    assert _get_attr_or_val(data_entry, "sparse_embedding")
 
     # Verify sparse embedding format
-    sparse_embedding = data_entry.sparse_embedding
+    sparse_embedding = _get_attr_or_val(data_entry, "sparse_embedding")
     assert isinstance(sparse_embedding, list)
     _check_sparse_embedding(sparse_embedding, True)
 
     # Verify usage information
-    assert parsed_response.usage
-    assert parsed_response.usage.prompt_tokens > 0
-    assert parsed_response.usage.total_tokens == parsed_response.usage.prompt_tokens
+    usage = _get_attr_or_val(parsed_response, "usage")
+    assert usage, f"usage not found for {parsed_response}"
+    assert _get_attr_or_val(usage, "prompt_tokens") > 0
+    assert _get_attr_or_val(usage, "total_tokens") == _get_attr_or_val(
+        usage, "prompt_tokens"
+    )
 
 
 @pytest.mark.asyncio
