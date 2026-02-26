@@ -109,12 +109,10 @@ def _mamba_chunk_scan_combined_fwd(
     # (middle term of factorization of off-diag blocks; A terms)
     # - parallelized across sequences using last_chunk_indices to derive
     #   per-sequence chunk ranges. Each sequence's state passing runs independently.
-    batch = len(cu_seqlens) - 1
     states = _state_passing_fwd(
         rearrange(states, "... p n -> ... (p n)"),
         dA_cumsum,  # (nheads, nchunks, chunk_size)
         last_chunk_indices,
-        batch,
         initial_states=rearrange(initial_states, "... p n -> ... (p n)")
         if initial_states is not None
         else None,  # (batch, nheads, headdim*dstate)

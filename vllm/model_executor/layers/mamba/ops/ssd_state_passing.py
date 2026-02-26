@@ -103,12 +103,12 @@ def _state_passing_fwd(
     states,
     dA_cumsum,
     last_chunk_indices,
-    batch,
     initial_states=None,
     out_dtype=None,
 ):
     nchunks, nheads, dim = states.shape
     chunk_size = dA_cumsum.shape[-1]
+    batch = last_chunk_indices.shape[0]
     assert dA_cumsum.shape == (nheads, nchunks, chunk_size)
     out_dtype = states.dtype if out_dtype is None else out_dtype
     out = torch.empty((nchunks, nheads, dim), device=states.device, dtype=out_dtype)
