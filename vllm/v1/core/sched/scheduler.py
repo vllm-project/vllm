@@ -1263,6 +1263,11 @@ class Scheduler(SchedulerInterface):
         sampled_token_ids = model_runner_output.sampled_token_ids
         sampled_token_ids_np = model_runner_output.sampled_token_ids_np
         num_generated_tokens = model_runner_output.num_generated_tokens
+        if sampled_token_ids_np is not None and num_generated_tokens is None:
+            raise ValueError(
+                "num_generated_tokens cannot be None when "
+                "sampled_token_ids_np is not None."
+            )
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -1317,11 +1322,7 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             if sampled_token_ids_np is not None:
-                num_generated = (
-                    int(num_generated_tokens[req_index])
-                    if num_generated_tokens is not None
-                    else sampled_token_ids_np.shape[1]
-                )
+                num_generated = int(num_generated_tokens[req_index])
                 generated_token_ids = (
                     sampled_token_ids_np[req_index, :num_generated]
                     if num_generated > 0
