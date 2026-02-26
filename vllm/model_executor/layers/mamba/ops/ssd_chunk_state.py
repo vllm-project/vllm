@@ -8,25 +8,8 @@
 
 import torch
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import tl, triton
-
-logger = init_logger(__name__)
-
-# Track which kernels have already logged their chosen autotune config (log once per kernel)
-_logged_autotune_configs = set()
-
-
-def _log_autotune_config_once(kernel_name: str, kernel) -> None:
-    if kernel_name not in _logged_autotune_configs:
-        logger.info(
-            "%s AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA chosen config: %s",
-            kernel_name,
-            getattr(kernel, "best_config", None),
-        )
-        _logged_autotune_configs.add(kernel_name)
-
 
 from .mamba_ssm import softplus
 
@@ -192,17 +175,17 @@ def _chunk_cumsum_fwd_kernel(
             {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
             num_stages=4,
             num_warps=4,
-        ),  # This one is missing in TRTLLM's new configs
+        ),
         triton.Config(
             {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
             num_stages=5,
             num_warps=2,
-        ),  # This one is missing in TRTLLM's new configs
+        ),
         triton.Config(
             {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
             num_stages=5,
             num_warps=2,
-        ),  # This one is missing in TRTLLM's new configs
+        ),
         triton.Config(
             {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
             num_stages=4,
@@ -374,17 +357,17 @@ def _chunk_state_fwd_kernel(
             {"BLOCK_SIZE_M": 128, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
             num_stages=4,
             num_warps=4,
-        ),  # This one is missing in TRTLLM's new configs
+        ),
         triton.Config(
             {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 32, "BLOCK_SIZE_K": 32},
             num_stages=5,
             num_warps=2,
-        ),  # This one is missing in TRTLLM's new configs
+        ),
         triton.Config(
             {"BLOCK_SIZE_M": 32, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
             num_stages=5,
             num_warps=2,
-        ),  # This one is missing in TRTLLM's new configs
+        ),
         triton.Config(
             {"BLOCK_SIZE_M": 64, "BLOCK_SIZE_N": 64, "BLOCK_SIZE_K": 32},
             num_stages=4,
@@ -623,7 +606,6 @@ def _chunk_cumsum_fwd(
             HAS_DT_BIAS=dt_bias is not None,
             BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
         )
-        _log_autotune_config_once("_chunk_cumsum_fwd_kernel", _chunk_cumsum_fwd_kernel)
     return dA_cumsum, dt_out
 
 
@@ -682,7 +664,6 @@ def _chunk_state_fwd(
             stride_dA_cs_chunk=dA_cumsum.stride(1),
             stride_dA_cs_csize=dA_cumsum.stride(2),
         )
-        _log_autotune_config_once("_chunk_state_fwd_kernel", _chunk_state_fwd_kernel)
     return states
 
 
@@ -769,8 +750,5 @@ def chunk_state_varlen(
             stride_init_states_hdim=initial_states_strides[2],
             stride_init_states_dstate=initial_states_strides[3],
             HAS_INITSTATES=initial_states is not None,
-        )
-        _log_autotune_config_once(
-            "_chunk_state_varlen_kernel", _chunk_state_varlen_kernel
         )
     return states

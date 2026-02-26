@@ -88,7 +88,7 @@ def _state_passing_fwd_kernel(
 
     # Loop over only this sequence's chunks — branchless
     nchunks_this_seq = chunk_end - chunk_start
-    for c in range(nchunks_this_seq):
+    for _ in range(nchunks_this_seq):
         new_states = tl.load(states_ptrs, mask=offs_m < dim, other=0.0).to(tl.float32)
         dA_cs = tl.load(dA_cs_ptr).to(tl.float32)
         states = fast_exp(dA_cs) * states + new_states

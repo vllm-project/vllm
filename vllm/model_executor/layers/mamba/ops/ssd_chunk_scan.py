@@ -8,27 +8,10 @@
 
 from packaging import version
 
+from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.triton_utils import tl, triton
 
 TRITON_22 = version.parse(triton.__version__) >= version.parse("2.2.0")
-
-from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
-
-logger = init_logger(__name__)
-
-# Track which kernels have already logged their chosen autotune config (log once per kernel)
-_logged_autotune_configs = set()
-
-
-def _log_autotune_config_once(kernel_name: str, kernel) -> None:
-    if kernel_name not in _logged_autotune_configs:
-        logger.info(
-            "%s AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA chosen config: %s",
-            kernel_name,
-            getattr(kernel, "best_config", None),
-        )
-        _logged_autotune_configs.add(kernel_name)
 
 
 @triton.autotune(
@@ -541,5 +524,4 @@ def _chunk_scan_fwd(
         IS_TRITON_22=TRITON_22,
         HAS_INITSTATES=initial_states is not None,
     )
-    _log_autotune_config_once("_chunk_scan_fwd_kernel", _chunk_scan_fwd_kernel)
     return
