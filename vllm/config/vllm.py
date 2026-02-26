@@ -857,7 +857,7 @@ class VllmConfig:
                 self.compilation_config.pass_config.fuse_gemm_comms = False
             else:
                 # Compute SP threshold early; disable if None (model too
-                # small) before +rms_norm gets forced into custom_ops.
+                # small for SP to be beneficial).
                 pass_config = self.compilation_config.pass_config
                 if pass_config.sp_min_token_num is None:
                     from vllm.compilation.passes.fusion.sequence_parallelism import (
@@ -879,14 +879,6 @@ class VllmConfig:
                     )
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
-
-        if self.compilation_config.pass_config.enable_sp:
-            if "-rms_norm" in self.compilation_config.custom_ops:
-                logger.warning(
-                    "RMS norm force disabled, sequence parallelism might break"
-                )
-            else:
-                self.compilation_config.custom_ops.append("+rms_norm")
 
         if self.compilation_config.fast_moe_cold_start is None:
             # resolve default behavior: try to be as safe as possible
