@@ -766,7 +766,6 @@ class MoRIIOConnectorWorker:
 
         # TODO: consider the integration of flashinfer or other backends.
         self.backend_name = backend.get_name()
-
         logger.debug("Detected attention backend %s", self.backend_name)
 
     def schedule_write_blocks(
