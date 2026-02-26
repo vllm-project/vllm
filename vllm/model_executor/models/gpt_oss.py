@@ -155,7 +155,7 @@ class MLPBlock(torch.nn.Module):
         super().__init__()
 
         config = vllm_config.model_config.hf_config
-        # quant_config = vllm_config.quant_config # [DV] Temp. Remove this.
+        quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
@@ -174,7 +174,7 @@ class MLPBlock(torch.nn.Module):
             intermediate_size=config.intermediate_size,
             reduce_results=True,
             renormalize=True,
-            quant_config=None,  # [DV] Remove this. Forces w4a8 for LinearLayer only
+            quant_config=quant_config,
             prefix=f"{prefix}.experts",
             apply_router_weight_on_input=False,
             has_bias=True,
