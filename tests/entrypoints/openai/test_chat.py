@@ -912,9 +912,7 @@ async def test_chat_completion_n_parameter_streaming(
     "model_name",
     [MODEL_NAME],
 )
-async def test_chat_completion_n_with_seed(
-    client: openai.AsyncOpenAI, model_name: str
-):
+async def test_chat_completion_n_with_seed(client: openai.AsyncOpenAI, model_name: str):
     """Test that n parameter works correctly with seed parameter."""
     messages = [
         {"role": "user", "content": "Say hello."},
@@ -946,9 +944,7 @@ async def test_chat_completion_n_with_seed(
     "model_name",
     [MODEL_NAME],
 )
-async def test_chat_completion_n_equals_1(
-    client: openai.AsyncOpenAI, model_name: str
-):
+async def test_chat_completion_n_equals_1(client: openai.AsyncOpenAI, model_name: str):
     """Test that n=1 (default) still works correctly."""
     messages = [
         {"role": "user", "content": "Hello!"},
