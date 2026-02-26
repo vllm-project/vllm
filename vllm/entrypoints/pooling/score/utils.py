@@ -7,6 +7,7 @@ import torch
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypedDict
 
+from vllm import envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
@@ -54,6 +55,10 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
     return token_scores.amax(dim=-1).sum()
 
 
+def _should_use_gpu_for_maxsim() -> bool:
+    return envs.VLLM_USE_GPU_FOR_POOLING_SCORE and current_platform.is_cuda()
+
+
 def compute_maxsim_scores(
     q_embs: Sequence[torch.Tensor],
     d_embs: Sequence[torch.Tensor],
@@ -74,7 +79,7 @@ def compute_maxsim_scores(
         if q_emb.shape[1] != d_emb.shape[1]:
             raise ValueError("Query and document embeddings must have same dim")
 
-    compute_device = torch.device("cuda" if current_platform.is_cuda() else "cpu")
+    compute_device = torch.device("cuda" if _should_use_gpu_for_maxsim() else "cpu")
     scores: list[torch.Tensor] = []
     start = 0
     while start < num_pairs:
