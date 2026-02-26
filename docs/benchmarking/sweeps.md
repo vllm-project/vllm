@@ -194,11 +194,22 @@ vllm bench sweep startup \
 
 Control the variables to plot via `--var-x` and `--var-y`, optionally applying `--filter-by` and `--bin-by` to the values. The plot is organized according to `--fig-by`, `--row-by`, `--col-by`, and `--curve-by`.
 
-Example command:
+Example commands for visualizing [SLA Scanner](#sla-scanner) results:
 
 ```bash
+# Latency increases as the request rate increases
 vllm bench sweep plot benchmarks/results/<timestamp> \
     --var-x request_rate \
+    --var-y p99_e2el_ms \
+    --row-by random_input_len \
+    --col-by random_output_len \
+    --curve-by max_num_seqs,max_num_batched_tokens \
+    --filter-by 'request_rate<=128'
+
+# Tradeoff between latency and throughput
+vllm bench sweep plot benchmarks/results/<timestamp> \
+    --var-x request_throughput \
+    --var-y median_e2el_ms \
     --row-by random_input_len \
     --col-by random_output_len \
     --curve-by max_num_seqs,max_num_batched_tokens \
