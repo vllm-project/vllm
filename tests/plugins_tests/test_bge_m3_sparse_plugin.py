@@ -196,7 +196,9 @@ def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
         default_torch_num_threads=1,
     ) as llm_runner:
         llm = llm_runner.get_llm()
-        outputs = llm.encode(prompts, pooling_task="token_classify")
+        pooler_output = llm.encode(prompts, pooling_task="token_classify")
+
+    outputs = pooler_output[0]
 
     print(f"Outputs: {outputs}")
 
