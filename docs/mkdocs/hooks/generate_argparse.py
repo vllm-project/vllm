@@ -51,10 +51,21 @@ with open(ROOT_DIR / "requirements/test.txt") as f:
 importlib.metadata.version = lambda name: VERSIONS.get(name) or "0.0.0"
 
 
-# Make torch.nn.Parameter safe to inherit from
-mock_if_no_torch("torch.nn", MagicMock(Parameter=object))
-# LoRA Async Doc Mocking
-mock_if_no_torch("vllm.lora.layers.base", MagicMock(BaseLayerWithLoRA=object))
+# Make torch.nn.Module/Parameter safe to inherit from.
+# These must be unique classes (not `object` itself), otherwise MRO fails
+# when a class inherits from both Module and another class that extends object.
+class Parameter:
+    pass
+
+
+class Module:
+    pass
+
+
+nn_mock = MagicMock(Parameter=Parameter, Module=Module)
+mock_if_no_torch("torch.nn", nn_mock)
+# Mocking torch itself must happen last since it breaks mock_if_no_torch
+mock_if_no_torch("torch", MagicMock(nn=nn_mock))
 
 
 class PydanticMagicMock(MagicMock):
