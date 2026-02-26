@@ -183,5 +183,5 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
                         height,
                     )
                 height = min(height, overrides.height)
-        video = np.full((num_frames, width, height, 3), 255, dtype=np.uint8)
+        video = np.empty((num_frames, width, height, 3), dtype=np.uint8)
         return [video] * num_videos
