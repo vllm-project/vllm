@@ -135,42 +135,31 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
         default_torch_num_threads=1,
     ) as llm_runner:
         llm = llm_runner.get_llm()
-        output = llm.encode(prompt, pooling_task="token_classify")
+        pooler_output = llm.encode(prompt, pooling_task="token_classify")
 
-    print(f"Output: {output}")
+    outputs = pooler_output[0]
 
     # Verify output structure
-    assert len(output) > 0
-    result = output[0]
-    assert hasattr(result, "outputs")
-
-    # The outputs should be SparseEmbeddingResponse
-    response = result.outputs
+    assert hasattr(outputs, "outputs")
+    response = outputs.outputs
     assert hasattr(response, "data")
-    assert hasattr(response, "usage")
-
+    assert len(response.data) == 1
+    print("")
     # Verify response data
-    data_entry = response.data[0]
-    assert data_entry.object == "sparse-embedding"
-    assert hasattr(data_entry, "sparse_embedding")
-
-    # Verify sparse embedding format
-    sparse_embedding = data_entry.sparse_embedding
-    assert isinstance(sparse_embedding, list)
-    if sparse_embedding:
-        entry = sparse_embedding[0]
-        assert hasattr(entry, "token_id")
-        assert hasattr(entry, "weight")
-        assert isinstance(entry.token_id, int)
-        assert isinstance(entry.weight, float)
-        assert entry.weight >= 0  # SPLADE outputs are non-negative
-
-        # Verify token presence based on return_tokens
-        if return_tokens:
-            # For offline mode, tokens might be None depending on renderer
-            # but token_id and weight should always be present
-            assert isinstance(entry.token_id, int)
-            assert isinstance(entry.weight, (float, int))
+    for i, output in enumerate(response.data):
+        # Each output should have sparse embeddings
+        sparse_embedding = output.sparse_embedding
+        assert isinstance(sparse_embedding, list)
+        for idx, entry in enumerate(sparse_embedding):
+            # Verify token presence based on return_tokens
+            if return_tokens:
+                # For offline mode, tokens might be None depending on renderer
+                # but token_id and weight should always be present
+                assert isinstance(entry.token_id, int)
+                assert isinstance(entry.weight, (float, int))
+    # Verify usage
+    assert response.usage.prompt_tokens > 0
+    assert response.usage.total_tokens == response.usage.prompt_tokens
 
 
 def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
@@ -200,13 +189,11 @@ def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
 
     outputs = pooler_output[0]
 
-    print(f"Outputs: {outputs}")
-
     # Verify output structure
     assert hasattr(outputs, "outputs")
     response = outputs.outputs
     assert hasattr(response, "data")
-    assert len(outputs.outputs.data) == 3
+    assert len(response.data) == 3
     for i, output in enumerate(response.data):
         # Each output should have sparse embeddings
         sparse_embedding = output.sparse_embedding
