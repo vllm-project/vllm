@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
-from vllm.model_executor.layers.attention import Attention
+from vllm.model_executor.layers.attention import Attention, MLAAttention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -181,7 +181,7 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         self, layer: torch.nn.Module, prefix: str
     ) -> "QuantizeMethodBase | None":
         # handle kv-cache first so we can focus only on weight quantization thereafter
-        if isinstance(layer, Attention):
+        if isinstance(layer, (Attention, MLAAttention)):
             return self.KVCacheMethodCls(self)
 
         # handle exclusion
