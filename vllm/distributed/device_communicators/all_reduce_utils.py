@@ -10,7 +10,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from itertools import product
-from typing import Any
+from typing import Any, TypeVar
 
 import torch
 import torch.distributed as dist
@@ -59,6 +59,28 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         8: 128 * MiB,  # 128 MB
     },
 }
+
+_T = TypeVar("_T")
+
+
+def get_capability_config(
+    config: dict[str, _T],
+    capability_version_str: str,
+) -> _T | None:
+    """Get config for a device capability, with family-level fallback.
+
+    Tries exact match first (e.g., "10.3"), then falls back to
+    the base version of the same family (e.g., "10.0").
+
+    This ensures that minor architecture variants (like SM 10.3 for
+    GB200/B300) automatically use the config from their family base
+    (SM 10.0) when no specific override exists.
+    """
+    if capability_version_str in config:
+        return config[capability_version_str]
+    family_key = capability_version_str.split(".")[0] + ".0"
+    return config.get(family_key)
+
 
 NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
     "min_world_size": 4,

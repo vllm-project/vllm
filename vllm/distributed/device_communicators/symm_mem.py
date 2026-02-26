@@ -7,6 +7,7 @@ from torch.distributed import ProcessGroup
 
 from vllm.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
+    get_capability_config,
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import (
@@ -63,14 +64,17 @@ class SymmMemCommunicator:
             )
             return
         self.device_capability = capability.as_version_str()
-        if self.device_capability not in SYMM_MEM_ALL_REDUCE_MAX_SIZES:
+        symm_mem_sizes = get_capability_config(
+            SYMM_MEM_ALL_REDUCE_MAX_SIZES, self.device_capability
+        )
+        if symm_mem_sizes is None:
             logger.warning(
                 "SymmMemCommunicator: Device capability %s not supported, "
                 "communicator is not available.",
                 self.device_capability,
             )
             return
-        if self.world_size not in SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability]:
+        if self.world_size not in symm_mem_sizes:
             logger.warning(
                 "SymmMemCommunicator: World size %d not supported, "
                 "communicator is not available.",
@@ -85,9 +89,7 @@ class SymmMemCommunicator:
                 self.max_size,
             )
         else:
-            self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
-                self.world_size
-            ]
+            self.max_size = symm_mem_sizes[self.world_size]
         try:
             self.buffer = torch_symm_mem.empty(
                 self.max_size // self.dtype.itemsize,
@@ -140,8 +142,12 @@ class SymmMemCommunicator:
             use_multimem = self.force_multimem
         else:
             # Normal logic: use multimem for supported world sizes
+            multimem_world_sizes = get_capability_config(
+                self._WORLD_SIZES_MULTIMEM, self.device_capability
+            )
             use_multimem = (
-                self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]
+                multimem_world_sizes is not None
+                and self.world_size in multimem_world_sizes
             )
 
         if use_multimem:
