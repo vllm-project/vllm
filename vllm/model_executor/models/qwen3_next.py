@@ -115,7 +115,6 @@ def fi_chunk_gated_delta_rule(
     initial_state: torch.Tensor,
     output_final_state: bool,
     cu_seqlens: torch.LongTensor | None = None,
-    head_first: bool = False,
     use_qk_l2norm_in_kernel: bool = True,
 ):
     from flashinfer.gdn_prefill import (
@@ -172,7 +171,6 @@ class ChunkGatedDeltaRule(CustomOp):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fi_chunk_gated_delta_rule(
@@ -184,7 +182,6 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            head_first=head_first,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -198,7 +195,6 @@ class ChunkGatedDeltaRule(CustomOp):
         initial_state: torch.Tensor,
         output_final_state: bool,
         cu_seqlens: torch.LongTensor | None = None,
-        head_first: bool = False,
         use_qk_l2norm_in_kernel: bool = True,
     ):
         return fla_chunk_gated_delta_rule(
@@ -210,7 +206,6 @@ class ChunkGatedDeltaRule(CustomOp):
             initial_state=initial_state,
             output_final_state=output_final_state,
             cu_seqlens=cu_seqlens,
-            head_first=head_first,
             use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
         )
 
@@ -257,7 +252,7 @@ class Qwen3NextSparseMoeBlock(nn.Module):
             config.hidden_size,
             config.num_experts,
             bias=False,
-            quant_config=quant_config,
+            quant_config=None,
             prefix=f"{prefix}.gate",
         )
 
@@ -790,7 +785,6 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
-                head_first=False,
                 use_qk_l2norm_in_kernel=True,
             )
             # Init cache

@@ -28,7 +28,7 @@ from vllm.tasks import SupportedTask
 from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.usage.usage_lib import UsageContext
-from vllm.v1.engine import EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest, PauseMode
 from vllm.v1.engine.core_client import EngineCoreClient
 from vllm.v1.engine.input_processor import InputProcessor
 from vllm.v1.engine.output_processor import OutputProcessor
@@ -199,10 +199,6 @@ class LLMEngine:
             self.should_execute_dummy_batch = True
         return aggregated_has_unfinished
 
-    @classmethod
-    def validate_outputs(cls, outputs, output_type):
-        return outputs
-
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         if not hasattr(self, "_supported_tasks"):
             # Cache the result
@@ -252,12 +248,12 @@ class LLMEngine:
                 request_id,
                 prompt,
                 params,
-                arrival_time,
-                lora_request,
-                tokenization_kwargs,
-                trace_headers,
-                priority,
                 supported_tasks=self.get_supported_tasks(),
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                tokenization_kwargs=tokenization_kwargs,
+                trace_headers=trace_headers,
+                priority=priority,
             )
             prompt_text, _, _ = extract_prompt_components(self.model_config, prompt)
 
@@ -359,8 +355,8 @@ class LLMEngine:
         """
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1):
-        self.engine_core.sleep(level)
+    def sleep(self, level: int = 1, mode: PauseMode = "abort"):
+        self.engine_core.sleep(level, mode)
 
         if self.logger_manager is not None:
             self.logger_manager.record_sleep_state(1, level)
