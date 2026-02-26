@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -57,9 +58,14 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
                 "image/jpeg",
             )
 
-            return np.stack(
-                [np.asarray(load_frame(frame_data)) for frame_data in data.split(",")]
-            ), {}
+            frame_data_list = data.split(",")
+            with ThreadPoolExecutor() as executor:
+                frames = list(
+                    executor.map(
+                        lambda fd: np.asarray(load_frame(fd)), frame_data_list
+                    )
+                )
+            return np.stack(frames), {}
 
         return self.load_bytes(base64.b64decode(data))
 
