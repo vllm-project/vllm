@@ -332,28 +332,42 @@ def prepare_nvfp4_moe_layer_for_marlin(
     return w13, w13_scale, w13_scale_2, w2, w2_scale, w2_scale_2
 
 
-def prepare_moe_fp4_layer_for_marlin(
-    layer: torch.nn.Module, input_dtype: torch.dtype | None = None
-) -> None:
+def prepare_moe_mxfp4_layer_for_marlin(
+    layer: torch.nn.Module,
+    w13: torch.Tensor,
+    w2: torch.Tensor,
+    w13_scale: torch.Tensor,
+    w2_scale: torch.Tensor,
+    w13_bias: torch.Tensor | None = None,
+    w2_bias: torch.Tensor | None = None,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor | None,
+    torch.Tensor | None,
+]:
     logger.warning_once(
         "Your GPU does not have native support for FP4 computation but "
         "FP4 quantization is being used. Weight-only FP4 compression will "
         "be used leveraging the Marlin kernel. This may degrade "
         "performance for compute-heavy workloads."
     )
+    input_dtype = get_marlin_input_dtype(prefix="")
 
-    is_nvfp4 = hasattr(layer, "w13_weight_scale_2")
-    if input_dtype is not None and input_dtype.itemsize == 1:
-        if is_nvfp4:
-            raise RuntimeError("NVFP4 weight + INT8/FP8 activation is not supported.")
-        elif input_dtype != torch.float8_e4m3fn:
-            raise RuntimeError("MXFP4 weight + INT8 activation is not supported.")
+    if (
+        input_dtype is not None
+        and input_dtype.itemsize == 1
+        and input_dtype != torch.float8_e4m3fn
+    ):
+        raise RuntimeError("MXFP4 weight + INT8 activation is not supported.")
 
-    group_size = 16 if is_nvfp4 else 32
+    group_size = 32
 
-    e = layer.num_experts
-    k = layer.hidden_size
-    n = layer.intermediate_size_per_partition
+    e = layer.moe_config.num_experts
+    k = layer.moe_config.hidden_size
+    n = layer.moe_config.intermediate_size_per_partition
 
     # WORKSPACE
     device = layer.w13_weight.device
@@ -364,8 +378,8 @@ def prepare_moe_fp4_layer_for_marlin(
 
     # WEIGHT
     # Repack weights to marlin format
-    for name in ["w13_weight", "w2_weight"]:
-        weight = getattr(layer, name)
+
+    def repack_weight(weight: torch.Tensor, name: str) -> torch.Tensor:
         tensor_list = []
         if "w13" in name:
             size_n, size_k = n * 2, k
@@ -388,19 +402,17 @@ def prepare_moe_fp4_layer_for_marlin(
             tensor_list.append(marlin_qweight)
 
         weight = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
-        weight = torch.nn.Parameter(weight, requires_grad=False)
 
-        setattr(layer, name, weight)
+        return weight
+
+    w13 = repack_weight(w13, "w13")
+    w2 = repack_weight(w2, "w2")
 
     # WEIGHT SCALES
     # Permute scales
-    for name in ["w13", "w2"]:
-        scales = getattr(layer, name + "_weight_scale")
-        if not is_nvfp4:
-            scales = scales.view(torch.float8_e8m0fnu)
+    def premute_scales(scales: torch.Tensor, name: str) -> torch.Tensor:
+        scales = scales.view(torch.float8_e8m0fnu)
         scales = scales.to(param_dtype)
-        if is_nvfp4:
-            global_scale = getattr(layer, name + "_weight_scale_2").to(param_dtype)
 
         tensor_list = []
         if "w13" in name:
@@ -418,30 +430,18 @@ def prepare_moe_fp4_layer_for_marlin(
                 group_size=group_size,
                 is_a_8bit=is_a_8bit,
             )
-            if is_nvfp4:
-                marlin_scales = nvfp4_marlin_process_scales(marlin_scales)
-            else:
-                marlin_scales = mxfp4_marlin_process_scales(
-                    marlin_scales, input_dtype=input_dtype
-                )
+
+            marlin_scales = mxfp4_marlin_process_scales(
+                marlin_scales, input_dtype=input_dtype
+            )
             tensor_list.append(marlin_scales)
 
         scales = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
-        scales = torch.nn.Parameter(scales, requires_grad=False)
-        setattr(layer, name + "_weight_scale", scales)
 
-        if is_nvfp4:
-            global_scale = nvfp4_marlin_process_global_scale(global_scale)
-            global_scale = torch.nn.Parameter(global_scale, requires_grad=False)
-            setattr(layer, name + "_weight_scale_2", global_scale)
+    w13_scale = premute_scales(w13_scale, "w13")
+    w2_scale = premute_scales(w2_scale, "w2")
 
-    # BIAS
-    # Permute bias
-    for name in ["w13_bias", "w2_bias"]:
-        if not hasattr(layer, name):
-            continue
-        bias = getattr(layer, name).to(param_dtype)
-
+    def premute_bias(bias: torch.Tensor) -> torch.Tensor:
         tensor_list = []
         for i in range(e):
             expert_bias = bias[i]
@@ -449,8 +449,12 @@ def prepare_moe_fp4_layer_for_marlin(
             tensor_list.append(marlin_permute_bias(expert_bias))
 
         bias = torch.cat([x.unsqueeze(0) for x in tensor_list], 0)
-        bias = torch.nn.Parameter(bias, requires_grad=False)
-        setattr(layer, name, bias)
+
+    if w13_bias is not None and w2_bias is not None:
+        w13_bias = premute_bias(w13_bias)
+        w2_bias = premute_bias(w2_bias)
+
+    return w13, w2, w13_scale, w2_scale, w13_bias, w2_bias
 
 
 def rand_marlin_weight_nvfp4_like(weight, group_size, input_dtype=None):

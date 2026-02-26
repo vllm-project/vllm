@@ -19,6 +19,7 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 from vllm.model_executor.layers.fused_moe.utils import _resize_cache
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kMxfp4Static,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -386,41 +387,32 @@ def make_routing_data(
 class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     @staticmethod
     def _supports_current_device() -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
+        p = current_platform
+        return p.is_cuda_alike() and (
+            p.is_device_capability(90) or p.is_device_capability_family(100)
         )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return False
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        raise NotImplementedError
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        raise NotImplementedError(
-            "OAITritonExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return True
 
     def supports_expert_map(self) -> bool:
         return True
@@ -476,6 +468,10 @@ class BaseOAITritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
 class OAITritonExperts(BaseOAITritonExperts):
     """OAI Triton-based fused MoE expert implementation."""
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation == MoEActivation.SWIGLUOAI
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -560,6 +556,15 @@ class UnfusedOAITritonExperts(BaseOAITritonExperts):
 
     One use case for it is to inject LoRA modules on the activation and moe_sum.
     """
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.GELU,
+            MoEActivation.SWIGLUOAI,
+            MoEActivation.SWIGLUSTEP,
+        ]
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:

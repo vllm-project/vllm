@@ -25,9 +25,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     ocp_mx_moe_quant_config,
 )
 from vllm.model_executor.layers.fused_moe.fused_marlin_moe import fused_marlin_moe
-from vllm.model_executor.layers.quantization.mxfp4 import (
-    Mxfp4Backend,
-    get_mxfp4_backend,
+from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+    Mxfp4MoeBackend,
+    select_mxfp4_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     prepare_fp8_moe_layer_for_marlin,
@@ -674,9 +674,9 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 f"Please check that the combination is supported in OCP_MX_Scheme."
             )
 
-        self.mxfp4_backend: Mxfp4Backend | None = None
+        self.mxfp4_backend: Mxfp4MoeBackend | None = None
         if self.ocp_mx_scheme == "w_mxfp4":
-            self.mxfp4_backend = get_mxfp4_backend(moe.is_lora_enabled)
+            self.mxfp4_backend, experts_cls = select_mxfp4_moe_backend(moe)
 
         if self.input_quant is not None:
             self.static_input_scales = not self.input_quant.get("is_dynamic")
@@ -991,9 +991,10 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         if not self.emulate:
-            if (
-                self.model_type == "gpt_oss"
-                and self.mxfp4_backend == Mxfp4Backend.TRITON
+            if self.model_type == "gpt_oss" and self.mxfp4_backend in (
+                Mxfp4MoeBackend.TRITON,
+                Mxfp4MoeBackend.TRITON_UNFUSED,
+                Mxfp4MoeBackend.TRITON_MONOLITHIC,
             ):
                 raise NotImplementedError(
                     "Triton kernel implemented fused MoE for GPT_OSS model "

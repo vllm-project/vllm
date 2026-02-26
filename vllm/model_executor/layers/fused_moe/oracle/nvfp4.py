@@ -14,7 +14,6 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
-    mxfp4_w4a16_moe_quant_config,
     nvfp4_moe_quant_config,
     nvfp4_w4a16_moe_quant_config,
 )
@@ -380,16 +379,6 @@ def convert_to_nvfp4_moe_kernel_format(
         w2_scale,
         w2_scale_2,
         a2_scale,
-    )
-
-
-def make_mxfp4_moe_quant_config(
-    w13_scale: torch.Tensor,
-    w2_scale: torch.Tensor,
-) -> FusedMoEQuantConfig:
-    return mxfp4_w4a16_moe_quant_config(
-        w1_scale=w13_scale,
-        w2_scale=w2_scale,
     )
 
 

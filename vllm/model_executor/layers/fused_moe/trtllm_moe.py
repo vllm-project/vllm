@@ -4,6 +4,7 @@
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
@@ -15,7 +16,11 @@ from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kMxfp4Static,
+    kMxfp8Dynamic,
 )
+from vllm.platforms import current_platform
+from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 
 class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
@@ -25,7 +30,6 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self,
         moe_config: FusedMoEConfig,
         quant_config: FusedMoEQuantConfig,
-        max_capture_size,
     ):
         super().__init__(moe_config, quant_config)
         self.device = torch.cuda.current_device()
@@ -39,7 +43,9 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
         self.gemm1_clamp_limit = torch.tensor(
             [7.0] * self.num_experts, dtype=torch.float32, device=self.device
         )
-        self.max_capture_size = max_capture_size
+        self.max_capture_size = (
+            get_current_vllm_config().compilation_config.max_cudagraph_capture_size
+        )
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -47,41 +53,35 @@ class TrtLlmGenExperts(mk.FusedMoEPermuteExpertsUnpermute):
 
     @staticmethod
     def _supports_current_device() -> bool:
-        raise NotImplementedError(
-            "TrtLlmGenExperts is not yet used by an Oracle. "
-            "This method should not be called."
+        p = current_platform
+        return (
+            p.is_cuda()
+            and (p.is_device_capability_family(100))
+            and has_flashinfer_trtllm_fused_moe()
         )
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
-        raise NotImplementedError(
-            "TrtLlmGenExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return False
 
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
         activation_key: QuantKey | None,
     ) -> bool:
-        raise NotImplementedError(
-            "TrtLlmGenExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        SUPPORTED_W_A = [
+            (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp8Dynamic),
+        ]
+        return (weight_key, activation_key) in SUPPORTED_W_A
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        raise NotImplementedError(
-            "TrtLlmGenExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return activation == MoEActivation.SWIGLUOAI
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
-        raise NotImplementedError(
-            "TrtLlmGenExperts is not yet used by an Oracle. "
-            "This method should not be called."
-        )
+        return True
 
     def supports_chunking(self) -> bool:
         return True
