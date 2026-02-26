@@ -579,11 +579,6 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         self.multimodal_config = multimodal_config
         self.image_token_id = _IMAGE_TOKEN_ID
 
-        self.configure_mm_token_handling(
-            vocab_size=config.vocab_size,
-            mm_token_ids=[self.image_token_id],
-        )
-
         with self._mark_tower_model(vllm_config, "image"):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
