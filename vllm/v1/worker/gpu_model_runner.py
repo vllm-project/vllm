@@ -540,7 +540,14 @@ class GPUModelRunner(
             elif self.speculative_config.method == "suffix":
                 self.drafter = SuffixDecodingProposer(self.vllm_config)
             elif self.speculative_config.use_eagle():
-                self.drafter = EagleProposer(self.vllm_config, self.device, self)
+                eagle_cls = EagleProposer
+                if self.vllm_config.kv_transfer_config is not None:
+                    from vllm.v1.spec_decode.capturing_eagle import (
+                        CapturingEagleProposer,
+                    )
+
+                    eagle_cls = CapturingEagleProposer
+                self.drafter = eagle_cls(self.vllm_config, self.device, self)
                 if self.speculative_config.method == "eagle3":
                     self.use_aux_hidden_state_outputs = (
                         self.drafter.eagle3_use_aux_hidden_state
