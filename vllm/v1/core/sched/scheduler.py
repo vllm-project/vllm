@@ -1322,6 +1322,7 @@ class Scheduler(SchedulerInterface):
 
             req_index = model_runner_output.req_id_to_index[req_id]
             if sampled_token_ids_np is not None:
+                assert num_generated_tokens is not None
                 num_generated = int(num_generated_tokens[req_index])
                 generated_token_ids = (
                     sampled_token_ids_np[req_index, :num_generated]
