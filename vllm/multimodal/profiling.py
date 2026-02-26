@@ -130,7 +130,7 @@ class BaseDummyInputsBuilder(ABC, Generic[_I]):
     ) -> list[npt.NDArray]:
         if num_videos == 0:
             return []
-        video = np.full((num_frames, width, height, 3), 255)
+        video = np.empty((num_frames, width, height, 3), dtype=np.uint8)
         return [video] * num_videos
 
 
