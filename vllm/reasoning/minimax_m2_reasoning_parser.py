@@ -94,7 +94,7 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         start_token_id = self.start_token_id
         for input_id in reversed(input_ids):
             if input_id in (end_token_id, start_token_id):
-                return input_ids == end_token_id
+                return input_id == end_token_id
         return True
 
     def extract_content_ids(self, input_ids: list[int]) -> list[int]:
