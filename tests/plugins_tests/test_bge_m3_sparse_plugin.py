@@ -175,11 +175,16 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
 
 def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
     """Test BGE-M3 sparse plugin with multiple inputs in offline mode."""
-    prompts = [
-        {"data": {"input": "What is the capital of France?", "return_tokens": True}},
-        {"data": {"input": "What is the capital of Germany?", "return_tokens": True}},
-        {"data": {"input": "What is the capital of Spain?", "return_tokens": True}},
-    ]
+    prompts = {
+        "data": {
+            "input": [
+                "What is the capital of France?",
+                "What is the capital of Germany?",
+                "What is the capital of Spain?",
+            ],
+            "return_tokens": True,
+        }
+    }
 
     with vllm_runner(
         model_config["model_name"],
