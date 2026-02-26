@@ -448,6 +448,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         "response_format of type 'json_schema' requires the "
                         "'json_schema' field"
                     )
+                if json_schema.json_schema is None:
+                    raise ValueError(
+                        "response_format.json_schema object must contain a "
+                        "'schema' field when response_format of type 'json_schema'"
+                    )
                 structured_outputs_kwargs["json"] = json_schema.json_schema
             elif response_format.type == "structural_tag":
                 structural_tag = response_format
