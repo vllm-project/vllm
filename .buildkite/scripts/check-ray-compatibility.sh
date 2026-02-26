@@ -16,11 +16,9 @@ RAY_LOCK_FILES=(
     "rayllm_test_py311_cu128.lock"
 )
 
-cd /vllm-workspace/
-
-# Use the source tree directly — pip install --dry-run only needs metadata,
-# not a compiled wheel.
-INSTALL_TARGET="."
+# Use the already-installed vllm package. The CI image installs vllm from a
+# wheel; the source tree (pyproject.toml) is not present in the image.
+INSTALL_TARGET="vllm"
 
 OVERALL_EXIT=0
 FAILED_LOCKS=()
@@ -43,7 +41,7 @@ for LOCK_NAME in "${RAY_LOCK_FILES[@]}"; do
     # to produce a clean constraints file with only package==version pins.
     # Also remove any vllm pin — the lock file may pin the currently-released
     # vllm version, which would conflict with the local wheel we're testing.
-    sed -E '/^\s*--hash=/d; /^\s*#/d; s/ \\$//' "$LOCK_FILE" \
+    sed -E '/^\s*--hash=/d; /^\s*#/d; /^\s*--(index-url|extra-index-url)/d; s/ \\$//' "$LOCK_FILE" \
         | sed '/^$/d' \
         | grep -v '^vllm==' \
         > "$CONSTRAINTS_FILE"
