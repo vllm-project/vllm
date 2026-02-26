@@ -1611,6 +1611,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # enable LORA per Request Async Loading for GPU Accelerators
     "VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA": lambda: bool(
         int(os.getenv("VLLM_LORA_REQUEST_ASYNC_LOADING_CUDA", "0"))
+    ),
     # Enable CUDA compatibility mode for datacenter GPUs with older
     # driver versions than the CUDA toolkit major version of vLLM.
     "VLLM_ENABLE_CUDA_COMPATIBILITY": lambda: (
