@@ -532,7 +532,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Check if fused RoPE+FP8 quant path should be used.
         # When active, RoPE was NOT applied upfront in forward(), so we
         # must apply it per-path (prefill vs decode) below.
-        positions = self._positions
+        #
+        # Prefer positions from forward_context (set outside CUDA graphs,
+        # always up-to-date) over self._positions which can be stale during
+        # piecewise CUDA graph replay -- the Python-level assignment
+        # self._positions = positions in forward() is not re-executed on
+        # replay, so it may point to a view with the wrong size from a
+        # different capture.
+        forward_ctx = get_forward_context()
+        positions = getattr(forward_ctx, 'positions', None) or self._positions
         if positions is not None:
             positions = positions[:attn_metadata.num_actual_tokens]
 

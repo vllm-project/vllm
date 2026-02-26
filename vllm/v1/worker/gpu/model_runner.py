@@ -996,6 +996,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_tokens_across_dp=num_tokens_across_dp,
                 batch_descriptor=batch_descriptor,
                 slot_mapping=input_batch.slot_mappings,
+                positions=positions,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
                 hidden_states = self.model(

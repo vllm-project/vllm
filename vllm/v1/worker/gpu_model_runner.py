@@ -3535,6 +3535,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                positions=positions,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(scheduler_output) as kv_connector_output,
@@ -4871,6 +4872,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    positions=positions,
                 ),
             ):
                 outputs = self.model(
