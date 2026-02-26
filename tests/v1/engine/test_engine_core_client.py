@@ -280,20 +280,15 @@ def echo_dc_nested(
 
 
 def future_echo(self, value: Any, num_wait_loops: int = 2) -> Future:
-    """Utility that returns a Future completed by a per_step_hook after
-    num_wait_loops engine steps (tests deferred utility path).
+    """Utility that returns a Future completed once the engine is idle
+    (tests deferred utility path).
     """
     future: Future = Future()
-    remaining = [num_wait_loops]
 
-    def _step(engine: EngineCore) -> bool:
-        remaining[0] -= 1
-        if remaining[0] <= 0:
-            future.set_result(value)
-            return True  # remove hook
-        return False
+    def idle(engine: EngineCore):
+        future.set_result(value)
 
-    self.per_step_hooks.add(_step)
+    self._idle_state_callbacks.append(idle)
     return future
 
 
@@ -832,8 +827,8 @@ async def test_engine_core_client_future_utility_async(
     monkeypatch: pytest.MonkeyPatch,
     subprocess_future_echo_patch,
 ):
-    """Test that a utility returning a Future (completed by a per_step_hook
-    after N steps) completes when the future is done (engine uses add_done_callback).
+    """Test that a utility returning a Future completes when the future is done
+    (engine uses add_done_callback).
     """
     with monkeypatch.context() as m:
         m.setattr(EngineCore, "future_echo", future_echo, raising=False)

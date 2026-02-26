@@ -99,7 +99,11 @@ class Scheduler(SchedulerInterface):
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_scheduled_tokens = self.scheduler_config.max_num_batched_tokens
+        self.max_num_scheduled_tokens = (
+            self.scheduler_config.max_num_scheduled_tokens
+            if self.scheduler_config.max_num_scheduled_tokens
+            else self.scheduler_config.max_num_batched_tokens
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
         self.enable_kv_cache_events = (
             self.kv_events_config is not None
@@ -945,7 +949,7 @@ class Scheduler(SchedulerInterface):
                 request.num_tokens + request.num_output_placeholders
             )
             scheduler_output.has_structured_output_requests |= (
-                request.use_structured_output
+                request.use_structured_output and not request.is_prefill_chunk
             )
 
             # NOTE: _free_encoder_inputs relies on num_computed_tokens, which
@@ -1232,14 +1236,14 @@ class Scheduler(SchedulerInterface):
     ) -> GrammarOutput | None:
         # Collect list of scheduled request ids that use structured output.
         # The corresponding rows of the bitmask will be in this order.
-        # PERF: in case of chunked prefill,
-        # request might not include any new tokens.
-        # Therefore, we might introduce some additional
-        # cycle to fill in the bitmask, which could be a big no-op.
+        if not scheduler_output.has_structured_output_requests:
+            return None
+
         structured_output_request_ids = [
             req_id
             for req_id in scheduler_output.num_scheduled_tokens
-            if (req := self.requests.get(req_id)) and req.use_structured_output
+            if (req := self.requests.get(req_id))
+            and (req.use_structured_output and not req.is_prefill_chunk)
         ]
         if not structured_output_request_ids:
             return None
