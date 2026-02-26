@@ -54,6 +54,7 @@ def _ensure_fa3_imported() -> None:
         FA3_UNAVAILABLE_REASON = str(e)
         FA3_AVAILABLE = False
 
+
 try:
     import os
 
