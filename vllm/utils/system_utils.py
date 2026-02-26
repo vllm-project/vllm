@@ -122,23 +122,9 @@ def _sync_visible_devices_env_vars():
     """
     if not current_platform.is_rocm():
         return
+    from vllm.platforms.rocm import sync_hip_cuda_env_vars
 
-    # Treat empty string the same as unset - both mean "not configured".
-    hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
-    cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
-
-    if hip_val is not None and cuda_val is not None:
-        if hip_val != cuda_val:
-            raise ValueError(
-                f"HIP_VISIBLE_DEVICES='{hip_val}' and "
-                f"CUDA_VISIBLE_DEVICES='{cuda_val}' are both set but "
-                f"inconsistent. On ROCm these must match. "
-                f"Please set only one, or ensure they have the same value."
-            )
-    elif cuda_val is not None:
-        os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
-    elif hip_val is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
+    sync_hip_cuda_env_vars()
 
 
 def _maybe_force_spawn():
