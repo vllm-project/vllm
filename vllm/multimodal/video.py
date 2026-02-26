@@ -256,7 +256,6 @@ def _get_cv2_video_api():
 
 @VIDEO_LOADER_REGISTRY.register("opencv")
 class OpenCVVideoBackend(VideoLoader):
-
     @classmethod
     def load_bytes(
         cls,
@@ -438,7 +437,6 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
 @VIDEO_LOADER_REGISTRY.register("molmo2")
 class Molmo2VideoBackend(VideoLoader):
-
     @classmethod
     def get_candidate_target_fps(
         cls,
