@@ -338,7 +338,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return None, None
 
         assert self.execute_model_state is not None
-        hidden_states, _, input_batch, _ = self.execute_model_state
+        input_batch, _, _, _, hidden_states, _, _ = self.execute_model_state
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -876,8 +876,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings = None
             # FIXME(woosuk): Fix warmup for LoRA.
 
-        attn_metadata = None
         slot_mappings_by_layer = None
+        attn_metadata = None
         if not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
             slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -947,22 +947,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     aux_hidden_states = None
 
         kv_connector_output = self.kv_connector.post_forward(scheduler_output)
+        self.execute_model_state = (
+            input_batch,
+            model_inputs,
+            slot_mappings_by_layer,
+            attn_metadata,
+            hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
+        )  # type: ignore
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
             assert isinstance(hidden_states, IntermediateTensors)
             hidden_states.kv_connector_output = kv_connector_output
-            self.execute_model_state = (None, None, input_batch, kv_connector_output)
             return hidden_states
-
         # Last rank (or no PP): hidden_states is a tensor for sampling.
         assert isinstance(hidden_states, torch.Tensor)
-        self.execute_model_state = (
-            hidden_states,
-            aux_hidden_states,
-            input_batch,
-            kv_connector_output,
-        )  # type: ignore
         return None
 
     @torch.inference_mode()
@@ -970,9 +971,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
         assert self.execute_model_state is not None
-        hidden_states, aux_hidden_states, input_batch, kv_connector_output = (
-            self.execute_model_state
-        )
+        (
+            input_batch,
+            model_inputs,
+            slot_mappings_by_layer,
+            attn_metadata,
+            hidden_states,
+            aux_hidden_states,
+            kv_connector_output,
+        ) = self.execute_model_state
         self.execute_model_state = None  # type: ignore
 
         if not self.is_last_pp_rank:
@@ -1035,6 +1042,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             draft_tokens = self.speculator.propose(
                 input_batch,
+                slot_mappings_by_layer,
+                attn_metadata,
                 hidden_states,
                 aux_hidden_states,
                 num_sampled,
