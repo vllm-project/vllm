@@ -307,34 +307,32 @@ def benchmark_all_gather_gemm_fp8(TEST_SHAPES: List[Tuple[int, int, int]], rank:
                 torch.cuda.synchronize()
 
                 # ---- PROFILE the helion kernel (only on rank 0) ----
-                if rank == 0:
-                    with profile(
-                        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                        record_shapes=True,
-                        with_stack=True,
-                        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logdir/helion_M{M}_N{N}_K{K}_sp{sp}_RANK{rank}')
-                    ) as prof:
-                        helion_kernel()
-                        torch.cuda.synchronize()
-                    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=12))
-                    print(f"Profiling trace saved. To view: tensorboard --logdir=./logdir")
+                with profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                    record_shapes=True,
+                    with_stack=True,
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logdir/helion_M{M}_N{N}_K{K}_sp{sp}_RANK{rank}')
+                ) as prof:
+                    helion_kernel()
+                    torch.cuda.synchronize()
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=12))
+                print(f"Profiling trace saved. To view: tensorboard --logdir=./logdir")
                 # ---- Prepare the kernel for profiling (warmup) ----
                 for _ in range(3):
                     baseline_kernel()
                     torch.cuda.synchronize()
                 # ---- PROFILE the baseline kernel (only on rank 0) ----
-                if rank == 0:
-                    with profile(
-                        activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
-                        record_shapes=True,
-                        with_stack=True,
-                        on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logdir/baseline_M{M}_N{N}_K{K}_sp{sp}_RANK{rank}')
-                    ) as prof:
-                        baseline_kernel()
-                        torch.cuda.synchronize()
-                    print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=12))
-                    print(f"Profiling trace saved. To view: tensorboard --logdir=./logdir")
-                    
+                with profile(
+                    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],
+                    record_shapes=True,
+                    with_stack=True,
+                    on_trace_ready=torch.profiler.tensorboard_trace_handler(f'./logdir/baseline_M{M}_N{N}_K{K}_sp{sp}_RANK{rank}')
+                ) as prof:
+                    baseline_kernel()
+                    torch.cuda.synchronize()
+                print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=12))
+                print(f"Profiling trace saved. To view: tensorboard --logdir=./logdir")
+                
             # benchmark Helion kernel
             torch.cuda.reset_peak_memory_stats(device)
             # if rank == 0:
@@ -386,8 +384,8 @@ if __name__ == "__main__":
         #(128, 128, 128),
         #(256, 1024, 1024),
         #medium shapes
-        (2048, 1024, 2048), 
-        #(2048, 4096, 4096),
+        #(2048, 1024, 2048), 
+        (2048, 4096, 4096),
         #(4096, 2048, 4096),
         #large shapes
         #(4096, 5120, 5120), # this fails to do_bench_distributed_graph
