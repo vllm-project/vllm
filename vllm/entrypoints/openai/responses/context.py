@@ -27,7 +27,7 @@ from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     FunctionCall,
 )
-from vllm.entrypoints.openai.parser.harmony_utils import (
+from vllm.entrypoints.openai.harmony import (
     get_encoding,
     get_streamable_parser_for_assistant,
     render_for_completion,

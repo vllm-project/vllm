@@ -56,15 +56,14 @@ from vllm.entrypoints.openai.engine.serving import (
     GenerationError,
     OpenAIServing,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.parser.harmony_utils import (
+from vllm.entrypoints.openai.harmony import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_system_message,
     get_user_message,
-    has_custom_tools,
     render_for_completion,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.responses.context import (
     ConversationContext,
     HarmonyContext,
@@ -75,6 +74,7 @@ from vllm.entrypoints.openai.responses.context import (
 from vllm.entrypoints.openai.responses.harmony import (
     construct_harmony_previous_input_messages,
     harmony_to_response_output,
+    has_custom_tools,
     parser_state_to_response_output,
     response_input_to_harmony,
 )

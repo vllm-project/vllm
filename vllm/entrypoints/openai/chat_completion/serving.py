@@ -23,6 +23,10 @@ from vllm.entrypoints.chat_utils import (
     make_tool_call_id,
 )
 from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.openai.chat_completion.harmony import (
+    chat_inputs_to_harmony,
+    parse_chat_output,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -55,16 +59,14 @@ from vllm.entrypoints.openai.engine.serving import (
     OpenAIServing,
     clamp_prompt_logprobs,
 )
-from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.openai.parser.harmony_utils import (
+from vllm.entrypoints.openai.harmony import (
     get_developer_message,
     get_stop_tokens_for_assistant_actions,
     get_streamable_parser_for_assistant,
     get_system_message,
-    parse_chat_inputs_to_harmony_messages,
-    parse_chat_output,
     render_for_completion,
 )
+from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
 from vllm.inputs.data import ProcessorInputs, TokensPrompt
@@ -1968,7 +1970,7 @@ class OpenAIServingChat(OpenAIServing):
             messages.append(dev_msg)
 
         # Add user message.
-        messages.extend(parse_chat_inputs_to_harmony_messages(request.messages))
+        messages.extend(chat_inputs_to_harmony(request.messages))
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)

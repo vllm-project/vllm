@@ -98,7 +98,7 @@ class TestMCPToolServerUnit:
 
     def test_builtin_tools_consistency(self):
         """MCP_BUILTIN_TOOLS must match BUILTIN_TOOL_TO_MCP_SERVER_LABEL values."""
-        from vllm.entrypoints.openai.parser.harmony_utils import (
+        from vllm.entrypoints.openai.responses.harmony import (
             BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
             MCP_BUILTIN_TOOLS,
         )
