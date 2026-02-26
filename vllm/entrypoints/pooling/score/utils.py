@@ -25,6 +25,7 @@ from vllm.inputs.data import PromptType, TextPrompt
 from vllm.model_executor.models.interfaces import supports_score_template
 from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.outputs import PoolingRequestOutput
+from vllm.platforms import current_platform
 from vllm.renderers.hf import safe_apply_chat_template
 from vllm.tokenizers import TokenizerLike
 
@@ -73,7 +74,7 @@ def compute_maxsim_scores(
         if q_emb.shape[1] != d_emb.shape[1]:
             raise ValueError("Query and document embeddings must have same dim")
 
-    compute_device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    compute_device = torch.device("cuda" if current_platform.is_cuda() else "cpu")
     scores: list[torch.Tensor] = []
     start = 0
     while start < num_pairs:
