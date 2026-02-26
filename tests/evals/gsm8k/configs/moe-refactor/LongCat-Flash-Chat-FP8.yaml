@@ -1,0 +1,10 @@
+model_name: "meituan-longcat/LongCat-Flash-Chat-FP8"
+accuracy_threshold: 0.70
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 8
+  --enable-expert-parallel
