@@ -339,7 +339,7 @@ class QuarkConfig(QuantizationConfig):
 
         is_input_fp8 = (
             input_quant.get("dtype") == "fp8_e4m3"
-            and input_quant.get("qscheme") in ["per_tensor", "per_channel"]
+            and input_quant.get("qscheme") == "per_tensor"
             and not input_quant.get("is_dynamic")  # Static per-tensor
             and input_quant.get("symmetric") is True  # Symmetric quantization
         )

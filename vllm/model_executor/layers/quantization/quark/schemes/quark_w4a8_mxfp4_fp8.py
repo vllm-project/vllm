@@ -15,6 +15,7 @@ from vllm.model_executor.parameter import (
     PackedvLLMParameter,
     PerTensorScaleParameter,
 )
+from vllm.platforms import current_platform
 
 from .quark_scheme import QuarkScheme
 
@@ -55,8 +56,16 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
                 "FP8 scales stored in the checkpoint."
             )
 
+        kernel_supported_gpu = False
+        if current_platform.is_rocm():
+            from vllm.platforms.rocm import on_gfx950
+
+            kernel_supported_gpu = on_gfx950()
+
         self.use_aiter_kernel = (
-            is_aiter_found_and_supported() and self.is_static_input_scheme
+            is_aiter_found_and_supported()
+            and self.is_static_input_scheme
+            and kernel_supported_gpu
         )
 
         if not self.use_aiter_kernel:
@@ -127,8 +136,6 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
             input_scale[:] = torch.finfo(torch.float32).min
             layer.register_parameter("input_scale", input_scale)
 
-        logger.debug_once("[W4A8 MXFP4+FP8] weights and scales created successfully.")
-
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Ensuring weights & scales are non-trainable
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
@@ -146,7 +153,6 @@ class QuarkW4A8_MXFP4_FP8(QuarkScheme):
                 torch.tensor(input_scale, dtype=torch.float32),
                 requires_grad=False,
             )
-        logger.debug_once("[W4A8 MXFP4+FP8] weights and scales processed successfully.")
 
     def apply_weights(
         self,
