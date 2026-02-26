@@ -222,7 +222,7 @@ def _patch_standalone_compile_atomic_save() -> None:
 
     _save._vllm_patched = True  # type: ignore[attr-defined]
     cls.save = _save  # type: ignore[assignment]
-    logger.info("Patched %s.save for atomic writes (torch < 2.10)", cls.__name__)
+    logger.debug("Patched %s.save for atomic writes (torch < 2.10)", cls.__name__)
 
 
 class InductorStandaloneAdaptor(CompilerInterface):
@@ -239,14 +239,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
     def __init__(self, save_format: Literal["binary", "unpacked"]) -> None:
         if not is_torch_equal_or_newer("2.10.0"):
-            try:
-                _patch_standalone_compile_atomic_save()
-            except Exception:
-                logger.warning(
-                    "Failed to patch CompiledArtifact.save for atomic writes. "
-                    "Concurrent vllm instances may hit compile cache corruption.",
-                    exc_info=True,
-                )
+            _patch_standalone_compile_atomic_save()
         self.save_format = save_format
 
     def compute_hash(self, vllm_config: VllmConfig) -> str:
