@@ -56,11 +56,11 @@ steps:
     - pytest -v -s models/test_utils.py models/test_vision.py
 
 
-# - label: Model strategy test
-#   num_devices: 2
-#   source_file_dependencies: []
-#   commands:
-#     - pytest -v -s models/nightly/gptoss.py
+- label: Model strategy test
+  num_devices: 2
+  source_file_dependencies: []
+  commands:
+    - pytest -v -s models/nightly/gptoss.py
 
 
 - label: Transformers Nightly Models
