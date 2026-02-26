@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import base64
 from io import BytesIO
 from pathlib import Path
 
@@ -43,7 +42,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
         media_type: str,
         data: str,
     ) -> tuple[npt.NDArray, float]:
-        return self.load_bytes(base64.b64decode(data))
+        return self.load_bytes(pybase64.b64decode(data))
 
     def load_file(self, filepath: Path) -> tuple[npt.NDArray, float]:
         return librosa.load(filepath, sr=None)
@@ -60,7 +59,7 @@ class AudioMediaIO(MediaIO[tuple[npt.NDArray, float]]):
             soundfile.write(buffer, audio, sr, format=audio_format)
             data = buffer.getvalue()
 
-        return base64.b64encode(data).decode("utf-8")
+        return pybase64.b64encode(data).decode("utf-8")
 
 
 class AudioEmbeddingMediaIO(MediaIO[torch.Tensor]):
