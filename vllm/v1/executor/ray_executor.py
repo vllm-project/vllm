@@ -416,8 +416,12 @@ class RayDistributedExecutor(Executor):
                 "after execute_model() returns None."
             )
 
-        if not self.uses_sampler or not scheduler_output.total_num_scheduled_tokens:
-            # Model will not execute, call model runner immediately.
+        if (
+            not self.uses_sampler
+            or not scheduler_output.total_num_scheduled_tokens
+            or not scheduler_output.has_structured_output_requests
+        ):
+            # sample_tokens won't be called, call model runner immediately.
             return self._execute_dag(scheduler_output, None, non_block)
 
         # Model will execute, defer to sample_tokens() call.
