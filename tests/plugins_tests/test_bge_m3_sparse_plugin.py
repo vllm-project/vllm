@@ -131,7 +131,11 @@ def _check_sparse_embedding(data, check_tokens=False):
             f"actual embed {entry} not equal to {expected_val}"
         )
         if check_tokens:
-            assert expected_val["token"] == entry.token
+            assert expected_val["token"] == entry.token, (
+                f"actual embed {entry} not equal to {expected_val}"
+            )
+        else:
+            assert entry.token is None, f"{entry} should not return token"
 
 
 @pytest.mark.parametrize(
@@ -166,7 +170,6 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
     response = outputs.outputs
     assert hasattr(response, "data")
     assert len(response.data) == 1
-    print("")
     # Verify response data
     for i, output in enumerate(response.data):
         # Each output should have sparse embeddings
