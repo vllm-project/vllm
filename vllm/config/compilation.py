@@ -118,7 +118,9 @@ class PassConfig:
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
-    """Enable sequence parallelism."""
+    """Enable sequence parallelism. Requires TP>1. Automatically disabled
+    if the model's hidden_size is too small for SP to be beneficial
+    (threshold is device-capability dependent)."""
     fuse_gemm_comms: bool = Field(default=None)
     """Enable async TP."""
     fuse_allreduce_rms: bool = Field(default=None)
@@ -155,6 +157,11 @@ class PassConfig:
                 8: 1,  # 1MB
             },
         }, where key is the device capability"""
+    sp_min_token_num: int | None = None
+    """The minimum number of tokens above which vllm should use
+    sequence parallelism. Specified as an integer token count.
+    Unspecified will fallback to default values which are compute
+    capability and world size dependent."""
 
     # TODO(luka) better pass enabling system.
 
