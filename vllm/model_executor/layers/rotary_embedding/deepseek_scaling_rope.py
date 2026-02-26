@@ -159,6 +159,18 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if self.use_aiter:
+            cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+            self.rocm_aiter_triton_rotary_embedding(
+                positions,
+                query,
+                key,
+                self.head_size,
+                cos_sin_cache,
+                self.is_neox_style,
+                offsets,
+            )
+            return query, key
         return self.forward_native(positions, query, key, offsets)
 
     def forward_cuda(
