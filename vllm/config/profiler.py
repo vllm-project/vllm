@@ -45,8 +45,10 @@ class ProfilerConfig:
     worker's traces (CPU & GPU) will be saved under this directory. Note that
     it must be an absolute path."""
 
-    torch_profiler_with_stack: bool = True
-    """If `True`, enables stack tracing in the torch profiler. Enabled by default."""
+    torch_profiler_with_stack: bool = False
+    """If `True`, enables stack tracing in the torch profiler. Disabled by default
+    to reduce overhead. Can be enabled via VLLM_TORCH_PROFILER_WITH_STACK=1 env var
+    or --profiler-config.torch_profiler_with_stack=true CLI flag."""
 
     torch_profiler_with_flops: bool = False
     """If `True`, enables FLOPS counting in the torch profiler. Disabled by default."""
@@ -79,6 +81,27 @@ class ProfilerConfig:
     max_iterations: int = Field(default=0, ge=0)
     """Maximum number of engine iterations to profile after starting profiling.
     Defaults to 0, meaning no limit.
+    """
+
+    warmup_iterations: int = Field(default=0, ge=0)
+    """Number of warmup iterations for PyTorch profiler schedule.
+    During warmup, the profiler runs but data is discarded. This helps reduce
+    noise from JIT compilation and other one-time costs in the profiled trace.
+    Defaults to 0 (schedule-based profiling disabled, recording all iterations).
+    Set to a positive value (e.g., 2) to enable schedule-based profiling.
+    """
+
+    active_iterations: int = Field(default=5, ge=1)
+    """Number of active iterations for PyTorch profiler schedule.
+    This is the number of iterations where profiling data is actually collected.
+    Defaults to 5 active iterations.
+    """
+
+    wait_iterations: int = Field(default=0, ge=0)
+    """Number of wait iterations for PyTorch profiler schedule.
+    During wait, the profiler is completely off with zero overhead.
+    This allows skipping initial iterations before warmup begins.
+    Defaults to 0 (no wait period).
     """
 
     def compute_hash(self) -> str:
