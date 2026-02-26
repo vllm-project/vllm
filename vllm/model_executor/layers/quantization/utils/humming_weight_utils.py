@@ -272,14 +272,13 @@ class HummingFp8WeightConverter(HummingBaseWeightConverter):
     def __init__(self, quant_config):
         assert quant_config.b_dtype in [dtypes.float8e4m3, dtypes.float8e5m2]
         super().__init__(quant_config)
-        is_block_quant = self.quant_config.weight_scale_group_size_n > 0
+        is_block_quant = self.quant_config.weight_scale_group_size_n > 1
         self.is_block_quant = is_block_quant
         if is_block_quant:
             self.ckpt_weight_scale_name = "weight_scale_inv"
 
 
-class HummingNvfp4WeightConverter(HummingBaseWeightConverter):
-    ckpt_weight_name: str = "weight_packed"
+class HummingModeloptWeightConverter(HummingBaseWeightConverter):
     ckpt_weight_scale_name: str = "weight_global_scale"
 
     def convert_weight(
@@ -291,6 +290,17 @@ class HummingNvfp4WeightConverter(HummingBaseWeightConverter):
     ) -> dict[str, torch.Tensor]:
         tensor = tensor.view(torch.int32)
         return super().convert_weight(tensor, shape_n, shape_k, num_experts)
+
+    def convert_weight_scale(
+        self,
+        tensor: torch.Tensor,
+        shape_n: int,
+        shape_k: int,
+        num_experts: int | None = None,
+    ) -> dict[str, torch.Tensor]:
+        if self.quant_config.bs_dtype == dtypes.float8e8m0:
+            tensor = tensor.view(torch.float8_e8m0fnu)
+        return super().convert_weight_scale(tensor, shape_n, shape_k, num_experts)
 
 
 class HummingMxfp4WeightConverter(HummingBaseWeightConverter):
@@ -352,7 +362,7 @@ WEIGHT_CONVERTER_MAP: dict[str | None, type[HummingBaseWeightConverter]] = {
     "gptq": HummingGPTQWeightConverter,
     "awq": HummingAWQWeightConverter,
     "fp8": HummingFp8WeightConverter,
-    "modelopt": HummingNvfp4WeightConverter,
+    "modelopt": HummingModeloptWeightConverter,
     "mxfp4": HummingMxfp4WeightConverter,
     "bitnet": HummingBitnetWeightConverter,
     None: HummingUnquantizedWeightConverter,

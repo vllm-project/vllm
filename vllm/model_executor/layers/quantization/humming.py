@@ -23,8 +23,11 @@ from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
 from vllm.model_executor.layers.linear import (
+    ColumnParallelLinear,
     LinearBase,
     LinearMethodBase,
+    ReplicatedLinear,
+    RowParallelLinear,
     UnquantizedLinearMethod,
 )
 from vllm.model_executor.layers.quantization import QuantizationMethods
@@ -39,6 +42,60 @@ from vllm.model_executor.layers.quantization.utils.humming_weight_utils import (
     WEIGHT_CONVERTER_MAP,
 )
 from vllm.model_executor.utils import set_weight_attrs
+
+
+def get_full_shape_nk(layer: torch.nn.Module, shape_n: int, shape_k: int):
+    if isinstance(layer, ColumnParallelLinear):
+        return shape_n * layer.tp_size, shape_k
+    elif isinstance(layer, RowParallelLinear):
+        return shape_n, shape_k * layer.tp_size
+    elif isinstance(layer, ReplicatedLinear):
+        return shape_n, shape_k
+    else:
+        raise ValueError("unsupported layer type: " + layer.__class__.__name__)
+    
+
+def narrow_tensors(
+    tensors: dict[str, torch.Tensor],
+    shape_n: int,
+    shape_k: int,
+    tp_size: int,
+    tp_rank: int,
+    is_row_parallel: bool,
+) -> dict[str, torch.Tensor]:
+    if tp_size == 1:
+        return tensors
+
+    full_size = 0
+    for key, tensor in tensors.copy().items():
+        narrow_dim = None
+        if key in ["weight", "weight_scale", "zero_point"]:
+            if not is_row_parallel:
+                narrow_dim = -2
+                full_size = shape_n
+            elif is_row_parallel:
+                narrow_dim = -1
+                full_size = shape_k
+        elif key == "bias" and not is_row_parallel:
+            narrow_dim = -1
+            full_size = shape_n
+
+        if narrow_dim is None:
+            continue
+
+        size = tensor.size(narrow_dim)
+        if size == 1:
+            continue
+
+        assert full_size % tp_size == 0
+        split_size = full_size // tp_size
+        assert size * split_size % full_size == 0
+        new_size = size * split_size // full_size
+
+        tensor = tensor.narrow(narrow_dim, new_size * tp_rank, new_size)
+        tensors[key] = tensor.contiguous()
+
+    return tensors
 
 
 def get_ignored_layers(config):
@@ -80,12 +137,24 @@ def parse_single_config(config):
             "b_dtype": b_dtype,
         }
     elif quant_method == "modelopt":
-        result_dict = {
-            "block_shape": (1, 16),
-            "has_global_scale": True,
-            "b_dtype": dtypes.float4e2m1,
-            "bs_dtype": dtypes.float8e4m3,
-        }
+        assert "quant_algo" in config
+        quant_algo = config["quant_algo"]
+        if quant_algo.lower() == "nvfp4":
+            result_dict = {
+                "block_shape": (1, 16),
+                "has_global_scale": True,
+                "b_dtype": dtypes.float4e2m1,
+                "bs_dtype": dtypes.float8e4m3,
+            }
+        elif quant_algo.lower() == "mxfp8":
+            result_dict = {
+                "block_shape": (1, 32),
+                "b_dtype": dtypes.float8e4m3,
+                "bs_dtype": dtypes.float8e8m0,
+            }
+        else:
+            raise ValueError(f"Invalid modelopt algo: {quant_algo}")
+
     elif quant_method == "mxfp4":
         result_dict = {
             "block_shape": (1, 32),
@@ -348,6 +417,9 @@ class HummingLinearMethod(LinearMethodBase):
         layer.output_size_per_partition = output_size_per_partition
         layer.orig_dtype = params_dtype
 
+        group_size = self.quant_config.weight_scale_group_size_k
+        assert input_size_per_partition % group_size == 0
+
         self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
         self.quant_config.c_dtype = self.quant_config.c_dtype or f16_dtype
         self.quant_config.bs_dtype = self.quant_config.bs_dtype or f16_dtype
@@ -358,7 +430,7 @@ class HummingLinearMethod(LinearMethodBase):
         self.use_f16_accum = is_f16_accum_supported and envs.VLLM_HUMMING_USE_F16_ACCUM
 
         shape_n, pad_shape_n = prepare_padded_shape(output_size_per_partition, 256)
-        shape_k, pad_shape_k = prepare_padded_shape(input_size, 128)
+        shape_k, pad_shape_k = prepare_padded_shape(input_size_per_partition, 128)
         meta = HummingLayerMeta(
             a_dtype=self.quant_config.a_dtype,
             b_dtype=self.quant_config.b_dtype,
@@ -434,12 +506,24 @@ class HummingLinearMethod(LinearMethodBase):
             shape_n = self.meta.shape_n - self.meta.pad_shape_n
             if isinstance(shard_id, int):
                 shape_n = layer.logical_widths[shard_id]
+            shape_k = self.meta.shape_k - self.meta.pad_shape_k
+            shape_n, shape_k = get_full_shape_nk(layer, shape_n, shape_k)
             data = self.weight_converter.convert(
                 loaded_weight,
                 param_name,
                 shape_n=shape_n,
-                shape_k=self.meta.shape_k - self.meta.pad_shape_k,
+                shape_k=shape_k,
             )
+
+            data = narrow_tensors(
+                tensors=data,
+                shape_n=shape_n,
+                shape_k=shape_k,
+                tp_size=layer.tp_size,
+                tp_rank=layer.tp_rank,
+                is_row_parallel=isinstance(layer, RowParallelLinear)
+            )
+
             HummingMethod.load_weight(
                 layer=layer,
                 offset_n=offset_n,
@@ -489,6 +573,9 @@ class HummingMoEMethod(FusedMoEMethodBase):
     ):
         layer.num_experts = num_experts
         layer.top_k = self.moe.experts_per_token
+
+        group_size = self.quant_config.weight_scale_group_size_k
+        assert intermediate_size_per_partition % group_size == 0
 
         f16_dtype = dtypes.DataType.from_torch_dtype(params_dtype)
         self.quant_config.a_dtype = self.quant_config.a_dtype or f16_dtype
@@ -597,6 +684,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             weight_name: str,
             shard_id: int | None = None,
             expert_id: int | None = None,
+            return_success: bool = False
         ):
             param_name = param.param_name
 
@@ -609,9 +697,11 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     shard_id = shard_id_map[shard_id]
                 if isinstance(shard_id, int):
                     offset_n = shape_n * shard_id
+                shape_n = shape_n * layer.tp_size
             else:
                 shape_n = self.meta2.shape_n - self.meta2.pad_shape_n
                 shape_k = self.meta2.shape_k - self.meta2.pad_shape_k
+                shape_k = shape_k * layer.tp_size
 
             num_experts = layer.num_experts if expert_id is None else None
             data = self.weight_converter.convert(
@@ -622,6 +712,15 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 num_experts=num_experts,
             )
 
+            data = narrow_tensors(
+                tensors=data,
+                shape_n=shape_n,
+                shape_k=shape_k,
+                tp_size=layer.tp_size,
+                tp_rank=layer.tp_rank,
+                is_row_parallel=param.sublayer == "w2",
+            )
+
             HummingMethod.load_weight(
                 layer=layer,
                 offset_n=offset_n,
@@ -630,6 +729,8 @@ class HummingMoEMethod(FusedMoEMethodBase):
                 sublayer_name=param.sublayer,
                 **data,
             )
+
+            return True if return_success else None
 
         return weight_loader
 
