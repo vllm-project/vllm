@@ -3,6 +3,7 @@
 
 # imports for structured outputs tests
 import json
+from collections import defaultdict
 
 import jsonschema
 import openai  # use the official client for correctness check
@@ -12,6 +13,11 @@ import regex as re
 import requests
 import torch
 from openai import BadRequestError
+
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+)
+from vllm.sampling_params import SamplingParams
 
 from ...utils import RemoteOpenAIServer
 
@@ -868,8 +874,6 @@ async def test_chat_completion_n_parameter_streaming(
     client: openai.AsyncOpenAI, model_name: str
 ):
     """Test that n parameter returns multiple choices for streaming requests."""
-    from collections import defaultdict
-
     messages = [
         {"role": "system", "content": "You are a helpful assistant."},
         {"role": "user", "content": "What is the capital of France?"},
@@ -967,11 +971,6 @@ async def test_chat_completion_n_equals_1(
 # Unit tests for n parameter in ChatCompletionRequest.to_sampling_params()
 def test_chat_completion_request_n_parameter_to_sampling_params():
     """Test that n parameter is correctly passed to SamplingParams."""
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-    from vllm.sampling_params import SamplingParams
-
     # Test with n=3
     request = ChatCompletionRequest(
         model="test-model",
@@ -991,10 +990,6 @@ def test_chat_completion_request_n_parameter_to_sampling_params():
 
 def test_chat_completion_request_n_parameter_default():
     """Test that n parameter defaults to 1."""
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-
     request = ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "Hello"}],
@@ -1014,10 +1009,6 @@ def test_chat_completion_request_n_parameter_default():
 
 def test_chat_completion_request_n_parameter_various_values():
     """Test n parameter with various values."""
-    from vllm.entrypoints.openai.chat_completion.protocol import (
-        ChatCompletionRequest,
-    )
-
     for n_value in [1, 2, 5, 10]:
         request = ChatCompletionRequest(
             model="test-model",
