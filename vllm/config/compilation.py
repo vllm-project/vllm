@@ -118,7 +118,9 @@ class PassConfig:
     eliminate_noops: bool = Field(default=True)
     """Eliminate no-op ops."""
     enable_sp: bool = Field(default=None)
-    """Enable sequence parallelism."""
+    """Enable sequence parallelism. Requires TP>1. Automatically disabled
+    if the model's hidden_size is too small for SP to be beneficial
+    (threshold is device-capability dependent)."""
     enable_sp_moe: bool = Field(default=None)
     """Enable sequence parallelism rewrite for MoE communication."""
     fuse_gemm_comms: bool = Field(default=None)
