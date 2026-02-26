@@ -897,8 +897,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mappings = None
             # FIXME(woosuk): Fix warmup for LoRA.
 
-        slot_mappings_by_layer = None
         attn_metadata = None
+        slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
             assert slot_mappings is not None
             slot_mappings_by_layer = build_slot_mappings_by_layer(
@@ -969,8 +969,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.execute_model_state = (
             input_batch,
             model_inputs,
-            slot_mappings_by_layer,
             attn_metadata,
+            slot_mappings_by_layer,
             hidden_states,
             aux_hidden_states,
             kv_connector_output,
@@ -995,8 +995,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         (
             input_batch,
             model_inputs,
-            slot_mappings_by_layer,
             attn_metadata,
+            slot_mappings_by_layer,
             hidden_states,
             aux_hidden_states,
             kv_connector_output,
@@ -1063,8 +1063,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             draft_tokens = self.speculator.propose(
                 input_batch,
-                slot_mappings_by_layer,
                 attn_metadata,
+                slot_mappings_by_layer,
                 hidden_states,
                 aux_hidden_states,
                 num_sampled,

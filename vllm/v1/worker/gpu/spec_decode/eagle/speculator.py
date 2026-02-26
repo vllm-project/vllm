@@ -182,8 +182,8 @@ class EagleSpeculator:
     def propose(
         self,
         input_batch: InputBatch,
-        slot_mappings: dict[str, torch.Tensor],
         attn_metadata: dict[str, Any],
+        slot_mappings: dict[str, torch.Tensor],
         # [num_tokens, hidden_size]
         last_hidden_states: torch.Tensor,
         # num_layers x [num_tokens, hidden_size]
