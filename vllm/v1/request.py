@@ -150,6 +150,9 @@ class Request:
         # The number of tokens with prefix cache hits.
         self.num_cached_tokens = -1
 
+        # The number of tokens that have been cached remotely
+        self.num_external_cached_tokens = -1
+
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
 

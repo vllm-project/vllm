@@ -1421,11 +1421,14 @@ class LMCacheConnectorV1Impl:
         )
         return_params = None
 
-        # NOTE: Used to stream back the first token
-        # for disagg prefill
-        if params is not None and "ret_first_tok" in params:
-            return_params = {
-                "first_tok": request._output_token_ids[0],
-            }
+        if params is not None:
+            return_params = {}
+            # NOTE: Used to stream back the first token
+            # for disagg prefill
+            if "ret_first_tok" in params:
+                return_params["first_tok"] = request._output_token_ids[0]
+            # number of tokens cached by LMCache
+            if "ret_num_cached_toks" in params:
+                return_params["num_cached_toks"] = request.num_external_cached_tokens
 
         return False, return_params
