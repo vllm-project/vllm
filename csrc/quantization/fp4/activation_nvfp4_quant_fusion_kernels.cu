@@ -39,7 +39,7 @@ namespace vllm {
 template <class Type, bool UE8M0_SF = false>
 __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
     silu_mul_cvt_fp16_to_fp4(int32_t numRows, int32_t numCols,
-                             int32_t num_padded_cols,
+                             int32_t num_packed_cols,
                              Type const* __restrict__ in,
                              float const* __restrict__ SFScale,
                              uint32_t* __restrict__ out,
@@ -63,7 +63,7 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
 
   // Input tensor row/col loops.
   for (int rowIdx = blockIdx.x; rowIdx < numRows; rowIdx += gridDim.x) {
-    if (colIdx < num_padded_cols) {
+    if (colIdx < num_packed_cols) {
       PackedVec in_vec;
       PackedVec in_vec2;
       int64_t inOffset =
@@ -142,9 +142,9 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
   int const numBlocksPerSM =
       vllm_runtime_blocks_per_sm(static_cast<int>(block.x));
 
-  int sf_n_unpadded = int(n / CVT_FP4_ELTS_PER_THREAD);
+  int num_packed_cols = int(n / CVT_FP4_ELTS_PER_THREAD);
 
-  int grid_y = vllm::div_round_up(sf_n_unpadded, static_cast<int>(block.x));
+  int grid_y = vllm::div_round_up(num_packed_cols, static_cast<int>(block.x));
   int grid_x = std::min(
       int(m), std::max(1, (multiProcessorCount * numBlocksPerSM) / grid_y));
   dim3 grid(grid_x, grid_y);
@@ -154,7 +154,7 @@ void silu_and_mul_nvfp4_quant_sm1xxa(torch::Tensor& output,  // [..., d]
         using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
         auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
         vllm::silu_mul_cvt_fp16_to_fp4<cuda_type><<<grid, block, 0, stream>>>(
-            m, n, sf_n_unpadded, input_ptr, input_sf_ptr,
+            m, n, num_packed_cols, input_ptr, input_sf_ptr,
             reinterpret_cast<uint32_t*>(output_ptr),
             reinterpret_cast<uint32_t*>(sf_out));
       });
