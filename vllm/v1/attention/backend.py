@@ -10,8 +10,6 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
-from vllm import _custom_ops as ops
-
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
@@ -824,6 +822,8 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> None:
         if kv_cache.numel() == 0:
             return
+        from vllm import _custom_ops as ops
+
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),
@@ -889,6 +889,8 @@ class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> None:
         if kv_cache.numel() == 0:
             return
+        from vllm import _custom_ops as ops
+
         ops.concat_and_cache_mla(
             kv_c_normed,
             k_pe.squeeze(1),
