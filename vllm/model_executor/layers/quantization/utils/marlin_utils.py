@@ -255,18 +255,6 @@ def marlin_moe_intermediate_size(w1_packed: torch.Tensor, w2_packed: torch.Tenso
     return w2_packed.size(1) * marlin_tile_size
 
 
-def marlin_make_workspace(
-    output_size_per_partition: int, device: torch.device
-) -> torch.Tensor:
-    max_workspace_size = (
-        output_size_per_partition // GPTQ_MARLIN_MIN_THREAD_N
-    ) * GPTQ_MARLIN_MAX_PARALLEL
-
-    return torch.zeros(
-        max_workspace_size, dtype=torch.int, device=device, requires_grad=False
-    )
-
-
 def marlin_make_workspace_new(
     device: torch.device, max_blocks_per_sm: int = 1
 ) -> torch.Tensor:
@@ -292,12 +280,6 @@ def marlin_repeat_scales_on_all_ranks(
 
 
 def marlin_make_empty_g_idx(device: torch.device) -> torch.Tensor:
-    return torch.nn.Parameter(
-        torch.empty(0, dtype=torch.int, device=device), requires_grad=False
-    )
-
-
-def marlin_make_empty_zp(device: torch.device) -> torch.Tensor:
     return torch.nn.Parameter(
         torch.empty(0, dtype=torch.int, device=device), requires_grad=False
     )
