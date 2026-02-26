@@ -434,7 +434,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if isinstance(attn_metadata, dict):
                 attn_metadata = attn_metadata[self.layer_name]
             self_kv_cache = self.kv_cache[forward_context.virtual_engine]
+            slot_mapping = forward_context.slot_mapping
 
+            assert isinstance(slot_mapping, dict), (
+                f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
+            )
+            self.impl.do_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                self_kv_cache,
+                slot_mapping.get(self.layer_name),
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
             if self.attn_backend.accept_output_buffer:
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 self.forward_impl(
@@ -452,15 +464,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 )
         else:
             if self.attn_backend.accept_output_buffer:
-                kv_cache_dummy_dep = None
-                if not self.attn_backend.forward_includes_kv_cache_update:
-                    kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                        kv_c_normed,
-                        k_pe,
-                        self.layer_name,
-                        self.kv_cache_dtype,
-                        self._k_scale,
-                    )
+                kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                    kv_c_normed,
+                    k_pe,
+                    self.layer_name,
+                    self.kv_cache_dtype,
+                    self._k_scale,
+                )
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
@@ -895,7 +905,7 @@ def unified_mla_kv_cache_update(
     )
     layer_slot_mapping = slot_mapping.get(layer_name)
     if layer_slot_mapping is not None:
-        attn_layer.do_forward_cache_update(
+        attn_layer.impl.do_kv_cache_update(
             kv_c_normed,
             k_pe,
             kv_cache,
@@ -936,11 +946,11 @@ def unified_mla_attention_with_output(
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> None:
-    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
     # attention forward.
     del kv_cache_dummy_dep
+    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     layer.forward_impl(
         q,
         kv_c_normed,
