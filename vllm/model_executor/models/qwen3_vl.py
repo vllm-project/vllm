@@ -51,7 +51,7 @@ from transformers.video_utils import VideoMetadata
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
-from vllm.distributed import get_pp_group
+from vllm.distributed import get_pp_group, parallel_state
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
 from vllm.model_executor.layers.conv import Conv3dLayer
@@ -138,6 +138,9 @@ logger = init_logger(__name__)
 # of the maximum size.
 DUMMY_VIDEO_NUM_FRAMES = 2048
 
+# Pre-allocated workspace buffer size for FlashInfer cuDNN backend (128MB).
+FLASHINFER_WORKSPACE_SIZE_BYTES = 128 * 1024 * 1024
+
 
 class Qwen3_VisionPatchEmbed(nn.Module):
     def __init__(
@@ -215,6 +218,7 @@ class Qwen3_VisionBlock(nn.Module):
         norm_layer: Callable[[int], nn.Module] | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        workspace_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -227,6 +231,7 @@ class Qwen3_VisionBlock(nn.Module):
             projection_size=dim,
             quant_config=quant_config,
             prefix=f"{prefix}.attn",
+            workspace_buffer=workspace_buffer,
         )
         self.mlp = Qwen3_VisionMLP(
             dim,
@@ -244,6 +249,7 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_cos: torch.Tensor,
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
+        sequence_lengths: torch.Tensor | None = None,
     ) -> torch.Tensor:
         x = x + self.attn(
             self.norm1(x),
@@ -251,6 +257,7 @@ class Qwen3_VisionBlock(nn.Module):
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
+            sequence_lengths=sequence_lengths,
         )
 
         x = x + self.mlp(self.norm2(x))
@@ -332,6 +339,13 @@ class Qwen3_VisionTransformer(nn.Module):
         )
         self.num_grid_per_side = int(self.num_position_embeddings**0.5)
 
+        use_data_parallel = is_vit_use_data_parallel()
+        self.tp_size = (
+            1
+            if use_data_parallel
+            else parallel_state.get_tensor_model_parallel_world_size()
+        )
+
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
         self.out_hidden_size = vision_config.out_hidden_size * (
@@ -385,6 +399,14 @@ class Qwen3_VisionTransformer(nn.Module):
             dtype=torch.get_default_dtype(),
         )
 
+        workspace_buffer = (
+            None
+            if self.attn_backend != AttentionBackendEnum.FLASHINFER
+            else torch.zeros(
+                FLASHINFER_WORKSPACE_SIZE_BYTES, dtype=torch.uint8, device=self.device
+            )
+        )
+
         self.blocks = nn.ModuleList(
             [
                 Qwen3_VisionBlock(
@@ -395,6 +417,7 @@ class Qwen3_VisionTransformer(nn.Module):
                     norm_layer=norm_layer,
                     quant_config=quant_config,
                     prefix=f"{prefix}.blocks.{layer_idx}",
+                    workspace_buffer=workspace_buffer,
                 )
                 for layer_idx in range(vision_config.depth)
             ]
@@ -520,6 +543,7 @@ class Qwen3_VisionTransformer(nn.Module):
         max_seqlen = torch.zeros([], device=cu_seqlens.device)
         if self.attn_backend in (
             AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.FLASHINFER,
             AttentionBackendEnum.ROCM_AITER_FA,
             AttentionBackendEnum.TRITON_ATTN,
         ):
@@ -549,11 +573,21 @@ class Qwen3_VisionTransformer(nn.Module):
             axis=0, dtype=np.int32
         )
         cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+        sequence_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        if self.attn_backend == AttentionBackendEnum.FLASHINFER:
+            # For cuDNN: use actual max_seqlen and token-level start offsets
+            flashinfer_max_seqlen = int(sequence_lengths.max())
+            cu_seqlens = cu_seqlens[:-1]  # start offsets only (batch_size)
         cu_seqlens = torch.from_numpy(cu_seqlens)
+        sequence_lengths = torch.from_numpy(sequence_lengths)
 
         hidden_states = hidden_states.unsqueeze(1)
-        max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
+        if self.attn_backend == AttentionBackendEnum.FLASHINFER:
+            max_seqlen = torch.tensor(flashinfer_max_seqlen, device=self.device)
+        else:
+            max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
         cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        sequence_lengths = sequence_lengths.to(self.device, non_blocking=True)
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
@@ -563,6 +597,7 @@ class Qwen3_VisionTransformer(nn.Module):
                 rotary_pos_emb_cos=rotary_pos_emb_cos,
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
+                sequence_lengths=sequence_lengths,
             )
             if layer_num in self.deepstack_visual_indexes:
                 deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
