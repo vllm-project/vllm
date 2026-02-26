@@ -8,9 +8,10 @@ from vllm.distributed import (
     tensor_model_parallel_all_reduce,
 )
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 from vllm.utils.torch_utils import direct_register_custom_op
 
-from .utils import set_triton_allocator, supports_pdl, supports_tma
+from .utils import supports_pdl, supports_tma
 
 
 @triton.jit

@@ -13,7 +13,6 @@ from vllm import envs
 from vllm.logger import init_logger
 from vllm.model_executor.layers.batch_invariant import vllm_is_batch_invariant
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
 from vllm.utils.math_utils import next_power_of_2
 
 logger = init_logger(__name__)
@@ -303,13 +302,6 @@ def get_lora_op_configs(
 
     assert config_data is not None
     return config_data
-
-
-def set_triton_allocator(device: torch.device):
-    def alloc_fn(size: int, alignment: int, stream: int | None):
-        return torch.empty(size, device=device, dtype=torch.int8)
-
-    triton.set_allocator(alloc_fn)
 
 
 @lru_cache
