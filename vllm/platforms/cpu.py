@@ -492,19 +492,16 @@ class CpuPlatform(Platform):
             # not define module export function". But the library is imported
             # successfully. So ignore the exception for now, until we find
             # a solution.
-            ignored_warning = "dynamic module does not define module export function"
             if torch._C._cpu._is_avx512_supported():
                 try:
                     import vllm._C_AVX512  # noqa: F401
                 except ImportError as e:
-                    if ignored_warning not in e.msg:
-                        logger.warning("Failed to import from vllm._C_AVX512: %r", e)
+                    logger.warning("Failed to import from vllm._C_AVX512: %r", e)
             else:
                 try:
                     import vllm._C_AVX2  # noqa: F401
                 except ImportError as e:
-                    if ignored_warning not in e.msg:
-                        logger.warning("Failed to import from vllm._C_AVX2: %r", e)
+                    logger.warning("Failed to import from vllm._C_AVX2: %r", e)
         else:
             try:
                 import vllm._C  # noqa: F401
