@@ -821,34 +821,14 @@ async def test_invocations(server: RemoteOpenAIServer, client: openai.AsyncOpenA
 # Tests that the n parameter works correctly for regular sampling
 # (non-beam search) in chat completions, addressing issue #34305.
 
-# Use a smaller model for local testing to save disk space
-# CI will run with zephyr-7b-beta (MODEL_NAME)
-N_PARAMETER_MODEL_NAME = "Qwen/Qwen2.5-0.5B-Instruct"
-
-
-@pytest.fixture(scope="module")
-def n_parameter_server():
-    args = [
-        "--dtype",
-        "float16",
-        "--max-model-len",
-        "512",
-        "--enforce-eager",
-    ]
-
-    with RemoteOpenAIServer(N_PARAMETER_MODEL_NAME, args) as remote_server:
-        yield remote_server
-
-
-@pytest_asyncio.fixture
-async def n_parameter_client(n_parameter_server):
-    async with n_parameter_server.get_async_client() as async_client:
-        yield async_client
-
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_chat_completion_n_parameter_non_streaming(
-    n_parameter_client: openai.AsyncOpenAI,
+    client: openai.AsyncOpenAI, model_name: str
 ):
     """Test that n parameter returns multiple choices for non-streaming requests."""
     messages = [
@@ -857,8 +837,8 @@ async def test_chat_completion_n_parameter_non_streaming(
     ]
 
     # Test with n=3
-    chat_completion = await n_parameter_client.chat.completions.create(
-        model=N_PARAMETER_MODEL_NAME,
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
         messages=messages,
         max_completion_tokens=20,
         temperature=0.7,
@@ -880,8 +860,12 @@ async def test_chat_completion_n_parameter_non_streaming(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_chat_completion_n_parameter_streaming(
-    n_parameter_client: openai.AsyncOpenAI,
+    client: openai.AsyncOpenAI, model_name: str
 ):
     """Test that n parameter returns multiple choices for streaming requests."""
     from collections import defaultdict
@@ -891,8 +875,8 @@ async def test_chat_completion_n_parameter_streaming(
         {"role": "user", "content": "What is the capital of France?"},
     ]
 
-    stream = await n_parameter_client.chat.completions.create(
-        model=N_PARAMETER_MODEL_NAME,
+    stream = await client.chat.completions.create(
+        model=model_name,
         messages=messages,
         max_completion_tokens=15,
         temperature=0.7,
@@ -920,8 +904,12 @@ async def test_chat_completion_n_parameter_streaming(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_chat_completion_n_with_seed(
-    n_parameter_client: openai.AsyncOpenAI,
+    client: openai.AsyncOpenAI, model_name: str
 ):
     """Test that n parameter works correctly with seed parameter."""
     messages = [
@@ -929,8 +917,8 @@ async def test_chat_completion_n_with_seed(
     ]
 
     # Test that seed parameter is accepted and works with n > 1
-    chat_completion = await n_parameter_client.chat.completions.create(
-        model=N_PARAMETER_MODEL_NAME,
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.8,
@@ -950,16 +938,20 @@ async def test_chat_completion_n_with_seed(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
 async def test_chat_completion_n_equals_1(
-    n_parameter_client: openai.AsyncOpenAI,
+    client: openai.AsyncOpenAI, model_name: str
 ):
     """Test that n=1 (default) still works correctly."""
     messages = [
         {"role": "user", "content": "Hello!"},
     ]
 
-    chat_completion = await n_parameter_client.chat.completions.create(
-        model=N_PARAMETER_MODEL_NAME,
+    chat_completion = await client.chat.completions.create(
+        model=model_name,
         messages=messages,
         max_completion_tokens=10,
         temperature=0.7,
