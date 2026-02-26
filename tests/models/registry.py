@@ -206,6 +206,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "BailingMoeV2ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-mini-2.0", trust_remote_code=True
     ),
+    "BailingMoeV2_5ForCausalLM": _HfExamplesInfo(
+        "inclusionAI/Ring-2.5-1T", trust_remote_code=True
+    ),
     "BambaForCausalLM": _HfExamplesInfo(
         "ibm-ai-platform/Bamba-9B-v1",
         extras={"tiny": "hmellor/tiny-random-BambaForCausalLM"},

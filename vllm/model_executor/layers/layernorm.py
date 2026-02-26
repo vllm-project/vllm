@@ -592,6 +592,7 @@ class RMSNormGated(CustomOp):
             eps=self.eps,
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
         )
 
 
