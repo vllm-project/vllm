@@ -92,6 +92,7 @@ class InputBatch:
         cls,
         num_reqs: int,
         num_tokens: int,
+        vocab_size: int,
         input_buffers: InputBuffers,
         device: torch.device,
     ) -> "InputBatch":
@@ -153,7 +154,7 @@ class InputBatch:
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,
-            draft_logits=torch.empty(0, 1000, device=device, dtype=torch.float32),
+            draft_logits=torch.empty(0, vocab_size, device=device, dtype=torch.float32),
             has_structured_output_reqs=False,
         )
 

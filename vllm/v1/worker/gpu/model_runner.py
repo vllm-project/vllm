@@ -947,6 +947,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch = InputBatch.make_dummy(
                 num_reqs=num_reqs,
                 num_tokens=num_tokens_after_padding,
+                vocab_size=self.vocab_size,
                 input_buffers=self.input_buffers,
                 device=self.device,
             )
