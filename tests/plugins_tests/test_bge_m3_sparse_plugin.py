@@ -201,18 +201,15 @@ def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
     print(f"Outputs: {outputs}")
 
     # Verify output structure
-    assert len(outputs) == 3
-    for i, output in enumerate(outputs):
-        result = output
-        assert hasattr(result, "outputs")
-
-        response = result.outputs
-        assert len(response.data) > 0
-
+    assert hasattr(outputs, "outputs")
+    response = outputs.outputs
+    assert hasattr(response, "data")
+    assert len(outputs.outputs.data) == 3
+    for i, output in enumerate(response.data):
         # Each output should have sparse embeddings
-        sparse_embedding = response.data[0].sparse_embedding
+        sparse_embedding = output.sparse_embedding
         assert isinstance(sparse_embedding, list)
 
-        # Verify usage
-        assert response.usage.prompt_tokens > 0
-        assert response.usage.total_tokens == response.usage.prompt_tokens
+    # Verify usage
+    assert response.usage.prompt_tokens > 0
+    assert response.usage.total_tokens == response.usage.prompt_tokens
