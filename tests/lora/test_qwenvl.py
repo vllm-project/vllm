@@ -18,7 +18,17 @@ class TestConfig:
     enable_tower_connector_lora: bool = False
     max_model_len: int = 8192
     gpu_memory_utilization: float = 0.85
+    mm_processor_kwargs: dict[str, object] | None = None
     mm_processor_cache_gb: float = 4
+
+    def __post_init__(self):
+        if self.mm_processor_kwargs is None:
+            self.mm_processor_kwargs = {
+                "size": {
+                    "shortest_edge": 28 * 28,
+                    "longest_edge": 1280 * 28 * 28,
+                }
+            }
 
 
 class Qwen2VLTester:
@@ -46,6 +56,7 @@ class Qwen2VLTester:
             enable_tower_connector_lora=self.config.enable_tower_connector_lora,
             trust_remote_code=True,
             gpu_memory_utilization=self.config.gpu_memory_utilization,
+            mm_processor_kwargs=self.config.mm_processor_kwargs,
             mm_processor_cache_gb=self.config.mm_processor_cache_gb,
             max_model_len=self.config.max_model_len,
         )
