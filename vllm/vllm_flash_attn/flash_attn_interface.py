@@ -19,14 +19,40 @@ except ImportError as e:
     FA2_UNAVAILABLE_REASON = str(e)
     FA2_AVAILABLE = False
 
-try:
-    from . import _vllm_fa3_C  # type: ignore[attr-defined]  # noqa: F401
+# FA3 uses lazy import to avoid potential hangs with incompatible CUDA extensions
+# on non-SM90 architectures. The actual import happens in _ensure_fa3_imported().
+_vllm_fa3_C = None
+FA3_UNAVAILABLE_REASON: str | None = "FA3 not yet imported (lazy loading)"
+FA3_AVAILABLE = False
+_fa3_import_attempted = False
 
-    FA3_UNAVAILABLE_REASON = None
-    FA3_AVAILABLE = True
-except ImportError as e:
-    FA3_UNAVAILABLE_REASON = str(e)
-    FA3_AVAILABLE = False
+
+def _ensure_fa3_imported() -> None:
+    """Lazily import FA3 extension. Only imports on SM90 architectures."""
+    global _vllm_fa3_C, FA3_UNAVAILABLE_REASON, FA3_AVAILABLE, _fa3_import_attempted
+
+    if _fa3_import_attempted:
+        return
+    _fa3_import_attempted = True
+
+    try:
+        # Check architecture before importing to avoid potential hangs
+        if torch.cuda.is_available():
+            cc = torch.cuda.get_device_capability()
+            if cc[0] != 9:
+                raise ImportError(
+                    f"Skipping FA3 import on compute capability {cc[0]}.{cc[1]} "
+                    "(FA3 is only supported on SM90)"
+                )
+
+        from . import _vllm_fa3_C as fa3_module  # type: ignore[attr-defined]
+
+        _vllm_fa3_C = fa3_module
+        FA3_UNAVAILABLE_REASON = None
+        FA3_AVAILABLE = True
+    except ImportError as e:
+        FA3_UNAVAILABLE_REASON = str(e)
+        FA3_AVAILABLE = False
 
 try:
     import os
@@ -59,6 +85,9 @@ def _is_fa2_supported() -> tuple[bool, str | None]:
 
 
 def _is_fa3_supported() -> tuple[bool, str | None]:
+    # Lazily import FA3 on first check
+    _ensure_fa3_imported()
+
     if not FA3_AVAILABLE:
         return False, f"FA3 is unavailable due to: {FA3_UNAVAILABLE_REASON}"
     from vllm.platforms import current_platform
@@ -140,6 +169,9 @@ def get_scheduler_metadata(
     pack_gqa=None,  # Can be tuned for speed
     sm_margin=0,  # Can be tuned if some SMs are used for communication
 ):
+    # Ensure FA3 is imported (only imports on SM90)
+    _ensure_fa3_imported()
+
     cache_seqlens = maybe_contiguous(cache_seqlens)
     if headdim_v is None:
         headdim_v = headdim
@@ -323,6 +355,9 @@ def flash_attn_varlen_func(
             None,
         )
     elif fa_version == 3:
+        # Ensure FA3 is imported (only imports on SM90)
+        _ensure_fa3_imported()
+
         assert alibi_slopes is None, "Alibi is not supported in FA3"
         out, softmax_lse, _, _ = torch.ops._vllm_fa3_C.fwd(
             q,
