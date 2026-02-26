@@ -97,6 +97,7 @@ if TYPE_CHECKING:
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
     VLLM_DISABLE_PYNCCL: bool = False
+    VLLM_USE_OINK_OPS: bool = False
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -105,7 +106,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_MLA: bool = True
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
-    VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
+    VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = True
     VLLM_ROCM_USE_AITER_FP8BMM: bool = True
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
@@ -238,6 +239,8 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
+    VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
+    VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
 
 
 def get_default_cache_root():
@@ -896,6 +899,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DISABLE_PYNCCL": lambda: (
         os.getenv("VLLM_DISABLE_PYNCCL", "False").lower() in ("true", "1")
     ),
+    # Optional: enable external Oink custom ops (e.g., Blackwell RMSNorm).
+    # Disabled by default.
+    "VLLM_USE_OINK_OPS": lambda: (
+        os.getenv("VLLM_USE_OINK_OPS", "False").lower() in ("true", "1")
+    ),
     # Disable aiter ops unless specifically enabled.
     # Acts as a parent switch to enable the rest of the other operations.
     "VLLM_ROCM_USE_AITER": lambda: (
@@ -937,9 +945,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_ROCM_USE_AITER_FP4_ASM_GEMM", "False").lower() in ("true", "1")
     ),
     # Whether to use aiter rope.
-    # By default is disabled.
+    # By default is enabled.
     "VLLM_ROCM_USE_AITER_TRITON_ROPE": lambda: (
-        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "False").lower() in ("true", "1")
+        os.getenv("VLLM_ROCM_USE_AITER_TRITON_ROPE", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter triton fp8 bmm kernel
     # By default is enabled.
@@ -1585,6 +1593,16 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
+    # Enable CUDA compatibility mode for datacenter GPUs with older
+    # driver versions than the CUDA toolkit major version of vLLM.
+    "VLLM_ENABLE_CUDA_COMPATIBILITY": lambda: (
+        os.environ.get("VLLM_ENABLE_CUDA_COMPATIBILITY", "0").strip().lower()
+        in ("1", "true")
+    ),
+    # Path to the CUDA compatibility libraries when CUDA compatibility is enabled.
+    "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
+        "VLLM_CUDA_COMPATIBILITY_PATH", None
+    ),
 }
 
 
@@ -1725,6 +1743,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_CPU_MOE_PREPACK",
         "VLLM_CPU_SGL_KERNEL",
         "VLLM_TEST_FORCE_LOAD_FORMAT",
+        "VLLM_ENABLE_CUDA_COMPATIBILITY",
+        "VLLM_CUDA_COMPATIBILITY_PATH",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
         "NO_COLOR",
