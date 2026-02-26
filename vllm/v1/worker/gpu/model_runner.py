@@ -921,6 +921,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         # NOTE: We should use `.update()` to enable overriding the default inputs.
         model_inputs.update(extra_model_inputs)
+        # Update for non-first PP ranks.
+        if not self.is_first_pp_rank:
+            model_inputs["input_ids"] = None
+            model_inputs["inputs_embeds"] = None
+            model_inputs["intermediate_tensors"] = intermediate_tensors
 
         # Run model.
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -937,11 +942,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 hidden_states = model_output
                 aux_hidden_states = None
         else:
-            if not self.is_first_pp_rank:
-                model_inputs["inputs_ids"] = None
-                model_inputs["inputs_embeds"] = None
-                model_inputs["intermediate_tensors"] = intermediate_tensors
-
             # For piecewise and eager mode, just call model().
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
