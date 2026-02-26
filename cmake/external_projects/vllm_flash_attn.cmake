@@ -77,6 +77,7 @@ foreach(_FA_COMPONENT _vllm_fa2_C _vllm_fa3_C)
     DESTINATION vllm/vllm_flash_attn
     COMPONENT ${_FA_COMPONENT}
     FILES_MATCHING PATTERN "*.py"
+    PATTERN "__init__.py" EXCLUDE
     PATTERN "flash_attn_interface.py" EXCLUDE
   )
 
