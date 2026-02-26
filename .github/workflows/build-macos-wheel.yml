@@ -1,0 +1,62 @@
+name: Build macOS ARM Wheel
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:  # Manual trigger
+
+jobs:
+  build-macos-arm-wheel:
+    runs-on: macos-latest
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v6.0.1
+        with:
+          fetch-depth: 0  # setuptools-scm needs full git history
+          fetch-tags: true
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            requirements/**/*.txt
+            pyproject.toml
+          python-version: '3.12'
+
+      - name: Create virtual environment
+        run: |
+          uv venv
+          echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Install build dependencies
+        run: |
+          uv pip install -r requirements/cpu-build.txt --index-strategy unsafe-best-match
+
+      - name: Build wheel
+        run: |
+          VLLM_TARGET_DEVICE=cpu python setup.py bdist_wheel \
+            --dist-dir=dist --py-limited-api=cp38
+        env:
+          CMAKE_BUILD_PARALLEL_LEVEL: 4
+          MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+      - name: Verify wheel
+        run: |
+          wheel=$(ls dist/*.whl)
+          echo "Built wheel: $wheel"
+          # Install and verify import
+          uv pip install "$wheel" --index-strategy unsafe-best-match
+          python -c "import vllm; print(f'vLLM version: {vllm.__version__}')"
+
+      - name: Upload wheel to S3
+        run: |
+          bash .buildkite/scripts/upload-macos-wheels.sh
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+          COMMIT_SHA: ${{ github.sha }}
+          BRANCH_NAME: ${{ github.ref_name }}
+          IS_PULL_REQUEST: ${{ github.event_name == 'pull_request' && 'true' || 'false' }}
