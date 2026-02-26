@@ -54,7 +54,6 @@ for BACK in "${BACKENDS[@]}"; do
     --enable-expert-parallel \
     --trust-remote-code \
     --max-model-len 2048 \
-    --gpu-memory-utilization 0.85 \
     --port "$PORT" &
   SERVER_PID=$!
   wait_for_server "$PORT"

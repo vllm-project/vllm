@@ -41,7 +41,6 @@ def test_weight_loading(vllm_runner):
         quantization=None if QUANTIZATION == "None" else QUANTIZATION,
         max_model_len=MAX_MODEL_LEN,
         tensor_parallel_size=2,
-        gpu_memory_utilization=0.85,
     ) as model:
         output = model.generate_greedy("Hello world!", max_tokens=20)
         print(output)

@@ -191,8 +191,6 @@ def test_tp2_serialize_and_deserialize_lora(
                 lora_path,
                 "--tensor-parallel-size",
                 str(tp_size),
-                "--gpu-memory-utilization",
-                "0.85",
                 "serialize",
                 "--serialized-directory",
                 str(tmp_path),
