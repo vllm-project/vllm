@@ -1529,9 +1529,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL": lambda: bool(
         int(os.getenv("VLLM_DEEPEP_LOW_LATENCY_USE_MNNVL", "0"))
     ),
-    # The number of SMs to allocate for communication kernels when running DBO
-    # the rest of the SMs on the device will be allocated to compute
-    "VLLM_DBO_COMM_SMS": lambda: int(os.getenv("VLLM_DBO_COMM_SMS", "20")),
+    # The number of SMs/CUs to allocate for communication kernels when
+    # running DBO; the rest will be allocated to compute.
+    # Default: 20 on CUDA (SMs), 64 on ROCm (CUs).
+    "VLLM_DBO_COMM_SMS": lambda: int(os.getenv(
+        "VLLM_DBO_COMM_SMS",
+        "64" if hasattr(__import__("torch").version, "hip")
+               and __import__("torch").version.hip is not None
+        else "20"
+    )),
     # Enable max_autotune & coordinate_descent_tuning in inductor_config
     # to compile static shapes passed from compile_sizes in compilation_config
     # If set to 1, enable max_autotune; By default, this is enabled (1)

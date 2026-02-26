@@ -265,7 +265,7 @@ def moe_kernel_quantize_input(
         # weights are already dequantized, and we proceed with normal
         # activation quantization below.
 
-    if quant_dtype == torch.float8_e4m3fn:
+    if quant_dtype == torch.float8_e4m3fn or quant_dtype == torch.float8_e4m3fnuz:
         return _fp8_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == torch.int8:
         return _int8_quantize(A, A_scale, per_act_token_quant, block_shape)
