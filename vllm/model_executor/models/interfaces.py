@@ -130,10 +130,11 @@ class SupportsMultiModal(Protocol):
     Set internally by `_mark_tower_model`.
     """
 
-    _has_oov_mm_tokens: bool = True
+    _has_oov_mm_tokens: bool = False
     """
-    Set to True by default to be safe, but should be set at
-    init time by `configure_mm_token_handling` models.
+    In general, this should be set at init time by invoking
+    `configure_mm_token_handling` models & passing all potentially
+    OOV multimodal tokens.
     """
 
     @classmethod
@@ -341,7 +342,6 @@ class SupportsMultiModal(Protocol):
         multimodal_embeddings: MultiModalEmbeddings,
         *,
         is_multimodal: torch.Tensor,
-        handle_oov_mm_token: bool = False,
     ) -> Tensor: ...
 
     def _embed_text_input_ids(
@@ -356,7 +356,7 @@ class SupportsMultiModal(Protocol):
             # to ensure that any external configuration requiring offset tracking,
             # e.g., LoRA, are applied correctly regardless of whether or not
             # we have multimodal tokens.
-            in_vocab_ids = input_ids.clone().masked_fill_(is_multimodal, 0)
+            in_vocab_ids = input_ids.masked_fill(is_multimodal, 0)
             return embed_input_ids(in_vocab_ids)
 
         return embed_input_ids(input_ids)
