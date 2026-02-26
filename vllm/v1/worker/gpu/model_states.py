@@ -23,7 +23,7 @@ class ModelState:
 
         self.uses_mrope = self.model_config.uses_mrope
         if self.uses_mrope:
-            self.mrope_states = MRopeState(
+            self.mrope_state = MRopeState(
                 max_num_reqs=self.max_num_reqs,
                 max_num_tokens=self.max_num_tokens,
                 max_model_len=self.max_model_len,
@@ -37,7 +37,7 @@ class ModelState:
         if self.uses_mrope:
             # Pre-compute M-RoPE positions for prefill.
             assert new_req_data.prefill_token_ids is not None
-            self.mrope_states.init_prefill_mrope_positions(
+            self.mrope_state.init_prefill_mrope_positions(
                 req_index,
                 self.model,  # type: ignore
                 new_req_data.prefill_token_ids,
@@ -46,7 +46,7 @@ class ModelState:
 
     def apply_staged_writes(self) -> None:
         if self.uses_mrope:
-            self.mrope_states.apply_staged_writes()
+            self.mrope_state.apply_staged_writes()
 
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
@@ -56,13 +56,13 @@ class ModelState:
             return {}
 
         # Prepare M-RoPE positions.
-        self.mrope_states.prepare_mrope_positions(
+        self.mrope_state.prepare_mrope_positions(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
             req_states.num_computed_tokens.gpu,
         )
-        mrope_positions = self.mrope_states.mrope_positions[
+        mrope_positions = self.mrope_state.mrope_positions[
             :, : input_batch.num_tokens_after_padding
         ]
         return {"positions": mrope_positions}
@@ -72,5 +72,5 @@ class ModelState:
     ) -> dict[str, torch.Tensor | None]:
         if not self.uses_mrope:
             return {}
-        mrope_positions = self.mrope_states.mrope_positions[:, :num_tokens]
+        mrope_positions = self.mrope_state.mrope_positions[:, :num_tokens]
         return {"positions": mrope_positions}
