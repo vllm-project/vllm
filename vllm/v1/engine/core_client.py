@@ -36,6 +36,7 @@ from vllm.v1.engine import (
     EngineCoreOutputs,
     EngineCoreRequest,
     EngineCoreRequestType,
+    PauseMode,
     ReconfigureDistributedRequest,
     ReconfigureRankType,
     UtilityOutput,
@@ -135,7 +136,7 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    def profile(self, is_start: bool = True) -> None:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
         raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
@@ -149,7 +150,7 @@ class EngineCoreClient(ABC):
     def reset_encoder_cache(self) -> None:
         raise NotImplementedError
 
-    def sleep(self, level: int = 1) -> None:
+    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
     def wake_up(self, tags: list[str] | None = None) -> None:
@@ -194,7 +195,7 @@ class EngineCoreClient(ABC):
         raise NotImplementedError
 
     def dp_engines_running(self) -> bool:
-        """Returns True id data parallel engines are collectively in a
+        """Returns True if data parallel engines are collectively in a
         running state."""
         raise NotImplementedError
 
@@ -210,7 +211,9 @@ class EngineCoreClient(ABC):
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    async def profile_async(self, is_start: bool = True) -> None:
+    async def profile_async(
+        self, is_start: bool = True, profile_prefix: str | None = None
+    ) -> None:
         raise NotImplementedError
 
     async def reset_mm_cache_async(self) -> None:
@@ -224,7 +227,7 @@ class EngineCoreClient(ABC):
     async def reset_encoder_cache_async(self) -> None:
         raise NotImplementedError
 
-    async def sleep_async(self, level: int = 1) -> None:
+    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
         raise NotImplementedError
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
@@ -295,8 +298,8 @@ class InprocClient(EngineCoreClient):
     def shutdown(self) -> None:
         self.engine_core.shutdown()
 
-    def profile(self, is_start: bool = True) -> None:
-        self.engine_core.profile(is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
+        self.engine_core.profile(is_start, profile_prefix)
 
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
@@ -311,8 +314,11 @@ class InprocClient(EngineCoreClient):
     def reset_encoder_cache(self) -> None:
         self.engine_core.reset_encoder_cache()
 
-    def sleep(self, level: int = 1) -> None:
-        self.engine_core.sleep(level)
+    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        if mode == "wait":
+            raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
+        result = self.engine_core.sleep(level, mode)
+        assert result is None
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.engine_core.wake_up(tags)
@@ -724,6 +730,7 @@ class SyncMPClient(MPClient):
         # it is forwarded to the outputs_queue so we can raise it
         # from this (run_output_handler) task to shut down the server.
         outputs = self.outputs_queue.get()
+
         if isinstance(outputs, Exception):
             raise self._format_exception(outputs) from None
         if outputs.wave_complete is not None:
@@ -764,8 +771,8 @@ class SyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def profile(self, is_start: bool = True) -> None:
-        self.call_utility("profile", is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None) -> None:
+        self.call_utility("profile", is_start, profile_prefix)
 
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
@@ -792,8 +799,8 @@ class SyncMPClient(MPClient):
     def pin_lora(self, lora_id: int) -> bool:
         return self.call_utility("pin_lora", lora_id)
 
-    def sleep(self, level: int = 1) -> None:
-        self.call_utility("sleep", level)
+    def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        self.call_utility("sleep", level, mode)
 
     def wake_up(self, tags: list[str] | None = None) -> None:
         self.call_utility("wake_up", tags)
@@ -976,18 +983,21 @@ class AsyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             await self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    async def pause_scheduler_async(self) -> None:
-        """Pause the scheduler, keeping requests frozen in queue.
-        Blocks until the EngineCore acknowledges the pause.
-        """
-        await self.call_utility_async("pause_scheduler")
+    async def pause_scheduler_async(
+        self, mode: PauseMode = "abort", clear_cache: bool = True
+    ) -> None:
+        await self.call_utility_async("pause_scheduler", mode, clear_cache)
 
     async def resume_scheduler_async(self) -> None:
-        """Resume the scheduler after a pause."""
         await self.call_utility_async("resume_scheduler")
 
-    async def profile_async(self, is_start: bool = True) -> None:
-        await self.call_utility_async("profile", is_start)
+    async def is_scheduler_paused_async(self) -> bool:
+        return await self.call_utility_async("is_scheduler_paused")
+
+    async def profile_async(
+        self, is_start: bool = True, profile_prefix: str | None = None
+    ) -> None:
+        await self.call_utility_async("profile", is_start, profile_prefix)
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
@@ -1002,8 +1012,8 @@ class AsyncMPClient(MPClient):
     async def reset_encoder_cache_async(self) -> None:
         await self.call_utility_async("reset_encoder_cache")
 
-    async def sleep_async(self, level: int = 1) -> None:
-        await self.call_utility_async("sleep", level)
+    async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+        await self.call_utility_async("sleep", level, mode)
 
     async def wake_up_async(self, tags: list[str] | None = None) -> None:
         await self.call_utility_async("wake_up", tags)
@@ -1197,18 +1207,6 @@ class DPAsyncMPClient(AsyncMPClient):
 
     def get_core_engine_for_request(self, request: EngineCoreRequest):
         return self.core_engine
-
-    async def pause_scheduler_async(self) -> None:
-        """Pause the scheduler, keeping requests frozen in queue."""
-        raise NotImplementedError(
-            "pause_scheduler_async is not yet supported for data parallel"
-        )
-
-    async def resume_scheduler_async(self) -> None:
-        """Resume the scheduler after a pause."""
-        raise NotImplementedError(
-            "resume_scheduler_async is not yet supported for data parallel"
-        )
 
 
 class DPLBAsyncMPClient(DPAsyncMPClient):

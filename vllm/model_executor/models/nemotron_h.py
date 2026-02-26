@@ -33,8 +33,11 @@ from vllm.distributed.communication_op import tensor_model_parallel_all_gather
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
-from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    SharedFusedMoE,
+    activation_without_mul,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -633,6 +636,9 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
+    def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
+        return weight_name.startswith("mtp.")
+
     def _get_max_n_routed_experts(self) -> int:
         """Get max n_routed_experts from config or block_configs for puzzle models.
 
@@ -698,6 +704,10 @@ class NemotronHModel(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+
+            # Skip MTP/spec decode layers early (before stacked params mapping)
+            if name.startswith("mtp."):
+                continue
 
             # load stacked params
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -842,6 +852,7 @@ class NemotronHForCausalLM(
             head_dim=hf_config.mamba_head_dim,
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod

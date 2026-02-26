@@ -12,8 +12,28 @@ from typing import Any
 
 import numpy as np
 import torch
+from batch_spec import get_batch_type, parse_batch_spec
 from rich.console import Console
 from rich.table import Table
+
+
+def batch_spec_sort_key(spec: str) -> tuple[int, int, int]:
+    """
+    Extract sorting key from batch spec: (batch_size, max_q_len, max_kv_len).
+
+    This ensures results are sorted by batch size first, then query length,
+    then sequence length, rather than alphabetically.
+    """
+    try:
+        requests = parse_batch_spec(spec)
+        batch_size = len(requests)
+        max_q_len = max(r.q_len for r in requests) if requests else 0
+        max_kv_len = max(r.kv_len for r in requests) if requests else 0
+        return (batch_size, max_q_len, max_kv_len)
+    except Exception:
+        # Fallback for unparseable specs
+        return (0, 0, 0)
+
 
 # Mock classes for vLLM attention infrastructure
 
@@ -21,7 +41,7 @@ from rich.table import Table
 class MockHfConfig:
     """Mock HuggingFace config that satisfies vLLM's requirements."""
 
-    def __init__(self, mla_dims: dict):
+    def __init__(self, mla_dims: dict, index_topk: int | None = None):
         self.num_attention_heads = mla_dims["num_q_heads"]
         self.num_key_value_heads = mla_dims["num_kv_heads"]
         self.hidden_size = mla_dims["head_dim"] * mla_dims["num_q_heads"]
@@ -32,6 +52,8 @@ class MockHfConfig:
         self.qk_rope_head_dim = mla_dims["qk_rope_head_dim"]
         self.v_head_dim = mla_dims["v_head_dim"]
         self.qk_head_dim = mla_dims["qk_nope_head_dim"] + mla_dims["qk_rope_head_dim"]
+        if index_topk is not None:
+            self.index_topk = index_topk
 
     def get_text_config(self):
         return self
@@ -80,6 +102,38 @@ class MockKVBProj:
             dtype=x.dtype,
         )
         return (result,)  # Return as tuple to match ColumnParallelLinear API
+
+
+class MockIndexer:
+    """Mock Indexer for sparse MLA backends.
+
+    Provides topk_indices_buffer that sparse MLA backends use to determine
+    which KV cache slots to attend to for each token.
+    """
+
+    def __init__(
+        self,
+        max_num_tokens: int,
+        topk_tokens: int,
+        device: torch.device,
+    ):
+        self.topk_tokens = topk_tokens
+        self.topk_indices_buffer = torch.zeros(
+            (max_num_tokens, topk_tokens),
+            dtype=torch.int32,
+            device=device,
+        )
+
+    def fill_random_indices(self, num_tokens: int, max_kv_len: int):
+        """Fill topk_indices_buffer with random valid indices for benchmarking."""
+        indices = torch.randint(
+            0,
+            max_kv_len,
+            (num_tokens, self.topk_tokens),
+            dtype=torch.int32,
+            device=self.topk_indices_buffer.device,
+        )
+        self.topk_indices_buffer[:num_tokens] = indices
 
 
 class MockLayer(AttentionLayerBase):
@@ -316,13 +370,18 @@ class ResultsFormatter:
             backends: List of backend names being compared
             compare_to_fastest: Show percentage comparison to fastest
         """
-        # Group by batch spec
+        # Group by batch spec, preserving first-occurrence order
         by_spec = {}
+        specs_order = []
         for r in results:
             spec = r.config.batch_spec
             if spec not in by_spec:
                 by_spec[spec] = {}
+                specs_order.append(spec)
             by_spec[spec][r.config.backend] = r
+
+        # Sort specs by (batch_size, q_len, kv_len) instead of alphabetically
+        specs_order = sorted(by_spec.keys(), key=batch_spec_sort_key)
 
         # Create shortened backend names for display
         def shorten_backend_name(name: str) -> str:
@@ -337,6 +396,8 @@ class ResultsFormatter:
 
         table = Table(title="Attention Benchmark Results")
         table.add_column("Batch\nSpec", no_wrap=True)
+        table.add_column("Type", no_wrap=True)
+        table.add_column("Batch\nSize", justify="right", no_wrap=True)
 
         multi = len(backends) > 1
         for backend in backends:
@@ -350,12 +411,14 @@ class ResultsFormatter:
                 table.add_column(col_rel, justify="right", no_wrap=False)
 
         # Add rows
-        for spec in sorted(by_spec.keys()):
+        for spec in specs_order:
             spec_results = by_spec[spec]
             times = {b: r.mean_time for b, r in spec_results.items() if r.success}
             best_time = min(times.values()) if times else 0.0
 
-            row = [spec]
+            batch_type = get_batch_type(spec)
+            batch_size = len(parse_batch_spec(spec))
+            row = [spec, batch_type, str(batch_size)]
             for backend in backends:
                 if backend in spec_results:
                     r = spec_results[backend]
@@ -486,10 +549,11 @@ def get_attention_scale(head_dim: int) -> float:
 
 def is_mla_backend(backend: str) -> bool:
     """
-    Check if backend is an MLA backend using the backend's is_mla() property.
+    Check if backend is an MLA backend using the AttentionBackendEnum.
 
     Args:
-        backend: Backend name (e.g., "CUTLASS_MLA", "FLASHINFER_MLA")
+        backend: Backend name matching AttentionBackendEnum exactly
+        (e.g., "FLASHMLA_SPARSE")
 
     Returns:
         True if the backend is an MLA backend, False otherwise
@@ -497,7 +561,8 @@ def is_mla_backend(backend: str) -> bool:
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
     try:
-        backend_class = AttentionBackendEnum[backend.upper()].get_class()
+        backend_enum = AttentionBackendEnum[backend]
+        backend_class = backend_enum.get_class()
         return backend_class.is_mla()
-    except (KeyError, ValueError, ImportError):
+    except (KeyError, ValueError, ImportError, AttributeError):
         return False

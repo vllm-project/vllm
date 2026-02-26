@@ -357,7 +357,7 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         num_images = mm_counts.get("image", 0)
@@ -372,14 +372,15 @@ class Qwen2_5OmniThinkerDummyInputsBuilder(
             )
             * feature_extractor.sampling_rate
         )
+
         target_width, target_height = self.info.get_image_size_with_most_features()
         target_num_frames = self.info.get_num_frames_with_most_features(
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
+        audio_overrides = mm_options.get("audio")
 
         mm_data = {
             "audio": self._get_dummy_audios(
@@ -1375,23 +1376,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        from .utils import _merge_multimodal_embeddings
-
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
 
-        inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.get_language_model().embed_input_ids,
-            is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
-        )
-
-        if len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
         # Check for audio-in-video: interleaved video and audio tokens
-        # in the multimodal region.
+        # in the multimodal region. Only use the interleaved path when
+        # needed; otherwise fall back to the default parent implementation.
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
@@ -1402,6 +1392,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         num_audio = is_audio.sum().item()
 
         if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
+            inputs_embeds = self._embed_text_input_ids(
+                input_ids,
+                self.get_language_model().embed_input_ids,
+                is_multimodal=is_multimodal,
+                handle_oov_mm_token=handle_oov_mm_token,
+            )
             return merge_interleaved_embeddings(
                 inputs_embeds,
                 multimodal_embeddings,
@@ -1412,9 +1408,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 num_audio,
             )
 
-        # Default: standard merge (no interleaving)
-        return _merge_multimodal_embeddings(
-            inputs_embeds, multimodal_embeddings, is_multimodal
+        # Default: standard merge (no interleaving), same as parent class
+        return super().embed_input_ids(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

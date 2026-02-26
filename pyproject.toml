@@ -6,7 +6,7 @@ requires = [
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.9.1",
+    "torch == 2.10.0",
     "wheel",
     "jinja2",
     "grpcio-tools==1.78.0",
@@ -113,7 +113,6 @@ markers = [
     "cpu_test: mark test as CPU-only test",
     "split: run this test as part of a split",
     "distributed: run this test only in distributed GPU tests",
-    "skip_v1: do not run this test with v1",
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
 

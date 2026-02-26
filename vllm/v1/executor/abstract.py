@@ -238,8 +238,8 @@ class Executor(ABC):
     def max_concurrent_batches(self) -> int:
         return 1
 
-    def profile(self, is_start: bool = True):
-        self.collective_rpc("profile", args=(is_start,))
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None):
+        self.collective_rpc("profile", args=(is_start, profile_prefix))
 
     def save_sharded_state(
         self,

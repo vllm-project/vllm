@@ -434,13 +434,12 @@ def move_from_buffer(
 
 
 async def transfer_layer(
-    old_global_expert_indices: torch.Tensor,
-    new_global_expert_indices: torch.Tensor,
-    expert_weights: Sequence[Sequence[torch.Tensor]],
+    old_layer_indices: torch.Tensor,
+    new_layer_indices: torch.Tensor,
+    expert_weights: Sequence[torch.Tensor],
     expert_weights_buffer: Sequence[torch.Tensor],
     ep_group: ProcessGroup,
     is_profile: bool = False,
-    layer: int = 0,
     cuda_stream: torch.cuda.Stream | None = None,
     rank_mapping: dict[int, int] | None = None,
 ) -> MoveToBufferResult:
@@ -451,56 +450,64 @@ async def transfer_layer(
     while keys are physical.
 
     Args:
-        old_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
-        new_global_expert_indices: Shape (num_moe_layers, num_physical_experts).
-        expert_weights: A sequence of shape (num_moe_layers)(weight_count)
-            of tensors of shape (num_local_physical_experts, hidden_size_i).
-            For example, a linear layer may have up and down projection,
-            so weight_count = 2. Each weight's hidden size can be different.
+        old_layer_indices: Shape (num_physical_experts,).
+        new_layer_indices: Shape (num_physical_experts,).
+        expert_weights: Iterable of weight tensors for this layer, each with shape
+            (num_local_physical_experts, hidden_size_i).
+            For example, a linear layer may have up and down projection.
+        expert_weights_buffer: Intermediate buffers (one per weight tensor).
         ep_group: The device process group for expert parallelism.
         is_profile (bool): If `True`, do not perform any actual weight copy.
             This is used during profile run, where we only perform dummy
             communications to reserve enough memory for the buffers.
+        cuda_stream: CUDA stream for async copies (can be None for sync mode).
+        rank_mapping: Optional rank mapping for elastic expert parallelism.
 
     Returns:
-        is_unchanged (np.ndarray): (1, num_local_experts), True where expert
+        is_unchanged (np.ndarray): (num_local_experts,), True where expert
             is left unchanged.
-        is_received_locally (np.ndarray): (1, num_local_experts), True where expert
+        is_received_locally (np.ndarray): (num_local_experts,), True where expert
             can be received locally.
         RecvMetadata: Metadata needed for completing remote weight transfers.
     """
     ep_size = ep_group.size()
     if rank_mapping is not None:
+        # Add a layer dimension for compatibility with mapping functions
+        old_layer_indices_2d = old_layer_indices.unsqueeze(0)
+        new_layer_indices_2d = new_layer_indices.unsqueeze(0)
+
         if len(rank_mapping) == ep_group.size():
             # scale down
-            new_global_expert_indices = _map_new_expert_indices_with_rank_mapping(
-                new_global_expert_indices,
+            new_layer_indices_2d = _map_new_expert_indices_with_rank_mapping(
+                new_layer_indices_2d,
                 rank_mapping,
             )
         else:
             # scale up
-            old_global_expert_indices = _map_old_expert_indices_with_rank_mapping(
-                old_global_expert_indices,
+            old_layer_indices_2d = _map_old_expert_indices_with_rank_mapping(
+                old_layer_indices_2d,
                 rank_mapping,
                 ep_group.size(),
             )
 
-    assert old_global_expert_indices.shape[1] == new_global_expert_indices.shape[1]
-    num_moe_layers, num_physical_experts = old_global_expert_indices.shape
-    assert len(expert_weights) == num_moe_layers
+        # Remove the layer dimension
+        old_layer_indices = old_layer_indices_2d.squeeze(0)
+        new_layer_indices = new_layer_indices_2d.squeeze(0)
+
+    assert old_layer_indices.shape == new_layer_indices.shape
+    num_physical_experts = old_layer_indices.shape[0]
     assert len(expert_weights[0]) >= 1
-    num_local_physical_experts = expert_weights[0][0].shape[0]
-    assert new_global_expert_indices.shape == (num_moe_layers, num_physical_experts)
+    num_local_physical_experts = expert_weights[0].shape[0]
     assert num_physical_experts == ep_size * num_local_physical_experts
 
-    old_global_expert_indices_np = old_global_expert_indices.cpu().numpy()
-    new_global_expert_indices_np = new_global_expert_indices.cpu().numpy()
+    old_layer_indices_np = old_layer_indices.cpu().numpy()
+    new_layer_indices_np = new_layer_indices.cpu().numpy()
 
     is_unchanged, is_received_locally, recv_metadata = move_to_buffer(
         num_local_experts=num_local_physical_experts,
-        old_indices=old_global_expert_indices_np[layer],
-        new_indices=new_global_expert_indices_np[layer],
-        expert_weights=expert_weights[layer],
+        old_indices=old_layer_indices_np,
+        new_indices=new_layer_indices_np,
+        expert_weights=expert_weights,
         expert_weights_buffers=expert_weights_buffer,
         cuda_stream=cuda_stream,
         ep_group=ep_group,

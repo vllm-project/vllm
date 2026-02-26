@@ -22,11 +22,10 @@ check_hf_token() {
 
 check_num_gpus() {
     # can you check if the number of GPUs are >=2 via nvidia-smi/rocm-smi?
-    which rocm-smi > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
+    if ! which rocm-smi > /dev/null 2>&1; then
 	num_gpus=$(nvidia-smi --query-gpu=name --format=csv,noheader | wc -l)
     else
-	num_gpus=$(rocm-smi --showid | grep Instinct | wc -l)
+	num_gpus=$(rocm-smi --showid | grep -c Instinct)
     fi
 
     if [ "$num_gpus" -lt 2 ]; then
@@ -39,8 +38,7 @@ check_num_gpus() {
 
 ensure_python_library_installed() {
     echo "Checking if $1 is installed..."
-    python3 -c "import $1" > /dev/null 2>&1
-    if [ $? -ne 0 ]; then
+    if ! python3 -c "import $1" > /dev/null 2>&1; then
         if [ "$1" == "nixl" ]; then
             echo "$1 is not installed. Please refer to https://github.com/ai-dynamo/nixl for installation."
         else
@@ -102,12 +100,12 @@ main() {
     bash disagg_vllm_launcher.sh prefiller \
         > >(tee prefiller.log) 2>&1 &
     prefiller_pid=$!
-    PIDS+=($prefiller_pid)
+    PIDS+=("$prefiller_pid")
 
     bash disagg_vllm_launcher.sh decoder  \
         > >(tee decoder.log)  2>&1 &
     decoder_pid=$!
-    PIDS+=($decoder_pid)
+    PIDS+=("$decoder_pid")
 
     python3 disagg_proxy_server.py \
         --host localhost \
@@ -118,7 +116,7 @@ main() {
         --decoder-port 8200  \
         > >(tee proxy.log)    2>&1 &
     proxy_pid=$!
-    PIDS+=($proxy_pid)
+    PIDS+=("$proxy_pid")
 
     wait_for_server 8100
     wait_for_server 8200
@@ -128,7 +126,7 @@ main() {
 
     # begin benchmark
     cd ../../../../benchmarks/
-    vllm bench serve --port 9000 --seed $(date +%s) \
+    vllm bench serve --port 9000 --seed "$(date +%s)" \
         --model meta-llama/Llama-3.1-8B-Instruct \
         --dataset-name random --random-input-len 7500 --random-output-len 200 \
         --num-prompts 200 --burstiness 100 --request-rate 3.6 | tee benchmark.log
