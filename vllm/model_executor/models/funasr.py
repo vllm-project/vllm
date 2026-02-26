@@ -48,7 +48,6 @@ from vllm.multimodal.processing import (
     BaseProcessingInfo,
     PromptReplacement,
     PromptUpdate,
-    PromptUpdateDetails,
 )
 from vllm.transformers_utils.processor import cached_processor_from_config
 from vllm.transformers_utils.processors.funasr_processor import FunASRFeatureExtractor
@@ -714,10 +713,6 @@ class FunASRProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self) -> Qwen3Config:
         return self.ctx.get_hf_config(Qwen3Config)
 
-    @property
-    def skip_prompt_length_check(self) -> bool:
-        return True  # Because the encoder prompt is padded
-
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": 1}
 
@@ -726,6 +721,13 @@ class FunASRProcessingInfo(BaseProcessingInfo):
         feature_extractor = hf_processor.feature_extractor  # type: ignore
         assert isinstance(feature_extractor, FunASRFeatureExtractor)
         return feature_extractor
+
+    def get_data_parser(self) -> MultiModalDataParser:
+        feature_extractor = self.get_feature_extractor()
+        return MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            target_channels=self.get_target_channels(),
+        )
 
     def get_target_channels(self) -> int:
         return 1
@@ -744,7 +746,7 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
 
@@ -752,23 +754,18 @@ class FunASRDummyInputsBuilder(BaseDummyInputsBuilder[FunASRProcessingInfo]):
         audio_len = feature_extractor.chunk_length * sampling_rate
         num_audios = mm_counts.get("audio", 0)
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         return {
             "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
-            )
+                length=audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,
+            ),
         }
 
 
 class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(
-            target_sr=feature_extractor.sampling_rate,
-            target_channels=self.info.get_target_channels(),
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -811,13 +808,7 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         processor = self.info.get_hf_processor(**hf_processor_mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        vocab = tokenizer.get_vocab()
-
-        # Use getattr with default to be compatible with transformers<4.48
-        audio_token = getattr(processor, "audio_token", "<|AUDIO|>")
-
-        audio_token_id = vocab[audio_token]
+        audio_token_id = processor.audio_token_id
 
         out_mm_data = out_mm_kwargs.get_data()
 
@@ -837,17 +828,12 @@ class FunASRMultiModalProcessor(BaseMultiModalProcessor[FunASRProcessingInfo]):
                 assert len(audio_embeds.shape) == 2, "audio_embeds must be a 2D tensor"
                 num_features = audio_embeds.shape[0]
 
-            audio_tokens = [audio_token_id] * num_features
-
-            return PromptUpdateDetails.select_token_id(
-                audio_tokens,
-                embed_token_id=audio_token_id,
-            )
+            return [audio_token_id] * num_features
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=audio_token,
+                target=[audio_token_id],
                 replacement=get_replacement_qwen2_audio,
             )
         ]

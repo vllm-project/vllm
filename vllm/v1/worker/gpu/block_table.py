@@ -18,6 +18,9 @@ class BlockTables:
         max_num_batched_tokens: int,
         max_model_len: int,
         device: torch.device,
+        cp_size: int = 1,
+        cp_rank: int = 0,
+        cp_interleave: int = 1,
     ):
         self.block_sizes = block_sizes
         self.max_num_reqs = max_num_reqs
@@ -25,12 +28,19 @@ class BlockTables:
         self.max_model_len = max_model_len
         self.device = device
 
+        self.cp_size = cp_size
+        self.cp_rank = cp_rank
+        self.cp_interleave = cp_interleave
+
         self.num_kv_cache_groups = len(self.block_sizes)
         # num_kv_cache_groups x [max_num_reqs, max_num_blocks]
         self.block_tables: list[StagedWriteTensor] = []
         for i in range(self.num_kv_cache_groups):
             block_size = self.block_sizes[i]
-            max_num_blocks = cdiv(self.max_model_len, block_size)
+            # When using DCP, each request's KV cache is sharded among different ranks.
+            # As a result, one block on the current rank covers `block_size * cp_size`
+            # tokens in the full, global (unsharded) sequence.
+            max_num_blocks = cdiv(self.max_model_len, block_size * self.cp_size)
             block_table = StagedWriteTensor(
                 (self.max_num_reqs, max_num_blocks),
                 dtype=torch.int32,
@@ -131,6 +141,9 @@ class BlockTables:
             self.block_sizes_tensor,
             self.slot_mappings,
             self.slot_mappings.stride(0),
+            self.cp_rank,
+            CP_SIZE=self.cp_size,
+            CP_INTERLEAVE=self.cp_interleave,
             PAD_ID=PAD_SLOT_ID,
             TRITON_BLOCK_SIZE=1024,  # type: ignore
         )
@@ -183,6 +196,9 @@ def _compute_slot_mappings_kernel(
     block_sizes,  # [num_kv_cache_groups]
     slot_mappings_ptr,  # [num_kv_cache_groups, max_num_tokens]
     slot_mappings_stride,
+    cp_rank,
+    CP_SIZE: tl.constexpr,
+    CP_INTERLEAVE: tl.constexpr,
     PAD_ID: tl.constexpr,
     TRITON_BLOCK_SIZE: tl.constexpr,
 ):
@@ -208,11 +224,25 @@ def _compute_slot_mappings_kernel(
     for i in range(start_idx, end_idx, TRITON_BLOCK_SIZE):
         offset = i + tl.arange(0, TRITON_BLOCK_SIZE)
         positions = tl.load(pos + offset, mask=offset < end_idx, other=0)
-        block_indices = positions // block_size
+
+        block_indices = positions // (block_size * CP_SIZE)
+        block_offsets = positions % (block_size * CP_SIZE)
         block_numbers = tl.load(
             block_table_ptr + req_state_idx * block_table_stride + block_indices
         )
-        slot_ids = block_numbers * block_size + positions % block_size
+
+        if CP_SIZE == 1:
+            # Common case: Context parallelism is not used.
+            slot_ids = block_numbers * block_size + block_offsets
+        else:
+            # Context parallelism is used.
+            is_local = block_offsets // CP_INTERLEAVE % CP_SIZE == cp_rank
+            rounds = block_offsets // (CP_INTERLEAVE * CP_SIZE)
+            remainder = block_offsets % CP_INTERLEAVE
+            local_offsets = rounds * CP_INTERLEAVE + remainder
+            slot_ids = block_numbers * block_size + local_offsets
+            slot_ids = tl.where(is_local, slot_ids, PAD_ID)
+
         tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset < end_idx)
 
 

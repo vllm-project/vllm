@@ -1224,11 +1224,8 @@ class MolmoProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        processor: MolmoProcessorWrapper | None,
+        processor: MolmoProcessorWrapper,
     ) -> int:
-        if processor is None:
-            processor = self.get_hf_processor()
-
         ncols, nrows = processor.get_patches_grid_size(
             image_width=image_width,
             image_height=image_height,
@@ -1277,12 +1274,12 @@ class MolmoDummyInputsBuilder(BaseDummyInputsBuilder[MolmoProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         target_width, target_height = self.info.get_image_size_with_most_features()
         num_images = mm_counts.get("image", 0)
 
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoEConfig,
     FusedMoEMethodBase,
     FusedMoeWeightScaleSupported,
+    MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
@@ -438,7 +439,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
                 expert_map=layer.expert_map,
             )
         elif self.use_marlin:
-            assert layer.activation == "silu", (
+            assert layer.activation == MoEActivation.SILU, (
                 f"{layer.activation} not supported for Marlin MoE."
             )
             return fused_marlin_moe(
@@ -857,7 +858,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w2_input_scale = None
 
     def process_weights_after_loading(self, layer):
-        if self.static_input_scales:
+        if self.static_input_scales and self.input_dtype == "fp8":
             # firstly, process activations if fp8 static input
             if layer.w13_input_scale is None or layer.w2_input_scale is None:
                 raise ValueError(
@@ -882,14 +883,14 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             if current_platform.is_fp8_fnuz():
                 # Normalize the weights and scales
                 _, _, w13_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    torch.empty_like(layer.w13_weight, dtype=torch.float8_e4m3fnuz),
+                    torch.empty_like(layer.w13_weight, dtype=torch.float8_e4m3fn),
                     torch.empty_like(
                         layer.w13_weight_scale, dtype=layer.w13_weight_scale.dtype
                     ),
                     layer.w13_input_scale,
                 )
                 _, _, w2_input_scale = normalize_e4m3fn_to_e4m3fnuz(
-                    torch.empty_like(layer.w2_weight, dtype=torch.float8_e4m3fnuz),
+                    torch.empty_like(layer.w2_weight, dtype=torch.float8_e4m3fn),
                     torch.empty_like(
                         layer.w2_weight_scale, dtype=layer.w13_weight_scale.dtype
                     ),
@@ -932,7 +933,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 layer.w2_weight.view(self.fp4_dtype),
                 requires_grad=layer.w2_weight.requires_grad,
             )
+        # Pre-shuffle weight
+        shuffled_w13, shuffled_w2 = rocm_aiter_ops.shuffle_weights(
+            layer.w13_weight.data, layer.w2_weight.data
+        )
 
+        layer.w13_weight = torch.nn.Parameter(shuffled_w13, requires_grad=False)
+        layer.w2_weight = torch.nn.Parameter(shuffled_w2, requires_grad=False)
+        layer.w13_weight.is_shuffled = True
+        layer.w2_weight.is_shuffled = True
         torch.cuda.empty_cache()
 
     def get_fused_moe_quant_config(

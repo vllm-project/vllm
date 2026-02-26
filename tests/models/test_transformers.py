@@ -6,8 +6,6 @@ from typing import Any
 
 import pytest
 
-from vllm.platforms import current_platform
-
 from ..conftest import HfRunner, VllmRunner
 from ..utils import multi_gpu_test, prep_prompts
 from .registry import HF_EXAMPLE_MODELS
@@ -131,6 +129,7 @@ def test_distributed(
                 "quantization": "bitsandbytes",
             },
         ),
+        ("unsloth/tinyllama-bnb-4bit", {}),
     ],
 )
 @pytest.mark.parametrize("max_tokens", [32])
@@ -143,12 +142,6 @@ def test_quantization(
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
-    if (
-        current_platform.is_rocm()
-        and quantization_kwargs.get("quantization", "") == "bitsandbytes"
-    ):
-        pytest.skip("bitsandbytes quantization is currently not supported in rocm.")
-
     with vllm_runner(
         model,
         model_impl="auto",

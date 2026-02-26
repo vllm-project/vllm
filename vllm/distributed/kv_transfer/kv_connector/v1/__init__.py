@@ -6,7 +6,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
     supports_hma,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import (  # noqa E:501
+from vllm.distributed.kv_transfer.kv_connector.v1.decode_bench_connector import (  # noqa: E501
     DecodeBenchConnector,
 )
 

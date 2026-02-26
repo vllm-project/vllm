@@ -4,6 +4,11 @@
 from contextlib import contextmanager
 from typing import Any
 
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    activation_without_mul,
+    apply_moe_activation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     RoutingMethodType,
@@ -27,7 +32,6 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.model_executor.layers.fused_moe.zero_expert_fused_moe import (
     ZeroExpertFusedMoE,
 )
@@ -54,6 +58,7 @@ __all__ = [
     "FusedMoERouter",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
+    "MoEActivation",
     "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
     "FusedMoEPermuteExpertsUnpermute",
@@ -63,6 +68,7 @@ __all__ = [
     "SharedFusedMoE",
     "ZeroExpertFusedMoE",
     "activation_without_mul",
+    "apply_moe_activation",
     "override_config",
     "get_config",
 ]

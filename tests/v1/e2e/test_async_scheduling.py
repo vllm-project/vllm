@@ -6,6 +6,7 @@ from typing import Any
 import pytest
 import torch._dynamo.config as dynamo_config
 
+from tests.utils import large_gpu_mark, single_gpu_only
 from vllm import SamplingParams
 from vllm.logprobs import Logprob
 from vllm.platforms import current_platform
@@ -36,6 +37,7 @@ default_params = dict(
 )
 
 
+@single_gpu_only
 def test_without_spec_decoding(
     sample_json_schema,
     monkeypatch: pytest.MonkeyPatch,
@@ -95,6 +97,8 @@ def test_without_spec_decoding(
     run_tests(monkeypatch, MODEL, test_configs, test_sampling_params)
 
 
+@single_gpu_only
+@large_gpu_mark(min_gb=16)
 def test_with_spec_decoding(sample_json_schema, monkeypatch: pytest.MonkeyPatch):
     """Test consistency and acceptance rates with some different combos of
     preemption, executor, async scheduling, prefill chunking,
