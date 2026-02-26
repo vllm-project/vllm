@@ -34,8 +34,9 @@ class ModelState:
         self.model = model
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        # Pre-compute M-RoPE positions for prefill.
         if self.uses_mrope:
+            # Pre-compute M-RoPE positions for prefill.
+            assert new_req_data.prefill_token_ids is not None
             self.mrope_states.init_prefill_mrope_positions(
                 req_index,
                 self.model,  # type: ignore
