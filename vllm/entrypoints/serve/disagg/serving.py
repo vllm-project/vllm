@@ -24,6 +24,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.disagg.mm_serde import decode_mm_kwargs_item
 from vllm.entrypoints.serve.disagg.protocol import (
     GenerateRequest,
     GenerateResponse,
@@ -31,7 +32,7 @@ from vllm.entrypoints.serve.disagg.protocol import (
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.inputs import PlaceholderRange, mm_inputs
+from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange, mm_inputs
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils.collection_utils import as_list
@@ -101,13 +102,18 @@ class ServingTokens(OpenAIServing):
 
         if request.features is not None and len(request.features) > 0:
             # Multimodal: build MultiModalInputs directly from metadata.
-            # Tensor data is None (looked up from cache by InputProcessor).
-            mm_kwargs: dict[str, list[None]] = {}
+            # When kwargs_data is present, tensors are deserialized directly.
+            # When kwargs_data is None, data is looked up from cache.
+            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
             mm_hashes: dict[str, list[str]] = {}
             mm_placeholders: dict[str, list[PlaceholderRange]] = {}
 
             for feat in request.features:
-                mm_kwargs.setdefault(feat.modality, []).append(None)
+                if feat.kwargs_data is not None:
+                    item = decode_mm_kwargs_item(feat.kwargs_data)
+                    mm_kwargs.setdefault(feat.modality, []).append(item)
+                else:
+                    mm_kwargs.setdefault(feat.modality, []).append(None)
                 mm_hashes.setdefault(feat.modality, []).append(feat.mm_hash)
                 mm_placeholders.setdefault(feat.modality, []).append(
                     PlaceholderRange(offset=feat.offset, length=feat.length)
