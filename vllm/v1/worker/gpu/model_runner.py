@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+NOTE: Coding style guide for this file:
+This model runner is shared by all models: text and multimodal, generative
+and embedding, public and private. As a result, this file must only contain
+code that is common to every model. Model-specific behavior belongs in the
+appropriate model-specific files.
+
+In other words:
+* Be paranoid about changing this file. It should remain stable.
+* Be even more paranoid about adding new lines. It should remain minimal.
+
+Even for shared features (for example, different parallelism modes), keep the
+complexity out of this path. The less common the feature, the more it should be
+hidden. Prefer utility functions defined elsewhere and call them from here,
+instead of embedding feature-specific logic directly.
+"""
+
 import functools
 import gc
 import time
@@ -153,9 +170,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.cp_interleave = self.parallel_config.cp_kv_cache_interleave_size
 
         self.speculator = None
+        self.num_speculative_steps = 0
         self.use_aux_hidden_state_outputs = False
         if self.speculative_config is not None:
-            self.do_spec_decode = True
             self.num_speculative_steps = self.speculative_config.num_speculative_tokens
             if self.is_last_pp_rank:
                 self.speculator = init_speculator(self.vllm_config, self.device)
@@ -165,9 +182,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.use_aux_hidden_state_outputs = True
                 if self.pp_size > 1:
                     raise ValueError("EAGLE3 with pipeline parallel is not supported.")
-        else:
-            self.do_spec_decode = False
-            self.num_speculative_steps = 0
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
@@ -197,7 +211,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # CUDA graphs.
         self.cudagraph_manager = CudaGraphManager(
-            self.vllm_config, self.uses_mrope, self.device
+            self.vllm_config,
+            self.uses_mrope,
+            self.use_aux_hidden_state_outputs,
+            self.device,
         )
         # Structured outputs worker.
         self.structured_outputs_worker = StructuredOutputsWorker(
@@ -248,10 +265,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         prepare_communication_buffer_for_model(self.model)
-        if self.do_spec_decode:
-            speculator_model = getattr(self.speculator, "model", None)
-            if speculator_model is not None:
-                prepare_communication_buffer_for_model(speculator_model)
+        if self.speculator is not None:
+            prepare_communication_buffer_for_model(self.speculator)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -283,7 +298,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cp_interleave=self.cp_interleave,
         )
 
-        self.attn_backends, self.attn_metadata_builders = init_attn_backend(
+        self.attn_backends, self.attn_groups = init_attn_backend(
             self.kv_cache_config, self.vllm_config, self.device
         )
         check_attention_cp_compatibility(self.vllm_config)
@@ -291,7 +306,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # HACK(woosuk)
             self.speculator.set_attn(
                 self.kv_cache_config,
-                self.attn_metadata_builders,
+                self.attn_groups,
                 self.block_tables,
             )
 
@@ -305,9 +320,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
-        # Attention groups are not supported.
-        self.attn_groups = []  # type: ignore
-
     def prepare_dummy_attn_metadata(self, input_batch: InputBatch) -> None:
         block_tables = self.block_tables.get_dummy_block_tables(input_batch.num_reqs)
         slot_mappings = self.block_tables.get_dummy_slot_mappings(
@@ -317,7 +329,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             slot_mappings, self.kv_cache_config
         )
         attn_metadata = build_attn_metadata(
-            attn_metadata_builders=self.attn_metadata_builders,
+            attn_groups=self.attn_groups,
             num_reqs=input_batch.num_reqs,
             num_tokens=input_batch.num_tokens,
             query_start_loc_gpu=input_batch.query_start_loc,
@@ -477,7 +489,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mrope_positions=mrope_positions,
                 inputs_embeds=inputs_embeds,
                 block_tables=self.block_tables,
-                attn_metadata_builders=self.attn_metadata_builders,
+                attn_groups=self.attn_groups,
                 kv_cache_config=self.kv_cache_config,
                 has_lora=self.lora_config is not None,
             )
@@ -712,7 +724,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Layer name -> attention metadata.
         attn_metadata = build_attn_metadata(
-            attn_metadata_builders=self.attn_metadata_builders,
+            attn_groups=self.attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_tokens,
             query_start_loc_gpu=query_start_loc,
@@ -862,29 +874,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         np.minimum(
             computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
         )
-
-    @torch.inference_mode()
-    def propose_draft(
-        self,
-        input_batch: InputBatch,
-        last_hidden_states: torch.Tensor,
-        aux_hidden_states: list[torch.Tensor] | None,
-        num_sampled: torch.Tensor,
-        num_rejected: torch.Tensor,
-    ) -> torch.Tensor:
-        assert self.speculator is not None
-        draft_tokens = self.speculator.propose(
-            input_batch,
-            last_hidden_states,
-            aux_hidden_states,
-            num_sampled,
-            num_rejected,
-            self.req_states.last_sampled_tokens,
-            self.req_states.next_prefill_tokens,
-            self.sampler.sampling_states.temperature.gpu,
-            self.sampler.sampling_states.seeds.gpu,
-        )
-        return draft_tokens
 
     @torch.inference_mode()
     def execute_model(
@@ -1047,7 +1036,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states,
             input_batch,
             kv_connector_output,
-        )
+        )  # type: ignore
         return None
 
     @torch.inference_mode()
@@ -1118,12 +1107,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch, sampler_output.sampled_token_ids, num_sampled, num_rejected
         )
         if self.speculator is not None:
-            draft_tokens = self.propose_draft(
+            draft_tokens = self.speculator.propose(
                 input_batch,
                 hidden_states,
                 aux_hidden_states,
                 num_sampled,
                 num_rejected,
+                self.req_states.last_sampled_tokens,
+                self.req_states.next_prefill_tokens,
+                self.sampler.sampling_states.temperature.gpu,
+                self.sampler.sampling_states.seeds.gpu,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             self.draft_tokens_handler.set_draft_tokens(input_batch, draft_tokens)

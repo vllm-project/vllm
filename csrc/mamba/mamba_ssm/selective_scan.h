@@ -15,7 +15,7 @@
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 struct SSMParamsBase {
-    using index_t = uint32_t;
+    using index_t = size_t;
 
     int batch, dim, seqlen, dstate, n_groups, n_chunks;
     int dim_ngroups_ratio;

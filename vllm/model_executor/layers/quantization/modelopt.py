@@ -9,6 +9,9 @@ from torch.nn.parameter import Parameter
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    init_fp8_linear_kernel,
+)
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -45,9 +48,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.utils.flashinfer_fp4_moe import (
     flashinfer_trtllm_fp4_moe,
@@ -70,6 +70,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_VALUE_DTYPE,
     Mxfp8LinearBackend,
     Mxfp8LinearOp,
+    swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.nvfp4_utils import (
     apply_nvfp4_linear,
@@ -1689,9 +1690,9 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 "Dynamic quantization is not supported."
             )
 
-        backend: Mxfp8LinearBackend = Mxfp8LinearBackend.EMULATION
-        self.mxfp8_linear_op = Mxfp8LinearOp(backend=backend)
-        logger.info_once("Using %s backend for MXFP8 GEMM", backend.value)
+        self.backend: Mxfp8LinearBackend = Mxfp8LinearBackend.FLASHINFER_CUTLASS
+        self.mxfp8_linear_op = Mxfp8LinearOp(backend=self.backend)
+        logger.info_once("Using %s backend for MXFP8 GEMM", self.backend.value)
 
     def create_weights(
         self,
@@ -1749,7 +1750,38 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
         )
         layer.register_parameter("weight_scale", weight_scale)
 
+    def _process_weights_after_loading_scale_2d(self, layer: torch.nn.Module) -> None:
+        """Not swizzled - MXFP8 GEMM emulation"""
+        weight = layer.weight.data  # [N, K]
+        N, K = weight.shape
+        scale_k = K // MXFP8_BLOCK_SIZE
+
+        # Slice weight_scale to match weight dimensions (handles padding)
+        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+
+    def _process_weights_after_loading_scale_1d(self, layer: torch.nn.Module) -> None:
+        """Swizzled - MXFP8 GEMM Flashinfer CUTLASS"""
+        weight = layer.weight.data  # [N, K]
+        N, K = weight.shape
+
+        # 2D weight scale
+        weight_scale = layer.weight_scale.data
+
+        # Swizzle the weight scales
+        scale_k = K // MXFP8_BLOCK_SIZE
+        weight_scale_2d = weight_scale[:N, :scale_k].contiguous()
+        weight_scale_swizzled = swizzle_mxfp8_scale(weight_scale_2d, M=N, K=K)
+
+        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
+        layer.weight_scale = Parameter(
+            weight_scale_swizzled.contiguous(), requires_grad=False
+        )
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        # Validate weight tensor
         if layer.weight.ndim != 2:
             raise ValueError(
                 f"MXFP8 weight must be 2D tensor [N, K], got {layer.weight.ndim}D "
@@ -1763,15 +1795,23 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
                 f"quantized with MXFP8."
             )
 
-        weight = layer.weight.data  # [N, K]
-        N, K = weight.shape
-        scale_k = K // MXFP8_BLOCK_SIZE
+        # Validate weight scale tensor (should be 2D, not swizzled)
+        assert layer.weight_scale.ndim == 2, (
+            f"MXFP8 weight scale must be 2D, got {layer.weight_scale.ndim}D"
+        )
+        assert layer.weight_scale.dtype == MXFP8_SCALE_DTYPE, (
+            f"MXFP8 weight scale must be {MXFP8_SCALE_DTYPE},"
+            f" got {layer.weight_scale.dtype}"
+        )
 
-        # Slice weight_scale to match weight dimensions (handles padding)
-        weight_scale = layer.weight_scale.data[:N, :scale_k].contiguous()
+        if self.backend == Mxfp8LinearBackend.EMULATION:
+            # Swizzled layout is not used
+            self._process_weights_after_loading_scale_2d(layer)
+            return
 
-        layer.weight = Parameter(weight.contiguous(), requires_grad=False)
-        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
+        assert self.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS
+        # Swizzled layout is required for Flashinfer CUTLASS
+        self._process_weights_after_loading_scale_1d(layer)
 
     def apply(
         self,

@@ -10,7 +10,6 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backend import AttentionMetadataBuilder
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
@@ -21,6 +20,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.eagle.cudagraph import EagleCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.eagle.utils import load_eagle_model
+from vllm.v1.worker.utils import AttentionGroup
 
 logger = init_logger(__name__)
 
@@ -78,11 +78,11 @@ class EagleSpeculator:
     def set_attn(
         self,
         kv_cache_config: KVCacheConfig,
-        attn_metadata_builders: list[AttentionMetadataBuilder],
+        attn_groups: list[list[AttentionGroup]],
         block_tables: BlockTables,
     ) -> None:
         self.kv_cache_config = kv_cache_config
-        self.attn_metadata_builders = attn_metadata_builders
+        self.attn_groups = attn_groups
         self.block_tables = block_tables
 
     @torch.inference_mode()
@@ -174,7 +174,7 @@ class EagleSpeculator:
             self.generate_draft,
             self.input_buffers,
             self.block_tables,
-            self.attn_metadata_builders,
+            self.attn_groups,
             self.kv_cache_config,
         )
 
@@ -298,7 +298,7 @@ class EagleSpeculator:
 
         # FIXME(woosuk): This is UNSAFE!!
         attn_metadata = build_attn_metadata(
-            attn_metadata_builders=self.attn_metadata_builders,
+            attn_groups=self.attn_groups,
             num_reqs=num_reqs,
             num_tokens=num_reqs,
             query_start_loc_gpu=query_start_loc,

@@ -115,6 +115,7 @@ steps:
     - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
     - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
     - pytest -v -s tests/kernels/moe/test_flashinfer.py
+    - pytest -v -s tests/kernels/moe/test_flashinfer_moe.py
     - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
     # e2e
     - pytest -v -s tests/models/quantization/test_nvfp4.py
@@ -156,14 +157,3 @@ steps:
     - pytest -v -s kernels/moe/test_deepep_moe.py
     - pytest -v -s kernels/moe/test_pplx_cutlass_moe.py
     # - pytest -v -s kernels/moe/test_pplx_moe.py - failing on main
-  
-- label: Kernels Fp4 MoE Test (B200)
-  timeout_in_minutes: 60
-  device: b200
-  num_devices: 1
-  optional: true
-  commands:
-    - pytest -v -s kernels/moe/test_cutedsl_moe.py
-    - pytest -v -s kernels/moe/test_flashinfer_moe.py
-    - pytest -v -s kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s kernels/moe/test_ocp_mx_moe.py
