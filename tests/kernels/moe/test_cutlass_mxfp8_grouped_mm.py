@@ -32,7 +32,7 @@ def calc_diff(x, y):
 
 
 def is_sm100_supported() -> bool:
-    return current_platform.is_cuda() and current_platform.has_device_capability(100)
+    return current_platform.is_cuda() and current_platform.is_device_capability_family(100)
 
 
 def compute_ref_output(
