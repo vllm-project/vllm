@@ -126,12 +126,12 @@ def _check_sparse_embedding(data, check_tokens=False):
 
     assert len(data) == len(expected_embed)
     for entry in data:
-        expected_val = expected_embed[entry["token_id"]]
-        assert expected_val["weight"] == entry["weight"], (
+        expected_val = expected_embed[entry.token_id]
+        assert expected_val["weight"] == entry.weight, (
             f"actual embed {entry} not equal to {expected_val}"
         )
         if check_tokens:
-            assert expected_val["token"] == entry["token"]
+            assert expected_val["token"] == entry.token
 
 
 @pytest.mark.parametrize(
