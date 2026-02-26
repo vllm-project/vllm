@@ -297,7 +297,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[ProcessorInputs], float]:
+    ) -> tuple[list[ProcessorInputs], float, list[float]]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.
@@ -342,9 +342,7 @@ class OpenAISpeechToText(OpenAIServing):
             # contiguous, so start_time[i] = sum of durations of chunks 0..i-1)
             chunk_start_times = [0.0]
             for chunk in chunks[:-1]:
-                chunk_start_times.append(
-                    chunk_start_times[-1] + chunk.shape[-1] / sr
-                )
+                chunk_start_times.append(chunk_start_times[-1] + chunk.shape[-1] / sr)
 
         if language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -513,12 +511,14 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            engine_prompts, duration_s, chunk_start_times = (
-                await self._preprocess_speech_to_text(
-                    request=request,
-                    audio_data=audio_data,
-                    request_id=request_id,
-                )
+            (
+                engine_prompts,
+                duration_s,
+                chunk_start_times,
+            ) = await self._preprocess_speech_to_text(
+                request=request,
+                audio_data=audio_data,
+                request_id=request_id,
             )
 
         except ValueError as e:
