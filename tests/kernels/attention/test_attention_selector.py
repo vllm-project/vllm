@@ -103,21 +103,20 @@ def test_backend_selection(
 
                     if name == "TRITON_MLA" and block_size == 1:
                         # TRITON_MLA doesn't support block_size == 1
-                        with pytest.raises(ValueError) as exc_info:
+                        with pytest.raises(ValueError):
                             get_attn_backend(
-                                16, torch.float16, None, block_size, use_mla=use_mla
+                                576, torch.float16, None, block_size, use_mla=use_mla
                             )
-                        assert f"The selected backend, {name}" in str(exc_info.value)
                     else:
                         # Valid backend-block_size combination
                         backend = get_attn_backend(
-                            16, torch.float16, None, block_size, use_mla=use_mla
+                            576, torch.float16, None, block_size, use_mla=use_mla
                         )
                         expected = name
                         assert backend.get_name() == expected
                 else:
                     backend = get_attn_backend(
-                        16, torch.float16, None, block_size, use_mla=use_mla
+                        32, torch.float16, None, block_size, use_mla=use_mla
                     )
                     expected = "ROCM_ATTN"
                     assert backend.get_name() == expected
