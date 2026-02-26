@@ -200,7 +200,7 @@ Example commands for visualizing [SLA Scanner](#sla-scanner) results:
 # Latency increases as the request rate increases
 vllm bench sweep plot benchmarks/results/<timestamp> \
     --var-x request_rate \
-    --var-y p99_e2el_ms \
+    --var-y p99_ttft_ms \
     --row-by random_input_len \
     --col-by random_output_len \
     --curve-by max_num_seqs,max_num_batched_tokens \
@@ -209,7 +209,7 @@ vllm bench sweep plot benchmarks/results/<timestamp> \
 # Tradeoff between latency and throughput
 vllm bench sweep plot benchmarks/results/<timestamp> \
     --var-x request_throughput \
-    --var-y median_e2el_ms \
+    --var-y median_ttft_ms \
     --row-by random_input_len \
     --col-by random_output_len \
     --curve-by max_num_seqs,max_num_batched_tokens \
