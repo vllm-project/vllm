@@ -17,9 +17,7 @@ model_config = {
     "model_name": "BAAI/bge-m3",
     "plugin": "bge_m3_sparse_plugin",
     "test_input": "What is the capital of France?",
-    "hf_overrides": json.dumps(
-        {"architectures": ["BgeM3EmbeddingModel"], "head_dtype": "float16"}
-    ),
+    "hf_overrides": {"architectures": ["BgeM3EmbeddingModel"], "head_dtype": "float16"},
 }
 
 
@@ -32,7 +30,7 @@ def server():
         "--max-num-seqs",
         "32",
         "--hf_overrides",
-        model_config["hf_overrides"],
+        json.dumps(model_config["hf_overrides"]),
         "--io-processor-plugin",
         model_config["plugin"],
     ]
