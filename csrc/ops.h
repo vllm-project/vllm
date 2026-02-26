@@ -269,13 +269,13 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     const int64_t n, const int64_t k, const bool swap_ab);
 
-void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
-                                  torch::Tensor& problem_sizes1,
-                                  torch::Tensor& problem_sizes2,
-                                  const torch::Tensor& expert_num_tokens,
-                                  const int64_t num_local_experts,
-                                  const int64_t padded_m, const int64_t n,
-                                  const int64_t k);
+void get_cutlass_batched_moe_mm_data(torch::Tensor& expert_offsets,
+                                     torch::Tensor& problem_sizes1,
+                                     torch::Tensor& problem_sizes2,
+                                     const torch::Tensor& expert_num_tokens,
+                                     const int64_t num_local_experts,
+                                     const int64_t padded_m, const int64_t n,
+                                     const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,

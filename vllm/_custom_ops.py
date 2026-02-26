@@ -988,7 +988,7 @@ def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     return output_tensor
 
 
-def get_cutlass_pplx_moe_mm_data(
+def get_cutlass_batched_moe_mm_data(
     expert_offsets: torch.Tensor,
     problem_sizes1: torch.Tensor,
     problem_sizes2: torch.Tensor,
@@ -1011,7 +1011,7 @@ def get_cutlass_pplx_moe_mm_data(
                                       multiplication in two grouped MMs used in
                                       the fused MoE operation.
     """
-    return torch.ops._C.get_cutlass_pplx_moe_mm_data(
+    return torch.ops._C.get_cutlass_batched_moe_mm_data(
         expert_offsets,
         problem_sizes1,
         problem_sizes2,
