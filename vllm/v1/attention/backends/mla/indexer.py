@@ -224,7 +224,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
 
-        # Pre-allocated buffers for the flattening path (max_decode_len > 2).
+        # Pre-allocated buffers for flattening (spec decode).
         self.arange_buffer = torch.arange(
             scheduler_config.max_num_seqs * (1 + self.num_speculative_tokens),
             dtype=torch.int32,
@@ -344,9 +344,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata.query_start_loc_cpu[: num_decodes + 1]
             )
 
-            # Use CPU to avoid GPU sync; breaking async scheduling
-            requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
-
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
             block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
 
@@ -357,8 +354,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             block_table.clamp_(min=0)
 
             max_decode_len = int(decode_lens_cpu.max().item())
-            if max_decode_len > 2:
-                # fp8_paged_mqa_logits does not support next_n > 2.
+            if max_decode_len > 1:
                 # Flatten multi-token decode requests into single-token
                 # batch entries, expanding seq_lens and block tables so
                 # the kernel always sees next_n=1.
@@ -407,7 +403,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 # All reqs now have decode_len=1
                 self.decode_lens_buffer[:num_decode_tokens] = 1
                 decode_lens = self.decode_lens_buffer[:num_decode_tokens]
-                requires_padding = False
                 offsets = None
                 batch_size = num_decode_tokens
             else:
@@ -439,7 +434,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 block_table=block_table,
                 seq_lens=seq_lens,
                 decode_lens=decode_lens,
-                requires_padding=requires_padding,
+                requires_padding=False,
                 schedule_metadata=self.scheduler_metadata_buffer,
                 use_large_context_topk=use_large_context_topk,
                 offsets=offsets,
