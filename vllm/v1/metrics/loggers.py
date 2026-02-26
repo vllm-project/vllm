@@ -670,7 +670,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         self.counter_prompt_tokens_by_source: dict[str, dict[int, AbstractCounter]] = {}
         for source in PromptTokenStats.ALL_SOURCES:
             self.counter_prompt_tokens_by_source[source] = {
-                idx: counter_prompt_tokens_by_source.labels(
+                idx: counter_prompt_tokens_by_source.labels(  # type: ignore[misc]
                     model_name, str(idx), source
                 )
                 for idx in engine_indexes

@@ -198,7 +198,7 @@ class SpecDecodingProm:
         self.counter_spec_decode_num_accepted_tokens_per_pos: dict[
             int, list[AbstractCounter]
         ] = {
-            idx: [base_counter.labels(*lv, str(pos)) for pos in range(num_spec_tokens)]
+            idx: [base_counter.labels(*lv, str(pos)) for pos in range(num_spec_tokens)]  # type: ignore[misc]
             for idx, lv in per_engine_labelvalues.items()
         }
 

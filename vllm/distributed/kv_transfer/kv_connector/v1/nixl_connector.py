@@ -2756,15 +2756,15 @@ class NixlPromMetrics(KVConnectorPromMetrics):
             self.make_per_engine(counter_nixl_num_failed_notifications)
         )  # type: ignore[assignment]
 
-        counter_nixl_num_kv_expired_reqs = self._counter_cls(
+        counter_nixl_num_kv_expired_reqs = self._backend.create_counter(
             name="vllm:nixl_num_kv_expired_reqs",
             documentation="Number of requests that had their KV expire. "
             "NOTE: This metric is tracked on the P instance.",
             labelnames=labelnames,
         )
-        self.counter_nixl_num_kv_expired_reqs = self.make_per_engine(
-            counter_nixl_num_kv_expired_reqs
-        )
+        self.counter_nixl_num_kv_expired_reqs: dict[int, AbstractCounter] = (
+            self.make_per_engine(counter_nixl_num_kv_expired_reqs)
+        )  # type: ignore[assignment]
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
         for prom_obj, list_item_key in zip(

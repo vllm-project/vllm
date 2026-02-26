@@ -64,8 +64,6 @@ class RayPerfMetricsProm(PerfMetricsProm):
     uses Ray's util.metrics library.
     """
 
-    _counter_cls = RayCounterWrapper
-
 
 class RayPrometheusStatLogger(PrometheusStatLogger):
     """RayPrometheusStatLogger uses Ray metrics instead of Prometheus.
