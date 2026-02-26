@@ -2,149 +2,164 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 #
-# Check if vllm can be installed under Ray's dependency constraints.
-# This is an informational check — failure means a PR introduces dependencies
-# that would prevent Ray from installing vllm in its locked environment.
+# Check if Ray LLM can generate lock files that are compatible with this
+# version of vllm. Downloads Ray's requirement files and runs a full
+# dependency resolution with the installed vllm's constraints to see if
+# a valid lock file can be produced.
 #
 # See: https://github.com/vllm-project/vllm/issues/33599
 
 set -eo pipefail
 
-RAY_LOCK_BASE_URL="https://raw.githubusercontent.com/ray-project/ray/master/python/deplocks/llm"
-RAY_LOCK_FILES=(
-    "ray_py311_cu128.lock"
-    "rayllm_test_py311_cu128.lock"
+RAY_BASE_URL="https://raw.githubusercontent.com/ray-project/ray/master/python"
+
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf "$WORK_DIR"' EXIT
+
+# Fetch all Ray requirement files used in the LLM depset pipeline
+echo ">>> Fetching Ray requirement files"
+RAY_FILES=(
+    "requirements.txt"
+    "requirements/cloud-requirements.txt"
+    "requirements/base-test-requirements.txt"
+    "requirements/llm/llm-requirements.txt"
+    "requirements/llm/llm-test-requirements.txt"
 )
+for FILE in "${RAY_FILES[@]}"; do
+    LOCAL_PATH="${WORK_DIR}/$(basename "$FILE")"
+    echo "    ${FILE}"
+    curl -fsSL -o "$LOCAL_PATH" "${RAY_BASE_URL}/${FILE}"
+done
 
-OVERALL_EXIT=0
-FAILED_LOCKS=()
+# Extract installed vllm deps
+echo ">>> Extracting installed vllm dependency constraints"
+python3 - "${WORK_DIR}/vllm-constraints.txt" <<'PYEOF'
+"""Write out the installed vllm's dependencies as pip constraint lines.
 
-for LOCK_NAME in "${RAY_LOCK_FILES[@]}"; do
-    LOCK_URL="${RAY_LOCK_BASE_URL}/${LOCK_NAME}"
-    LOCK_FILE="/tmp/${LOCK_NAME}"
-    CONSTRAINTS_FILE="/tmp/${LOCK_NAME%.lock}_constraints.txt"
-
-    echo ""
-    echo "============================================================"
-    echo ">>> Checking against: ${LOCK_NAME}"
-    echo "============================================================"
-
-    echo ">>> Fetching Ray lock file from ${LOCK_URL}"
-    curl -fsSL -o "$LOCK_FILE" "$LOCK_URL"
-
-    # The lock file contains --hash= entries which trigger pip's --require-hashes
-    # mode for all packages, including the local wheel. Strip hashes and comments
-    # to produce a clean constraints file with only package==version pins.
-    # Also remove any vllm pin — the lock file may pin the currently-released
-    # vllm version, which would conflict with the local wheel we're testing.
-    sed -E '/^\s*--hash=/d; /^\s*#/d; /^\s*--(index-url|extra-index-url)/d; s/ \\$//' "$LOCK_FILE" \
-        | sed '/^$/d' \
-        | grep -v '^vllm==' \
-        > "$CONSTRAINTS_FILE"
-
-    echo ">>> Constraints file (first 20 lines):"
-    head -20 "$CONSTRAINTS_FILE"
-
-    echo ">>> Checking installed vllm deps against ${LOCK_NAME} constraints"
-    set +e
-    python3 - "$CONSTRAINTS_FILE" <<'PYEOF'
-"""Check if the installed vllm dependencies are satisfiable
-under the version pins in a Ray lock-file-derived constraints file.
-
-Reads the installed vllm metadata (including the [audio] extra) and
-checks every dependency against the constraints.  Exits 0 if all
-constraints are satisfiable, 1 otherwise.
+Ray uses vllm[audio], so audio-extra deps are included with their extra
+markers stripped. The resolver cannot evaluate extra markers for a
+package that is not itself being resolved from an index, so we activate
+them manually here.
 """
 import importlib.metadata
 import re
 import sys
-from packaging.requirements import Requirement
-from packaging.version import Version
 
-constraints_file = sys.argv[1]
-
-# Parse constraints file into {package_name: pinned_version}
-pins: dict[str, str] = {}
-with open(constraints_file) as f:
-    for line in f:
-        line = line.strip()
-        # Skip environment markers (e.g. "cffi==1.17.1 ; platform...")
-        # — we only care about the name==version part.
-        m = re.match(r'^([A-Za-z0-9_.-]+)==([^\s;]+)', line)
-        if m:
-            pins[m.group(1).lower().replace("-", "_")] = m.group(2)
-
-# Gather all unconditional vllm requirements (no extras needed).
+out_path = sys.argv[1]
 raw_reqs = importlib.metadata.requires("vllm") or []
 
-reqs = []
+# Ray uses vllm[audio] – activate that extra.
+ACTIVE_EXTRAS = {"audio"}
+EXTRA_RE = re.compile(r"""extra\s*==\s*['"]([^'"]+)['"]""")
+
+lines = []
 for r in raw_reqs:
-    req = Requirement(r)
-    if req.marker is None:
-        reqs.append(req)
-
-conflicts = []
-for req in reqs:
-    name = req.name.lower().replace("-", "_")
-    if name not in pins:
+    if ";" not in r:
+        # Unconditional dep — always include.
+        lines.append(r.strip())
         continue
-    pinned = Version(pins[name])
-    if not req.specifier.contains(pinned):
-        conflicts.append(
-            f"  {req.name}: vllm requires {req.specifier}, "
-            f"but Ray pins {pins[name]}"
-        )
 
-if conflicts:
-    print("Conflicts found:")
-    for c in conflicts:
-        print(c)
-    sys.exit(1)
-else:
-    print("No conflicts found.")
-    sys.exit(0)
+    req_part, _, marker_part = r.partition(";")
+    marker_part = marker_part.strip()
+
+    extra_matches = EXTRA_RE.findall(marker_part)
+    if not extra_matches:
+        # Non-extra marker (python_version, etc.) — keep as-is.
+        lines.append(r.strip())
+        continue
+
+    if not ACTIVE_EXTRAS.intersection(extra_matches):
+        continue  # Skip inactive extras (tensorizer, bench, …).
+
+    # Strip the extra== conditions but keep any remaining markers
+    # (e.g. python_version).
+    cleaned = EXTRA_RE.sub("", marker_part)
+    cleaned = re.sub(r"\band\b\s*\band\b", "and", cleaned)
+    cleaned = re.sub(r"^\s*and\s+|\s+and\s*$", "", cleaned).strip()
+
+    if cleaned:
+        lines.append(f"{req_part.strip()} ; {cleaned}")
+    else:
+        lines.append(req_part.strip())
+
+with open(out_path, "w") as f:
+    for line in lines:
+        f.write(line + "\n")
+
+print(f"Wrote {len(lines)} constraints to {out_path}")
 PYEOF
-    EXIT_CODE=$?
-    set -e
 
-    if [ $EXIT_CODE -eq 0 ]; then
-        echo ">>> PASS: vllm is compatible with ${LOCK_NAME}"
-    else
-        echo ">>> FAIL: vllm conflicts with ${LOCK_NAME}"
-        OVERALL_EXIT=1
-        FAILED_LOCKS+=("$LOCK_NAME")
-    fi
-done
+echo ">>> Installed vllm deps (first 20 lines):"
+head -20 "${WORK_DIR}/vllm-constraints.txt"
+
+# Remove Ray's vllm pin — the installed vllm's transitive deps
+# (written above) replace it in the resolution. vllm itself cannot
+# be resolved from PyPI for in-development versions, so we test
+# whether Ray's requirements can coexist with vllm's dependency
+# constraints instead.
+sed -i '/^vllm/d' "${WORK_DIR}/llm-requirements.txt"
+
+# Install uv if needed
+if ! command -v uv &>/dev/null; then
+    echo ">>> Installing uv"
+    pip install uv -q
+fi
+
+# Resolve: given vllm's constraints, can Ray compile a lock file?
+#
+# vllm's dependency constraints are the fixed side — Ray is flexible and
+# can regenerate its lock files. We pass vllm's constraints via -c so
+# the resolver treats them as non-negotiable bounds, then check whether
+# Ray's own requirements can still be satisfied within those bounds.
+echo ""
+echo "============================================================"
+echo ">>> Resolving: Can Ray generate compatible lock files?"
+echo "============================================================"
+
+set +e
+uv pip compile \
+    "${WORK_DIR}/requirements.txt" \
+    "${WORK_DIR}/cloud-requirements.txt" \
+    "${WORK_DIR}/base-test-requirements.txt" \
+    "${WORK_DIR}/llm-requirements.txt" \
+    "${WORK_DIR}/llm-test-requirements.txt" \
+    -c "${WORK_DIR}/vllm-constraints.txt" \
+    --python-version 3.12 \
+    --python-platform x86_64-manylinux_2_31 \
+    --extra-index-url https://download.pytorch.org/whl/cu129 \
+    --index-strategy unsafe-best-match \
+    --unsafe-package setuptools \
+    --unsafe-package ray \
+    --no-header \
+    -o "${WORK_DIR}/resolved.txt" \
+    2>&1
+EXIT_CODE=$?
+set -e
 
 echo ""
 echo "=========================================="
-if [ $OVERALL_EXIT -eq 0 ]; then
-    echo "SUCCESS: vllm is compatible with all Ray lock files."
+if [ $EXIT_CODE -eq 0 ]; then
+    echo "SUCCESS: Ray can generate lock files compatible with this vllm."
+    echo ""
+    echo "Key resolved versions:"
+    grep -E '^(protobuf|torch|numpy|transformers)==' \
+        "${WORK_DIR}/resolved.txt" | sort || true
     echo "=========================================="
     exit 0
 fi
 
-echo "WARNING: This PR introduces dependencies that conflict with Ray's lock files."
-echo "Failing lock files: ${FAILED_LOCKS[*]}"
-echo "Ray installs vllm via: pip install 'vllm'"
-echo "Lock file base: ${RAY_LOCK_BASE_URL}/"
+echo "FAILURE: Ray cannot generate lock files compatible with this vllm."
+echo "This means a fundamental dependency conflict exists that Ray"
+echo "cannot resolve by regenerating its lock files."
 echo "See: https://github.com/vllm-project/vllm/issues/33599"
 echo "=========================================="
 
-FAILED_LIST=""
-for f in "${FAILED_LOCKS[@]}"; do
-    FAILED_LIST="${FAILED_LIST}\n- [${f}](${RAY_LOCK_BASE_URL}/${f})"
-done
-
-# if the agent binary is not found, skip annotations
+# Buildkite annotation
 if [ -f /usr/bin/buildkite-agent ]; then
     buildkite-agent annotate --style 'warning' --context 'ray-compat' << EOF
 ### :warning: Ray Dependency Compatibility Warning
-This PR introduces dependencies that conflict with Ray's pinned environment.
-Ray installs vllm via \`pip install 'vllm'\` with constraints from its lock files.
-
-**Failing lock files:**
-$(echo -e "$FAILED_LIST")
+This PR introduces dependencies that **cannot** be resolved with Ray's requirements.
+Ray would not be able to regenerate its lock files to accommodate this vllm version.
 
 Please check the **Ray Dependency Compatibility Check** step logs for details.
 See [issue #33599](https://github.com/vllm-project/vllm/issues/33599) for context.
@@ -157,7 +172,6 @@ if [ -n "$RAY_COMPAT_SLACK_WEBHOOK_URL" ]; then
     # shellcheck disable=SC2016
     PAYLOAD=$(python3 -c '
 import json, os, sys
-failed = sys.argv[1]
 pr = os.getenv("BUILDKITE_PULL_REQUEST", "N/A")
 branch = os.getenv("BUILDKITE_BRANCH", "unknown")
 url = os.getenv("BUILDKITE_BUILD_URL", "#")
@@ -170,18 +184,18 @@ data = {
             "text": (
                 "*:warning: Ray Dependency Compatibility Check Failed*\n"
                 f"PR #{pr} on branch `{branch}` introduces dependencies "
-                f"that conflict with Ray'\''s lock file(s): {failed}\n"
+                f"that cannot be resolved with Ray'\''s requirements.\n"
                 f"<{url}|View Build>"
             ),
         },
     }],
 }
 print(json.dumps(data))
-' "${FAILED_LOCKS[*]}")
+')
 
     curl -s -X POST "$RAY_COMPAT_SLACK_WEBHOOK_URL" \
         -H 'Content-type: application/json' \
         -d "$PAYLOAD"
 fi
 
-exit $OVERALL_EXIT
+exit 1
