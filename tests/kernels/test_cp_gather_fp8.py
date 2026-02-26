@@ -128,9 +128,96 @@ def _build_test_case(seq_lens, block_size, seed=42):
     )
 
 
+def _build_test_case_fast(seq_lens, block_size, seed=42):
+    """Vectorized test-case builder for large sequence lengths.
+
+    Same logic as _build_test_case but uses tensor operations instead of
+    per-token Python loops, making it practical for seq_lens up to 128K+.
+    """
+    torch.manual_seed(seed)
+
+    num_reqs = len(seq_lens)
+    total_tokens = sum(seq_lens)
+
+    workspace_starts = []
+    s = 0
+    for sl in seq_lens:
+        workspace_starts.append(s)
+        s += sl
+
+    blocks_per_req = [math.ceil(sl / block_size) for sl in seq_lens]
+    total_blocks = sum(blocks_per_req)
+    max_blocks = max(blocks_per_req)
+
+    # Contiguous block allocation
+    block_table = torch.zeros(num_reqs, max_blocks, dtype=torch.int32, device="cuda")
+    block_idx = 0
+    for r in range(num_reqs):
+        for b in range(blocks_per_req[r]):
+            block_table[r, b] = block_idx
+            block_idx += 1
+
+    cache = torch.zeros(
+        total_blocks, block_size, ENTRY_BYTES, dtype=torch.uint8, device="cuda"
+    )
+
+    # Generate all data vectorized
+    nope_fp8 = torch.randn(total_tokens, NOPE_DIM, device="cuda").to(
+        torch.float8_e4m3fn
+    )
+    scales = (torch.rand(total_tokens, NUM_TILES, device="cuda") * 2.0 + 0.1).float()
+    rope = torch.randn(total_tokens, ROPE_DIM, dtype=torch.bfloat16, device="cuda")
+
+    # Compute expected output vectorized (same dequant logic as kernel)
+    expected = torch.zeros(
+        total_tokens, NOPE_DIM + ROPE_DIM, dtype=torch.bfloat16, device="cuda"
+    )
+    for tile in range(NUM_TILES):
+        start = tile * GROUP_SIZE
+        expected[:, start : start + GROUP_SIZE] = (
+            nope_fp8[:, start : start + GROUP_SIZE].float() * scales[:, tile : tile + 1]
+        ).bfloat16()
+    expected[:, NOPE_DIM:] = rope
+
+    # Build per-token cache entries as [total_tokens, 656] uint8
+    token_data = torch.zeros(
+        total_tokens, ENTRY_BYTES, dtype=torch.uint8, device="cuda"
+    )
+    token_data[:, :NOPE_DIM] = nope_fp8.view(torch.uint8)
+    token_data[:, NOPE_DIM : NOPE_DIM + 16] = scales.view(torch.uint8)
+    token_data[:, NOPE_DIM + 16 :] = rope.view(torch.uint8)
+
+    # Scatter into paged cache (loop over requests, not tokens)
+    block_start = 0
+    for r in range(num_reqs):
+        sl = seq_lens[r]
+        nb = blocks_per_req[r]
+        ws = workspace_starts[r]
+        flat_cache = cache[block_start : block_start + nb].reshape(-1, ENTRY_BYTES)
+        flat_cache[:sl] = token_data[ws : ws + sl]
+        block_start += nb
+
+    seq_lens_t = torch.tensor(seq_lens, dtype=torch.int32, device="cuda")
+    workspace_starts_t = torch.tensor(
+        workspace_starts, dtype=torch.int32, device="cuda"
+    )
+
+    return (
+        cache,
+        block_table,
+        seq_lens_t,
+        workspace_starts_t,
+        num_reqs,
+        total_tokens,
+        expected,
+    )
+
+
 @pytest.mark.parametrize(
     "seq_lens,block_size",
     [
+        # Production block_size=64 (only supported value for FlashMLA sparse).
+        # Realistic prefill scenarios with varying request counts.
         ([1], 64),  # single token edge case
         ([64], 64),  # 1 req, exactly one block
         ([128], 64),  # 1 req, crosses block boundary
@@ -171,6 +258,12 @@ def test_cp_gather_and_upconvert_fp8_kv_cache(seq_lens, block_size):
 
 
 def test_cp_gather_fp8_shuffled_blocks():
+    """Test that the kernel correctly follows the block table when
+    physical blocks are non-contiguous and out of order.
+
+    Here we allocate 4 physical blocks but map the request's 2 logical
+    blocks to physical blocks [3, 1] (reversed, with gaps).
+    """
     torch.manual_seed(123)
     block_size = 4
     seq_lens = [8]  # needs 2 blocks (tokens 0-3 in block 0, 4-7 in block 1)
@@ -222,6 +315,46 @@ def test_cp_gather_fp8_shuffled_blocks():
 
     ops.cp_gather_and_upconvert_fp8_kv_cache(
         cache, dst, block_table, seq_lens_t, workspace_starts, len(seq_lens)
+    )
+
+    torch.testing.assert_close(
+        dst[:, :NOPE_DIM], expected[:, :NOPE_DIM], atol=1e-3, rtol=1e-2
+    )
+    assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
+
+
+@pytest.mark.parametrize(
+    "seq_lens,block_size",
+    [
+        # Large sequence lengths matching end-to-end benchmark scenarios.
+        # Uses vectorized builder since per-token Python loops would be too slow.
+        ([8000], 64),
+        ([16000], 64),
+        ([32000], 64),
+        ([64000], 64),
+        ([96000], 64),
+        ([128000], 64),
+    ],
+)
+def test_cp_gather_fp8_large_seqlens(seq_lens, block_size):
+    """Correctness test with large sequence lengths matching benchmark
+    scenarios (8K-128K prefill)."""
+    (
+        cache,
+        block_table,
+        seq_lens_t,
+        workspace_starts_t,
+        num_reqs,
+        total_tokens,
+        expected,
+    ) = _build_test_case_fast(seq_lens, block_size)
+
+    dst = torch.zeros(
+        total_tokens, NOPE_DIM + ROPE_DIM, dtype=torch.bfloat16, device="cuda"
+    )
+
+    ops.cp_gather_and_upconvert_fp8_kv_cache(
+        cache, dst, block_table, seq_lens_t, workspace_starts_t, num_reqs
     )
 
     torch.testing.assert_close(
