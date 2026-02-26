@@ -154,6 +154,37 @@ async def test_chat_error_non_stream():
 
 
 @pytest.mark.asyncio
+async def test_chat_error_response_format_json_schema_invalid_format() -> None:
+    """Test that missing json_schema in response_format for type json_schema
+    returns 400 BAD_REQUEST
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "hello"}],
+        response_format={"type": "json_schema", "schema": {"type": "object"}},
+    )
+
+    response = await serving_chat.create_chat_completion(request)
+
+    assert isinstance(response, ErrorResponse)
+    assert response.error.type == "BadRequestError"
+    assert (
+        response.error.message
+        == "response_format of type 'json_schema' requires the 'json_schema' field"
+    )
+    assert response.error.code == HTTPStatus.BAD_REQUEST
+
+
+@pytest.mark.asyncio
 async def test_chat_error_stream():
     """test finish_reason='error' returns 500 InternalServerError (streaming)"""
     mock_engine = MagicMock(spec=AsyncLLM)

@@ -443,7 +443,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 structured_outputs_kwargs["json_object"] = True
             elif response_format.type == "json_schema":
                 json_schema = response_format.json_schema
-                assert json_schema is not None
+                if json_schema is None:
+                    raise ValueError(
+                        "response_format of type 'json_schema' requires the "
+                        "'json_schema' field"
+                    )
                 structured_outputs_kwargs["json"] = json_schema.json_schema
             elif response_format.type == "structural_tag":
                 structural_tag = response_format
