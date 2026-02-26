@@ -341,7 +341,7 @@ class OpenAISpeechToText(OpenAIServing):
 
     def _find_split_point(self, wav: np.ndarray, start_idx: int,
                           end_idx: int) -> int:
-        """Find the best point to split audio by 
+        """Find the best point to split audio by
         looking for silence or low amplitude.
         Args:
             wav: Audio tensor [1, T]
@@ -352,15 +352,18 @@ class OpenAISpeechToText(OpenAIServing):
         """
         segment = wav[start_idx:end_idx]
 
-        # Calculate RMS energy in small windows
-        min_energy = math.inf
-        quietest_idx = 0
         min_energy_window = self.asr_config.min_energy_split_window_size
         assert min_energy_window is not None
-        for i in range(0, len(segment) - min_energy_window, min_energy_window):
-            window = segment[i:i + min_energy_window]
-            energy = (window**2).mean()**0.5
-            if energy < min_energy:
-                quietest_idx = i + start_idx
-                min_energy = energy
-        return quietest_idx
+
+        # Trim segment to a multiple of window size
+        n = len(segment)
+        usable = n - (n % min_energy_window)
+        if usable <= 0:
+            return start_idx
+        trimmed = segment[:usable]
+
+        # Vectorized RMS energy across all windows
+        windows = trimmed.reshape(-1, min_energy_window)
+        energies = np.sqrt(np.mean(windows ** 2, axis=1))
+        quietest_window = int(np.argmin(energies))
+        return quietest_window * min_energy_window + start_idx
