@@ -321,16 +321,11 @@ def find_split_point(
         True
     """
     segment = wav[start_idx:end_idx]
+    n = len(segment)
+    usable = n - (n % min_energy_window)
+    if usable <= 0:
+        return start_idx
 
-    # Calculate RMS energy in small windows
-    min_energy = math.inf
-    quietest_idx = 0
-
-    for i in range(0, len(segment) - min_energy_window, min_energy_window):
-        window = segment[i : i + min_energy_window]
-        energy = (window**2).mean() ** 0.5
-        if energy < min_energy:
-            quietest_idx = i + start_idx
-            min_energy = energy
-
-    return quietest_idx
+    windows = segment[:usable].reshape(-1, min_energy_window)
+    energies = np.mean(windows**2, axis=1)
+    return int(np.argmin(energies)) * min_energy_window + start_idx
