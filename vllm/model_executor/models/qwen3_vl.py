@@ -1046,8 +1046,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
         tokenizer = self.info.get_tokenizer()
         merged_lt_splits = _get_merged_lt_splits(tokenizer)
 
-        # Fast path: no merged tokens in this tokenizer's vocab.
-        if not merged_lt_splits:
+        # Fast path: skip split loop when no tokens in the prompt need
+        # splitting (covers both empty vocab map and no-merge prompts).
+        if not merged_lt_splits or merged_lt_splits.keys().isdisjoint(new_token_ids):
             return super()._find_mm_placeholders(new_token_ids, mm_prompt_updates)
 
         repl_token_ids = list[int]()
