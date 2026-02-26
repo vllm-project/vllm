@@ -928,12 +928,12 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
 def _get_merged_lt_splits(
     tokenizer: PreTrainedTokenizerBase,
 ) -> dict[int, list[int]]:
-    """Pre-compute split mappings for vocab tokens that end with ``<``.
+    """Pre-compute split mappings for vocab tokens that end with `<`.
 
-    The Qwen3-VL tokenizer may merge preceding punctuation with ``<``
-    (e.g. ``.<`` → single token 15757).  This function scans the vocab
+    The Qwen3-VL tokenizer may merge preceding punctuation with `<`
+    (e.g. `.<` → single token 15757).  This function scans the vocab
     once and returns a dict mapping each such merged token ID to its
-    split form ``[*prefix_ids, lt_id]``.
+    split form `[*prefix_ids, lt_id]`.
     """
     vocab = tokenizer.get_vocab()
     lt_id = vocab["<"]
