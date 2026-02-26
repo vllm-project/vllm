@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -37,6 +37,7 @@ from .load import LoadConfig
 from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
+from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
@@ -74,6 +75,8 @@ class OptimizationLevel(IntEnum):
     O3 = 3
     """O3: Currently the same as -O2s."""
 
+
+PerformanceMode = Literal["balanced", "interactivity", "throughput"]
 
 IS_QUANTIZED = False
 IS_DENSE = False
@@ -126,14 +129,27 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+def enable_rope_kvcache_fusion(cfg: "VllmConfig") -> bool:
+    """Enable if rotary embedding custom op is active and
+    use_inductor_graph_partition is enabled.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    return (
+        rocm_aiter_ops.is_enabled()
+        and cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+        and cfg.compilation_config.use_inductor_graph_partition
+    )
+
+
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and AITER Triton GEMMs
     and hidden size is 2880 i.e. gpt-oss; otherwise Inductor handles fusion."""
+    from vllm._aiter_ops import rocm_aiter_ops
 
     return (
-        envs.VLLM_ROCM_USE_AITER
-        and envs.VLLM_ROCM_USE_AITER_RMSNORM
-        and envs.VLLM_ROCM_USE_AITER_TRITON_GEMM
+        rocm_aiter_ops.is_rmsnorm_enabled()
+        and not rocm_aiter_ops.is_triton_gemm_enabled()
         and cfg.model_config is not None
         and cfg.model_config.get_hidden_size() == 2880
     )
@@ -149,6 +165,7 @@ OPTIMIZATION_LEVEL_00 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": False,
+            "fuse_rope_kvcache": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
         "use_inductor_graph_partition": False,
@@ -167,6 +184,7 @@ OPTIMIZATION_LEVEL_01 = {
             "enable_sp": False,
             "fuse_gemm_comms": False,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -185,6 +203,7 @@ OPTIMIZATION_LEVEL_02 = {
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -203,6 +222,7 @@ OPTIMIZATION_LEVEL_03 = {
             "enable_sp": IS_DENSE,
             "fuse_gemm_comms": IS_DENSE,
             "fuse_act_padding": enable_norm_pad_fusion,
+            "fuse_rope_kvcache": enable_rope_kvcache_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -242,6 +262,8 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
+    offload_config: OffloadConfig = Field(default_factory=OffloadConfig)
+    """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -291,6 +313,13 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -O2 is used by default. See OptimizationLevel for full
     description."""
+
+    performance_mode: PerformanceMode = "balanced"
+    """Performance mode for runtime behavior, 'balanced' is the default.
+    'interactivity' favors low end-to-end per-request latency at small batch
+    sizes (fine-grained CUDA graphs, latency-oriented kernels).
+    'throughput' favors aggregate tokens/sec at high concurrency (larger CUDA
+    graphs, more aggressive batching, throughput-oriented kernels)."""
 
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
@@ -342,6 +371,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.load_config:
             vllm_factors.append(self.load_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.offload_config:
+            vllm_factors.append(self.offload_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.attention_config:
@@ -618,6 +651,11 @@ class VllmConfig:
 
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
+
+        if self.performance_mode != "balanced":
+            logger.info_once(
+                "Performance mode set to '%s'.", self.performance_mode, scope="local"
+            )
 
         self.try_verify_and_update_config()
 
@@ -1308,9 +1346,15 @@ class VllmConfig:
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
-                cudagraph_capture_sizes = [
-                    i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-                ]
+                if self.performance_mode == "interactivity":
+                    # Fine-grained CUDA graphs at small batch sizes
+                    # for minimal padding overhead
+                    interactivity_max = min(max_cudagraph_capture_size, 32)
+                    cudagraph_capture_sizes = list(range(1, interactivity_max + 1))
+                else:
+                    cudagraph_capture_sizes = [
+                        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+                    ]
                 if max_cudagraph_capture_size >= 8:
                     # Step size 8 for small batch sizes, up to 256(not included)
                     cudagraph_capture_sizes += list(
@@ -1321,6 +1365,8 @@ class VllmConfig:
                     cudagraph_capture_sizes += list(
                         range(256, max_cudagraph_capture_size + 1, 16)
                     )
+                # de-duplicate and sort the sizes
+                cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
             if (
                 self.parallel_config.tensor_parallel_size > 1
