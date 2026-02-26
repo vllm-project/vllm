@@ -89,7 +89,7 @@ async def test_bge_m3_sparse_plugin_online(server: RemoteOpenAIServer):
     response = ret.json()
 
     # Verify the request response is in the correct format
-    assert (parsed_response := IOProcessorResponse(**response))
+    assert (parsed_response := IOProcessorResponse(**response).data)
 
     # Verify the output is formatted as expected for this plugin
     assert parsed_response.data
@@ -102,15 +102,7 @@ async def test_bge_m3_sparse_plugin_online(server: RemoteOpenAIServer):
     # Verify sparse embedding format
     sparse_embedding = data_entry.sparse_embedding
     assert isinstance(sparse_embedding, list)
-    if sparse_embedding:
-        entry = sparse_embedding[0]
-        assert hasattr(entry, "token_id")
-        assert hasattr(entry, "weight")
-        # When return_tokens=True, token should be present
-        assert entry.token is not None
-        assert isinstance(entry.token_id, int)
-        assert isinstance(entry.weight, float)
-        assert entry.weight >= 0  # SPLADE outputs are non-negative
+    _check_sparse_embedding(sparse_embedding, True)
 
     # Verify usage information
     assert parsed_response.usage
