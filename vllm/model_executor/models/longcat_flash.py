@@ -297,7 +297,7 @@ class LongcatMoe(nn.Module):
         self.experts = ZeroExpertFusedMoE(
             zero_expert_num=config.zero_expert_num,
             zero_expert_type=config.zero_expert_type,
-            router=self.router,
+            e_score_correction_bias=self.router.e_score_correction_bias,
             num_experts=num_experts,
             top_k=top_k,
             hidden_size=hidden_size,
