@@ -748,9 +748,9 @@ class SpeculativeConfig:
                 f"Eagle3 is only supported for {eagle3_target_supported} models. "  # noqa: E501
                 f"Got {self.target_model_config.hf_text_config.model_type=}"
             )
-        if not (0 <= self.acceptance_threshold < 1):
+        if not (0 <= self.acceptance_threshold <= 1):
             raise ValueError(
-                f"acceptance_threshold must be in [0, 1), "
+                f"acceptance_threshold must be in [0, 1], "
                 f"got {self.acceptance_threshold}"
             )
 
