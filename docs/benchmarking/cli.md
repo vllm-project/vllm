@@ -4,6 +4,11 @@ This section guides you through running benchmark tests with the extensive datas
 
 It's a living document, updated as new features and datasets become available.
 
+!!! tip
+    The benchmarks described on this page are mainly for evaluating specific vLLM features as well as regression testing.
+
+    For benchmarking production vLLM servers, we recommend [GuideLLM](https://github.com/vllm-project/guidellm), an established performance benchmarking framework with live progress updates and automatic report generation. It is also more flexible than `vllm bench serve` in terms of dataset loading, request formatting, and workload patterns.
+
 ## Dataset Overview
 
 <style>
