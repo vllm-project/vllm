@@ -795,16 +795,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
-        if [ "$CUDA_MAJOR" -ge 13 ]; then \
-            sed 's/^nixl\b/nixl[cu13]/' /tmp/kv_connectors.txt > /tmp/kv_connectors_resolved.txt; \
-        else \
-            cp /tmp/kv_connectors.txt /tmp/kv_connectors_resolved.txt; \
-        fi; \
-        uv pip install --system -r /tmp/kv_connectors_resolved.txt --no-build || ( \
+        uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \
             apt-get install -y --no-install-recommends --allow-change-held-packages ${BUILD_PKGS} && \
-            uv pip install --system -r /tmp/kv_connectors_resolved.txt --no-build-isolation && \
+            uv pip install --system -r /tmp/kv_connectors.txt --no-build-isolation && \
             apt-get purge -y ${BUILD_PKGS} && \
             # clean up -dev packages, keep runtime libraries
             rm -rf /var/lib/apt/lists/* \

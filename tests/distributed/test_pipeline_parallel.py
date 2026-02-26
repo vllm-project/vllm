@@ -36,7 +36,6 @@ class ParallelSetup(NamedTuple):
 class PPTestOptions(NamedTuple):
     multi_node_only: bool
     load_format: str | None = None
-    gpu_memory_utilization: float | None = None
 
 
 @dataclass
@@ -54,7 +53,6 @@ class PPTestSettings:
         multi_node_only: bool = False,
         runner: RunnerOption = "auto",
         load_format: str | None = None,
-        gpu_memory_utilization: float | None = None,
     ):
         return PPTestSettings(
             parallel_setups=[
@@ -69,7 +67,6 @@ class PPTestSettings:
             test_options=PPTestOptions(
                 multi_node_only=multi_node_only,
                 load_format=load_format,
-                gpu_memory_utilization=gpu_memory_utilization,
             ),
         )
 
@@ -155,7 +152,7 @@ TEXT_GENERATION_MODELS = {
     "microsoft/phi-2": PPTestSettings.fast(),
     "microsoft/Phi-3-small-8k-instruct": PPTestSettings.fast(),
     "microsoft/Phi-3.5-MoE-instruct": PPTestSettings.detailed(
-        multi_node_only=True, load_format="dummy", gpu_memory_utilization=0.85
+        multi_node_only=True, load_format="dummy"
     ),
     "Qwen/Qwen-7B-Chat": PPTestSettings.fast(),
     "Qwen/Qwen2.5-0.5B-Instruct": PPTestSettings.fast(),
@@ -240,7 +237,7 @@ def _compare_tp(
         eager_mode,
     ) = parallel_setup
 
-    multi_node_only, load_format, gpu_memory_utilization = test_options
+    multi_node_only, load_format = test_options
 
     model_info = HF_EXAMPLE_MODELS.find_hf_info(model_id)
     model_info.check_transformers_version(on_fail="skip")
@@ -314,10 +311,6 @@ def _compare_tp(
         )
     if max_num_seqs:
         common_args.extend(["--max-num-seqs", f"{max_num_seqs}"])
-    if gpu_memory_utilization is not None:
-        common_args.extend(
-            ["--gpu-memory-utilization", f"{gpu_memory_utilization}"])
-
     if distributed_backend == "ray":
         # Test Ray Compiled Graph for all the tests
         pp_env = {
