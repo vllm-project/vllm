@@ -429,6 +429,17 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 compile_native=True,
             )
 
+        # When the impl supports fused RoPE+quant (e.g. FlashInferMLA with
+        # fp8 cache), we can replace its RopeQuantizeKernel with our Triton
+        # kernel that fuses concat + RoPE + fp8 quant in a single pass.
+        # This avoids the FlashInfer kernel where 88% of GPU blocks process
+        # Q nope with zero RoPE work.
+        self._fused_rope_in_quant = (
+            self._use_fused_concat_quant
+            and self.kv_cache_dtype.startswith("fp8")
+            and getattr(self.impl, "use_fused_rope_quant", False)
+        )
+
     def forward(
         self,
         q: torch.Tensor,
@@ -531,23 +542,8 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_c_normed = k_c_normed[:num_actual_toks, ...]
         k_pe = k_pe[:num_actual_toks, ...]
 
-        # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                k_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                attn_metadata.slot_mapping.flatten(),
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=self._k_scale,
-            )
-
-        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
-            kv_cache = kv_cache.view(current_platform.fp8_dtype())
-
-        # Sparse MLA impls only support forward_mqa (decode-style attention)
+        # Determine prefill/decode split early (needed for fused RoPE path)
         is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
-
         if is_sparse_impl:
             num_mqa_tokens = q.size(0)
             num_mha_tokens = 0
@@ -559,6 +555,68 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
             num_mqa_tokens = attn_metadata.num_decode_tokens
             num_mha_tokens = q.size(0) - num_mqa_tokens
+
+        if self._fused_rope_in_quant:
+            # RoPE was NOT applied upfront; apply per-path here.
+            positions = self._rope_positions[:num_actual_toks]
+            rotary_emb = self._rotary_emb_ref
+            _cos_sin_cache = rotary_emb.cos_sin_cache
+            if _cos_sin_cache.dtype != torch.float32:
+                _cos_sin_cache = _cos_sin_cache.float()
+            self._cos_sin_cache_f32 = _cos_sin_cache
+
+            cos_sin = _cos_sin_cache.index_select(0, positions)
+            cos, sin = cos_sin.chunk(2, dim=-1)
+
+            # Apply RoPE to k_pe (1 head) for all tokens
+            k_pe_sq = k_pe.squeeze(1)  # [T, rope_dim]
+            k_even = k_pe_sq[..., ::2]
+            k_odd = k_pe_sq[..., 1::2]
+            k_pe_rotated = torch.stack(
+                (k_even * cos - k_odd * sin,
+                 k_odd * cos + k_even * sin), dim=-1
+            ).flatten(-2)
+
+            # Write rotated k_pe to cache
+            if kv_cache.numel() > 0:
+                ops.concat_and_cache_mla(
+                    k_c_normed,
+                    k_pe_rotated,
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=self._k_scale,
+                )
+
+            # Replace k_pe with rotated version for forward_mha
+            k_pe = k_pe_rotated.unsqueeze(1)
+
+            # Apply RoPE to prefill q_pe
+            if num_mha_tokens > 0:
+                pf_q_pe = q[num_mqa_tokens:, :, self.qk_nope_head_dim:]
+                pf_cos = cos[num_mqa_tokens:].unsqueeze(1)
+                pf_sin = sin[num_mqa_tokens:].unsqueeze(1)
+                pf_even = pf_q_pe[..., ::2]
+                pf_odd = pf_q_pe[..., 1::2]
+                q[num_mqa_tokens:, :, self.qk_nope_head_dim:] = \
+                    torch.stack(
+                        (pf_even * pf_cos - pf_odd * pf_sin,
+                         pf_odd * pf_cos + pf_even * pf_sin), dim=-1
+                    ).flatten(-2)
+        else:
+            # Original path: RoPE was applied upfront, write all tokens
+            if kv_cache.numel() > 0:
+                ops.concat_and_cache_mla(
+                    k_c_normed,
+                    k_pe.squeeze(1),
+                    kv_cache,
+                    attn_metadata.slot_mapping.flatten(),
+                    kv_cache_dtype=self.kv_cache_dtype,
+                    scale=self._k_scale,
+                )
+
+        if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
+            kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
         if num_mha_tokens > 0:
             self.impl.forward_mha(
@@ -629,9 +687,20 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
-                mqa_q = self._decode_concat_quant_fp8_op(
-                    mqa_ql_nope, mqa_q_pe, self._q_scale
-                )
+                if self._fused_rope_in_quant:
+                    # Fused concat + RoPE + fp8 quant: the Triton kernel
+                    # applies GPT-J RoPE to q_pe (which has no RoPE yet)
+                    # and concatenates with q_nope in a single pass.
+                    decode_positions = self._rope_positions[:num_mqa_tokens]
+                    mqa_q = self._decode_concat_quant_fp8_op(
+                        mqa_ql_nope, mqa_q_pe, self._q_scale,
+                        cos_sin_cache=self._cos_sin_cache_f32,
+                        positions=decode_positions,
+                    )
+                else:
+                    mqa_q = self._decode_concat_quant_fp8_op(
+                        mqa_ql_nope, mqa_q_pe, self._q_scale
+                    )
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
@@ -996,6 +1065,10 @@ class _DecodeConcatQuantFP8(QuantFP8):
 # Fuses torch.cat([nope, pe], dim=-1) + scaled_fp8_quant into a single
 # kernel, eliminating the intermediate bf16 tensor. ~3x less memory traffic.
 # Pre-allocates output buffer for CUDA graph compatibility.
+#
+# When APPLY_ROPE=True, also applies GPT-J interleaved RoPE to the pe
+# portion before quantization, replacing FlashInfer's RopeQuantizeKernel
+# which wastes 88% of GPU blocks on Q nope (no RoPE needed).
 
 import triton
 import triton.language as tl
@@ -1007,6 +1080,8 @@ def _fused_concat_quant_fp8_kernel(
         pe_ptr,
         out_ptr,
         scale_ptr,
+        cos_sin_cache_ptr,
+        positions_ptr,
         # Strides for dim 0 and dim 1 (dim 2 assumed contiguous = 1)
         sn0,
         sn1,
@@ -1014,15 +1089,17 @@ def _fused_concat_quant_fp8_kernel(
         sp1,
         so0,
         so1,
+        cos_sin_stride,
         D_NOPE: tl.constexpr,
         D_PE: tl.constexpr,
+        APPLY_ROPE: tl.constexpr,
     ):
         bid = tl.program_id(0)
         hid = tl.program_id(1)
 
         inv_scale = 1.0 / tl.load(scale_ptr)
 
-        # nope portion
+        # nope portion — scale and quantize to fp8
         offs_n = tl.arange(0, D_NOPE)
         nope = tl.load(nope_ptr + bid * sn0 + hid * sn1 + offs_n)
         tl.store(
@@ -1030,13 +1107,42 @@ def _fused_concat_quant_fp8_kernel(
             (nope.to(tl.float32) * inv_scale).to(out_ptr.dtype.element_ty),
         )
 
-        # pe portion
-        offs_p = tl.arange(0, D_PE)
-        pe = tl.load(pe_ptr + bid * sp0 + hid * sp1 + offs_p)
-        tl.store(
-            out_ptr + bid * so0 + hid * so1 + D_NOPE + offs_p,
-            (pe.to(tl.float32) * inv_scale).to(out_ptr.dtype.element_ty),
-        )
+        # pe portion — optionally apply RoPE, then scale and quantize
+        if APPLY_ROPE:
+            # GPT-J interleaved RoPE: pairs at (2k, 2k+1)
+            #   out[2k]   = pe[2k]*cos[k] - pe[2k+1]*sin[k]
+            #   out[2k+1] = pe[2k+1]*cos[k] + pe[2k]*sin[k]
+            HALF: tl.constexpr = D_PE // 2
+            pos = tl.load(positions_ptr + bid)
+            cache_off = pos * cos_sin_stride
+            cos = tl.load(
+                cos_sin_cache_ptr + cache_off + tl.arange(0, HALF)
+            ).to(tl.float32)
+            sin = tl.load(
+                cos_sin_cache_ptr + cache_off + HALF + tl.arange(0, HALF)
+            ).to(tl.float32)
+
+            pe_base = pe_ptr + bid * sp0 + hid * sp1
+            offs_even = tl.arange(0, HALF) * 2
+            offs_odd = offs_even + 1
+            x_even = tl.load(pe_base + offs_even).to(tl.float32)
+            x_odd = tl.load(pe_base + offs_odd).to(tl.float32)
+
+            o_even = x_even * cos - x_odd * sin
+            o_odd = x_odd * cos + x_even * sin
+
+            out_base = out_ptr + bid * so0 + hid * so1 + D_NOPE
+            tl.store(out_base + offs_even,
+                     (o_even * inv_scale).to(out_ptr.dtype.element_ty))
+            tl.store(out_base + offs_odd,
+                     (o_odd * inv_scale).to(out_ptr.dtype.element_ty))
+        else:
+            offs_p = tl.arange(0, D_PE)
+            pe = tl.load(pe_ptr + bid * sp0 + hid * sp1 + offs_p)
+            tl.store(
+                out_ptr + bid * so0 + hid * so1 + D_NOPE + offs_p,
+                (pe.to(tl.float32) * inv_scale).to(out_ptr.dtype.element_ty),
+            )
 
 
 class FusedConcatQuantFP8:
@@ -1044,6 +1150,9 @@ class FusedConcatQuantFP8:
 
     Zero intermediate allocations - safe for CUDA graph replay.
     Output buffer is pre-allocated at init with max batch size.
+
+    When cos_sin_cache and positions are provided, also applies GPT-J
+    interleaved RoPE to the pe portion before quantization.
     """
 
     def __init__(
@@ -1069,23 +1178,30 @@ class FusedConcatQuantFP8:
         nope: torch.Tensor,
         pe: torch.Tensor,
         scale: torch.Tensor,
+        cos_sin_cache: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         B, N, _ = nope.shape
         out = self._out[:B]
+        apply_rope = cos_sin_cache is not None and positions is not None
 
         _fused_concat_quant_fp8_kernel[(B, N)](
             nope,
             pe,
             out,
             scale,
+            cos_sin_cache if apply_rope else nope,
+            positions if apply_rope else nope,
             nope.stride(0),
             nope.stride(1),
             pe.stride(0),
             pe.stride(1),
             out.stride(0),
             out.stride(1),
+            cos_sin_cache.stride(0) if apply_rope else 0,
             D_NOPE=self.d_nope,
             D_PE=self.d_pe,
+            APPLY_ROPE=apply_rope,
             num_warps=4,
         )
         return out

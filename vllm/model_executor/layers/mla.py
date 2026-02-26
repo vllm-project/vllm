@@ -154,9 +154,15 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         k_pe = k_pe.unsqueeze(1)
 
         if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
-            )
+            if getattr(self.mla_attn, '_fused_rope_in_quant', False):
+                # RoPE will be applied per-path in forward_impl:
+                # decode Q via fused Triton kernel, others via rotary_emb.
+                self.mla_attn._rope_positions = positions
+                self.mla_attn._rotary_emb_ref = self.rotary_emb
+            else:
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions, q[..., self.qk_nope_head_dim :], k_pe
+                )
 
         if self.indexer and self.is_sparse:
             _topk_indices = self.indexer(
