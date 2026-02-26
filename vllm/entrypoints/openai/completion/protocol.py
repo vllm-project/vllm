@@ -5,13 +5,13 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import json
 import time
-from dataclasses import replace
 from typing import Annotated, Any, Literal
 
 import torch
 from pydantic import Field, model_validator
 
 from vllm.config import ModelConfig
+from vllm.config.utils import replace
 from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     LegacyStructuralTagResponseFormat,
@@ -42,7 +42,13 @@ class CompletionRequest(OpenAIBaseModel):
     # Ordered by official OpenAI API documentation
     # https://platform.openai.com/docs/api-reference/completions/create
     model: str | None = None
-    prompt: list[int] | list[list[int]] | str | list[str] | None = None
+    prompt: (
+        list[Annotated[int, Field(ge=0)]]
+        | list[list[Annotated[int, Field(ge=0)]]]
+        | str
+        | list[str]
+        | None
+    ) = None
     echo: bool | None = False
     frequency_penalty: float | None = 0.0
     logit_bias: dict[str, float] | None = None
@@ -314,8 +320,16 @@ class CompletionRequest(OpenAIBaseModel):
             return data
 
         structured_outputs_kwargs = data["structured_outputs"]
+        # structured_outputs may arrive as a dict (from JSON/raw kwargs) or
+        # as a StructuredOutputsParams dataclass instance.
+        is_dataclass = isinstance(structured_outputs_kwargs, StructuredOutputsParams)
         count = sum(
-            structured_outputs_kwargs.get(k) is not None
+            (
+                getattr(structured_outputs_kwargs, k, None)
+                if is_dataclass
+                else structured_outputs_kwargs.get(k)
+            )
+            is not None
             for k in ("json", "regex", "choice")
         )
         if count > 1:

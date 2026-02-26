@@ -148,10 +148,12 @@ class NemotronHMoE(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
+        router_logits_dtype = torch.float32
         self.gate = ReplicatedLinear(
             config.hidden_size,
             config.n_routed_experts,
             bias=False,
+            params_dtype=router_logits_dtype,
             quant_config=None,
             prefix=f"{prefix}.gate",
         )
@@ -230,6 +232,7 @@ class NemotronHMoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            router_logits_dtype=router_logits_dtype,
             routed_input_transform=self.fc1_latent_proj,
         )
 
@@ -241,7 +244,7 @@ class NemotronHMoE(nn.Module):
             hidden_states = sequence_parallel_chunk(hidden_states)
 
         # router_logits: (num_tokens, n_experts)
-        router_logits, _ = self.gate(hidden_states)
+        router_logits, _ = self.gate(hidden_states.to(dtype=torch.float32))
 
         # SharedFusedMoE handles:
         #   - shared experts (with original hidden_states)
@@ -295,6 +298,11 @@ class NemotronHMLPDecoderLayer(nn.Module):
 
         hybrid_override_pattern = config.hybrid_override_pattern
         mlp_index = hybrid_override_pattern[: layer_idx + 1].count("-") - 1
+        # Get per-layer config for heterogeneous models if exist
+        get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
+        layer_config = get_layer_config(layer_idx) if get_layer_config else config
+        config = layer_config
+
         if isinstance(config.intermediate_size, list):
             if len(config.intermediate_size) == 1:
                 intermediate_size = config.intermediate_size[0]
@@ -633,6 +641,9 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
+    def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
+        return weight_name.startswith("mtp.")
+
     def _get_max_n_routed_experts(self) -> int:
         """Get max n_routed_experts from config or block_configs for puzzle models.
 
@@ -698,6 +709,10 @@ class NemotronHModel(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+
+            # Skip MTP/spec decode layers early (before stacked params mapping)
+            if name.startswith("mtp."):
+                continue
 
             # load stacked params
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -842,6 +857,7 @@ class NemotronHForCausalLM(
             head_dim=hf_config.mamba_head_dim,
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod
