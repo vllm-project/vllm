@@ -1374,10 +1374,18 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
+
+        inputs_embeds = self._embed_text_input_ids(
+            input_ids,
+            self.get_language_model().embed_input_ids,
+            is_multimodal=is_multimodal,
+        )
+
+        if len(multimodal_embeddings) == 0:
+            return inputs_embeds
 
         # Check for audio-in-video: interleaved video and audio tokens
         # in the multimodal region. Only use the interleaved path when
