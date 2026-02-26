@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import functools
 import math
 from abc import abstractmethod
 from io import BytesIO
@@ -235,22 +236,26 @@ class VideoLoader:
 VIDEO_LOADER_REGISTRY = ExtensionManager()
 
 
+@functools.cache
+def _get_cv2_video_api():
+    """Detect the best OpenCV video backend (cached, result is per-process)."""
+    import cv2.videoio_registry as vr
+
+    api_pref = None
+    for backend in vr.getStreamBufferedBackends():
+        if not vr.hasBackend(backend):
+            continue
+        if not vr.isBackendBuiltIn(backend):
+            _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
+            if abi < 1 or (abi == 1 and api < 2):
+                continue
+        api_pref = backend
+        break
+    return api_pref
+
+
 @VIDEO_LOADER_REGISTRY.register("opencv")
 class OpenCVVideoBackend(VideoLoader):
-    def get_cv2_video_api(self):
-        import cv2.videoio_registry as vr
-
-        api_pref = None
-        for backend in vr.getStreamBufferedBackends():
-            if not vr.hasBackend(backend):
-                continue
-            if not vr.isBackendBuiltIn(backend):
-                _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
-                if abi < 1 or (abi == 1 and api < 2):
-                    continue
-            api_pref = backend
-            break
-        return api_pref
 
     @classmethod
     def load_bytes(
@@ -277,7 +282,7 @@ class OpenCVVideoBackend(VideoLoader):
         """
         import cv2
 
-        backend = cls().get_cv2_video_api()
+        backend = _get_cv2_video_api()
         cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
@@ -364,7 +369,7 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         """
         import cv2
 
-        backend = cls().get_cv2_video_api()
+        backend = _get_cv2_video_api()
         cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
@@ -433,20 +438,6 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
 
 @VIDEO_LOADER_REGISTRY.register("molmo2")
 class Molmo2VideoBackend(VideoLoader):
-    def get_cv2_video_api(self):
-        import cv2.videoio_registry as vr
-
-        api_pref = None
-        for backend in vr.getStreamBufferedBackends():
-            if not vr.hasBackend(backend):
-                continue
-            if not vr.isBackendBuiltIn(backend):
-                _, abi, api = vr.getStreamBufferedBackendPluginVersion(backend)
-                if abi < 1 or (abi == 1 and api < 2):
-                    continue
-            api_pref = backend
-            break
-        return api_pref
 
     @classmethod
     def get_candidate_target_fps(
@@ -672,7 +663,7 @@ class Molmo2VideoBackend(VideoLoader):
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         import cv2
 
-        backend = cls().get_cv2_video_api()
+        backend = _get_cv2_video_api()
         cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
@@ -779,7 +770,7 @@ class OpenCVDynamicOpenPanguVideoBackend(OpenCVVideoBackend):
         """
         import cv2
 
-        backend = cls().get_cv2_video_api()
+        backend = _get_cv2_video_api()
         cap = cv2.VideoCapture(BytesIO(data), backend, [])
         if not cap.isOpened():
             raise ValueError("Could not open video stream")
