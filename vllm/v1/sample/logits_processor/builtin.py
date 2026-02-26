@@ -258,6 +258,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     ):
         reasoning_config = vllm_config.reasoning_config
         max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.in_spec_mode = False
         if vllm_config.speculative_config:
             self.in_spec_mode = True
             self.num_spec_tokens = \
@@ -273,7 +274,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         self.think_start_token_ids = getattr(
             reasoning_config, "think_start_token_ids", []
         )
-        print("This is the start thinking token", self.think_start_token_ids)
+        # print("This is the start thinking token", self.think_start_token_ids)
         self.think_end_token_ids = getattr(reasoning_config, "think_end_token_ids", [])
 
         self.pin_memory = is_pin_memory
@@ -292,15 +293,19 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         #                               incremental processing
         self._state: dict[int, dict[str, Any]] = {}
 
+        self.cu_num_tokens: dict[int, int] = {}
+
+        self.spec_token_ids : list[list[int]] = []
+
         # Preallocate reusable tensors
         if self.num_spec_tokens > 0:
-            self.mask = torch.zeros(max_num_reqs * self.num_spec_tokens, dtype=torch.bool, device=device)
+            self.mask = torch.zeros(max_num_reqs * (self.num_spec_tokens+1), dtype=torch.bool, device=device)
         else:
             self.mask = torch.zeros(max_num_reqs, dtype=torch.bool, device=device)
 
         if self.num_spec_tokens > 0:
             self.force_token_ids = torch.full(
-                (max_num_reqs*self.num_spec_tokens,), -1, dtype=torch.long, device=device
+                (max_num_reqs*(self.num_spec_tokens+1),), -1, dtype=torch.long, device=device
             )
         else:
             self.force_token_ids = torch.full(
@@ -332,7 +337,11 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             last_end = -1
             in_think = False
             think_count = 0
+            start_thinking = -1
         else:
+            start_thinking = -1
+            countdown = thinking_token_budget
+            continue_thinking = False
             last_start = self._find_last_sequence_index(
                 prompt_tok_ids, self.think_start_token_ids
             )
@@ -340,17 +349,23 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                 prompt_tok_ids, self.think_end_token_ids
             )
             in_think = last_start > last_end
+            # print("This is the prompt token ids for the sequence", prompt_tok_ids)
+            # print("This is the last start index for the thinking token sequence in the prompt tokens", last_start)
             if in_think:
                 think_count = len(prompt_tok_ids) - (
                     last_start + len(self.think_start_token_ids)
                 )
+                # print("This is the think count", think_count)
+                start_thinking = len(prompt_tok_ids) - think_count - 1
+                countdown -= think_count
+                continue_thinking = True
             else:
                 think_count = 0
 
         return {
             "in_think": in_think,  # Currently in thinking mode
             "in_end": in_think and thinking_token_budget == 0,
-            "check_count_down": thinking_token_budget,
+            "check_count_down": countdown,  # Steps until next think start/end parsing
             "think_count": think_count,  # Number of tokens in thinking section
             "end_count": 0,  # Number of end tokens forced so far
             "prompt_tok_ids": prompt_tok_ids,
@@ -359,47 +374,60 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             "prev_output_length": 0,
             "spec_token_ids": [],
             "force_index": 0,
-            "start_thinking": -1,
+            "start_thinking": start_thinking,
             "end_thinking": -1,
             "in_spec_mode": False,
+            "bonus_token_forced": False,
+            "continue_thinking": continue_thinking,
             # Track previous output length for incremental updates
         }
 
-    def check_sequence(self, output_token_ids, start_thinking_token_ids) -> int:
-        return (len(output_token_ids) - len(start_thinking_token_ids)
-                if output_token_ids and start_thinking_token_ids
-                and len(start_thinking_token_ids) <= len(output_token_ids)
-                and output_token_ids[-len(start_thinking_token_ids):] \
-                == start_thinking_token_ids
+    def check_sequence(self, output_token_ids, thinking_token_ids) -> int:
+        return (len(output_token_ids) - len(thinking_token_ids)
+                if output_token_ids and thinking_token_ids
+                and len(thinking_token_ids) <= len(output_token_ids)
+                and output_token_ids[-len(thinking_token_ids):] \
+                == thinking_token_ids
                 else -1)
 
 
     def _update_think_state(self, state: dict[str, Any]):
         """Updates the state based on newly generated output tokens."""
         # Needs a change here need to ensure 1 is not subtracted 
+        if state["thinking_token_budget"] == -1:
+            return
+        
         if state["start_thinking"] == -1: 
-            start_thinking = self.check_sequence(\
-            state.get("output_tok_ids", []), self.think_start_token_ids)
-            print("This is the output token ids in the state when checking for start thinking", state.get("output_tok_ids", []))
+            start_thinking = self._find_last_sequence_index(
+                state.get("output_tok_ids", []), self.think_start_token_ids
+            )
             state["start_thinking"] = start_thinking
-        total_tokens = len(state.get("output_tok_ids", []))  + len(state.get("spec_token_ids", []))
-        remaining_budget = state["thinking_token_budget"] - total_tokens
 
         if state["end_thinking"] == -1:
-            end_thinking = self.check_sequence(\
-            state.get("output_tok_ids", []), self.think_end_token_ids)
+            end_thinking = self._find_last_sequence_index(
+                state.get("output_tok_ids", []), self.think_end_token_ids
+            )
             state["end_thinking"] = end_thinking
         
-        if not state.get("in_end", False) and \
-        state.get("check_count_down", 0) > 0 and state["start_thinking"] > -1 \
-        and remaining_budget > 0:
-            state["check_count_down"] -=  (len(state.get("output_tok_ids", [])) - state.get("prev_output_length", 0)) - 1
-            state["prev_output_length"] = len(state.get("output_tok_ids", []))
-            print("This is the check countdown", state["check_count_down"])
-            print("These are the spec tokens in the state", state.get("spec_token_ids", []))
-            print("These are the output token ids in the state", state.get("output_tok_ids", []))
+        # total tokens for this step
+        if state["start_thinking"] == -1:
             return
+        if state["continue_thinking"]:
+            sampled_tokens_previous_step =  (len(state.get("output_tok_ids", [])) \
+                                                - state.get("prev_output_length", 0))
+        else:
+                if state["prev_output_length"] == 0:
+                    sampled_tokens_previous_step = len(state.get("output_tok_ids", [])) - len(self.think_start_token_ids)
+                else:
+                    sampled_tokens_previous_step = len(state.get("output_tok_ids", [])) - state["prev_output_length"]
+        current_step_countdown = state["check_count_down"] - sampled_tokens_previous_step
+        predicted_countdown = current_step_countdown - len(state["spec_token_ids"]) - 1
 
+        if not state.get("in_end", False) and \
+                predicted_countdown >= 0 and state["start_thinking"] > -1:
+                state["check_count_down"] = current_step_countdown
+                state["prev_output_length"] = len(state.get("output_tok_ids", []))
+                return
         output = state.get("output_tok_ids", [])
         if not output:
             return
@@ -412,25 +440,33 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             return
 
         # Process only newly added tokens
-        new_tokens = output[prev_length:]
-        print("These are new tokens being processed for thinking token budget management", new_tokens)
-        print("This is the previous length" , prev_length)
         state["prev_output_length"] = current_length
 
         # Check if new tokens contain think start or end sequences
         start_len = len(self.think_start_token_ids)
-        end_len = len(self.think_end_token_ids)
         absolute_start_pos = state["start_thinking"]
-        absolute_end_pos = state["end_thinking"]
+        
+        if state["continue_thinking"] and state["end_thinking"] > -1:
+            absolute_end_pos = state["end_thinking"] + len(state["prompt_tok_ids"])
+        else:
+            absolute_end_pos = state["end_thinking"]
+        
         # Update state based on recent sequences
+        # This is the case where we are in end mode, but the rejection sampler
+        # rejected a token before the end token, 
+        # so we need to go back to think mode and wait for the next end token
+        # eg with 999: [2,4,5,999] -> [3,-1,-1,-1]
+
         if state["in_end"] and \
         self.think_end_token_ids[0] not in state.get("output_tok_ids", []):
-            print("This code comes here to exit end mode when end token sequence is no longer in the output tokens")
             state["in_think"] = True
             state["in_end"] = False
             state["end_count"] = 0
+            state["bonus_token_forced"] = False
+        
         if not state["in_end"]:
             if absolute_start_pos >= 0 and absolute_end_pos >= 0:
+                
                 if absolute_start_pos > absolute_end_pos:
                     # Case: ...<end>...<start>... - entering think mode
                     new_think_count = current_length - (absolute_start_pos + start_len)
@@ -440,23 +476,23 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                     # Case: ...<start>...<end>... - exiting think mode
                     state["in_think"] = False
                     state["think_count"] = 0
-            elif absolute_start_pos >= 0:
+            
+            elif absolute_start_pos >= 0 and not state["continue_thinking"]:
                 # Found think start - entering think mode
-                absolute_start_pos = absolute_start_pos
                 new_think_count = current_length - (absolute_start_pos + start_len)
-                print("This is the current length", current_length)
-                print("This is the absolute position of start thinking token sequence in the output tokens", absolute_start_pos)
-                print("This is the length of start thinking token sequence", start_len)
-                print("This is the calculated new think count when entering think mode", new_think_count)
                 state["in_think"] = True
                 state["think_count"] = new_think_count
+            
             elif absolute_end_pos >= 0:
                 # Found think end - exiting think mode
                 state["in_think"] = False
                 state["think_count"] = 0
+            
             elif state["in_think"]:
                 # Continue thinking mode, increment count by new tokens
-                state["think_count"] += len(new_tokens)
+                think_tokens_in_prompt = len(state["prompt_tok_ids"]) - \
+                (absolute_start_pos + start_len)
+                state["think_count"] = len(state["output_tok_ids"]) + think_tokens_in_prompt
 
             # Set countdown based on current state
             if state["in_think"]:
@@ -464,34 +500,31 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                     0, state["thinking_token_budget"] - state["think_count"]
                 )
                 state["check_count_down"] = remaining_budget
-                print("This is the remaining budget when in think mode", remaining_budget)
-
             else:
                 state["check_count_down"] = state["thinking_token_budget"]
 
             # Check if need to transition to end mode
-            total_thinking_tokens = state["think_count"] + len(state["spec_token_ids"])
-            print("This is the thinking token ids", state["thinking_token_budget"])
-            print("This is thinking counting tokens", state["think_count"])
-            if state["in_think"] and total_thinking_tokens >= state["thinking_token_budget"]:
+            total_thinking_tokens = state["think_count"] + len(state["spec_token_ids"]) + 1
+            if state["in_think"] and total_thinking_tokens > state["thinking_token_budget"]:
                 state["in_think"] = False
                 state["in_end"] = True
                 state["end_count"] = 0 # make changes here
+                state["check_count_down"] = state["thinking_token_budget"]
+                
                 # Calculate force_index: position within spec_token_ids where forcing starts
                 # If we're already over budget without spec tokens, force from position 0
-                    # Force from the position where budget is exceeded
+                # Force from the position where budget is exceeded
                 remaining_budget = state["thinking_token_budget"] - state["think_count"]
-                print("This is length of output tokens when entering end mode", len(state["output_tok_ids"]))
                 if 0 < remaining_budget < len(state["spec_token_ids"]):
                     state["force_index"] =  remaining_budget
-                    print("This is the remaining budget when entering end mode", remaining_budget)
-                    print("This is the calculated force index when entering end mode", state["force_index"])
-                    print("These are the spec tokens in the state", state.get("spec_token_ids", []))
-                    print("This is the state of force_index when entering end mode with remaining budget", state["force_index"])
-                else:
+
+                elif remaining_budget == 0:
                     state["force_index"] = 0
-                    print("This is the state of force_index when entering end mode without remaining budget", state["force_index"])
-                state["check_count_down"] = state["thinking_token_budget"]
+
+                else:
+                    # case when the bonus token is to be forced to with end thinking token
+                    state["force_index"] = len(state["spec_token_ids"])
+
         else:
             # In end mode
             state["end_count"] += 1
@@ -519,12 +552,10 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
     ):
         if not self.is_enabled:
             return
-
+        self.spec_token_ids = spec_token_ids if spec_token_ids else []
         # Store the spec token IDs for use in apply()
-        self._spec_token_ids = spec_token_ids
         if batch_update:
             for index, params, prompt_tok_ids, output_tok_ids in batch_update.added:
-                print("RHese are the output ids", output_tok_ids)
                 thinking_token_budget = params.thinking_token_budget
                 if thinking_token_budget is not None:
                     self._state[index] = self._init_state_entry(
@@ -532,9 +563,8 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                     )
                     self._state[index]["output_tok_ids"] = output_tok_ids
                     
-                    # Set spec_token_ids if available
-                    if self._spec_token_ids and len(self._spec_token_ids[index]) > 0:
-                        self._state[index]["spec_token_ids"] = self._spec_token_ids[index]
+                    # Set spec_token_ids if available, otherwise use empty list
+                    self._state[index]["spec_token_ids"] = spec_token_ids[index]
                 else:
                     # Remove state if no thinking budget
                     self._state.pop(index, None)
@@ -553,7 +583,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
                     self._state[i2] = self._state.pop(i1, {})
         
         for index, state in self._state.items():
-                state["spec_token_ids"] = spec_token_ids[index]
+                state["spec_token_ids"] = spec_token_ids[index] if spec_token_ids else []
                 state["in_spec_mode"] = self.in_spec_mode
                 self._update_think_state(state)
 
@@ -562,37 +592,54 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
             return logits
         # Reset mask
         self.mask[:] = False
-        # bonus_logits check
+        cumulative_total = 0
+        self.cu_num_tokens.clear()
 
-        # Find active sequences and set up masking
-        print("This is the logits spave of the current batch", logits.shape)
-        cumulative_offset = 0
+        for index, spec_tokens in enumerate(self.spec_token_ids):
+            # Store the starting position for this request
+            self.cu_num_tokens[index] = cumulative_total
+            # Add this request's token count to cumulative total
+            if self.in_spec_mode:
+                cumulative_total += len(spec_tokens) if not predict_bonus_token else 1
+
+            else:
+                # for non-spec mode
+                cumulative_total += 1
+
         for seq_idx in sorted(self._state.keys()):
-            print("This is the logits shape in the loop", logits.shape)
+
             state = self._state[seq_idx]
-            if predict_bonus_token:
-                if state["think_count"] + len(state["spec_token_ids"]) \
-                != state["thinking_token_budget"]:
-                    return logits
-            if state["in_spec_mode"] and len(state["spec_token_ids"]) == 0:
-                continue
-            if state and state["in_end"] == True:
-                force_index = state.get("force_index", 0)
-                if 0 <= force_index:
-                    mask_idx = cumulative_offset + force_index
-                    if mask_idx < len(self.mask):
-                        print("This is the length of the mask token", len(self.mask))
-                        self.mask[mask_idx] = True
-                        # print("This is the state of the mask 
-                        # after setting to True", self.mask)
-                        end_count = state.get("end_count", 0)
-                        if end_count < len(self.think_end_token_ids):
-                            self.force_token_ids[mask_idx] = \
-                            self.think_end_token_ids[end_count]
+            if  state["in_end"]:
+                
+                # logits processor in spec mode are called twice 
+                # once for bonus token logits and 
+                # second time for the target logits
+                # in case the force index is bonus token index
+                # we change the force index to 0
+                if  predict_bonus_token:
+
+                    if state["force_index"] < len(state["spec_token_ids"]):
+                        return logits
+                    else:
+                        state["force_index"] = 0
+                
+                if state and state["bonus_token_forced"] == False:
+                    force_index = state.get("force_index", 0)
+                    if 0 <= force_index:
+                        mask_idx = self.cu_num_tokens[seq_idx] + force_index
+                        if mask_idx < len(self.mask) and mask_idx < logits.shape[0]:
+                            self.mask[mask_idx] = True
+
+                            # after setting to True", self.mask)
+                            end_count = state.get("end_count", 0)
+
+                            if end_count < len(self.think_end_token_ids):
+                                self.force_token_ids[mask_idx] = \
+                                self.think_end_token_ids[end_count]
+                            
+                            if predict_bonus_token:
+                                state["bonus_token_forced"] = True
             
-            # Update cumulative offset based on spec token count for this sequence
-            spec_tokens_count = len(state.get("spec_token_ids", [])) if not predict_bonus_token else 0
-            cumulative_offset += spec_tokens_count
 
         # Check in CPU first not to sync with GPU
         has_active_thinking = any(
@@ -600,17 +647,15 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         )
 
         if has_active_thinking:
-            current_mask = self.mask[:cumulative_offset]
+            current_mask = self.mask
             active_indices = current_mask.nonzero(as_tuple=False).view(-1)
-            
+
             if len(active_indices) > 0:
                 force_tokens = self.force_token_ids[active_indices]
-                print("Comes to applying large logits for end thinking tokens", active_indices)
-                print("These are the force tokens being applied with large logits", force_tokens)
-                print("THis is logits before applying large values", logits.shape)
+
                 # Apply a large value for the end thinking token id index
                 logits[active_indices, force_tokens] = 1e9
-            print("This is already done")
+
         return logits
 
 

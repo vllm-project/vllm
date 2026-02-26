@@ -1000,7 +1000,7 @@ class InputBatch:
             return
 
         if (spec_token_ids := self.sampling_metadata.spec_token_ids) is not None:
-            for req_id, spec_ids in zip(self.req_ids, spec_token_ids):
+            for req_index, (req_id, spec_ids) in enumerate(zip(self.req_ids, spec_token_ids)):
                 if spec_ids:
                     prev_index = self.prev_req_id_to_index.get(req_id)
                     if prev_index is not None:
@@ -1009,6 +1009,8 @@ class InputBatch:
                             del draft_ids[len(spec_ids) :]
                             spec_ids.clear()
                             spec_ids.extend(draft_ids)
+                            self.spec_token_ids[req_index].clear()
+                            self.spec_token_ids[req_index].extend(draft_ids)
 
     @property
     def num_reqs(self) -> int:
