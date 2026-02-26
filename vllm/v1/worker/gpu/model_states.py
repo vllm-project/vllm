@@ -11,10 +11,11 @@ from vllm.v1.worker.gpu.states import RequestState
 
 
 class ModelState:
-    def __init__(self, vllm_config: VllmConfig, device: torch.device):
+    def __init__(self, vllm_config: VllmConfig, model: nn.Module, device: torch.device):
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.scheduler_config = vllm_config.scheduler_config
+        self.model = model
         self.device = device
 
         self.max_model_len = self.model_config.max_model_len
@@ -29,9 +30,6 @@ class ModelState:
                 max_model_len=self.max_model_len,
                 device=self.device,
             )
-
-    def set_model(self, model: nn.Module) -> None:
-        self.model = model
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         if self.uses_mrope:
