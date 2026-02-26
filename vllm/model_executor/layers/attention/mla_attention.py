@@ -489,29 +489,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     self.layer_name,
                 )
 
-    def do_forward_cache_update(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
-        layer_slot_mapping,
-        kv_cache_dtype: str,
-        k_scale: torch.Tensor,
-    ) -> None:
-        num_actual_toks = layer_slot_mapping.shape[0]
-        kv_c_normed = kv_c_normed[:num_actual_toks, ...]
-        k_pe = k_pe[:num_actual_toks, ...]
-        # write the latent and rope to kv cache
-        if kv_cache.numel() > 0:
-            ops.concat_and_cache_mla(
-                kv_c_normed,
-                k_pe.squeeze(1),
-                kv_cache,
-                layer_slot_mapping,
-                kv_cache_dtype=kv_cache_dtype,
-                scale=k_scale,
-            )
-
     def forward_impl(
         self,
         q: torch.Tensor,
@@ -1112,8 +1089,6 @@ class MLACommonBackend(AttentionBackend):
     @classmethod
     def is_mla(cls) -> bool:
         return True
-
-    forward_includes_kv_cache_update: bool = False
 
 
 @dataclass
