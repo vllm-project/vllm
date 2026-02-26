@@ -48,12 +48,15 @@ from vllm.config import (
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
+    OffloadConfig,
     ParallelConfig,
     PoolerConfig,
+    PrefetchOffloadConfig,
     ProfilerConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
+    UVAOffloadConfig,
     VllmConfig,
     WeightTransferConfig,
     get_attr_docs,
@@ -439,8 +442,13 @@ class EngineArgs:
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     swap_space: float = CacheConfig.swap_space
-    cpu_offload_gb: float = CacheConfig.cpu_offload_gb
-    cpu_offload_params: set[str] = get_field(CacheConfig, "cpu_offload_params")
+    offload_backend: str = OffloadConfig.offload_backend
+    cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
+    cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
+    offload_group_size: int = PrefetchOffloadConfig.offload_group_size
+    offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
+    offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
+    offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
@@ -948,10 +956,6 @@ class EngineArgs:
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
-        cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
-        cache_group.add_argument(
-            "--cpu-offload-params", **cache_kwargs["cpu_offload_params"]
-        )
         cache_group.add_argument(
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
@@ -975,6 +979,37 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
+        )
+
+        # Model weight offload related configs
+        offload_kwargs = get_kwargs(OffloadConfig)
+        uva_kwargs = get_kwargs(UVAOffloadConfig)
+        prefetch_kwargs = get_kwargs(PrefetchOffloadConfig)
+        offload_group = parser.add_argument_group(
+            title="OffloadConfig",
+            description=OffloadConfig.__doc__,
+        )
+        offload_group.add_argument(
+            "--offload-backend", **offload_kwargs["offload_backend"]
+        )
+        offload_group.add_argument("--cpu-offload-gb", **uva_kwargs["cpu_offload_gb"])
+        offload_group.add_argument(
+            "--cpu-offload-params", **uva_kwargs["cpu_offload_params"]
+        )
+        offload_group.add_argument(
+            "--offload-group-size",
+            **prefetch_kwargs["offload_group_size"],
+        )
+        offload_group.add_argument(
+            "--offload-num-in-group",
+            **prefetch_kwargs["offload_num_in_group"],
+        )
+        offload_group.add_argument(
+            "--offload-prefetch-step",
+            **prefetch_kwargs["offload_prefetch_step"],
+        )
+        offload_group.add_argument(
+            "--offload-params", **prefetch_kwargs["offload_params"]
         )
 
         # Multimodal related configs
@@ -1466,8 +1501,6 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
-            cpu_offload_gb=self.cpu_offload_gb,
-            cpu_offload_params=self.cpu_offload_params,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
@@ -1825,6 +1858,21 @@ class EngineArgs:
             compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
+
+        offload_config = OffloadConfig(
+            offload_backend=self.offload_backend,
+            uva=UVAOffloadConfig(
+                cpu_offload_gb=self.cpu_offload_gb,
+                cpu_offload_params=self.cpu_offload_params,
+            ),
+            prefetch=PrefetchOffloadConfig(
+                offload_group_size=self.offload_group_size,
+                offload_num_in_group=self.offload_num_in_group,
+                offload_prefetch_step=self.offload_prefetch_step,
+                offload_params=self.offload_params,
+            ),
+        )
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1832,6 +1880,7 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             load_config=load_config,
+            offload_config=offload_config,
             attention_config=attention_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
