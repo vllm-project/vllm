@@ -23,7 +23,7 @@ from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 
 @dataclass
 class FP8BlockParams(FP8Params):
-    weight_scale_inv: torch.Tensor
+    weight_scale_inv: torch.Tensor | None
     weight_scale: torch.Tensor | None
 
     WEIGHT_SCALE_INV: ClassVar[str] = "weight_scale_inv"
@@ -32,7 +32,7 @@ class FP8BlockParams(FP8Params):
     def from_layer(cls, layer: torch.nn.Module) -> Self:
         return cls(
             weight=getattr(layer, cls.WEIGHT),
-            weight_scale_inv=getattr(layer, cls.WEIGHT_SCALE_INV),
+            weight_scale_inv=getattr(layer, cls.WEIGHT_SCALE_INV, None),
             weight_scale=getattr(layer, cls.WEIGHT_SCALE, None),
             input_scale=getattr(layer, cls.INPUT_SCALE, None),
             input_scale_ub=getattr(layer, cls.INPUT_SCALE_UB, None),
@@ -103,13 +103,25 @@ class Fp8BlockScaledMMLinearKernel(
 
     def process_weights_after_loading(self, layer: torch.nn.Module):
         params = self._get_layer_params(layer)
-        weight, weight_scale_inv = process_fp8_weight_block_strategy(
+        # Fp8LinearMethod registered weight scale
+        # buffer as weight_scale_inv unlike compressed tensors.
+        weight_scale = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
+        scale_attr_name = (
+            params.WEIGHT_SCALE
+            if params.weight_scale_inv is None
+            else params.WEIGHT_SCALE_INV
+        )
+        new_weight, new_weight_scale = process_fp8_weight_block_strategy(
             params.weight,
-            params.weight_scale_inv,
+            weight_scale,
         )
 
-        replace_parameter(layer, params.WEIGHT, weight.data)
-        replace_parameter(layer, params.WEIGHT_SCALE_INV, weight_scale_inv.data)
+        replace_parameter(layer, params.WEIGHT, new_weight.data)
+        replace_parameter(layer, scale_attr_name, new_weight_scale.data)
 
     def apply_weights(
         self,
@@ -121,7 +133,11 @@ class Fp8BlockScaledMMLinearKernel(
         maybe_out_dtype = self.config.out_dtype
         params = self._get_layer_params(layer)
         weight = params.weight
-        weight_scale_inv = params.weight_scale_inv
+        weight_scale = (
+            params.weight_scale
+            if params.weight_scale_inv is None
+            else params.weight_scale_inv
+        )
         input_scale = params.input_scale
         scale_up = params.input_scale_ub
 
@@ -137,7 +153,7 @@ class Fp8BlockScaledMMLinearKernel(
             B=weight,
             out_dtype=out_dtype,
             As=input_scale,
-            Bs=weight_scale_inv,
+            Bs=weight_scale,
         )
 
         if bias is not None:

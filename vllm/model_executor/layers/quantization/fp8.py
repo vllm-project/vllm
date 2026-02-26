@@ -57,7 +57,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    maybe_post_process_fp8_weight_block,
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy,
     process_fp8_weight_tensor_strategy_moe,
@@ -442,9 +441,6 @@ class Fp8LinearMethod(LinearMethodBase):
             # Activations not quantized for marlin.
             del layer.input_scale
             return
-
-        if self.block_quant:
-            maybe_post_process_fp8_weight_block(layer)
 
     def apply(
         self,

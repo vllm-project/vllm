@@ -19,7 +19,6 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     create_fp8_input_scale,
     create_fp8_scale_parameter,
     create_fp8_weight_parameter,
-    maybe_post_process_fp8_weight_block,
     process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy,
     validate_fp8_block_shape,
@@ -185,8 +184,6 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             layer.input_scale = Parameter(layer.input_scale.max(), requires_grad=False)
         else:
             layer.input_scale = None
-        if self.strategy == QuantizationStrategy.BLOCK:
-            maybe_post_process_fp8_weight_block(layer)
 
     def apply_weights(
         self,

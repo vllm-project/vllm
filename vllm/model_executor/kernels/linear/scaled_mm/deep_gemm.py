@@ -65,8 +65,9 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
     def process_weights_after_loading(self, layer):
         super().process_weights_after_loading(layer)
         params = self._get_layer_params(layer)
+        assert layer.weight_block_size is not None
 
-        if should_use_deepgemm_for_fp8_linear(self.config.out_dtype, params.weight):
+        if should_use_deepgemm_for_fp8_linear(layer.orig_dtype, params.weight):
             weight_scale_invs = params.weight_scale_inv
             scale_attr = (
                 params.WEIGHT_SCALE_INV
@@ -78,10 +79,7 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 ws=weight_scale_invs
                 if weight_scale_invs is not None
                 else params.weight_scale,
-                quant_block_shape=(
-                    self.weight_group_shape.row,
-                    self.weight_group_shape.col,
-                ),
+                quant_block_shape=tuple(layer.weight_block_size),
                 use_e8m0=is_deep_gemm_e8m0_used(),
             )
             replace_parameter(layer, params.WEIGHT, dg_weight)
