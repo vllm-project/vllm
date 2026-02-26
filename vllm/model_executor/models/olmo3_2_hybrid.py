@@ -32,7 +32,7 @@ from einops import rearrange
 from torch import nn
 from transformers.activations import ACT2FN
 
-from vllm.attention.layer import Attention
+from vllm.model_executor.layers.attention import Attention
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import (
     CacheConfig,
@@ -148,14 +148,16 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
 
     def get_state_dtype(self) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            self.model_config.dtype, self.cache_config.mamba_cache_dtype
+            self.model_config.dtype,
+            self.cache_config.mamba_cache_dtype,
+            self.cache_config.mamba_ssm_cache_dtype,
         )
 
     def get_state_shape(self) -> tuple[tuple[int, ...], tuple[int, ...]]:
         return MambaStateShapeCalculator.gated_delta_net_state_shape(
             self.tp_size,
-            self.num_kv_heads,
-            self.num_heads,
+            self.num_k_heads,
+            self.num_v_heads,
             self.head_k_dim,
             self.head_v_dim,
             self.conv_kernel_size,
@@ -175,12 +177,12 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.tp_rank = get_tensor_model_parallel_rank()
         self.hidden_size = config.hidden_size
-        self.num_heads = config.linear_num_value_heads
-        self.num_kv_heads = config.linear_num_key_heads
+        self.num_v_heads = config.linear_num_value_heads
+        self.num_k_heads = config.linear_num_key_heads
         self.head_k_dim = config.linear_key_head_dim
         self.head_v_dim = config.linear_value_head_dim
-        self.key_dim = self.head_k_dim * self.num_kv_heads
-        self.value_dim = self.head_v_dim * self.num_heads
+        self.key_dim = self.head_k_dim * self.num_k_heads
+        self.value_dim = self.head_v_dim * self.num_v_heads
 
         self.conv_kernel_size = config.linear_conv_kernel_dim
         self.layer_idx = extract_layer_index(prefix)
@@ -226,14 +228,14 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
 
         self.a_proj = ColumnParallelLinear(
             input_size=self.hidden_size,
-            output_size=self.num_heads,
+            output_size=self.num_v_heads,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.a_proj",
         )
         self.b_proj = ColumnParallelLinear(
             input_size=self.hidden_size,
-            output_size=self.num_heads,
+            output_size=self.num_v_heads,
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.b_proj",
@@ -284,11 +286,11 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
         )
 
         self.dt_bias = nn.Parameter(
-            torch.ones(self.num_heads // self.tp_size),
+            torch.ones(self.num_v_heads // self.tp_size),
         )
         self.A_log = nn.Parameter(
             torch.empty(
-                divide(self.num_heads, self.tp_size),
+                divide(self.num_v_heads, self.tp_size),
             )
         )
 
@@ -350,22 +352,22 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
             dim=-1,
         )
 
-        num_kv_heads = self.num_kv_heads // self.tp_size
-        num_heads = self.num_heads // self.tp_size
+        num_k_heads = self.num_k_heads // self.tp_size
+        num_v_heads = self.num_v_heads // self.tp_size
 
         query = rearrange(
-            query, "l (h d) -> 1 l h d", h=num_kv_heads, d=self.head_k_dim
+            query, "l (h d) -> 1 l h d", h=num_k_heads, d=self.head_k_dim
         )
-        key = rearrange(key, "l (h d) -> 1 l h d", h=num_kv_heads, d=self.head_k_dim)
-        value = rearrange(value, "l (h d) -> 1 l h d", h=num_heads, d=self.head_v_dim)
+        key = rearrange(key, "l (h d) -> 1 l h d", h=num_k_heads, d=self.head_k_dim)
+        value = rearrange(value, "l (h d) -> 1 l h d", h=num_v_heads, d=self.head_v_dim)
 
         # GQA expansion if needed
-        if num_heads > num_kv_heads:
-            expand_ratio = num_heads // num_kv_heads
+        if num_v_heads > num_k_heads:
+            expand_ratio = num_v_heads // num_k_heads
             query = query.unsqueeze(3).expand(-1, -1, -1, expand_ratio, -1)
-            query = query.reshape(1, query.shape[1], num_heads, self.head_k_dim)
+            query = query.reshape(1, query.shape[1], num_v_heads, self.head_k_dim)
             key = key.unsqueeze(3).expand(-1, -1, -1, expand_ratio, -1)
-            key = key.reshape(1, key.shape[1], num_heads, self.head_k_dim)
+            key = key.reshape(1, key.shape[1], num_v_heads, self.head_k_dim)
 
         query = _l2_normalize(query, dim=-1)
         key = _l2_normalize(key, dim=-1)
@@ -400,7 +402,7 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
         # Part 2: Core Attention (Custom Op)
         # ============================================================
         core_attn_out = torch.zeros(
-            (num_tokens, self.num_heads // self.tp_size, self.head_v_dim),
+            (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
@@ -418,19 +420,19 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
         # ============================================================
         if self.use_gate:
             gate = gate.view(
-                num_tokens, self.num_heads // self.tp_size, self.head_v_dim
+                num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim
             )
             core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
             gate_flat = gate.reshape(-1, gate.shape[-1])
             core_attn_out_normed = self.o_norm(core_attn_out_flat, gate_flat)
             core_attn_out = core_attn_out_normed.view(
-                num_tokens, self.num_heads // self.tp_size, self.head_v_dim
+                num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim
             )
         else:
             core_attn_out_flat = core_attn_out.reshape(-1, core_attn_out.shape[-1])
             core_attn_out_normed = self.o_norm(core_attn_out_flat)
             core_attn_out = core_attn_out_normed.view(
-                num_tokens, self.num_heads // self.tp_size, self.head_v_dim
+                num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim
             )
 
         core_attn_out = rearrange(core_attn_out, "l h d -> l (h d)")
@@ -947,6 +949,9 @@ class Olmo3_2HybridModel(nn.Module):
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
                     continue
+                # Linear attention layers use separate q/k/v projections
+                # rather than a merged qkv_proj, so stacked param mapping
+                # does not apply.
                 if "linear_attn" in name:
                     continue
                 name = name.replace(weight_name, param_name)
@@ -1044,7 +1049,9 @@ class Olmo3_2HybridForCausalLM(
         vllm_config: "VllmConfig",
     ) -> tuple[torch.dtype, torch.dtype]:
         return MambaStateDtypeCalculator.gated_delta_net_state_dtype(
-            vllm_config.model_config.dtype, vllm_config.cache_config.mamba_cache_dtype
+            vllm_config.model_config.dtype,
+            vllm_config.cache_config.mamba_cache_dtype,
+            vllm_config.cache_config.mamba_ssm_cache_dtype,
         )
 
     @classmethod

@@ -404,7 +404,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "OlmoForCausalLM": _HfExamplesInfo("allenai/OLMo-1B-hf"),
     "Olmo2ForCausalLM": _HfExamplesInfo("allenai/OLMo-2-0425-1B"),
     "Olmo3ForCausalLM": _HfExamplesInfo("allenai/Olmo-3-7B-Instruct"),
-    "Olmo3_2HybridForCausalLM": _HfExamplesInfo("yanhong-l/olmo-3.5-test"),
+    "Olmo3_2HybridForCausalLM": _HfExamplesInfo("allenai/Olmo-Hybrid-7B"),
     "OlmoeForCausalLM": _HfExamplesInfo("allenai/OLMoE-1B-7B-0924-Instruct"),
     "OpenPanguMTPModel": _HfExamplesInfo(
         "FreedomIntelligence/openPangu-Ultra-MoE-718B-V1.1",
