@@ -32,7 +32,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     is_quantized_kv_cache,
 )
-from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheSpec,

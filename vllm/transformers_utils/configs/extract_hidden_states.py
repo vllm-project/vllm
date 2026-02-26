@@ -7,9 +7,6 @@ import os
 
 from transformers import PretrainedConfig
 
-from vllm.config import ModelConfig
-from vllm.transformers_utils.config import get_hf_text_config
-
 
 class ExtractHiddenStatesConfig(PretrainedConfig):
     model_type = "extract_hidden_states"
