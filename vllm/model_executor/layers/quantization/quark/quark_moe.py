@@ -421,7 +421,7 @@ class QuarkW8A8Fp8MoEMethod(QuarkMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if self.rocm_aiter_moe_enabled:
             from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
                 rocm_aiter_fused_experts,
@@ -610,7 +610,7 @@ class QuarkW4A8Fp8MoEMethod(QuarkMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
             rocm_aiter_fused_experts,
         )
@@ -989,7 +989,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+    ) -> torch.Tensor:
         if not self.emulate:
             if (
                 self.model_type == "gpt_oss"

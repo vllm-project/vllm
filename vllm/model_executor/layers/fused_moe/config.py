@@ -932,6 +932,15 @@ class FusedMoEParallelConfig:
     enable_eplb: bool  # whether to enable expert load balancing
 
     @property
+    def use_dp_chunking(self) -> bool:
+        return (
+            self.use_pplx_kernels
+            or self.use_deepep_ll_kernels
+            or self.use_mori_kernels
+            or self.use_fi_all2allv_kernels
+        ) and envs.VLLM_ENABLE_MOE_DP_CHUNK
+
+    @property
     def is_sequence_parallel(self) -> bool:
         return self.sp_size > 1
 
