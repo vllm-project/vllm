@@ -18,17 +18,11 @@ RAY_LOCK_FILES=(
 
 cd /vllm-workspace/
 
-# Locate the pre-built wheel
-WHEEL=$(find /vllm-workspace/dist/ -name '*.whl' 2>/dev/null | head -1)
-if [ -z "$WHEEL" ]; then
-    echo "No pre-built wheel found in /vllm-workspace/dist/, building one..."
-    pip wheel --no-deps -w /tmp/vllm-wheel .
-    WHEEL=$(find /tmp/vllm-wheel -name '*.whl' | head -1)
-fi
-
-if [ -z "$WHEEL" ]; then
-    echo "ERROR: Could not find or build a vllm wheel"
-    exit 1
+# Locate the pre-built wheel; fall back to the source tree for --dry-run.
+INSTALL_TARGET=$(find /vllm-workspace/dist/ -name '*.whl' 2>/dev/null | head -1)
+if [ -z "$INSTALL_TARGET" ]; then
+    echo "No pre-built wheel found in /vllm-workspace/dist/, using source tree."
+    INSTALL_TARGET="."
 fi
 
 OVERALL_EXIT=0
@@ -60,9 +54,9 @@ for LOCK_NAME in "${RAY_LOCK_FILES[@]}"; do
     echo ">>> Constraints file (first 20 lines):"
     head -20 "$CONSTRAINTS_FILE"
 
-    echo ">>> Testing: pip install --dry-run '${WHEEL}[audio]' -c ${CONSTRAINTS_FILE}"
+    echo ">>> Testing: pip install --dry-run '${INSTALL_TARGET}[audio]' -c ${CONSTRAINTS_FILE}"
     set +e
-    pip install --dry-run "${WHEEL}[audio]" -c "$CONSTRAINTS_FILE" 2>&1
+    pip install --dry-run "${INSTALL_TARGET}[audio]" -c "$CONSTRAINTS_FILE" 2>&1
     EXIT_CODE=$?
     set -e
 
