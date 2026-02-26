@@ -2734,7 +2734,7 @@ steps:
 - label: Blackwell LM Eval Small Models
   timeout_in_minutes: 120
   mirror_hardwares: [amdexperimental, amdproduction, amdmi355]
-  agent_pool: mi355_1
+  agent_pool: mi355_2
   gpu: b200
   optional: true # run on nightlies
   source_file_dependencies:
