@@ -5,7 +5,7 @@ from collections.abc import Callable
 
 import torch
 from torch._ops import OpOverload
-
+from vllm.platforms.rocm import on_gfx12x
 import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -50,9 +50,9 @@ def is_aiter_found_and_supported() -> bool:
     VLLM_ROCM_USE_AITER=0, while preventing unwanted JIT warnings for auto-discovery.
     """
     if current_platform.is_rocm() and IS_AITER_FOUND:
-        from vllm.platforms.rocm import on_gfx9
+        from vllm.platforms.rocm import on_gfx9, on_gfx12x
 
-        return on_gfx9()
+        return on_gfx9() or on_gfx12x()
     return False
 
 
@@ -1646,6 +1646,9 @@ class rocm_aiter_ops:
         group_size: int = 128,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert group_size == 128, "Group size must be 128"
+
+        if on_gfx12x():
+            return torch.ops.vllm.triton_per_token_group_quant_fp8(input_2d, group_size)
         return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
 
     @staticmethod

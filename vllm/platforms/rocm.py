@@ -124,7 +124,8 @@ def _get_gcn_arch() -> str:
 # These are plain Python bools — fully torch.compile/Dynamo safe.
 _GCN_ARCH = _get_gcn_arch()
 
-_ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
+_ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11"])
+_ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
 _ON_GFX942 = "gfx942" in _GCN_ARCH
@@ -133,6 +134,10 @@ _ON_GFX950 = "gfx950" in _GCN_ARCH
 
 def on_gfx1x() -> bool:
     return _ON_GFX1X
+
+
+def on_gfx12x() -> bool:
+    return _ON_GFX12X
 
 
 def on_mi3xx() -> bool:
@@ -195,7 +200,7 @@ def use_rocm_custom_paged_attention(
 
 @cache
 def flash_attn_triton_available() -> bool:
-    if not on_gfx1x():
+    if not on_gfx1x() and not on_gfx12x():
         return False
     try:
         from importlib.util import find_spec
@@ -420,6 +425,7 @@ class RocmPlatform(Platform):
         # RDNA3/RDNA4 (gfx11xx/gfx12xx): Use Flash Attention Triton backend
         if (
             on_gfx1x()
+            and on_gfx12x()
             and flash_attn_triton_available()
             and (dtype == torch.float16 or dtype == torch.bfloat16)
         ):
