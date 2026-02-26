@@ -46,8 +46,8 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     MultiModalInputs,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
     PlaceholderRange,
+    mm_inputs,
 )
 from vllm.multimodal.parse import (
     DictEmbeddingItems,
@@ -59,10 +59,11 @@ from vllm.multimodal.processing import (
     BaseDummyInputsBuilder,
     BaseMultiModalProcessor,
     BaseProcessingInfo,
+    ProcessorInputs,
     PromptUpdate,
+    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.utils import length_from_prompt_token_ids_or_embeds
 
 from .interfaces import IsAttentionFree, MultiModalEmbeddings, SupportsMultiModal
 from .interfaces_base import attn_type
@@ -74,7 +75,11 @@ def _terratorch_field_names(input_definition: InputDefinition):
     return set(input_definition.data.keys())
 
 
-def _terratorch_field_factory(input_definition: InputDefinition):
+def _terratorch_field_factory(
+    input_definition: InputDefinition,
+    *,
+    is_shared: bool = True,  # True for unprocessed data, False for processed data
+):
     def _terratorch_field_config(
         hf_inputs: Mapping[str, torch.Tensor],
     ) -> Mapping[str, MultiModalFieldConfig]:
@@ -82,7 +87,11 @@ def _terratorch_field_factory(input_definition: InputDefinition):
         for name, input in input_definition.data.items():
             modality = "image"
             if input.type == InputTypeEnum.tensor:
-                fields[name] = MultiModalFieldConfig.shared(modality, batch_size=1)
+                fields[name] = (
+                    MultiModalFieldConfig.shared(modality, batch_size=1)
+                    if is_shared
+                    else MultiModalFieldConfig.batched(modality)
+                )
 
         return fields
 
@@ -146,7 +155,7 @@ class TerratorchInputBuilder(BaseDummyInputsBuilder[TerratorchProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         # Dummy data is generated based on the 'input' section
         # defined in the HF configuration file
@@ -166,8 +175,14 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
         self,
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
+        *,
+        is_shared: bool = True,
     ) -> Mapping[str, MultiModalFieldConfig]:
-        return _terratorch_field_factory(self.info.input_definition)(hf_inputs)
+        factory = _terratorch_field_factory(
+            self.info.input_definition,
+            is_shared=is_shared,
+        )
+        return factory(hf_inputs)
 
     def _get_prompt_updates(
         self,
@@ -179,30 +194,37 @@ class TerratorchMultiModalProcessor(BaseMultiModalProcessor[TerratorchProcessing
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        hf_processor_mm_kwargs: Mapping[str, object],
-        tokenization_kwargs: Mapping[str, object] | None = None,
-        mm_uuids: MultiModalUUIDDict | None = None,
+        inputs: ProcessorInputs,
+        timing_ctx: TimingContext,
     ) -> MultiModalInputs:
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
+        mm_items = inputs.mm_data_items
+        hf_processor_mm_kwargs = inputs.hf_processor_mm_kwargs
 
-        mm_hashes = self._hash_mm_items(
-            mm_items, hf_processor_mm_kwargs, tokenization_kwargs, mm_uuids=mm_uuids
-        )
-
-        _, passthrough_data = self._get_hf_mm_data(mm_items)
-        mm_processed_data = BatchFeature(dict(passthrough_data), tensor_type="pt")
-        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
+        with timing_ctx.record("apply_hf_processor"):
+            _, passthrough_data = self._get_hf_mm_data(mm_items)
+            mm_processed_data = BatchFeature(
+                {
+                    k: torch.as_tensor(v).unsqueeze(0)
+                    for k, v in passthrough_data.items()
+                },
+                tensor_type="pt",
+            )
 
         mm_kwargs = MultiModalKwargsItems.from_hf_inputs(
             mm_processed_data,
-            self._get_mm_fields_config(mm_processed_data, hf_processor_mm_kwargs),
+            self._get_mm_fields_config(
+                mm_processed_data,
+                hf_processor_mm_kwargs,
+                is_shared=False,
+            ),
         )
 
-        return MultiModalInputs(
-            type="multimodal",
+        with timing_ctx.record("get_mm_hashes"):
+            mm_hashes = inputs.get_mm_hashes(self.info.model_id)
+
+        mm_placeholders = {"image": [PlaceholderRange(offset=0, length=0)]}
+
+        return mm_inputs(
             prompt_token_ids=[1],
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,
@@ -235,9 +257,6 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         self.inference_runner = InferenceRunner(config)
         self.model = self.inference_runner.model
 
-        pooler_config = vllm_config.model_config.pooler_config
-        assert pooler_config is not None
-
         self.pooler = IdentityPooler()
 
     def embed_input_ids(
@@ -262,15 +281,8 @@ class Terratorch(nn.Module, IsAttentionFree, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
-        input_len = length_from_prompt_token_ids_or_embeds(input_ids, inputs_embeds)
-
-        batched_kwargs = {k: v.unsqueeze(0) for k, v in kwargs.items()}
-        model_output = self.inference_runner.forward(**batched_kwargs).output
-
-        # The leading dimension of hidden states needs to equal input length
-        return model_output.expand(
-            input_len, *(-1 for _ in range(model_output.ndim - 1))
-        )
+        model_output = self.inference_runner.forward(**kwargs)
+        return model_output.output
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         params_list = []

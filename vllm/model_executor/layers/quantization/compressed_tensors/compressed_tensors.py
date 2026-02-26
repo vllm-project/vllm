@@ -207,18 +207,19 @@ class CompressedTensorsConfig(QuantizationConfig):
         # because Attention quantization on its own is not supported by vLLM.
         # It is coupled with KV-cache quantization, and if scales are present in the
         # checkpoint, they will be used properly.
-        grps_without_attn_quant = {}
-        for k, v in config["config_groups"].items():
-            # e.g. LlamaAttention, Qwen3Attention, etc.
-            if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
-                logger.warning(
-                    "Skipping CompressedTensors config group for %s. Attention quant "
-                    "is coupled with KV-cache quantization in vLLM.",
-                    v["targets"][0],
-                )
-                continue
-            grps_without_attn_quant[k] = v
-        config["config_groups"] = grps_without_attn_quant
+        if "config_groups" in config:
+            grps_without_attn_quant = {}
+            for k, v in config["config_groups"].items():
+                # e.g. LlamaAttention, Qwen3Attention, etc.
+                if len(v["targets"]) == 1 and v["targets"][0].endswith("Attention"):
+                    logger.warning(
+                        "Skipping CompressedTensors config group for %s. Attention "
+                        "quant is coupled with KV-cache quantization in vLLM.",
+                        v["targets"][0],
+                    )
+                    continue
+                grps_without_attn_quant[k] = v
+            config["config_groups"] = grps_without_attn_quant
 
         ignore: list[str] = cast(list[str], config.get("ignore", []))
         quant_format = cast(str, config.get("format"))
@@ -950,11 +951,11 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
                 f"received num_bits={num_bits}, type={type_}"
             )
 
-        # TODO: delegate validation to compressed-tensors library so that we have a
-        # single source of truth. Right now this is not possible until the next release
-        # of compressed-tensors.
-        strategy = kv_cache_scheme.get("strategy")
-        supported_strategies = ("tensor", "attn_head")
+        strategy = QuantizationStrategy(kv_cache_scheme.get("strategy"))
+        supported_strategies = (
+            QuantizationStrategy.TENSOR,
+            QuantizationStrategy.ATTN_HEAD,
+        )
         if strategy not in supported_strategies:
             raise NotImplementedError(
                 "Invalid strategy for compressed-tensors KV cache. "
@@ -980,16 +981,11 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
             hasattr(self.quant_config, "kv_cache_scheme")
             and self.quant_config.kv_cache_scheme is not None
         ):
-            strategy = self.quant_config.kv_cache_scheme["strategy"]
-
-        if strategy == "attn_head":
-            assert layer.impl.supports_per_head_quant_scales, (
-                f"Layer {layer.__class__.__name__} with implementation "
-                f"{layer.impl.__class__.__name__} does not support per-head scales."
+            strategy = QuantizationStrategy(
+                self.quant_config.kv_cache_scheme["strategy"]
             )
-            n_scales = int(layer.num_kv_heads)
-        else:
-            n_scales = 1
+
+        n_scales = int(layer.num_kv_heads) if strategy == "attn_head" else 1
 
         layer.k_scale = torch.nn.Parameter(
             torch.ones(n_scales, requires_grad=False, dtype=torch.float32)
@@ -1019,7 +1015,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         # - q_scale is partitioned over query heads.
         # - k/v_scale is partitioned over kv heads when total_kv_heads >= tp_size,
         #   and replicated when total_kv_heads < tp_size.
-        if strategy == "attn_head":
+        if strategy == QuantizationStrategy.ATTN_HEAD:
 
             def _tp_aware_loader(
                 param: torch.Tensor,
