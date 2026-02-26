@@ -170,6 +170,19 @@ class LLM:
             the model weights. This virtually increases the GPU memory space
             you can use to hold the model weights, at the cost of CPU-GPU data
             transfer for every forward pass.
+        offload_group_size: Prefetch offloading: Group every N layers
+            together. Offload last `offload_num_in_group` layers of each group.
+            Default is 0 (disabled).
+        offload_num_in_group: Prefetch offloading: Number of layers to
+            offload per group. Default is 1.
+        offload_prefetch_step: Prefetch offloading: Number of layers to
+            prefetch ahead. Higher values hide more latency but use more GPU
+            memory. Default is 1.
+        offload_params: Prefetch offloading: Set of parameter name segments
+            to selectively offload. Only parameters whose names contain one of
+            these segments will be offloaded (e.g., {"gate_up_proj", "down_proj"}
+            for MLP weights, or {"w13_weight", "w2_weight"} for MoE expert
+            weights). If None or empty, all parameters are offloaded.
         enforce_eager: Whether to enforce eager execution. If True, we will
             disable CUDA graph and always execute the model in eager mode.
             If False, we will use CUDA graph and eager execution in hybrid.
@@ -224,6 +237,10 @@ class LLM:
         gpu_memory_utilization: float = 0.9,
         swap_space: float = 4,
         cpu_offload_gb: float = 0,
+        offload_group_size: int = 0,
+        offload_num_in_group: int = 1,
+        offload_prefetch_step: int = 1,
+        offload_params: set[str] | None = None,
         enforce_eager: bool = False,
         enable_return_routed_experts: bool = False,
         disable_custom_all_reduce: bool = False,
@@ -333,6 +350,10 @@ class LLM:
             kv_cache_memory_bytes=kv_cache_memory_bytes,
             swap_space=swap_space,
             cpu_offload_gb=cpu_offload_gb,
+            offload_group_size=offload_group_size,
+            offload_num_in_group=offload_num_in_group,
+            offload_prefetch_step=offload_prefetch_step,
+            offload_params=offload_params or set(),
             enforce_eager=enforce_eager,
             enable_return_routed_experts=enable_return_routed_experts,
             disable_custom_all_reduce=disable_custom_all_reduce,
