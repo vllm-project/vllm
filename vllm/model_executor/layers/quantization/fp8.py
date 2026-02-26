@@ -72,6 +72,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
     apply_fp8_marlin_linear,
     prepare_fp8_layer_for_marlin,
 )
+from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
+    MXFP8_BLOCK_SIZE,
+    mxfp8_e4m3_quantize,
+)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     is_layer_skipped,
@@ -80,6 +84,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     cutlass_block_fp8_supported,
@@ -233,6 +239,68 @@ class Fp8Config(QuantizationConfig):
         if name.endswith("self_attn.prob_output_scale"):
             return name.replace(".prob_output_scale", ".attn.prob_scale")
         # If no matches, return None
+        return None
+
+
+class Mxfp8Config(Fp8Config):
+    """Config class for online MXFP8 MoE quantization."""
+
+    def __init__(
+        self,
+        activation_scheme: str = "dynamic",
+        ignored_layers: list[str] | None = None,
+    ) -> None:
+        if activation_scheme != "dynamic":
+            raise ValueError("mxfp8 only supports dynamic activation scheme.")
+        super().__init__(
+            is_checkpoint_fp8_serialized=False,
+            activation_scheme=activation_scheme,
+            ignored_layers=ignored_layers,
+            weight_block_size=None,
+        )
+
+    @classmethod
+    def get_name(cls) -> QuantizationMethods:
+        return "mxfp8"
+
+    @classmethod
+    def get_min_capability(cls) -> int:
+        return 100
+
+    @classmethod
+    def from_config(cls, config: dict[str, Any]) -> "Mxfp8Config":
+        activation_scheme = cls.get_from_keys_or(
+            config, ["activation_scheme"], "dynamic"
+        )
+        ignored_layers = cls.get_from_keys_or(config, ["ignored_layers"], None)
+        if not ignored_layers:
+            ignored_layers = cls.get_from_keys_or(
+                config, ["modules_to_not_convert"], None
+            )
+        return cls(activation_scheme=activation_scheme, ignored_layers=ignored_layers)
+
+    def get_quant_method(
+        self, layer: torch.nn.Module, prefix: str
+    ) -> "QuantizeMethodBase | None":
+        if isinstance(layer, LinearBase):
+            if is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedLinearMethod()
+            # TODO: Add MXFP8 Linear method.
+            return UnquantizedLinearMethod()
+        elif isinstance(layer, FusedMoE):
+            if is_layer_skipped(
+                prefix=prefix,
+                ignored_layers=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedFusedMoEMethod(layer.moe_config)
+            return Mxfp8OnlineMoEMethod(self, layer)
+        elif isinstance(layer, Attention):
+            return Fp8KVCacheMethod(self)
         return None
 
 
@@ -1281,6 +1349,157 @@ class Fp8OnlineMoEMethod(Fp8MoEMethod):
             w2[expert, :, :], w2_scale[expert] = ops.scaled_fp8_quant(
                 layer.w2_weight[expert, :, :]
             )
+
+        # Shuffle weights to runtime format and setup kernel.
+        self._setup_kernel(
+            layer,
+            w13,
+            w2,
+            w13_scale,
+            w2_scale,
+            layer.w13_input_scale,
+            layer.w2_input_scale,
+        )
+
+        # Prevent duplicate processing (e.g., during weight reload)
+        layer._already_called_process_weights_after_loading = True
+
+
+class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
+    """MoE method for online MXFP8 (block) quantization."""
+
+    uses_meta_device: bool = True
+
+    def __init__(self, quant_config: Fp8Config, layer: torch.nn.Module):
+        # Initialize MoE base state directly, then override backend selection
+        # for MXFP8 keys (without triggering Fp8OnlineMoEMethod assertions).
+        FusedMoEMethodBase.__init__(self, layer.moe_config)
+        self.quant_config = quant_config
+        assert not quant_config.is_checkpoint_fp8_serialized
+        assert quant_config.activation_scheme == "dynamic"
+
+        self.weight_block_size = [1, 32]
+        self.block_quant = True
+        self.weight_scale_name = "weight_scale_inv"
+
+        weight_key = kMxfp8Static
+        activation_key = kMxfp8Dynamic
+
+        # Select Fp8 MoE backend
+        self.fp8_backend, self.experts_cls = select_fp8_moe_backend(
+            config=self.moe,
+            weight_key=weight_key,
+            activation_key=activation_key,
+            allow_vllm_cutlass=False,
+        )
+
+    def create_weights(
+        self,
+        layer: Module,
+        num_experts: int,
+        hidden_size: int,
+        intermediate_size_per_partition: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if (
+            hidden_size % MXFP8_BLOCK_SIZE != 0
+            or intermediate_size_per_partition % MXFP8_BLOCK_SIZE != 0
+        ):
+            raise ValueError(
+                "Online MXFP8 MoE requires hidden/intermediate sizes divisible "
+                f"by {MXFP8_BLOCK_SIZE}."
+            )
+
+        super().create_weights(
+            layer=layer,
+            num_experts=num_experts,
+            hidden_size=hidden_size,
+            intermediate_size_per_partition=intermediate_size_per_partition,
+            params_dtype=params_dtype,
+            **extra_weight_attrs,
+        )
+
+        # Replace per-tensor scales with MXFP8 block scales.
+        w13_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size // MXFP8_BLOCK_SIZE,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        w2_weight_scale = torch.nn.Parameter(
+            torch.zeros(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition // MXFP8_BLOCK_SIZE,
+                dtype=torch.uint8,
+            ),
+            requires_grad=False,
+        )
+        layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        set_weight_attrs(w13_weight_scale, extra_weight_attrs)
+        set_weight_attrs(w2_weight_scale, extra_weight_attrs)
+        layer.weight_block_size = [1, 32]
+
+    def _quantize_mxfp8_moe_weight(
+        self, weight: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if weight.shape[-1] % MXFP8_BLOCK_SIZE != 0:
+            raise ValueError(
+                "Online MXFP8 MoE requires the K dimension to be divisible by "
+                f"{MXFP8_BLOCK_SIZE}, but got {weight.shape[-1]}."
+            )
+        return mxfp8_e4m3_quantize(weight.contiguous())
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        # deferred initialization of randomly initialized weights for the
+        # `--load_format dummy` feature
+        if layer.w13_weight.device == torch.device("meta"):
+            w13_weight = torch.nn.Parameter(
+                torch.empty_like(layer.w13_weight, device=layer._load_device),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                w13_weight, {"weight_loader": layer.w13_weight.weight_loader}
+            )
+            _copy_missing_attrs(layer.w13_weight, w13_weight)
+            layer.register_parameter("w13_weight", w13_weight)
+            initialize_single_dummy_weight(layer.w13_weight)
+        if layer.w2_weight.device == torch.device("meta"):
+            w2_weight = torch.nn.Parameter(
+                torch.empty_like(layer.w2_weight, device=layer._load_device),
+                requires_grad=False,
+            )
+            set_weight_attrs(
+                w2_weight, {"weight_loader": layer.w2_weight.weight_loader}
+            )
+            _copy_missing_attrs(layer.w2_weight, w2_weight)
+            layer.register_parameter("w2_weight", w2_weight)
+            initialize_single_dummy_weight(layer.w2_weight)
+
+        fp8_dtype = current_platform.fp8_dtype()
+        w13 = torch.empty_like(layer.w13_weight, dtype=fp8_dtype)
+        w2 = torch.empty_like(layer.w2_weight, dtype=fp8_dtype)
+        w13_scale = layer.w13_weight_scale
+        w2_scale = layer.w2_weight_scale
+
+        for expert in range(layer.local_num_experts):
+            w13[expert, :, :], w13_scale[expert, :] = self._quantize_mxfp8_moe_weight(
+                layer.w13_weight[expert, :, :]
+            )
+            w2[expert, :, :], w2_scale[expert, :] = self._quantize_mxfp8_moe_weight(
+                layer.w2_weight[expert, :, :]
+            )
+
+        # w13, w13_scale = self._quantize_mxfp8_moe_weight(layer.w13_weight.data)
+        # w2, w2_scale = self._quantize_mxfp8_moe_weight(layer.w2_weight.data)
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(

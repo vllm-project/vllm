@@ -36,6 +36,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8Static128BlockSym,
+    kMxfp8Dynamic,
+    kMxfp8Static,
 )
 from vllm.platforms import current_platform
 
@@ -197,6 +199,18 @@ def select_fp8_moe_backend(
 
     # NOTE: the kernels are selected in the following order.
     AVAILABLE_BACKENDS = _get_priority_backends(config, weight_key, activation_key)
+
+    # For Blackwell block-FP8 (used by online MXFP8), prefer FlashInfer TRTLLM
+    # so execution goes through the monolithic blockscale kernel path.
+    if (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and weight_key == kMxfp8Static
+        and activation_key == kMxfp8Dynamic
+        and Fp8MoeBackend.FLASHINFER_TRTLLM in AVAILABLE_BACKENDS
+    ):
+        AVAILABLE_BACKENDS.remove(Fp8MoeBackend.FLASHINFER_TRTLLM)
+        AVAILABLE_BACKENDS.insert(0, Fp8MoeBackend.FLASHINFER_TRTLLM)
 
     # NOTE(rob): We need to peak into the P/F selection to determine
     # if we are using the batched or standard expert format, which
