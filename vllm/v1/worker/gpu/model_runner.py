@@ -77,7 +77,7 @@ from vllm.v1.worker.gpu.kv_connector import (
 )
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
-from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
+from vllm.v1.worker.gpu.model_states import ModelState
 from vllm.v1.worker.gpu.pp_utils import pp_broadcast, pp_receive
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
@@ -138,14 +138,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_num_tokens=self.max_num_tokens,
                 hidden_size=self.inputs_embeds_size,
                 dtype=self.dtype,
-                device=self.device,
-            )
-        self.uses_mrope = self.model_config.uses_mrope
-        if self.uses_mrope:
-            self.mrope_states = MRopeState(
-                max_num_reqs=self.max_num_reqs,
-                max_num_tokens=self.max_num_tokens,
-                max_model_len=self.max_model_len,
                 device=self.device,
             )
 
@@ -212,7 +204,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # CUDA graphs.
         self.cudagraph_manager = CudaGraphManager(
             self.vllm_config,
-            self.uses_mrope,
             self.use_aux_hidden_state_outputs,
             self.device,
         )
@@ -270,6 +261,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         prepare_communication_buffer_for_model(self.model)
         if self.speculator is not None:
             prepare_communication_buffer_for_model(self.speculator)
+
+        # Initialize the components that require the model.
+        self.model_state = ModelState(self.vllm_config, self.model, self.device)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -481,16 +475,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         start_free_gpu_memory = torch.cuda.mem_get_info()[0]
 
         with self.maybe_setup_dummy_loras(self.lora_config):
-            mrope_positions = None
-            if self.uses_mrope:
-                mrope_positions = self.mrope_states.mrope_positions
             inputs_embeds = None
             if self.supports_mm_inputs:
                 inputs_embeds = self.encoder_runner.inputs_embeds
             self.cudagraph_manager.capture(
                 model=self.model,
+                model_state=self.model_state,
                 input_buffers=self.input_buffers,
-                mrope_positions=mrope_positions,
                 inputs_embeds=inputs_embeds,
                 block_tables=self.block_tables,
                 attn_groups=self.attn_groups,
@@ -554,14 +545,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.supports_mm_inputs:
                 self.encoder_runner.add_request(req_id, new_req_data.mm_features)
 
-            # Pre-compute M-RoPE positions for prefill.
-            if self.uses_mrope:
-                self.mrope_states.init_prefill_mrope_positions(
-                    req_index,
-                    self.model,  # type: ignore
-                    new_req_data.prefill_token_ids,
-                    mm_features=new_req_data.mm_features,
-                )
+            self.model_state.add_request(req_index, new_req_data)
 
             self.block_tables.append_block_ids(
                 req_index, new_req_data.block_ids, overwrite=True
@@ -577,8 +561,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
             self.sampler.apply_staged_writes()
-            if self.uses_mrope:
-                self.mrope_states.apply_staged_writes()
+            self.model_state.apply_staged_writes()
 
     def update_requests(self, scheduler_output: SchedulerOutput) -> None:
         # Add new blocks for the existing requests.
@@ -692,15 +675,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs]
 
-        # Prepare M-RoPE positions.
-        if self.uses_mrope:
-            self.mrope_states.prepare_mrope_positions(
-                idx_mapping,
-                query_start_loc,
-                self.req_states.prefill_len.gpu,
-                self.req_states.num_computed_tokens.gpu,
-            )
-
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
         logits_indices = combine_sampled_and_draft_tokens(
@@ -744,10 +718,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         input_ids = self.input_buffers.input_ids[:num_tokens_after_padding]
         positions = self.input_buffers.positions[:num_tokens_after_padding]
-        mrope_positions = None
-        if self.uses_mrope:
-            mrope_positions = self.mrope_states.mrope_positions
-            mrope_positions = mrope_positions[:, :num_tokens_after_padding]
         return InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
@@ -764,7 +734,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
-            mrope_positions=mrope_positions,
             inputs_embeds=None,
             attn_metadata=attn_metadata,
             slot_mappings=slot_mappings_by_layer,
@@ -959,13 +928,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_buffers=self.input_buffers,
                 device=self.device,
             )
-            if self.uses_mrope:
-                input_batch.mrope_positions = self.mrope_states.mrope_positions[
-                    :, :num_tokens_after_padding
-                ]
             if not skip_attn_for_dummy_run:
                 self.prepare_dummy_attn_metadata(input_batch)
             # FIXME(woosuk): Fix warmup for LoRA.
+
+        model_inputs = {
+            "input_ids": input_batch.input_ids,
+            "positions": input_batch.positions,
+            "inputs_embeds": input_batch.inputs_embeds,
+            # NOTE: Values returned by `prepare_inputs` will override the default
+            # values above.
+            **self.model_state.prepare_inputs(input_batch, self.req_states),
+        }
+        if not self.is_first_pp_rank:
+            # Update for non-first PP ranks.
+            model_inputs["input_ids"] = None
+            model_inputs["inputs_embeds"] = None
+            model_inputs["intermediate_tensors"] = intermediate_tensors
 
         # Run model.
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:
@@ -983,20 +962,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 aux_hidden_states = None
         else:
             # For piecewise and eager mode, just call model().
-            positions = input_batch.positions
-            if self.uses_mrope:
-                assert input_batch.mrope_positions is not None
-                positions = input_batch.mrope_positions
-
-            if self.is_first_pp_rank:
-                input_ids = input_batch.input_ids
-                inputs_embeds = input_batch.inputs_embeds
-                assert intermediate_tensors is None
-            else:
-                input_ids = None
-                inputs_embeds = None
-                assert intermediate_tensors is not None
-
             batch_descriptor = BatchDescriptor(
                 num_tokens=input_batch.num_tokens_after_padding,
                 has_lora=self.lora_config is not None,
@@ -1012,12 +977,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 slot_mapping=input_batch.slot_mappings,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
-                model_output = self.model(
-                    input_ids=input_ids,
-                    positions=positions,
-                    inputs_embeds=inputs_embeds,
-                    intermediate_tensors=intermediate_tensors,
-                )
+                model_output = self.model(**model_inputs)
                 if self.use_aux_hidden_state_outputs:
                     hidden_states, aux_hidden_states = model_output
                 else:
