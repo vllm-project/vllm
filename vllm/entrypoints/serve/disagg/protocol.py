@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -16,45 +16,6 @@ from vllm.logprobs import Logprob
 from vllm.renderers import TokenizeParams
 from vllm.utils import random_uuid
 
-####### Multimodal wire-format models #######
-
-
-class TensorData(BaseModel):
-    """JSON-serializable representation of a torch.Tensor."""
-
-    dtype: str
-    """EmbedDType key, e.g. "float32", "int64", "bfloat16"."""
-    shape: list[int]
-    """Tensor shape, e.g. [1000, 3]."""
-    data_b64: str
-    """Base64-encoded raw tensor bytes."""
-
-
-class FieldInfo(BaseModel):
-    """JSON-serializable metadata for a BaseMultiModalField."""
-
-    type: Literal["batched", "flat", "shared"]
-    keep_on_cpu: bool = False
-    # flat-specific
-    slices: list[list[int | None]] | list[list[list[int | None]]] | None = None
-    dim: int | None = None
-    # shared-specific
-    batch_size: int | None = None
-
-
-class FieldElemData(BaseModel):
-    """JSON-serializable representation of a MultiModalFieldElem."""
-
-    data: TensorData | list[FieldElemData | TensorData] | int | float | None = None
-    field: FieldInfo
-
-
-class MultiModalKwargsItemData(BaseModel):
-    """JSON-serializable representation of a MultiModalKwargsItem."""
-
-    items: dict[str, FieldElemData]
-
-
 ####### Tokens IN <> Tokens OUT #######
 
 
@@ -66,7 +27,7 @@ class GenerateMultiModalFeature(BaseModel):
     mm_hash: str
     offset: int
     length: int
-    kwargs_data: MultiModalKwargsItemData | None = None
+    kwargs_data: str | None = None
 
 
 class GenerateRequest(BaseModel):
