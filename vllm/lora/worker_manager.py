@@ -130,17 +130,24 @@ class WorkerLoRAManager:
                 skip_prefixes=lora_skip_prefixes,
             )
 
-            # Warn about adapter modules not targeted by the model
+            # Warn about adapter modules not targeted by the model.
+            # Module names in the adapter are full paths like
+            # "model.layers.0.self_attn.o_proj", while
+            # supported_lora_modules contains short suffixes like
+            # "o_proj", so we check with endswith.
             for module_name in lora.loras:
-                if module_name not in supported_lora_modules:
+                if not any(
+                    module_name.endswith(f".{suffix}")
+                    for suffix in supported_lora_modules
+                ):
                     logger.warning_once(
                         "LoRA module '%s' in adapter '%s' is not in the "
-                        "model's supported LoRA target modules %s. "
+                        "model's supported LoRA target modules [%s]. "
                         "These parameters will be ignored, which may "
                         "cause abnormal model behavior.",
                         module_name,
                         lora_request.lora_path,
-                        supported_lora_modules,
+                        ", ".join(sorted(supported_lora_modules)),
                     )
 
         except FileNotFoundError as e:
