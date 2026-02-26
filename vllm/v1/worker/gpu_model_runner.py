@@ -81,6 +81,11 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
+from vllm.model_executor.offloader import (
+    create_offloader,
+    get_offloader,
+    set_offloader,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
@@ -378,6 +383,7 @@ class GPUModelRunner(
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+        self.offload_config = vllm_config.offload_config
         self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
@@ -385,14 +391,6 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
-
-        from vllm.model_executor.models.utils import (
-            set_cpu_offload_max_bytes,
-            set_cpu_offload_params,
-        )
-
-        set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
-        set_cpu_offload_params(self.cache_config.cpu_offload_params)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -748,6 +746,10 @@ class GPUModelRunner(
                     device="cpu",
                     pin_memory=self.pin_memory,
                 )
+
+        # Model weight offloader
+        # Make sure this is called before any get_offloader call
+        set_offloader(create_offloader(self.offload_config))
 
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
@@ -4342,6 +4344,8 @@ class GPUModelRunner(
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
 
+        get_offloader().post_init()
+
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.
 
@@ -5780,7 +5784,7 @@ class GPUModelRunner(
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
             self.cache_config.block_size
         ]:
-            assert self.cache_config.cpu_offload_gb == 0, (
+            assert self.offload_config.uva.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
