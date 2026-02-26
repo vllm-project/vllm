@@ -194,7 +194,7 @@ class OpenAISpeechToText(OpenAIServing):
     def _warmup_input_processor(self) -> None:
         """Warm up input processor with dummy audio to avoid first-request latency.
 
-        The first call to input_processor.process_inputs() with multimodal audio
+        The first call to renderer.render_cmpl() with multimodal audio
         triggers multimodal processing initialization which can take ~2.5s.
         This method processes a dummy audio request to warm up the pipeline.
         """
