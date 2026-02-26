@@ -7,9 +7,6 @@ import pytest
 import requests
 
 # Test configuration for BGE-M3 sparse plugin
-from tests.plugins.bge_m3_sparse_plugin.bge_m3_sparse_processor.types import (
-    SparseEmbeddingResponse,
-)
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 
@@ -74,12 +71,18 @@ def server():
 
 
 @pytest.mark.asyncio
-async def test_bge_m3_sparse_plugin_online(server: RemoteOpenAIServer):
+@pytest.mark.parametrize(
+    "return_tokens",
+    [True, False],
+)
+async def test_bge_m3_sparse_plugin_online(
+    server: RemoteOpenAIServer, return_tokens: bool
+):
     """Test BGE-M3 sparse plugin in online mode via API."""
     request_payload = {
         "model": model_config["model_name"],
         "task": "token_classify",
-        "data": {"input": model_config["test_input"], "return_tokens": True},
+        "data": {"input": model_config["test_input"], "return_tokens": return_tokens},
     }
 
     ret = requests.post(
@@ -103,7 +106,7 @@ async def test_bge_m3_sparse_plugin_online(server: RemoteOpenAIServer):
     # Verify sparse embedding format
     sparse_embedding = _get_attr_or_val(data_entry, "sparse_embedding")
     assert isinstance(sparse_embedding, list)
-    _check_sparse_embedding(sparse_embedding, True)
+    _check_sparse_embedding(sparse_embedding, return_tokens)
 
     # Verify usage information
     usage = _get_attr_or_val(parsed_response, "usage")
@@ -112,34 +115,6 @@ async def test_bge_m3_sparse_plugin_online(server: RemoteOpenAIServer):
     assert _get_attr_or_val(usage, "total_tokens") == _get_attr_or_val(
         usage, "prompt_tokens"
     )
-
-
-@pytest.mark.asyncio
-async def test_bge_m3_sparse_plugin_online_no_tokens(server: RemoteOpenAIServer):
-    """Test BGE-M3 sparse plugin in online mode without returning tokens."""
-    request_payload = {
-        "model": model_config["model_name"],
-        "input": model_config["test_input"],
-        "return_tokens": False,
-    }
-
-    ret = requests.post(
-        server.url_for("pooling"),
-        json=request_payload,
-    )
-
-    response = ret.json()
-    print(f"Response: {response}")
-
-    # Verify the request response is in the correct format
-    assert (parsed_response := SparseEmbeddingResponse(**response))
-
-    # Verify sparse embedding format
-    sparse_embedding = parsed_response.data[0].sparse_embedding
-    if sparse_embedding:
-        entry = sparse_embedding[0]
-        # When return_tokens=False, token should be None
-        assert entry.token is None
 
 
 @pytest.mark.parametrize(
