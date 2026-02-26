@@ -222,6 +222,8 @@ if current_platform.is_rocm():
         x,
         k_stride0,
         v_stride0,
+        kc_block_stride,
+        vc_block_stride,
         block_size,
         head_size,
         num_kv_heads,
@@ -239,15 +241,19 @@ if current_platform.is_rocm():
             return
         block_id = slot_id // block_size
         block_offset = slot_id % block_size
-        dst_offset = (
-            block_id * num_kv_heads * head_size * block_size
+        dst_k_base = (
+            block_id * kc_block_stride
+            + head_id * head_size * block_size
+        )
+        dst_v_base = (
+            block_id * vc_block_stride
             + head_id * head_size * block_size
         )
         dst_k_shuffle_offset = (
-            dst_offset + offset // x * block_size * x + block_offset * x + offset % x
+            dst_k_base + offset // x * block_size * x + block_offset * x + offset % x
         )
         dst_v_shuffle_offset = (
-            dst_offset
+            dst_v_base
             + block_offset // x * head_size * x
             + offset * x
             + block_offset % x
@@ -278,21 +284,7 @@ if current_platform.is_rocm():
         _, num_kv_heads, head_size = key.shape
         num_blocks, block_size, _, _ = key_cache.shape
         x = 16 // key_cache.element_size()
-        k_cache_template = torch.empty(
-            [num_blocks, num_kv_heads, head_size // x, block_size, x],
-            dtype=key_cache.dtype,
-            device="meta",
-        )
-        v_cache_template = torch.empty(
-            [num_blocks, num_kv_heads, block_size // x, head_size, x],
-            dtype=value_cache.dtype,
-            device="meta",
-        )
-        new_key_cache = key_cache.view_as(k_cache_template)
-        new_value_cache = value_cache.view_as(v_cache_template)
-        QUANT = False
-        if kv_cache_dtype.startswith("fp8"):
-            QUANT = True
+        QUANT = kv_cache_dtype.startswith("fp8")
         grid = (
             num_tokens,
             num_kv_heads,
@@ -300,14 +292,16 @@ if current_platform.is_rocm():
         reshape_and_cache_shuffle_kernel[grid](
             key,
             value,
-            new_key_cache,
-            new_value_cache,
+            key_cache,
+            value_cache,
             slot_mapping,
             k_scales,
             v_scales,
             x,
             key.stride(0),
             value.stride(0),
+            key_cache.stride(0),
+            value_cache.stride(0),
             block_size,
             head_size,
             num_kv_heads,
@@ -1249,29 +1243,58 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 elif rocm_aiter_ops.is_shuffle_kv_cache_enabled():
                     num_blocks, block_size, num_kv_heads, head_size = key_cache.shape
                     x = 16 // key_cache.element_size()
-                    k_cache_template = torch.empty(
-                        [num_blocks, num_kv_heads, head_size // x, block_size, x],
-                        dtype=key_cache.dtype,
-                        device="meta",
+                    contiguous_block_elems = (
+                        num_kv_heads * head_size * block_size
                     )
-                    v_cache_template = torch.empty(
-                        [num_blocks, num_kv_heads, block_size // x, head_size, x],
-                        dtype=value_cache.dtype,
-                        device="meta",
-                    )
-                    new_key_cache = key_cache.view_as(k_cache_template)
-                    new_value_cache = value_cache.view_as(v_cache_template)
+                    kc_stride0 = key_cache.stride(0)
+                    vc_stride0 = value_cache.stride(0)
+                    bt = attn_metadata.block_table[:num_decodes]
+
+                    if kc_stride0 != contiguous_block_elems:
+                        stride_ratio = kc_stride0 // contiguous_block_elems
+                        n_virt = (num_blocks - 1) * stride_ratio + 1
+                        new_key_cache = torch.as_strided(
+                            key_cache,
+                            size=(n_virt, num_kv_heads,
+                                  head_size // x, block_size, x),
+                            stride=(contiguous_block_elems,
+                                    (head_size // x) * block_size * x,
+                                    block_size * x, x, 1),
+                        )
+                        new_value_cache = torch.as_strided(
+                            value_cache,
+                            size=(n_virt, num_kv_heads,
+                                  block_size // x, head_size, x),
+                            stride=(contiguous_block_elems,
+                                    (block_size // x) * head_size * x,
+                                    head_size * x, x, 1),
+                        )
+                        bt = bt * stride_ratio
+                    else:
+                        new_key_cache = key_cache.view(
+                            num_blocks, num_kv_heads,
+                            head_size // x, block_size, x,
+                        )
+                        new_value_cache = value_cache.view(
+                            num_blocks, num_kv_heads,
+                            block_size // x, head_size, x,
+                        )
+
+                    k_scale = None
+                    v_scale = None
+                    if self.kv_cache_dtype.startswith("fp8"):
+                        k_scale = attn_metadata.k_scale
+                        v_scale = attn_metadata.v_scale
+
                     rocm_aiter_ops.pa_fwd_asm(
-                        Q=query[:num_decode_tokens],
+                        Q=query[:num_decode_tokens].contiguous(),
                         K=new_key_cache,
                         V=new_value_cache,
-                        block_tables=attn_metadata.block_table[:num_decodes],
+                        block_tables=bt,
                         context_lens=attn_metadata.seq_lens[:num_decodes],
-                        block_tables_stride0=attn_metadata.block_table[
-                            :num_decodes
-                        ].stride(0),
-                        K_QScale=attn_metadata.k_scale,
-                        V_QScale=attn_metadata.v_scale,
+                        block_tables_stride0=bt.stride(0),
+                        K_QScale=k_scale,
+                        V_QScale=v_scale,
                         out_=output[:num_decode_tokens],
                     )
                 else:
