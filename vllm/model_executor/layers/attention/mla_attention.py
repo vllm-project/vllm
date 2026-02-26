@@ -1201,7 +1201,7 @@ class FusedConcatQuantFP8:
             cos_sin_cache.stride(0) if apply_rope else 0,
             D_NOPE=self.d_nope,
             D_PE=self.d_pe,
-            APPLY_ROPE=apply_rope,
+            APPLY_ROPE=1 if apply_rope else 0,
             num_warps=4,
         )
         return out
