@@ -627,9 +627,6 @@ class TTModelRunner:
                 seed=sample_params.seed,
                 enable_log_probs=enable_log_probs,
             )
-        perform_device_sampling = self.check_perform_device_sampling(
-            is_decode=not is_prompt
-        )
 
         if self.model_config.is_multimodal_model and is_prompt:
             multi_modal_kwargs = self._gather_multi_modal_inputs()
@@ -667,6 +664,11 @@ class TTModelRunner:
                         scheduler_bitmask_row, :
                     ]
             bitmask = reordered_bitmask
+
+        perform_device_sampling = self.check_perform_device_sampling(
+            is_decode=not is_prompt,
+            has_structured_outputs=bitmask is not None,
+        )
 
         # Populate prompt_tokens and output_tokens if penalties are needed
         # (decode only).
@@ -1314,7 +1316,9 @@ class TTModelRunner:
         output = self.generate_runner_output(sampled_token_ids, logprobs)
         return output
 
-    def check_perform_device_sampling(self, is_decode: bool) -> bool:
+    def check_perform_device_sampling(
+        self, is_decode: bool, has_structured_outputs: bool
+    ) -> bool:
         want_device_sampling = self.sample_on_device_mode == "all" or (
             self.sample_on_device_mode == "decode_only" and is_decode
         )
@@ -1337,6 +1341,11 @@ class TTModelRunner:
             or bool(self.model_config.logits_processors)  # custom logitsprocs
         )
         if has_always_host_only_sampling_params:
+            return False
+
+        # Structured outputs are not supported on device yet
+        # https://github.com/tenstorrent/vllm/issues/277
+        if has_structured_outputs:
             return False
 
         # Logprobs on device are only supported on multi-device setups
@@ -1662,7 +1671,6 @@ class TTModelRunner:
                 # Capture logprobs for this DP rank
                 logprobs_per_dp.append(sampler_output.logprobs_tensors)
             else:  # sample on device
-                # Grammar bitmask is applied on device
                 next_token_ids = tt_out[start : start + sz]
 
                 # Extract logprobs if available from device sampling
