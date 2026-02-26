@@ -146,11 +146,7 @@ def _fused_moe_lora_kernel_fp8(
     top_k_num,
     lora_ids,
     adapter_enabled,
-    max_loras,  # <<< PR2: rename, used for masks when grid axis-2 != max_loras
-    # The stride variables represent how much to increase the ptr by when
-    # moving by 1 element in a particular dimension. E.g. `stride_am` is
-    # how much to increase `a_ptr` by to get the element one row down
-    # (A has M rows).
+    max_loras,
     stride_am,
     stride_ak,
     stride_bl,
@@ -192,8 +188,6 @@ def _fused_moe_lora_kernel_fp8(
     launch_pdl: tl.constexpr,
     IS_PRIMARY: tl.constexpr,
     use_fp8_w8a8: tl.constexpr,
-    use_int8_w8a8: tl.constexpr,
-    use_int8_w8a16: tl.constexpr,
     per_channel_quant: tl.constexpr,
 ):
     pid = tl.program_id(axis=0)
@@ -378,12 +372,10 @@ def _fused_moe_lora_shrink_fp8(
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         assert lora_a_scale_stacked is not None, (
             "lora_a_scale_stacked must be provided for w8a8 quantization"
         )
@@ -396,13 +388,6 @@ def _fused_moe_lora_shrink_fp8(
             lora_a_stacked[0].size(-1), block_shape[1]
         ) == lora_a_scale_stacked[0].size(-1), (
             "Incompatible block shape for lora_a_scale_stacked.size(-1) "
-        )
-    elif use_int8_w8a16:
-        assert lora_a_scale_stacked is not None, (
-            "lora_a_scale_stacked must be provided for w8a16 quantization"
-        )
-        assert block_shape is None or block_shape[0] == 0, (
-            "Block shape for activation must be 0 for w8a16"
         )
     else:
         assert act_scale is None
@@ -498,8 +483,6 @@ def _fused_moe_lora_shrink_fp8(
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=True,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
         **shrink_config,
     )
@@ -545,12 +528,10 @@ def _fused_moe_lora_expand_fp8(
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
-    if use_fp8_w8a8 or use_int8_w8a8:
+    if use_fp8_w8a8:
         assert lora_b_scale_stacked is not None, (
             "lora_b_scale_stacked must be provided for w8a8 quantization"
         )
@@ -563,13 +544,6 @@ def _fused_moe_lora_expand_fp8(
             lora_b_stacked[0].size(-1), block_shape[1]
         ) == lora_b_scale_stacked[0].size(-1), (
             "Incompatible block shape for lora_b_scale_stacked.size(-1) "
-        )
-    elif use_int8_w8a16:
-        assert lora_b_scale_stacked is not None, (
-            "lora_b_scale_stacked must be provided for w8a16 quantization"
-        )
-        assert block_shape is None or block_shape[0] == 0, (
-            "Block shape for activation must be 0 for w8a16"
         )
     else:
         assert act_scale is None
@@ -675,8 +649,6 @@ def _fused_moe_lora_expand_fp8(
         USE_B_L2_CACHE=True,  # new
         IS_PRIMARY=False,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
         **expand_config,
     )
@@ -724,8 +696,6 @@ def _fused_moe_lora_fp8(
     fully_sharded: bool = False,
     offset: int = 0,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
@@ -807,8 +777,6 @@ def _fused_moe_lora_fp8(
         use_gdc=use_gdc,
         act_scale=shrink_act_scale,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
     )
@@ -863,8 +831,6 @@ def _fused_moe_lora_fp8(
         use_gdc=use_gdc,
         act_scale=expand_act_scale,
         use_fp8_w8a8=use_fp8_w8a8,
-        use_int8_w8a8=use_int8_w8a8,
-        use_int8_w8a16=use_int8_w8a16,
         per_channel_quant=per_channel_quant,
         block_shape=block_shape,
     )
@@ -907,8 +873,6 @@ def _fused_moe_lora_fp8_fake(
     shrink_act_scale: torch.Tensor | None = None,
     expand_act_scale: torch.Tensor | None = None,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
@@ -948,8 +912,6 @@ def _fused_moe_lora_shrink_fp8_fake(
     use_gdc: bool = False,
     act_scale: torch.Tensor | None = None,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
 ) -> None:
@@ -991,8 +953,6 @@ def _fused_moe_lora_expand_fp8_fake(
     mul_routed_weight: bool = False,
     offset: int = 0,
     use_fp8_w8a8: bool = False,
-    use_int8_w8a8: bool = False,
-    use_int8_w8a16: bool = False,
     per_channel_quant: bool = False,
     block_shape: List[int] | None = None,  # noqa: UP006, UP007
     use_gdc: bool = False,
