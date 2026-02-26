@@ -292,3 +292,11 @@ class _CPUSHMDistributed:
 
         key_size = pickle.loads(key_size_tensor.numpy().tobytes())
         key_list = key_size[0]
+        size_list = key_size[1]
+        assert len(key_list) == len(size_list)
+        assert len(key_list) == len(value_list)
+
+        tensor_dict: dict[str, torch.Tensor] = {}
+        for key, size, t in zip(key_list, size_list, value_list):
+            tensor_dict[key] = t.view(size)
+        return tensor_dict

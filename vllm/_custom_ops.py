@@ -6,6 +6,10 @@ from typing import TYPE_CHECKING, Literal
 import torch
 
 import vllm.envs as envs
+
+# Import dispatcher for CPU multi-ISA support
+# This routes torch.ops calls to _C or _C_avx512 depending on loaded extension
+from vllm._ops_dispatch import _detect_cpu_extension, get_cpu_ops, get_ops, has_op
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType
@@ -17,10 +21,6 @@ from vllm.utils.math_utils import cdiv
 logger = init_logger(__name__)
 
 current_platform.import_kernels()
-
-# Import dispatcher for CPU multi-ISA support
-# This routes torch.ops calls to _C or _C_avx512 depending on loaded extension
-from vllm._ops_dispatch import _detect_cpu_extension, get_cpu_ops, get_ops, has_op
 
 if TYPE_CHECKING:
 
