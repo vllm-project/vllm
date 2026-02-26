@@ -63,8 +63,9 @@ _ROCM_DEVICE_ID_NAME_MAP: dict[str, str] = {
 }
 
 
-def sync_hip_cuda_env_vars():
-    """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent."""
+def _sync_hip_cuda_env_vars():
+    """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent.
+    Treats empty string as unset. Raises on genuine conflicts."""
     hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
     cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
 
@@ -82,8 +83,8 @@ def sync_hip_cuda_env_vars():
         os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
 
 
-# Prevent use of clashing `{CUDA/HIP}_VISIBLE_DEVICES`
-sync_hip_cuda_env_vars()
+# Sync at import time - catches misconfigurations from process start.
+_sync_hip_cuda_env_vars()
 
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,

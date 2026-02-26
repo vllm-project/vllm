@@ -113,18 +113,14 @@ def unique_filepath(fn: Callable[[int], Path]) -> Path:
 
 
 def _sync_visible_devices_env_vars():
-    """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent
-    before spawning child processes on ROCm.
+    """Sync HIP/CUDA visibility env vars before spawning (ROCm only)."""
 
-    On ROCm, both env vars control GPU visibility and the HIP runtime
-    expects them to match. vLLM manages CUDA_VISIBLE_DEVICES as the
-    source of truth; sync HIP_VISIBLE_DEVICES to match.
-    """
     if not current_platform.is_rocm():
         return
-    from vllm.platforms.rocm import sync_hip_cuda_env_vars
 
-    sync_hip_cuda_env_vars()
+    from vllm.platforms.rocm import _sync_hip_cuda_env_vars
+
+    _sync_hip_cuda_env_vars()
 
 
 def _maybe_force_spawn():
