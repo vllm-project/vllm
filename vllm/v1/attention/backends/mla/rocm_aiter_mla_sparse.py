@@ -120,6 +120,11 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
     def is_sparse(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_block_size(cls, block_size: int | None) -> bool:
+        # The only supported block_size is 1
+        return block_size is None or block_size == 1
+
 
 @dataclass
 class ROCMAiterMLASparseMetadata(AttentionMetadata):
