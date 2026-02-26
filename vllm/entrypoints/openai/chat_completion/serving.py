@@ -822,11 +822,9 @@ class OpenAIServingChat(OpenAIServing):
                     ):
                         # only check once per choice, because prompt_token_ids
                         # are the same for all deltas in that choice
-                        prompt_is_reasoning_end_arr[i] = (
-                            self._prompt_ends_reasoning(
-                                reasoning_parser,
-                                res.prompt_token_ids,
-                            )
+                        prompt_is_reasoning_end_arr[i] = self._prompt_ends_reasoning(
+                            reasoning_parser,
+                            res.prompt_token_ids,
                         )
                     if finish_reason_sent[i]:
                         continue
