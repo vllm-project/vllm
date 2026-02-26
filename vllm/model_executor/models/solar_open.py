@@ -622,7 +622,7 @@ class SolarOpenForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
         self.expert_weights = []
 
         # Set MoE hyperparameters
-        self.num_moe_layers = config.num_hidden_layers - config.first_k_dense_replace
+        self.num_moe_layers = config.num_hidden_layers
         self.num_expert_groups = config.n_group
 
         self.moe_layers: list[FusedMoE] = []
