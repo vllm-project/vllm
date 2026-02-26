@@ -113,8 +113,7 @@ vllm bench sweep serve_sla \
     --serve-cmd 'vllm serve meta-llama/Llama-2-7b-chat-hf' \
     --bench-cmd 'vllm bench serve --model meta-llama/Llama-2-7b-chat-hf --backend vllm --endpoint /v1/completions --dataset-name sharegpt --dataset-path benchmarks/ShareGPT_V3_unfiltered_cleaned_split.json --num-prompts 100' \
     --serve-params benchmarks/serve_hparams.json \
-    --bench-params benchmarks/bench_hparams.json \
-    --sla-variable max_concurrency \
+    --bench-params benchmarks/bench_hparams.json
     -o benchmarks/results
 ```
 
@@ -199,11 +198,11 @@ Example command:
 
 ```bash
 vllm bench sweep plot benchmarks/results/<timestamp> \
-    --var-x max_concurrency \
+    --var-x request_rate \
     --row-by random_input_len \
     --col-by random_output_len \
     --curve-by max_num_seqs,max_num_batched_tokens \
-    --filter-by 'max_concurrency<=128'
+    --filter-by 'request_rate<=128'
 ```
 
 !!! tip
