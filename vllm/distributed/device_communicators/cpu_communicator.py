@@ -39,18 +39,19 @@ class CpuCommunicator(DeviceCommunicatorBase):
             self.dist_module = _CPUSHMDistributed(self)
 
         if self.use_all2all:
-            if self.all2all_backend != "naive":  # type: ignore[has-type]
+            if self.all2all_backend not in (
+                "naive",
+                "allgather_reducescatter",
+            ):  # type: ignore[has-type]
                 logger.warning(
                     "`%s` all2all manager is not supported on CPU. "
-                    "Falling back to `naive` all2all manager for CPU.",
+                    "Falling back to `allgather_reducescatter` manager.",
                     self.all2all_backend,  # type: ignore[has-type]
                 )
-                self.all2all_backend = "naive"
-            if self.all2all_backend == "naive":
-                from .all2all import NaiveAll2AllManager
+            from .all2all import AgRsAll2AllManager
 
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-                logger.info("Using naive all2all manager.")
+            self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
+            logger.info("Using allgather_reducescatter all2all manager.")
 
     def all_reduce(self, input_):
         self.dist_module.all_reduce(input_, group=self.device_group)

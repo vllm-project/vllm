@@ -104,11 +104,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
         if self.use_all2all:
-            if self.all2all_backend == "naive":
-                from .all2all import NaiveAll2AllManager
-
-                self.all2all_manager = NaiveAll2AllManager(self.cpu_group)
-            elif self.all2all_backend == "allgather_reducescatter":
+            if self.all2all_backend in ("naive", "allgather_reducescatter"):
                 from .all2all import AgRsAll2AllManager
 
                 self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
@@ -298,7 +294,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.fi_ar_comm = None
         if self.all2all_manager is not None:
             self.all2all_manager.destroy()
-            self.all2all_manager = None
+            self.all2all_manager = None  # type: ignore[assignment]
 
     def all_gatherv(
         self,
