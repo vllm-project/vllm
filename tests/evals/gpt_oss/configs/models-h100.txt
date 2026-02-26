@@ -1,0 +1,5 @@
+# H100 model configurations for GPQA evaluation
+# Tests different environment variable combinations
+gpt-oss-20b-baseline.yaml
+gpt-oss-20b-flashinfer-mxfp4-bf16.yaml
+gpt-oss-20b-marlin.yaml
