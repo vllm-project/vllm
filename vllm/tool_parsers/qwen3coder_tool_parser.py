@@ -566,7 +566,12 @@ class Qwen3CoderToolParser(ToolParser):
                                     self.prev_tool_call_arr[i]["arguments"] = args
                                     break
                     except Exception:
-                        pass
+                        logger.debug(
+                            "Failed to parse tool call during "
+                            "streaming: %s",
+                            tool_text,
+                            exc_info=True,
+                        )
 
                 # Send closing brace; the serving layer autocomplete
                 # will fill in any missing arguments based on
@@ -577,6 +582,13 @@ class Qwen3CoderToolParser(ToolParser):
                     self.streamed_args_for_tool[
                         self.current_tool_index
                     ] += "}"
+                else:
+                    logger.warning(
+                        "streamed_args_for_tool out of sync: "
+                        "index=%d len=%d",
+                        self.current_tool_index,
+                        len(self.streamed_args_for_tool),
+                    )
 
                 result = DeltaMessage(
                     tool_calls=[
@@ -702,6 +714,13 @@ class Qwen3CoderToolParser(ToolParser):
                             self.streamed_args_for_tool[
                                 self.current_tool_index
                             ] += json_fragment
+                        else:
+                            logger.warning(
+                                "streamed_args_for_tool out of sync: "
+                                "index=%d len=%d",
+                                self.current_tool_index,
+                                len(self.streamed_args_for_tool),
+                            )
 
                         return DeltaMessage(
                             tool_calls=[
