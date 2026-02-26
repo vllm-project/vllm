@@ -132,8 +132,10 @@ ENV UV_LINK_MODE=copy
 # Verify GCC version
 RUN gcc --version
 
-# Ensure CUDA compatibility library is loaded
-RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+# Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'
+# Only needed for datacenter/professional GPUs with older drivers.
+# See: https://docs.nvidia.com/deploy/cuda-compatibility/
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
@@ -320,7 +322,7 @@ WORKDIR /workspace
 
 # Build DeepGEMM wheel
 # Default moved here from tools/install_deepgemm.sh for centralized version management
-ARG DEEPGEMM_GIT_REF=594953acce41793ae00a1233eb516044d604bcb6
+ARG DEEPGEMM_GIT_REF=477618cd51baffca09c4b0b87e97c03fe827ef03
 COPY tools/install_deepgemm.sh /tmp/install_deepgemm.sh
 RUN --mount=type=cache,target=/root/.cache/uv \
     mkdir -p /tmp/deepgemm/dist && \
@@ -560,8 +562,10 @@ ENV UV_HTTP_TIMEOUT=500
 ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 
-# Ensure CUDA compatibility library is loaded
-RUN echo "/usr/local/cuda-$(echo "$CUDA_VERSION" | cut -d. -f1,2)/compat/" > /etc/ld.so.conf.d/cuda-compat.conf && ldconfig
+# Enable CUDA forward compatibility by setting '-e VLLM_ENABLE_CUDA_COMPATIBILITY=1'
+# Only needed for datacenter/professional GPUs with older drivers.
+# See: https://docs.nvidia.com/deploy/cuda-compatibility/
+ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 
 # ============================================================
 # SLOW-CHANGING DEPENDENCIES BELOW
@@ -582,7 +586,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # This is ~1.1GB and only changes when FlashInfer version bumps
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.2
+ARG FLASHINFER_VERSION=0.6.4
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
     && uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \

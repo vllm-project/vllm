@@ -4,11 +4,12 @@
 import enum
 import time
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Literal
 
 import msgspec
 import numpy as np
 import torch
+from typing_extensions import deprecated
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -17,6 +18,12 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
+
+# Type for pause_generation mode parameter.
+# - "abort": Abort all in-flight requests immediately (default).
+# - "wait": Wait for in-flight requests to complete before pausing.
+# - "keep": Freeze requests in queue; they resume on resume_generation().
+PauseMode = Literal["abort", "wait", "keep"]
 
 # These are possible values of RequestOutput.finish_reason,
 # so form part of the external API.
@@ -57,7 +64,6 @@ class EngineCoreRequest(
     mm_features: list[MultiModalFeatureSpec] | None
     sampling_params: SamplingParams | None
     pooling_params: PoolingParams | None
-    eos_token_id: int | None
     arrival_time: float
     lora_request: LoRARequest | None
     cache_salt: str | None
@@ -92,6 +98,17 @@ class EngineCoreRequest(
             return self.sampling_params
         assert self.pooling_params is not None
         return self.pooling_params
+
+    @property
+    @deprecated(
+        "EngineCoreRequest.eos_token_id will be removed in v0.18. "
+        "Please use EngineCoreRequest.sampling_params.eos_token_id instead."
+    )
+    def eos_token_id(self) -> int | None:
+        if self.sampling_params is None:
+            return None
+
+        return self.sampling_params.eos_token_id
 
 
 class EngineCoreEventType(enum.IntEnum):
