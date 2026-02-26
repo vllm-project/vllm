@@ -35,7 +35,7 @@ repos:
   hooks:
   - id: actionlint
 - repo: https://github.com/astral-sh/uv-pre-commit
-  rev: 0.9.3
+  rev: 0.9.5
   hooks:
     - id: pip-compile
       args: [requirements/test.in, -o, requirements/test.txt, --index-strategy, unsafe-best-match, --torch-backend, cu130, --python-platform, x86_64-manylinux_2_28, --python-version, "3.12"]
