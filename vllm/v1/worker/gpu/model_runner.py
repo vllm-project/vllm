@@ -38,6 +38,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -487,7 +488,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # keep per-step metadata aligned with the captured full-graph shape.
-        attn_num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
+        uniform_decode_query_len = self.cudagraph_manager.uniform_decode_query_len
+        query_lens = (
+            query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+        )
+        if (
+            self.cudagraph_manager.cudagraph_mode.separate_routine()
+            and self.cudagraph_manager.cudagraph_mode.decode_mode()
+            == CUDAGraphMode.FULL
+            and num_reqs > 0
+            and bool(torch.all(query_lens == uniform_decode_query_len))
+        ):
+            attn_num_reqs = min(
+                cdiv(num_tokens_after_padding, uniform_decode_query_len),
+                self.max_num_reqs,
+            )
+        else:
+            attn_num_reqs = min(num_tokens_after_padding, self.max_num_reqs)
         attn_num_tokens = num_tokens_after_padding
         if attn_num_reqs > num_reqs:
             # fill 0 for padded block-table rows.
