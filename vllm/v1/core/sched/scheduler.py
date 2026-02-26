@@ -797,8 +797,8 @@ class Scheduler(SchedulerInterface):
                 # Count the number of prefix cached tokens.
                 if request.num_cached_tokens < 0:
                     request.num_cached_tokens = num_computed_tokens
-                if request.num_external_computed_tokens < 0:
-                    request.num_external_computed_tokens = num_external_computed_tokens
+                if request.num_external_cached_tokens < 0:
+                    request.num_external_cached_tokens = num_external_computed_tokens
                 # Encoder-related.
                 if encoder_inputs_to_schedule:
                     scheduled_encoder_inputs[request_id] = encoder_inputs_to_schedule
