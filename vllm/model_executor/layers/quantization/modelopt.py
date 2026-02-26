@@ -603,13 +603,14 @@ class ModelOptFp8PbWoLinearMethod(LinearMethodBase):
 
     def __init__(self, quant_config: ModelOptFp8Config) -> None:
         self.quant_config = quant_config
+        block_n, block_k = self._WEIGHT_BLOCK_SIZE
         self.weight_block_size = list(self._WEIGHT_BLOCK_SIZE)
 
         activation_quant_key = create_fp8_quant_key(
-            static=False, group_shape=GroupShape(1, self.weight_block_size[0])
+            static=False, group_shape=GroupShape(1, block_k)
         )
         weight_quant_key = create_fp8_quant_key(
-            static=True, group_shape=GroupShape(*self.weight_block_size)
+            static=True, group_shape=GroupShape(block_n, block_k)
         )
         self.w8a8_block_fp8_linear = init_fp8_linear_kernel(
             weight_quant_key=weight_quant_key,
