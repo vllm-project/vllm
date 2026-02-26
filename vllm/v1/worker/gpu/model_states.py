@@ -73,5 +73,7 @@ class ModelState:
         num_reqs: int,
         num_tokens: int,
     ) -> dict[str, torch.Tensor | None]:
+        if not self.uses_mrope:
+            return {}
         mrope_positions = self.mrope_states.mrope_positions[:, :num_tokens]
         return {"positions": mrope_positions}
