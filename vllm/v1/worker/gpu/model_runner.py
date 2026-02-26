@@ -190,7 +190,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        self.model_state = ModelState(self.vllm_config, self.device)
+        self.model_state = ModelState(self.vllm_config, self.model, self.device)
         self.sampler = Sampler(
             max_num_reqs=self.max_num_reqs,
             vocab_size=self.vocab_size,
@@ -262,7 +262,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.speculator is not None:
             prepare_communication_buffer_for_model(self.speculator)
 
-        self.model_state.set_model(self.model)
+        # Initialize the components that require the model.
+        self.model_state = ModelState(self.vllm_config, self.model, self.device)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -917,14 +918,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             "input_ids": input_batch.input_ids,
             "positions": input_batch.positions,
             "inputs_embeds": input_batch.inputs_embeds,
+            # NOTE: Values returned by `prepare_inputs` will override the default
+            # values above.
+            **self.model_state.prepare_inputs(input_batch, self.req_states),
         }
-        extra_model_inputs = self.model_state.prepare_inputs(
-            input_batch, self.req_states
-        )
-        # NOTE: We should use `.update()` to enable overriding the default inputs.
-        model_inputs.update(extra_model_inputs)
-        # Update for non-first PP ranks.
         if not self.is_first_pp_rank:
+            # Update for non-first PP ranks.
             model_inputs["input_ids"] = None
             model_inputs["inputs_embeds"] = None
             model_inputs["intermediate_tensors"] = intermediate_tensors
