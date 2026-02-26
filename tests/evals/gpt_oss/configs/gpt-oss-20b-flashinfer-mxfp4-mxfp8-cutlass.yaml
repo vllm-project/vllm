@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+model_name: "openai/gpt-oss-20b"
+metric_threshold: 0.568
+reasoning_effort: "low"
+server_args: "--tensor-parallel-size 2"
+env:
+  VLLM_USE_FLASHINFER_MOE_MXFP4_MXFP8_CUTLASS: "1"

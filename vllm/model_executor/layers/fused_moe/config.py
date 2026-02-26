@@ -243,6 +243,10 @@ class FusedMoEQuantConfig:
         return self._a1.dtype
 
     @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return self._w1.dtype
+
+    @property
     def is_quantized(self) -> bool:
         return self.quant_dtype is not None
 
