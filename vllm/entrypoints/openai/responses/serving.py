@@ -8,7 +8,6 @@ from collections import deque
 from collections.abc import AsyncGenerator, AsyncIterator, Callable, Sequence
 from contextlib import AsyncExitStack
 from copy import copy
-from dataclasses import replace
 from http import HTTPStatus
 from typing import Final
 
@@ -40,6 +39,7 @@ from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import TypeAdapter
 
 from vllm import envs
+from vllm.config.utils import replace
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -89,7 +89,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
-    HarmonyStreamingState,
+    StreamingState,
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
@@ -1591,7 +1591,7 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        state = HarmonyStreamingState()
+        state = StreamingState()
 
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)

@@ -11,6 +11,7 @@ from transformers import (
     AutoImageProcessor,
     AutoProcessor,
     AutoVideoProcessor,
+    processing_utils,
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
@@ -27,6 +28,55 @@ logger = init_logger(__name__)
 
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+
+
+def _transformers_v4_compatibility_import():
+    """Some remote code processors still import `ChatTemplateLoadKwargs` which was a
+    subset of `ProcessorChatTemplateKwargs` as defined in Transformers v4.
+    In Transformers v5 these were merged into `ProcessorChatTemplateKwargs` and
+    `ChatTemplateLoadKwargs` was removed. For backward compatibility, we add an alias
+    for `ChatTemplateLoadKwargs` if it doesn't exist.
+
+    This can be removed if `HCXVisionForCausalLM` is upstreamed to Transformers."""
+    old_import = getattr(processing_utils, "ChatTemplateLoadKwargs", None)
+    new_import = getattr(processing_utils, "ProcessorChatTemplateKwargs", None)
+    if old_import is None and new_import is not None:
+        processing_utils.ChatTemplateLoadKwargs = new_import
+
+
+def _transformers_v4_compatibility_init() -> Any:
+    """Some remote code processors may define `optional_attributes` in their
+    `ProcessorMixin` subclass, and then pass these arbitrary attributes directly to
+    `ProcessorMixin.__init__`, which is no longer allowed in Transformers v5. For
+    backward compatibility, we intercept these optional attributes and set them on the
+    processor instance before calling the original `ProcessorMixin.__init__`.
+
+    This can be removed if `Molmo2ForConditionalGeneration` is upstreamed to
+    Transformers."""
+    # Transformers v4
+    if hasattr(ProcessorMixin, "optional_attributes"):
+        return
+    # Transformers v5
+    if hasattr(ProcessorMixin.__init__, "_vllm_patched"):
+        return
+
+    original_init = ProcessorMixin.__init__
+
+    def __init__(self, *args, **kwargs):
+        for optional_attribute in getattr(self, "optional_attributes", []):
+            if optional_attribute in kwargs:
+                setattr(self, optional_attribute, kwargs.pop(optional_attribute))
+
+        original_init(self, *args, **kwargs)
+
+    # Only patch if ProcessorMixin is not mocked (for docs builds)
+    if not hasattr(ProcessorMixin, "_mock_name"):
+        __init__._vllm_patched = True  # type: ignore[attr-defined]
+        ProcessorMixin.__init__ = __init__
+
+
+_transformers_v4_compatibility_import()
+_transformers_v4_compatibility_init()
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
