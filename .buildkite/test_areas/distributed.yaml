@@ -104,7 +104,6 @@ steps:
   # NEW rlhf examples
   - cd new_weight_syncing
   - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf.py
-  - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 rlhf_async_new_apis.py
 
 - label: Distributed Tests (8 GPUs)(H100)
   timeout_in_minutes: 10
@@ -146,6 +145,7 @@ steps:
   num_devices: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+    - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/offline_inference/new_weight_syncing/rlhf_async_new_apis.py
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
@@ -209,7 +209,7 @@ steps:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
-- label: Pipeline + Context Parallelism (4 GPUs))
+- label: Pipeline + Context Parallelism (4 GPUs)
   timeout_in_minutes: 60
   working_dir: "/vllm-workspace/tests"
   num_devices: 4

@@ -384,8 +384,11 @@ class DefaultMoERunner(MoERunner):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         # For latent MoE: save ORIGINAL hidden_states before transform
         # (shared_experts need original dimension, routed experts use transformed)
-        original_hidden_states = hidden_states
-        original_hidden_dim = hidden_states.shape[-1]
+        if self.shared_experts is not None:
+            original_hidden_states = hidden_states
+            original_hidden_dim = hidden_states.shape[-1]
+        else:
+            original_hidden_states = None
 
         # Apply transform for routed experts (e.g., latent projection for latent MoE)
         hidden_states = self.apply_routed_input_transform(hidden_states)
@@ -407,7 +410,7 @@ class DefaultMoERunner(MoERunner):
             self._encode_layer_name(),
         )
 
-        if isinstance(fused_output, tuple):
+        if self.shared_experts is not None:
             orig_hidden_dims = [original_hidden_dim, transformed_hidden_dim]
         else:
             orig_hidden_dims = [transformed_hidden_dim]
