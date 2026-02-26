@@ -28,7 +28,7 @@ AITER_MODEL_LIST = [
 MODEL_NAME = "openai/gpt-oss-120b"
 
 # Thresholds (±90%) - relaxed for CI variance (TTFT can vary significantly)
-THRESHOLD = 0.90
+THRESHOLD = 0.20
 
 
 @pytest.fixture(scope="module")
