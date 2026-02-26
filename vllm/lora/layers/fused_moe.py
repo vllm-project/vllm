@@ -83,11 +83,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ):
         if envs.VLLM_TUNED_CONFIG_FOLDER:
             hidden_size = layer.hidden_size
-            intermediate_size = (
-                self.w2_lora_a_stacked[0].shape[-1]
-                if op_prefix == "w2"
-                else self.w13_lora_b_stacked[0].shape[-2]
-            )
+            intermediate_size = layer.intermediate_size_per_partition
             shrink_config = get_lora_op_configs(
                 op_type=f"fused_moe_lora_{op_prefix}_shrink",
                 max_loras=num_loras,
