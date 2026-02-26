@@ -221,8 +221,6 @@ def _get_backend_priorities(
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import rocm_aiter_ops
 
-    # TODO (Sage) Should we fallback to dense MLA if this backend fails validation or
-    # just crash?
     if use_sparse:
         return [AttentionBackendEnum.ROCM_AITER_MLA_SPARSE]
 
