@@ -35,6 +35,7 @@ class MedusaProposer:
         self.max_num_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         self.hidden_size = self.spec_config.draft_model_config.get_hidden_size()
         self.dtype = vllm_config.model_config.dtype
+        self.num_speculative_tokens = None
 
     def propose(
         self,

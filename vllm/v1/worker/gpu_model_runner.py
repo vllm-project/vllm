@@ -159,6 +159,7 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import RejectionSampler
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.draft_model import DraftModelProposer
+from vllm.v1.spec_decode.dynamic.manager import DynamicSpeculativeDecodingManager
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -531,6 +532,15 @@ class GPUModelRunner(
                 self.effective_drafter_max_model_len = draft_config.max_model_len
             else:
                 self.effective_drafter_max_model_len = self.max_model_len
+
+            # setup Dynamic Speculative Decoding
+            self.dynamic_sd_manager: DynamicSpeculativeDecodingManager | None = None
+            if self.speculative_config.dynamic_config:
+                self.dynamic_sd_manager = DynamicSpeculativeDecodingManager(
+                    self.speculative_config.dynamic_config,
+                    self.vllm_config.scheduler_config.max_num_seqs,
+                    self.speculative_config.num_speculative_tokens,
+                )
 
         # Request states.
         self.requests: dict[str, CachedRequestState] = {}
@@ -4000,6 +4010,13 @@ class GPUModelRunner(
         common_attn_metadata: CommonAttentionMetadata,
         slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None,
     ) -> list[list[int]] | torch.Tensor:
+        optimal_num_speculative_tokens = None
+        if self.dynamic_sd_manager:
+            optimal_num_speculative_tokens = self.dynamic_sd_manager.step(
+                scheduler_output.spec_decoding_stats_all,
+                self.input_batch.num_reqs,
+            )
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         spec_config = self.speculative_config
         assert spec_config is not None
@@ -4009,6 +4026,7 @@ class GPUModelRunner(
             assert isinstance(sampled_token_ids, list)
             assert isinstance(self.drafter, NgramProposer)
             draft_token_ids = self.drafter.propose(
+                optimal_num_speculative_tokens,
                 sampled_token_ids,
                 self.input_batch.num_tokens_no_spec,
                 self.input_batch.token_ids_cpu,
@@ -4146,6 +4164,7 @@ class GPUModelRunner(
                 mm_embed_inputs = None
 
             draft_token_ids = self.drafter.propose(
+                optimal_num_speculative_tokens=optimal_num_speculative_tokens,
                 target_token_ids=target_token_ids,
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
