@@ -108,10 +108,9 @@ class VideoLoader:
         max_frame_idx = frame_indices[-1] if frame_indices else 0
 
         # Build map: target_idx -> next_target_idx (for recovery window)
-        next_target_map: dict[int, int] = {}
-        for k in range(len(frame_indices) - 1):
-            next_target_map[frame_indices[k]] = frame_indices[k + 1]
-        next_target_map[frame_indices[-1]] = total_frames
+        next_target_map = dict(
+            zip(frame_indices, [*frame_indices[1:], total_frames])
+        )
 
         frames_list: list[npt.NDArray] = []
         valid_frame_indices: list[int] = []
