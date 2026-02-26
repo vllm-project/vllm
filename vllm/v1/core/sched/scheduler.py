@@ -1261,6 +1261,8 @@ class Scheduler(SchedulerInterface):
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
         sampled_token_ids = model_runner_output.sampled_token_ids
+        sampled_token_ids_np = model_runner_output.sampled_token_ids_np
+        num_generated_tokens = model_runner_output.num_generated_tokens
         logprobs = model_runner_output.logprobs
         prompt_logprobs_dict = model_runner_output.prompt_logprobs_dict
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
@@ -1314,16 +1316,30 @@ class Scheduler(SchedulerInterface):
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
-            generated_token_ids = (
-                sampled_token_ids[req_index] if sampled_token_ids else []
-            )
+            if sampled_token_ids_np is not None:
+                num_generated = (
+                    int(num_generated_tokens[req_index])
+                    if num_generated_tokens is not None
+                    else sampled_token_ids_np.shape[1]
+                )
+                generated_token_ids = (
+                    sampled_token_ids_np[req_index, :num_generated]
+                    if num_generated > 0
+                    else []
+                )
+            else:
+                # compatibility path for callers that still materialize Python lists.
+                generated_token_ids = (
+                    sampled_token_ids[req_index] if sampled_token_ids else []
+                )
+                num_generated = len(generated_token_ids)
 
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            if scheduled_spec_token_ids and generated_token_ids:
+            if scheduled_spec_token_ids and num_generated > 0:
                 num_draft_tokens = len(scheduled_spec_token_ids)
-                num_accepted = len(generated_token_ids) - 1
+                num_accepted = num_generated - 1
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
@@ -1346,13 +1362,17 @@ class Scheduler(SchedulerInterface):
 
             stopped = False
             new_logprobs = None
-            new_token_ids = generated_token_ids
+            new_token_ids = (
+                generated_token_ids.tolist()
+                if sampled_token_ids_np is not None and num_generated > 0
+                else generated_token_ids
+            )
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
             status_before_stop = request.status
 
             # Check for stop and update request status.
-            if new_token_ids:
+            if num_generated > 0:
                 new_token_ids, stopped = self._update_request_with_output(
                     request, new_token_ids
                 )

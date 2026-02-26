@@ -49,15 +49,9 @@ class AsyncOutput(AsyncModelRunnerOutput):
     def get_output(self) -> ModelRunnerOutput:
         self.copy_event.synchronize()
 
-        # NOTE(woosuk): The following code is to ensure compatibility with
-        # the existing model runner.
-        # Going forward, we should keep the data structures as NumPy arrays
-        # rather than Python lists.
-        sampled_token_ids: list[list[int]] = self.sampled_token_ids.tolist()
-        num_sampled_tokens: list[int] = self.num_sampled_tokens_np.tolist()
-        for token_ids, num_tokens in zip(sampled_token_ids, num_sampled_tokens):
-            del token_ids[num_tokens:]
-        self.model_runner_output.sampled_token_ids = sampled_token_ids
+        self.model_runner_output.sampled_token_ids_np = self.sampled_token_ids
+        self.model_runner_output.num_generated_tokens = self.num_sampled_tokens_np
+        self.model_runner_output.sampled_token_ids = None
 
         if self.num_nans is not None:
             self.model_runner_output.num_nans_in_logits = dict(
