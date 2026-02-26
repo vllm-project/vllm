@@ -429,15 +429,6 @@ class VllmConfig:
         return hash_str
 
     @property
-    def num_speculative_tokens(self) -> int:
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.num_speculative_tokens is not None
-        ):
-            return self.speculative_config.num_speculative_tokens
-        return 0
-
-    @property
     def needs_dp_coordinator(self) -> bool:
         """
         Determine if the DPCoordinator process is needed.

@@ -118,7 +118,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
-from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
@@ -1855,9 +1854,7 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(
-                builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
-            ):
+            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
@@ -4732,7 +4729,7 @@ class GPUModelRunner(
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
-        assert num_tokens <= self.max_num_tokens
+        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
             assert not uniform_decode
@@ -4856,7 +4853,6 @@ class GPUModelRunner(
                     ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
                     for_cudagraph_capture=is_graph_capturing,
                     slot_mappings=slot_mappings_by_group,
-                    use_spec_decode=self.speculative_config is not None,
                 )
 
         with self.maybe_dummy_run_with_lora(

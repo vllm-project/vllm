@@ -36,7 +36,6 @@ MTPModelTypes = Literal[
     "glm4_moe_lite_mtp",
     "glm_ocr_mtp",
     "ernie_mtp",
-    "nemotron_h_mtp",
     "exaone_moe_mtp",
     "qwen3_next_mtp",
     "qwen3_5_mtp",
@@ -256,19 +255,6 @@ class SpeculativeConfig:
                 {"n_predict": n_predict, "architectures": ["ErnieMTPModel"]}
             )
 
-        if (
-            hf_config.model_type == "nemotron_h"
-            and hasattr(hf_config, "num_nextn_predict_layers")
-            and hf_config.num_nextn_predict_layers > 0
-        ):
-            # Check if this is an MTP variant
-            hf_config.model_type = "nemotron_h_mtp"
-        if hf_config.model_type == "nemotron_h_mtp":
-            n_predict = getattr(hf_config, "num_nextn_predict_layers", 1)
-            hf_config.update(
-                {"n_predict": n_predict, "architectures": ["NemotronHMTPModel"]}
-            )
-
         if hf_config.model_type == "qwen3_next":
             hf_config.model_type = "qwen3_next_mtp"
         if hf_config.model_type == "qwen3_next_mtp":
@@ -339,7 +325,7 @@ class SpeculativeConfig:
                 if self.target_model_config is None:
                     raise ValueError("target_model_config must be present for mtp")
                 if self.target_model_config.hf_text_config.model_type == "deepseek_v32":
-                    # FIXME(luccafong): cudagraph with v32 MTP is not supported,
+                    # FIXME(luccafong): cudgraph with v32 MTP is not supported,
                     # remove this when the issue is fixed.
                     self.enforce_eager = True
                 # use the draft model from the same model:
@@ -441,7 +427,7 @@ class SpeculativeConfig:
                     self.method = "mtp"
                     if self.num_speculative_tokens > 1:
                         logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run "
+                            "Enabling num_speculative_tokens > 1 will run"
                             "multiple times of forward on same MTP layer"
                             ",which may result in lower acceptance rate"
                         )
@@ -726,7 +712,6 @@ class SpeculativeConfig:
             "hunyuan_vl",
             "hunyuan_v1_dense",
             "afmoe",
-            "nemotron_h",
         ]
         if (
             self.method == "eagle3"
