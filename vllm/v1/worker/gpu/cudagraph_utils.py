@@ -112,19 +112,15 @@ class CudaGraphManager:
             )
         else:
             num_reqs = min(num_tokens, self.max_num_reqs)
-        input_ids = input_buffers.input_ids[:num_tokens]
-        positions = input_buffers.positions[:num_tokens]
-        if inputs_embeds is not None:
-            inputs_embeds = inputs_embeds[:num_tokens]
 
         model_inputs = {
-            "input_ids": input_ids,
-            "positions": positions,
-            "inputs_embeds": inputs_embeds,
+            "input_ids": input_buffers.input_ids[:num_tokens],
+            "positions": input_buffers.positions[:num_tokens],
+            "inputs_embeds": (
+                inputs_embeds[:num_tokens] if inputs_embeds is not None else None
+            ),
         }
-        extra_model_inputs = model_state.create_dummy_inputs_for_capture(
-            num_reqs, num_tokens
-        )
+        extra_model_inputs = model_state.create_dummy_inputs(num_reqs, num_tokens)
         model_inputs.update(extra_model_inputs)
 
         attn_metadata, slot_mappings = prepare_inputs_to_capture(

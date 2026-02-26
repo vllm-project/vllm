@@ -68,10 +68,8 @@ class ModelState:
         ]
         return {"positions": mrope_positions}
 
-    def create_dummy_inputs_for_capture(
-        self,
-        num_reqs: int,
-        num_tokens: int,
+    def create_dummy_inputs(
+        self, num_reqs: int, num_tokens: int
     ) -> dict[str, torch.Tensor | None]:
         if not self.uses_mrope:
             return {}
