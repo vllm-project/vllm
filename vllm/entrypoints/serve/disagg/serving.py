@@ -127,7 +127,6 @@ class ServingTokens(OpenAIServing):
                 cache_salt=request.cache_salt,
             )
         else:
-            # Text-only: existing path
             engine_prompts = await self._preprocess_completion(
                 request,
                 prompt_input=request.token_ids,
