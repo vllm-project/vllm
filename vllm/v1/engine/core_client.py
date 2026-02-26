@@ -135,7 +135,7 @@ class EngineCoreClient(ABC):
     def add_request(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    def profile(self, is_start: bool = True) -> None:
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None, delay: int = 0) -> None:
         raise NotImplementedError
 
     def reset_mm_cache(self) -> None:
@@ -210,7 +210,10 @@ class EngineCoreClient(ABC):
     async def add_request_async(self, request: EngineCoreRequest) -> None:
         raise NotImplementedError
 
-    async def profile_async(self, is_start: bool = True) -> None:
+    async def profile_async(
+        self, is_start: bool = True, profile_prefix: str | None = None,
+        delay: int = 0,
+    ) -> None:
         raise NotImplementedError
 
     async def reset_mm_cache_async(self) -> None:
@@ -295,8 +298,8 @@ class InprocClient(EngineCoreClient):
     def shutdown(self) -> None:
         self.engine_core.shutdown()
 
-    def profile(self, is_start: bool = True) -> None:
-        self.engine_core.profile(is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None, delay: int = 0) -> None:
+        self.engine_core.profile(is_start, profile_prefix, delay=delay)
 
     def reset_mm_cache(self) -> None:
         self.engine_core.reset_mm_cache()
@@ -764,8 +767,8 @@ class SyncMPClient(MPClient):
         if request_ids and not self.resources.engine_dead:
             self._send_input(EngineCoreRequestType.ABORT, request_ids)
 
-    def profile(self, is_start: bool = True) -> None:
-        self.call_utility("profile", is_start)
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None, delay: int = 0) -> None:
+        self.call_utility("profile", is_start, profile_prefix, delay)
 
     def reset_mm_cache(self) -> None:
         self.call_utility("reset_mm_cache")
@@ -986,8 +989,11 @@ class AsyncMPClient(MPClient):
         """Resume the scheduler after a pause."""
         await self.call_utility_async("resume_scheduler")
 
-    async def profile_async(self, is_start: bool = True) -> None:
-        await self.call_utility_async("profile", is_start)
+    async def profile_async(
+        self, is_start: bool = True, profile_prefix: str | None = None,
+        delay: int = 0,
+    ) -> float | None:
+        return await self.call_utility_async("profile", is_start, profile_prefix, delay)
 
     async def reset_mm_cache_async(self) -> None:
         await self.call_utility_async("reset_mm_cache")
