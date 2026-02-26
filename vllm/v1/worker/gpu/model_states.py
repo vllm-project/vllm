@@ -49,9 +49,7 @@ class ModelState:
             self.mrope_states.apply_staged_writes()
 
     def prepare_inputs(
-        self,
-        input_batch: InputBatch,
-        req_states: RequestState,
+        self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
         if not self.uses_mrope:
             # Common case (1D positions).
@@ -69,7 +67,7 @@ class ModelState:
         ]
         return {"positions": mrope_positions}
 
-    def create_dummy_inputs(
+    def prepare_dummy_inputs(
         self, num_reqs: int, num_tokens: int
     ) -> dict[str, torch.Tensor | None]:
         if not self.uses_mrope:

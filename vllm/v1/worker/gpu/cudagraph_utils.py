@@ -120,7 +120,7 @@ class CudaGraphManager:
                 inputs_embeds[:num_tokens] if inputs_embeds is not None else None
             ),
         }
-        extra_model_inputs = model_state.create_dummy_inputs(num_reqs, num_tokens)
+        extra_model_inputs = model_state.prepare_dummy_inputs(num_reqs, num_tokens)
         model_inputs.update(extra_model_inputs)
 
         attn_metadata, slot_mappings = prepare_inputs_to_capture(
