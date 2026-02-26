@@ -13,7 +13,7 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class SpecDecodingStats:
     """Per-step iteration decoding stats from scheduler.
 

@@ -359,7 +359,7 @@ class InprocClient(EngineCoreClient):
         return False
 
 
-@dataclass
+@dataclass(slots=True)
 class BackgroundResources:
     """Used as a finalizer for clean shutdown, avoiding
     circular reference back to the client object."""
@@ -440,9 +440,12 @@ class BackgroundResources:
                     shutdown_sender.send(b"")
 
     def validate_alive(self, frames: Sequence[zmq.Frame]):
-        if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
+        if len(frames) >= 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
             self.engine_dead = True
-            raise EngineDeadError()
+            reason = None
+            if len(frames) >= 2:
+                reason = frames[1].buffer.decode("utf-8", errors="replace")
+            raise EngineDeadError(engine_dead_reason=reason)
 
 
 class MPClient(EngineCoreClient):
@@ -572,10 +575,15 @@ class MPClient(EngineCoreClient):
         self._finalizer()
 
     def _format_exception(self, e: Exception) -> Exception:
-        """If errored, use EngineDeadError so root cause is clear."""
-        return (
-            EngineDeadError(suppress_context=True) if self.resources.engine_dead else e
-        )
+        """If errored, use EngineDeadError so root cause is clear.
+        Preserve e when it is already an EngineDeadError (e.g. with
+        engine_dead_reason from the engine process).
+        """
+        if isinstance(e, EngineDeadError):
+            return e
+        if self.resources.engine_dead:
+            return EngineDeadError(suppress_context=True)
+        return e
 
     def ensure_alive(self):
         if self.resources.engine_dead:

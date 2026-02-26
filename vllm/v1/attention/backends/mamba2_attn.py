@@ -98,7 +98,7 @@ class Mamba2AttentionBackend(AttentionBackend):
         return Mamba2AttentionMetadataBuilder
 
 
-@dataclass
+@dataclass(slots=True)
 class Mamba2AttentionMetadata(BaseMambaAttentionMetadata):
     prep_initial_states: bool = False
     chunk_size: int = 0

@@ -95,7 +95,7 @@ class StructuredOutputGrammar(ABC):
         """
 
 
-@dataclass
+@dataclass(slots=True)
 class StructuredOutputBackend(ABC):
     """Engine-level backend for structured output requests."""
 

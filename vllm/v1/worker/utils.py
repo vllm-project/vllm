@@ -19,7 +19,7 @@ from vllm.v1.kv_cache_interface import KVCacheGroupSpec, KVCacheSpec
 logger = init_logger(__name__)
 
 
-@dataclass
+@dataclass(slots=True)
 class AttentionGroup:
     backend: type[AttentionBackend]
     layer_names: list[str]

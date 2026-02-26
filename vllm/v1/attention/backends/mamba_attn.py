@@ -25,7 +25,7 @@ from vllm.v1.kv_cache_interface import AttentionSpec, MambaSpec
 M = TypeVar("M", bound="BaseMambaAttentionMetadata")
 
 
-@dataclass
+@dataclass(slots=True)
 class BaseMambaAttentionMetadata:
     num_prefills: int
     num_prefill_tokens: int

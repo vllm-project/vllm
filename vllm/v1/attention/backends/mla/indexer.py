@@ -62,7 +62,7 @@ class DeepseekV32IndexerBackend(AttentionBackend):
         return (0, 1, 2)
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepseekV32IndexerPrefillChunkMetadata:
     block_table: torch.Tensor
     cu_seqlen_ks: torch.Tensor
@@ -75,12 +75,12 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     num_reqs: int
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepseekV32IndexerPrefillMetadata:
     chunks: list[DeepseekV32IndexerPrefillChunkMetadata]
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepSeekV32IndexerDecodeMetadata:
     block_table: torch.Tensor
     seq_lens: torch.Tensor
@@ -91,7 +91,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     offsets: torch.Tensor | None  # Precomputed offsets for speculative decoding
 
 
-@dataclass
+@dataclass(slots=True)
 class DeepseekV32IndexerMetadata:
     # FIXME (zyongye)
     # hacky way to access the data now, need to be in chunked meta

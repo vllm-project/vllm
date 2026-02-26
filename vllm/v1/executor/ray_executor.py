@@ -45,7 +45,7 @@ COMPLETED_NONE_FUTURE: Future[ModelRunnerOutput | None] = Future()
 COMPLETED_NONE_FUTURE.set_result(None)
 
 
-@dataclass
+@dataclass(slots=True)
 class RayWorkerMetaData:
     """
     Metadata for a Ray worker.

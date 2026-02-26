@@ -25,7 +25,7 @@ logger = init_logger(__name__)
 NONES = itertools.repeat(None)
 
 
-@dataclass
+@dataclass(slots=True)
 class LogprobsProcessor:
     # Tokenizer for this request,
     # None if detokenization is disabled.

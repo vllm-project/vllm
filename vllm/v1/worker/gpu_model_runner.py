@@ -6320,7 +6320,7 @@ class GPUModelRunner(
                     stats.num_encoder_calls += 1
 
 
-@dataclass
+@dataclass(slots=True)
 class EncoderTimingStats:
     """Per-request timing statistics for encoder forward pass."""
 

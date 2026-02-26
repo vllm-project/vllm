@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # Datastructures defining a GPU input batch
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import cast
 
 import numpy as np
@@ -26,7 +26,7 @@ from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
 
 
-@dataclass
+@dataclass(slots=True)
 class CachedRequestState:
     req_id: str
     prompt_token_ids: list[int] | None
@@ -53,9 +53,15 @@ class CachedRequestState:
     pooling_params: PoolingParams | None = None
     pooling_states: PoolingStates | None = None
 
+    num_prompt_tokens: int = field(init=False)
+
     def __post_init__(self):
-        self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
-            self.prompt_token_ids, self.prompt_embeds
+        object.__setattr__(
+            self,
+            "num_prompt_tokens",
+            length_from_prompt_token_ids_or_embeds(
+                self.prompt_token_ids, self.prompt_embeds
+            ),
         )
 
         if self.pooling_params is not None:

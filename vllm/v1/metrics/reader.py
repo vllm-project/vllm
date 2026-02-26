@@ -8,7 +8,7 @@ from prometheus_client import Metric as PromMetric
 from prometheus_client.samples import Sample
 
 
-@dataclass
+@dataclass(slots=True)
 class Metric:
     """A base class for prometheus metrics.
 
@@ -21,14 +21,14 @@ class Metric:
     labels: dict[str, str]
 
 
-@dataclass
+@dataclass(slots=True)
 class Counter(Metric):
     """A monotonically increasing integer counter."""
 
     value: int
 
 
-@dataclass
+@dataclass(slots=True)
 class Vector(Metric):
     """An ordered array of integer counters.
 
@@ -39,14 +39,14 @@ class Vector(Metric):
     values: list[int]
 
 
-@dataclass
+@dataclass(slots=True)
 class Gauge(Metric):
     """A numerical value that can go up or down."""
 
     value: float
 
 
-@dataclass
+@dataclass(slots=True)
 class Histogram(Metric):
     """Observations recorded in configurable buckets.
 

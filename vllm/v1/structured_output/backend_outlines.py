@@ -8,7 +8,7 @@ import importlib
 import json
 import sys
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from regex import escape as regex_escape
@@ -47,8 +47,11 @@ else:
     import sre_parse
 
 
-@dataclass
+@dataclass(slots=True)
 class OutlinesBackend(StructuredOutputBackend):
+    vocabulary: OutlinesVocabulary = field(init=False)
+    cache: dict[str, Any] = field(init=False)
+
     def __post_init__(self):
         self.vocabulary = get_outlines_vocabulary(self.tokenizer)
         self.cache = get_outlines_cache()
@@ -103,7 +106,7 @@ class OutlinesBackend(StructuredOutputBackend):
         pass
 
 
-@dataclass
+@dataclass(slots=True)
 class OutlinesGrammar(StructuredOutputGrammar):
     vocab_size: int
     guide: oc.Guide = field(hash=False)

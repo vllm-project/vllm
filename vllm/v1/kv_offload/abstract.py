@@ -50,14 +50,14 @@ class LoadStoreSpec(ABC):
         pass
 
 
-@dataclass
+@dataclass(slots=True)
 class PrepareStoreOutput:
     block_hashes_to_store: list[BlockHash]
     store_spec: LoadStoreSpec
     block_hashes_evicted: list[BlockHash]
 
 
-@dataclass
+@dataclass(slots=True)
 class OffloadingEvent:
     block_hashes: list[BlockHash]
     block_size: int

@@ -133,7 +133,7 @@ class FlashMLASparseBackend(AttentionBackend):
             return (num_blocks, block_size, head_size)
 
 
-@dataclass
+@dataclass(slots=True)
 class FlashMLASparseMetadata(AttentionMetadata):
     num_reqs: int
     max_query_len: int
@@ -148,20 +148,20 @@ class FlashMLASparseMetadata(AttentionMetadata):
     block_size: int = 64
     topk_tokens: int = 2048
 
-    @dataclass
+    @dataclass(slots=True)
     class FP8KernelMetadata:
         scheduler_metadata: FlashMLASchedMeta
         dummy_block_table: torch.Tensor
         cache_lens: torch.Tensor
 
-    @dataclass
+    @dataclass(slots=True)
     class FP8SeparatePrefillDecode:
-        @dataclass
+        @dataclass(slots=True)
         class Decode:
             kernel_metadata: "FlashMLASparseMetadata.FP8KernelMetadata"
             decode_query_len: int  # needed for reshape in spec decode
 
-        @dataclass
+        @dataclass(slots=True)
         class Prefill:
             # Sequence lengths (context + query) for prefill requests
             # Shape: [num_prefill_reqs]
@@ -178,7 +178,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
             # offsets in convert_logical_index_to_physical_index
             workspace_starts: torch.Tensor
 
-            @dataclass
+            @dataclass(slots=True)
             class Chunk:
                 """Metadata for a chunk of prefill requests.
 
