@@ -36,6 +36,7 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
+DCPCommBackend = Literal["ag_rs", "a2a"]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -257,7 +258,7 @@ class ParallelConfig:
     and will be deprecated when PCP is fully supported.
 
     """
-    dcp_comm_backend: str = "ag_rs"
+    dcp_comm_backend: DCPCommBackend = "ag_rs"
     """Communication backend for Decode Context Parallel (DCP).
     - "ag_rs": AllGather + ReduceScatter (default, existing behavior)
     - "a2a": All-to-All exchange of partial outputs + LSE, then
@@ -363,11 +364,6 @@ class ParallelConfig:
                 f"dcp_size={self.decode_context_parallel_size}."
             )
 
-        if self.dcp_comm_backend not in ("ag_rs", "a2a"):
-            raise ValueError(
-                f"dcp_comm_backend must be one of 'ag_rs' or 'a2a', "
-                f"got '{self.dcp_comm_backend}'."
-            )
         if self.dcp_comm_backend == "a2a" and self.decode_context_parallel_size <= 1:
             raise ValueError(
                 "dcp_comm_backend='a2a' requires decode_context_parallel_size > 1."
