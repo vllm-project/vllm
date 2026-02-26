@@ -558,8 +558,7 @@ class Qwen3ASRForConditionalGeneration(
         )
         if to_language is None:
             prompt = (
-                f"<|im_start|>user\n{user_content}<|im_end|>\n"
-                f"<|im_start|>assistant\n"
+                f"<|im_start|>user\n{user_content}<|im_end|>\n<|im_start|>assistant\n"
             )
         else:
             prompt = (
