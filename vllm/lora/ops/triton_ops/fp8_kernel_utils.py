@@ -36,9 +36,6 @@ def _accumulate_mm(
         group_k: Block size for K dimension in block-wise quantization
         group_n: Block size for N dimension in block-wise quantization
         use_fp8_w8a8: Whether using FP8 W8A8 quantization
-
-    Returns:
-        tl.tensor: Updated accumulator
     """
 
     if use_fp8_w8a8:
