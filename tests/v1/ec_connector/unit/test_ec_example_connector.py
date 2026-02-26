@@ -175,7 +175,7 @@ class TestCacheExistence:
     def test_has_cache_item_none_exist(
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
-        """Test has_caches returns False when no caches exist."""
+        """Test has_cache_item returns False when no caches exist."""
         connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
@@ -194,7 +194,7 @@ class TestCacheExistence:
     def test_has_cache_item_partial_exist(
         self, mock_vllm_config_producer, mock_request_with_3_mm
     ):
-        """Test has_caches with some caches existing (1 of 3)."""
+        """Test has_cache_item with some caches existing (1 of 3)."""
         connector = ECExampleConnector(
             vllm_config=mock_vllm_config_producer,
             role=ECConnectorRole.SCHEDULER,
@@ -607,17 +607,3 @@ class TestEdgeCases:
         # Should raise FileNotFoundError
         with pytest.raises(FileNotFoundError):
             connector.start_load_caches(encoder_cache=encoder_cache)
-
-    def test_has_caches_empty_request(self, mock_vllm_config_producer):
-        """Test has_caches with request that has no MM data."""
-        connector = ECExampleConnector(
-            vllm_config=mock_vllm_config_producer,
-            role=ECConnectorRole.SCHEDULER,
-        )
-
-        mock_request = MockRequest("req_empty", [], [])
-
-        result = connector.has_caches(mock_request)
-
-        assert len(result) == 0
-        assert result == []
