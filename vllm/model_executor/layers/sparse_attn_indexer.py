@@ -16,7 +16,6 @@ from vllm.utils.deep_gemm import (
     fp8_paged_mqa_logits_torch,
     is_deep_gemm_supported,
 )
-from vllm.utils.import_utils import has_deep_gemm
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.mla.indexer import (
     DeepseekV32IndexerMetadata,
@@ -108,7 +107,7 @@ def sparse_attn_indexer(
                 chunk.block_table,
                 chunk.cu_seq_lens,
             )
-            if has_deep_gemm():
+            if is_deep_gemm_supported():
                 logits = fp8_mqa_logits(
                     q_fp8[chunk.token_start : chunk.token_end],
                     (k_fp8, k_scale.view(torch.float32).flatten()),
@@ -173,7 +172,7 @@ def sparse_attn_indexer(
         next_n = padded_q_fp8_decode_tokens.shape[1]
         assert batch_size == decode_metadata.seq_lens.shape[0]
         num_padded_tokens = batch_size * next_n
-        if has_deep_gemm():
+        if is_deep_gemm_supported():
             logits = fp8_paged_mqa_logits(
                 padded_q_fp8_decode_tokens,
                 kv_cache,
