@@ -13,3 +13,4 @@ Llama-4-Scout-Fp8-ModelOpt-marlin.yaml
 Llama-4-Scout-Fp8-ModelOpt-triton.yaml
 Qwen3-30B-A3B-BF16-fi-cutlass.yaml
 Qwen3-30B-A3B-BF16-triton.yaml
+LongCat-Flash-Chat-FP8.yaml
