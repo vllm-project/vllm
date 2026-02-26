@@ -2,11 +2,27 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
 
-from vllm.utils.collection_utils import swap_dict_values
+from vllm.utils.collection_utils import common_prefix, swap_dict_values
 
 
 @pytest.mark.parametrize(
-    "obj,key1,key2",
+    ("inputs", "expected_output"),
+    [
+        ([""], ""),
+        (["a"], "a"),
+        (["a", "b"], ""),
+        (["a", "ab"], "a"),
+        (["a", "ab", "b"], ""),
+        (["abc", "a", "ab"], "a"),
+        (["aba", "abc", "ab"], "ab"),
+    ],
+)
+def test_common_prefix(inputs, expected_output):
+    assert common_prefix(inputs) == expected_output
+
+
+@pytest.mark.parametrize(
+    ("obj", "key1", "key2"),
     [
         # Tests for both keys exist
         ({1: "a", 2: "b"}, 1, 2),

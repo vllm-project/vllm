@@ -161,7 +161,7 @@ def check_lora_shrink_kernel(
             data.inputs_tensor,
             data.lora_weights,
             out_tensor,
-            *lora_meta.meta_args(token_nums=token_nums),
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
             scaling,
         )
 
@@ -234,7 +234,7 @@ def check_lora_expand_kernel(
             data.inputs_tensor,
             data.lora_weights,
             out_tensor,
-            *lora_meta.meta_args(token_nums=token_nums),
+            *lora_meta.meta_args(token_nums=token_nums, specialize_active_lora=False),
             offset_start=0,
             add_inputs=add_inputs,
         )
@@ -395,6 +395,7 @@ def test_kernels(
     Tests LoRA kernels.
     """
     torch.set_default_device(device)
+    torch.cuda.set_device(device)
     set_random_seed(seed)
 
     if op_type == "shrink":
@@ -447,6 +448,7 @@ def test_kernels_hidden_size(
     Tests SGMV and LoRA kernels.
     """
     torch.set_default_device(device)
+    torch.cuda.set_device(device)
     set_random_seed(seed)
 
     if op_type == "shrink":

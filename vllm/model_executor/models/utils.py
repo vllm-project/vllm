@@ -2,13 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import itertools
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol, overload
 
 import torch
 import torch.nn as nn
-from torch.func import functional_call
+from torch.nn.modules.module import register_module_module_registration_hook
 from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
@@ -20,7 +21,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
 )
-from vllm.model_executor.model_loader.online_quantization import (
+from vllm.model_executor.model_loader.reload import (
     support_quantized_model_reload_from_hp_weights,
 )
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
@@ -30,11 +31,9 @@ from vllm.sequence import IntermediateTensors
 from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import (
     is_pin_memory_available,
-    is_uva_available,
 )
 from vllm.utils.torch_utils import (
     direct_register_custom_op,
-    get_cuda_view_from_cpu_tensor,
 )
 
 logger = init_logger(__name__)
@@ -210,8 +209,8 @@ class AutoWeightsLoader:
                     continue
 
                 raise ValueError(
-                    f"Attempted to load nested weight '{weight_qualname}' "
-                    f"into a single parameter '{base_prefix}'"
+                    f"Attempted to load nested weight {weight_qualname!r} "
+                    f"into a single parameter {base_prefix!r}"
                 )
 
             weight_loader = getattr(param, "weight_loader", default_weight_loader)
@@ -250,7 +249,7 @@ class AutoWeightsLoader:
         module: nn.Module,
         weights: Iterable[tuple[str, torch.Tensor]],
     ) -> Iterable[str]:
-        if isinstance(module, PPMissingLayer):
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             return
 
         # Avoid infinite recursion since this function is typically
@@ -312,9 +311,14 @@ class AutoWeightsLoader:
 
                     continue
 
+                desc_param_keys = {
+                    base_prefix + k for k, _ in module.named_parameters(recurse=True)
+                }
                 msg = (
-                    f"There is no module or parameter named '{prefix}' "
-                    f"in {type(self.module).__name__}"
+                    f"There is no module or parameter named {prefix!r} "
+                    f"in {self.module._get_name()}. "
+                    f"The available parameters belonging to {base_prefix} "
+                    f"({module._get_name()}) are: {desc_param_keys}"
                 )
                 raise ValueError(msg)
 
@@ -492,6 +496,100 @@ def isin_list(
     return torch.isin(elements, test_elements)
 
 
+class StageMissingLayer(nn.Module):
+    def __init__(self, stage_name: str, module: nn.Module | None = None) -> None:
+        super().__init__()
+
+        self.stage_name = stage_name
+
+        # Don't register this as a child module in order to
+        # avoid missing keys when loading weights
+        self.__dict__["module"] = module
+
+    def __getattr__(self, name: str):
+        return getattr(self.__dict__["module"], name)
+
+    def __call__(self, *args, **kwargs):
+        raise RuntimeError(f"{self} should not be called")
+
+    def extra_repr(self) -> str:
+        return f"stage_name={self.stage_name!r}"
+
+
+@contextmanager
+def collect_children(
+    module: nn.Module,
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, collect all direct child assignments to `module`,
+    returning a list of children names that is internally updated until the
+    context is exited.
+
+    If `targets` is set, instead collect descendents of `module`
+    that are an instance of `targets`, even if they aren't direct children.
+    """
+    children_names = list[str]()
+
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                children_names.append(name)
+
+        with register_module_module_registration_hook(hook):
+            yield children_names
+    else:
+        yield children_names
+
+        for name, module_ in module.named_modules():
+            if isinstance(module_, targets):
+                children_names.append(name)
+
+
+@contextmanager
+def no_init_weights(
+    module: nn.Module,
+    placeholder: Callable[[nn.Module], nn.Module],
+    *,
+    targets: type[nn.Module] | tuple[type[nn.Module], ...] | None = None,
+):
+    """
+    Within this context, prevent weight initialization from using device memory and
+    replace direct child assignments to `module` with the result of `placeholder()`.
+
+    If `targets` is set, instead prevent weight initialization and
+    replace assignments where the child is an instance of `targets`,
+    even if they aren't direct children of `module`.
+    """
+    if targets is None:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if module_ is module:
+                return placeholder(submodule)
+
+            return submodule
+
+        with register_module_module_registration_hook(hook), torch.device("meta"):
+            yield
+    else:
+
+        def hook(module_: nn.Module, name: str, submodule: nn.Module):
+            if isinstance(module_, targets):
+                submodule.to("meta")  # Free memory
+            if isinstance(submodule, targets):
+                submodule.to("meta")  # Free memory
+                return placeholder(submodule)
+
+            return submodule
+
+        # Not all descendents are targeted, so we can't use a blanket
+        # `torch.device("meta")` context
+        with register_module_module_registration_hook(hook):
+            yield
+
+
 class LayerFn(Protocol):
     def __call__(self, prefix: str) -> torch.nn.Module: ...
 
@@ -509,83 +607,6 @@ class PPMissingLayer(torch.nn.Identity):
         return args[0] if args else next(iter(kwargs.values()))
 
 
-_CPU_OFFLOAD_BYTES = 0
-_CPU_OFFLOAD_MAX_BYTES = 0
-
-
-def set_cpu_offload_max_bytes(max_bytes: int) -> None:
-    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    _CPU_OFFLOAD_BYTES = 0
-    _CPU_OFFLOAD_MAX_BYTES = max_bytes
-
-
-def maybe_offload_to_cpu(module: torch.nn.Module) -> torch.nn.Module:
-    if (params := next(module.parameters(), None)) is None:
-        return module
-
-    device = params.device
-
-    if device == torch.device("cpu"):
-        return module
-
-    global _CPU_OFFLOAD_MAX_BYTES, _CPU_OFFLOAD_BYTES
-    if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-        return module
-
-    pin_memory = is_pin_memory_available()
-    uva_available = is_uva_available()
-
-    assert uva_available, "V1 CPU offloading requires uva (pin memory) support"
-    uva_offloading = True
-
-    # offload parameters to CPU
-    # use pin_memory if possible, which helps cudagraph capture speed
-    offloaded_parameters = False
-    for p in module.parameters():
-        if _CPU_OFFLOAD_BYTES >= _CPU_OFFLOAD_MAX_BYTES:
-            # we use per-parameter offloading
-            # one module might have some parameters offloaded and some not
-            break
-
-        # `torch.empty_like` does not support `pin_memory` argument
-        cpu_data = torch.empty_strided(
-            size=p.data.size(),
-            stride=p.data.stride(),
-            dtype=p.data.dtype,
-            layout=p.data.layout,
-            device="cpu",
-            pin_memory=pin_memory,
-        )
-        cpu_data.copy_(p.data)
-        if not uva_offloading:
-            p.data = cpu_data
-        else:
-            # keep the cpu data alive
-            p._vllm_offloaded_cpu_data = cpu_data
-            p.data = get_cuda_view_from_cpu_tensor(cpu_data)
-        _CPU_OFFLOAD_BYTES += p.data.numel() * p.data.element_size()
-        offloaded_parameters = True
-
-    if offloaded_parameters and not uva_offloading:
-        original_forward = module.forward
-
-        def forward(*args, **kwargs):
-            module.forward = original_forward
-            device_state = {
-                # here we blindly call `to(device)`
-                # if the parameter is already on the device, it will be a no-op
-                k: v.to(device, non_blocking=True)
-                for k, v in module.state_dict().items()
-            }
-            output = functional_call(module, device_state, args=args, kwargs=kwargs)
-            module.forward = forward
-            return output
-
-        module.forward = forward
-
-    return module
-
-
 def make_layers(
     num_hidden_layers: int,
     layer_fn: LayerFn,
@@ -593,21 +614,31 @@ def make_layers(
 ) -> tuple[int, int, torch.nn.ModuleList]:
     """Make a list of layers with the given layer function, taking
     pipeline parallelism into account.
+
+    Args:
+        num_hidden_layers: Total number of hidden layers in the model.
+        layer_fn: Function to create a layer given its index.
+        prefix: Prefix for layer names.
+
+    Returns:
+        Tuple of (start_layer, end_layer, modules).
     """
     from vllm.distributed.parallel_state import get_pp_group
     from vllm.distributed.utils import get_pp_indices
+    from vllm.model_executor.offloader import get_offloader
 
     start_layer, end_layer = get_pp_indices(
         num_hidden_layers, get_pp_group().rank_in_group, get_pp_group().world_size
     )
+
     modules = torch.nn.ModuleList(
         [PPMissingLayer() for _ in range(start_layer)]
-        + [
-            maybe_offload_to_cpu(layer_fn(prefix=f"{prefix}.{idx}"))
-            for idx in range(start_layer, end_layer)
-        ]
+        + get_offloader().wrap_modules(
+            layer_fn(prefix=f"{prefix}.{idx}") for idx in range(start_layer, end_layer)
+        )
         + [PPMissingLayer() for _ in range(end_layer, num_hidden_layers)]
     )
+
     return start_layer, end_layer, modules
 
 
@@ -623,7 +654,7 @@ def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
 
     missing_layer_names = []
     for name, module in model.named_modules():
-        if isinstance(module, PPMissingLayer):
+        if isinstance(module, (StageMissingLayer, PPMissingLayer)):
             # NOTE: the trailing dot is used to match the prefix of the layer.
             # without the dot, we could match a layer that is not missing,
             # e.g., 'encoder.layer.1' would match 'encoder.layer.11'
@@ -635,7 +666,7 @@ def get_pp_missing_layer_names(model: torch.nn.Module) -> list[str]:
 
 def is_pp_missing_parameter(name: str, model: torch.nn.Module) -> bool:
     """Check if a parameter is missing in a pipeline parallel model."""
-    if isinstance(model, PPMissingLayer):
+    if isinstance(model, (StageMissingLayer, PPMissingLayer)):
         return True
 
     return any(
@@ -830,3 +861,16 @@ def process_eagle_weight(
         model.has_own_lm_head = True
     if "embed_tokens" in name:
         model.has_own_embed_tokens = True
+
+
+def get_layer_index(feature_layer_index: int, num_hidden_layers: int) -> int:
+    """Given a signed vision feature layer, get the number of hidden layers
+       needed to leverage it.
+
+    Args:
+        feature_layer_index: Index of a required layer in the visual encoder.
+        num_hidden_layers: The total number of hidden layers in the visual encoder.
+    """
+    if feature_layer_index < 0:
+        return num_hidden_layers + feature_layer_index + 1
+    return feature_layer_index

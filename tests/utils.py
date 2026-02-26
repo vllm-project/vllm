@@ -42,13 +42,27 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.model_executor.kernels.linear import (
+    FP8ScaledMMLinearKernel,
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+    QuantKey,
+)
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.platforms import current_platform
 from vllm.tokenizers import get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.mem_constants import GB_bytes
 from vllm.utils.network_utils import get_open_port
-from vllm.utils.torch_utils import cuda_device_count_stateless
+from vllm.utils.torch_utils import (
+    cuda_device_count_stateless,
+    set_random_seed,  # noqa: F401 - re-exported for use in test files
+)
+
+FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
     from amdsmi import (
@@ -112,6 +126,9 @@ class RemoteOpenAIServer:
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
+            # Create a dedicated process group so we can kill
+            # the entire tree (parent + EngineCore + workers) at once.
+            start_new_session=True,
         )
 
     def __init__(
@@ -173,20 +190,184 @@ class RemoteOpenAIServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
+        # Record GPU memory before server start so we know what
+        # "released" looks like.
+        self._pre_server_gpu_memory = self._get_gpu_memory_used()
+        if self._pre_server_gpu_memory is not None:
+            pre_gb = self._pre_server_gpu_memory / 1e9
+            print(
+                f"[RemoteOpenAIServer] GPU memory before server start: {pre_gb:.2f} GB"
+            )
+
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 240
+        max_wait_seconds = max_wait_seconds or 360
         self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
+        pid = self.proc.pid
+
+        # Get the process group ID. Because we used
+        # start_new_session=True the pgid equals the server's pid.
         try:
-            self.proc.wait(8)
+            pgid = os.getpgid(pid)
+        except (ProcessLookupError, OSError):
+            pgid = None
+
+        # Phase 1: graceful SIGTERM to the entire process group
+        if pgid is not None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(pgid, signal.SIGTERM)
+                print(f"[RemoteOpenAIServer] Sent SIGTERM to process group {pgid}")
+        else:
+            self.proc.terminate()
+
+        try:
+            self.proc.wait(timeout=15)
+            print(f"[RemoteOpenAIServer] Server {pid} terminated gracefully")
         except subprocess.TimeoutExpired:
-            # force kill if needed
-            self.proc.kill()
+            # Phase 2: SIGKILL the entire process group
+            print(
+                f"[RemoteOpenAIServer] Server {pid} did not respond "
+                "to SIGTERM, sending SIGKILL to process group"
+            )
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+
+            try:
+                self.proc.wait(timeout=10)
+                print(f"[RemoteOpenAIServer] Server {pid} killed")
+            except subprocess.TimeoutExpired:
+                # Phase 3: last resort - find and kill any orphaned children
+                self._kill_orphaned_children(pid)
+
+        # Wait for GPU memory to actually be *freed*, not just
+        # "stabilized at whatever level it's at".
+        self._wait_for_gpu_memory_release()
+
+    def _kill_orphaned_children(self, parent_pid: int) -> None:
+        """Best-effort cleanup of any lingering child processes."""
+        try:
+            import psutil
+
+            parent = psutil.Process(parent_pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                print(
+                    f"[RemoteOpenAIServer] Killing orphaned child "
+                    f"pid={child.pid} name={child.name()}"
+                )
+                child.kill()
+            psutil.wait_procs(children, timeout=5)
+        except Exception as e:
+            # psutil may not be installed, or processes already gone
+            print(f"[RemoteOpenAIServer] Orphan cleanup failed: {e}")
+            # Fallback: try to kill by pgid one more time
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(parent_pid, signal.SIGKILL)
+
+    def _get_gpu_memory_used(self) -> float | None:
+        """Get total GPU memory used across all visible devices in bytes."""
+        try:
+            if current_platform.is_rocm():
+                with _nvml():
+                    handles = amdsmi_get_processor_handles()
+                    total_used = 0
+                    for handle in handles:
+                        vram_info = amdsmi_get_gpu_vram_usage(handle)
+                        total_used += vram_info["vram_used"]
+                    return total_used
+            elif current_platform.is_cuda():
+                with _nvml():
+                    total_used = 0
+                    device_count = cuda_device_count_stateless()
+                    for i in range(device_count):
+                        handle = nvmlDeviceGetHandleByIndex(i)
+                        mem_info = nvmlDeviceGetMemoryInfo(handle)
+                        total_used += mem_info.used
+                    return total_used
+        except Exception as e:
+            print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
+            return None
+        return None
+
+    def _wait_for_gpu_memory_release(self, timeout: float = 60.0):
+        """Wait for GPU memory to drop back toward pre-server levels.
+
+        Two-phase strategy:
+          1. Try to wait for memory to return close to pre-server baseline.
+          2. If that doesn't happen, fall back to waiting for stabilization
+             and log a warning (the next server might still OOM).
+        """
+        baseline = self._pre_server_gpu_memory
+        if baseline is None:
+            # Can't query GPU memory - nothing to do
+            return
+
+        # Allow up to 2 GiB overhead above baseline for driver/context state
+        # that may persist between server instances.
+        headroom_bytes = 2 * 1024 * 1024 * 1024
+        target = baseline + headroom_bytes
+
+        start = time.time()
+        last_used: float | None = None
+        stable_count = 0
+
+        while time.time() - start < timeout:
+            used = self._get_gpu_memory_used()
+
+            if used is None:
+                return  # Can't query, assume ok
+
+            used_gb = used / 1e9
+            target_gb = target / 1e9
+            elapsed = time.time() - start
+
+            # Phase 1: memory dropped to near baseline - we're done.
+            if used <= target:
+                print(
+                    f"[RemoteOpenAIServer] GPU memory released to "
+                    f"{used_gb:.2f} GB (target: {target_gb:.2f} GB) "
+                    f"in {elapsed:.1f}s"
+                )
+                return
+
+            # Phase 2 (after 40s): fall back to stabilization check.
+            # This handles cases where another process is using GPU memory
+            # and we'll never reach baseline.
+            if elapsed > 40.0 and last_used is not None:
+                delta = abs(used - last_used)
+                if delta < 200 * 1024 * 1024:  # 200 MB
+                    stable_count += 1
+                    if stable_count >= 3:
+                        print(
+                            f"[RemoteOpenAIServer] WARNING: GPU memory "
+                            f"stabilized at {used_gb:.2f} GB "
+                            f"(target was {target_gb:.2f} GB). "
+                            f"Proceeding - next server may OOM."
+                        )
+                        return
+                else:
+                    stable_count = 0
+
+            last_used = used
+            time.sleep(1.0)
+
+        # Timeout - log clearly so CI failures are diagnosable
+        final_used = self._get_gpu_memory_used()
+        final_gb = final_used / 1e9 if final_used else 0.0
+        raise RuntimeError(
+            f"[RemoteOpenAIServer] GPU memory did not release within "
+            f"{timeout}s. Current: {final_gb:.2f} GB, "
+            f"target: {target / 1e9:.2f} GB, "
+            f"baseline: {baseline / 1e9:.2f} GB. "
+            f"Child processes may still be holding GPU memory."
+        )
 
     def _poll(self) -> int | None:
         """Subclasses override this method to customize process polling"""
@@ -1146,6 +1327,57 @@ def multi_gpu_test(*, num_gpus: int):
     return wrapper
 
 
+def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
+    """
+    Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
+
+    Examples:
+        @gpu_tier_mark(min_gpus=2)          # only on multi-GPU
+        @gpu_tier_mark(max_gpus=1)          # only on single-GPU
+        @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
+    """
+    gpu_count = cuda_device_count_stateless()
+    marks = []
+
+    if min_gpus > 1:
+        marks.append(pytest.mark.distributed(num_gpus=min_gpus))
+
+    reasons = []
+    if gpu_count < min_gpus:
+        reasons.append(f"Need at least {min_gpus} GPUs (have {gpu_count})")
+    if max_gpus is not None and gpu_count > max_gpus:
+        reasons.append(f"Need at most {max_gpus} GPUs (have {gpu_count})")
+
+    if reasons:
+        marks.append(pytest.mark.skipif(True, reason="; ".join(reasons)))
+
+    return marks
+
+
+def single_gpu_only(f=None):
+    """Skip this test when running in a multi-GPU environment."""
+    marks = gpu_tier_mark(max_gpus=1)
+
+    def wrapper(func):
+        for mark in reversed(marks):
+            func = mark(func)
+        return func
+
+    return wrapper(f) if f is not None else wrapper
+
+
+def multi_gpu_only(*, num_gpus: int = 2):
+    """Skip this test when running on fewer than num_gpus GPUs."""
+    marks = gpu_tier_mark(min_gpus=num_gpus)
+
+    def wrapper(f):
+        for mark in reversed(marks):
+            f = mark(f)
+        return f
+
+    return wrapper
+
+
 async def completions_with_server_args(
     prompts: list[str],
     model_name: str,
@@ -1286,7 +1518,7 @@ def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
         indices.append(idx)
         prompt = (
             "```python\n# We set a number of variables, "
-            + f"x{idx} will be important later\n"
+            f"x{idx} will be important later\n"
         )
         ln = random.randint(*ln_range)
         for k in range(30, ln):
@@ -1332,3 +1564,117 @@ def flat_product(*iterables: Iterable[Any]):
     for element in itertools.product(*iterables):
         normalized = (e if isinstance(e, tuple) else (e,) for e in element)
         yield tuple(itertools.chain(*normalized))
+
+
+class TestFP8Layer(torch.nn.Module):
+    """
+    Test helper for FP8 linear operations. Creates random weights and scales
+    based on quantization configuration.
+
+    Args:
+        weight_shape: Shape of the weight tensor (out_features, in_features).
+        activation_quant_key: Activation quantization configuration.
+        weight_quant_key: Weight quantization configuration.
+        out_dtype: Output dtype. Defaults to current default dtype.
+        force_kernel: Optional kernel to force use of specific implementation.
+    """
+
+    def __init__(
+        self,
+        weight_shape: tuple[int, int],
+        activation_quant_key: QuantKey,
+        weight_quant_key: QuantKey,
+        out_dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
+        force_kernel: FP8ScaledMMLinearKernel | None = None,
+    ):
+        super().__init__()
+        per_tensor_weights = weight_quant_key.scale.group_shape.is_per_tensor()
+        is_static_activation_scale = activation_quant_key.scale.static
+        weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
+
+        self.weight_scale = torch.rand(
+            weight_scale_shape, dtype=torch.float32, device=device
+        )
+        self.input_scale = (
+            torch.rand(1, dtype=torch.float32, device=device)
+            if is_static_activation_scale
+            else None
+        )
+        self.weight = torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE).t()
+        self.input_scale_ub = None
+
+        out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
+
+        self.kernel = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            out_dtype=out_dtype,
+            force_kernel=force_kernel,
+        )
+
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.kernel.quant_fp8.enabled()
+
+    def forward(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(self, y, bias)
+
+
+# TODO: Drop TestBlockFP8Layer in favour of a unified TestFP8Layer
+# after refactoring W8A8BlockFp8LinearOp.
+# https://github.com/vllm-project/vllm/issues/31818
+class TestBlockFP8Layer:
+    """
+    Test helper for blockwise FP8 linear operations. Creates random weights
+    and scales for W8A8BlockFp8LinearOp.
+
+    This is a workaround until W8A8BlockFp8LinearOp implements the kernel
+    abstraction (ScaledMMLinearKernel) for blockwise quantization.
+
+    Args:
+        weight_shape: Shape of the weight tensor (out_features, in_features).
+        group_shape: Blockwise quantization group shape.
+        cutlass_block_fp8_supported: Whether CUTLASS blockwise FP8 is available.
+        use_aiter_and_is_supported: Whether to use aiter quantization ops.
+        transpose_weights: Whether to transpose weights after creation.
+    """
+
+    def __init__(
+        self,
+        weight_shape: tuple[int, int],
+        group_shape: GroupShape,
+        cutlass_block_fp8_supported: bool = False,
+        use_aiter_and_is_supported: bool = False,
+        transpose_weights: bool = False,
+    ):
+        weight_scale_shape = weight_shape[0] // group_shape[1]
+        self.weight_scale = torch.rand(
+            (weight_scale_shape, weight_scale_shape), dtype=torch.float32
+        )
+        self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
+        self.input_scale = None
+        if transpose_weights:
+            self.weight = self.weight.t()
+
+        self.linear_op = W8A8BlockFp8LinearOp(
+            weight_group_shape=GroupShape(group_shape[1], group_shape[1]),
+            act_quant_group_shape=group_shape,
+            cutlass_block_fp8_supported=cutlass_block_fp8_supported,
+            use_aiter_and_is_supported=use_aiter_and_is_supported,
+        )
+
+    def __call__(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.linear_op.apply(
+            input=y,
+            weight=self.weight,
+            weight_scale=self.weight_scale,
+            input_scale=self.input_scale,
+            bias=bias,
+        )
+
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.linear_op.input_quant_op.enabled()

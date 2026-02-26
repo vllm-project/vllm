@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 class LoadLoRAAdapterRequest(BaseModel):
     lora_name: str
     lora_path: str
+    load_inplace: bool = False
 
 
 class UnloadLoRAAdapterRequest(BaseModel):

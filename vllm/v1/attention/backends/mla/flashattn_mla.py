@@ -21,6 +21,7 @@ from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.math_utils import round_up
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
@@ -43,7 +44,10 @@ logger = init_logger(__name__)
 
 class FlashAttnMLABackend(MLACommonBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.float16, torch.bfloat16]
-    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = ["auto"]
+    supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
+        "auto",
+        "bfloat16",
+    ]
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -126,8 +130,17 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
         self.max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
 
         if self.use_full_cuda_graph and self.fa_aot_schedule:
+            # FA3 scheduler_metadata size: 1 + round_up(batch_size, 4) * 4
+            # The +1 is for the tile_count_semaphore (synchronization).
+            # The 4 slots per batch element (num_prepare_batch_vectors) are:
+            #   prepare_varlen + dynamic_split + sort_batches + head_swizzle
+            # See: https://github.com/vllm-project/flash-attention/blob/5824e6e/hopper/flash_api.cpp#L664-L671  # noqa: E501
+            max_batch_size = max(
+                vllm_config.scheduler_config.max_num_seqs,
+                self.max_cudagraph_size or 0,
+            )
             self.scheduler_metadata = torch.zeros(
-                vllm_config.scheduler_config.max_num_seqs + 1,
+                1 + round_up(max_batch_size, 4) * 4,
                 dtype=torch.int32,
                 device=self.device,
             )
@@ -213,7 +226,7 @@ class FlashAttnMLAMetadataBuilder(MLACommonMetadataBuilder[FlashAttnMLAMetadata]
             # Ensure the persistent buffer is large enough
             assert n <= self.scheduler_metadata.shape[0], (
                 f"Scheduler metadata size {n} exceeds buffer size "
-                + f"{self.scheduler_metadata.shape[0]}"
+                f"{self.scheduler_metadata.shape[0]}"
             )
             self.scheduler_metadata[:n] = scheduler_metadata
             # NOTE(woosuk): We should zero out the rest of the scheduler
@@ -290,7 +303,7 @@ class FlashAttnMLAImpl(MLACommonImpl[FlashAttnMLAMetadata]):
                 "FlashAttnMLA V1 with FP8 KV cache not yet supported"
             )
 
-    def _forward_decode(
+    def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
         kv_c_and_k_pe_cache: torch.Tensor,

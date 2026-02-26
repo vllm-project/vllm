@@ -198,7 +198,6 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
             x = x[0].permute(2, 0, 1)
             num_experts, max_tokens, hidden_dim_by_2 = x.shape
             hidden_dim = hidden_dim_by_2 * 2
-            assert envs.VLLM_FLASHINFER_MOE_BACKEND == "masked_gemm"
             logger.info_once(
                 "Quantization is fused with DeepEP nvfp4 dispatch for "
                 "FlashInfer CUTEDSL as VLLM_DEEPEPLL_NVFP4_DISPATCH==1"
@@ -242,7 +241,14 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> tuple[Callable, mk.ReceiverType]:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
+
         hidden_size = a1.size(1)
         assert hidden_size in self.SUPPORTED_HIDDEN_SIZES, (
             f"Hidden Size {hidden_size} not in supported list of hidden sizes"
@@ -344,7 +350,13 @@ class DeepEPLLPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         quant_config: FusedMoEQuantConfig,
+        defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
+        if defer_input_quant:
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not support defer_input_quant=True. "
+                "Please select an MoE kernel that accepts quantized inputs."
+            )
         hook, receiver = self.prepare_async(
             a1,
             topk_weights,

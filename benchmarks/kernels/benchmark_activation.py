@@ -7,7 +7,8 @@ import itertools
 import torch
 
 import vllm.model_executor.layers.activation  # noqa F401
-from vllm.model_executor.custom_op import CustomOp
+from vllm.benchmarks.lib.utils import default_vllm_config
+from vllm.model_executor.custom_op import op_registry
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
@@ -18,6 +19,7 @@ intermediate_size = [3072, 9728, 12288]
 configs = list(itertools.product(batch_size_range, seq_len_range, intermediate_size))
 
 
+@default_vllm_config()
 def benchmark_activation(
     batch_size: int,
     seq_len: int,
@@ -33,14 +35,14 @@ def benchmark_activation(
     torch.set_default_device(device)
 
     if func_name == "gelu_and_mul":
-        layer = CustomOp.op_registry[func_name](approximate="none")
+        layer = op_registry[func_name](approximate="none")
     elif func_name == "gelu_and_mul_tanh":
-        layer = CustomOp.op_registry["gelu_and_mul"](approximate="tanh")
+        layer = op_registry["gelu_and_mul"](approximate="tanh")
     elif func_name == "fatrelu_and_mul":
         threshold = 0.5
-        layer = CustomOp.op_registry[func_name](threshold)
+        layer = op_registry[func_name](threshold)
     else:
-        layer = CustomOp.op_registry[func_name]()
+        layer = op_registry[func_name]()
 
     x = torch.randn(num_tokens, dim, dtype=dtype, device=device)
     compiled_layer = torch.compile(layer.forward_native)

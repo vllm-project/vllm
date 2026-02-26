@@ -4,14 +4,11 @@ import contextlib
 import enum
 import os
 import platform
-import random
 import sys
 from datetime import timedelta
-from typing import TYPE_CHECKING, Any, NamedTuple, Optional
+from typing import TYPE_CHECKING, Any, NamedTuple
 
-import numpy as np
 import torch
-from typing_extensions import deprecated
 
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -20,7 +17,7 @@ if TYPE_CHECKING:
     from torch.distributed import PrefixStore, ProcessGroup
 
     from vllm.config import VllmConfig
-    from vllm.inputs import ProcessorInputs, PromptType
+    from vllm.inputs import ProcessorInputs
     from vllm.pooling_params import PoolingParams
     from vllm.sampling_params import SamplingParams
     from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -37,6 +34,8 @@ def in_wsl() -> bool:
 
 
 class PlatformEnum(enum.Enum):
+    """Enumeration of supported hardware platforms."""
+
     CUDA = enum.auto()
     ROCM = enum.auto()
     TPU = enum.auto()
@@ -119,6 +118,11 @@ class Platform:
     # https://github.com/ray-project/ray/tree/master/python/ray/_private/accelerators # noqa
     device_control_env_var: str = "VLLM_DEVICE_CONTROL_ENV_VAR_PLACEHOLDER"
 
+    # environment variables that need to be set to 1 to prevent ray from
+    # setting the visible devices e.g.
+    # RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES
+    ray_noset_device_env_vars: list[str] = []
+
     # The torch.compile backend for compiling simple and
     # standalone functions. The default value is "inductor" to keep
     # the same behavior as PyTorch.
@@ -189,7 +193,7 @@ class Platform:
         Get the pass manager class for this platform.
         It will be registered as a custom pass under the current_platform.pass_key.
         """
-        return "vllm.compilation.pass_manager.PostGradPassManager"
+        return "vllm.compilation.passes.pass_manager.PostGradPassManager"
 
     @classmethod
     def get_compile_backend(cls) -> str:
@@ -228,6 +232,7 @@ class Platform:
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         """Get the attention backend class of a device."""
         return ""
@@ -243,7 +248,7 @@ class Platform:
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         """
         Get the vision attention backend class of a device.
@@ -366,23 +371,6 @@ class Platform:
         return torch.inference_mode(mode=True)
 
     @classmethod
-    @deprecated(
-        "`seed_everything` is deprecated. It will be removed in v0.15.0 or later. "
-        "Please use `vllm.utils.torch_utils.set_random_seed` instead."
-    )
-    def seed_everything(cls, seed: int | None = None) -> None:
-        """
-        Set the seed of each random module.
-        `torch.manual_seed` will set seed on all devices.
-
-        Loosely based on: https://github.com/Lightning-AI/pytorch-lightning/blob/2.4.0/src/lightning/fabric/utilities/seed.py#L20
-        """
-        if seed is not None:
-            random.seed(seed)
-            np.random.seed(seed)
-            torch.manual_seed(seed)
-
-    @classmethod
     def set_device(cls, device: torch.device) -> None:
         """
         Set the device for the current platform.
@@ -402,6 +390,20 @@ class Platform:
 
         For example, the out-of-tree quantization config can be imported and
         registered here dynamically.
+        """
+        pass
+
+    @classmethod
+    def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
+        """
+        Apply the platform-specific default values to the config.
+
+        This function is called during the initialization of global VllmConfig, after
+        parsing cli arguments.
+        It can modify the defaults of the config according to the platform. For example,
+        it can enable custom_ops based on the enabled features.
+
+        The config is passed by reference, so it can be modified in place.
         """
         pass
 
@@ -580,9 +582,8 @@ class Platform:
     @classmethod
     def validate_request(
         cls,
-        prompt: "PromptType",
-        params: "SamplingParams | PoolingParams",
         processed_inputs: "ProcessorInputs",
+        params: "SamplingParams | PoolingParams",
     ) -> None:
         """Raises if this request is unsupported on this platform"""
 
@@ -704,6 +705,16 @@ class Platform:
         Set some additional forward context for the current platform if needs.
         """
         return {}
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        """
+        Get the number of compute units for the current platform.
+        (NVIDIA SM / AMD CU / Intel EU)
+        """
+        raise NotImplementedError(
+            "num_compute_units is not implemented for the current platform."
+        )
 
 
 class UnspecifiedPlatform(Platform):

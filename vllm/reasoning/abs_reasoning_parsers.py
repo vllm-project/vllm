@@ -4,7 +4,7 @@
 import importlib
 import os
 from abc import abstractmethod
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from functools import cached_property
 from typing import TYPE_CHECKING, Any
 
@@ -51,7 +51,7 @@ class ReasoningParser:
         return self.model_tokenizer.get_vocab()
 
     @abstractmethod
-    def is_reasoning_end(self, input_ids: list[int]) -> bool:
+    def is_reasoning_end(self, input_ids: Sequence[int]) -> bool:
         """
         Check if the reasoning content ends in the input_ids.
 
@@ -68,7 +68,7 @@ class ReasoningParser:
         """
 
     def is_reasoning_end_streaming(
-        self, input_ids: list[int], delta_ids: list[int]
+        self, input_ids: Sequence[int], delta_ids: Iterable[int]
     ) -> bool:
         """
         Check if the reasoning content ends in the input_ids on a
@@ -103,6 +103,25 @@ class ReasoningParser:
         list[int]
             The extracted content from the input_ids.
         """
+
+    def count_reasoning_tokens(self, token_ids: Sequence[int]) -> int:
+        """Count the number of reasoning tokens in a sequence.
+
+        Text-based reasoning models typically wrap their chain-of-thought
+        between special start/end tokens (e.g., ``<think> ... </think>``).
+        Implementations that support reasoning token counting should override
+        this method. The default implementation returns ``0`` so existing
+        parsers remain unchanged unless they explicitly opt in.
+
+        Args:
+            token_ids: Sequence of generated token ids (excluding prompt).
+
+        Returns:
+            int: Number of tokens that belong to reasoning content.
+        """
+
+        # By default, assume the parser cannot detect reasoning spans.
+        return 0
 
     @abstractmethod
     def extract_reasoning(
