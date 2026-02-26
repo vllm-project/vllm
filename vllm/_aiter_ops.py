@@ -862,6 +862,8 @@ def _rocm_aiter_gemm_a8wfp4_fake(
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
     return torch.empty(x.shape[0], w.shape[0], dtype=out_dtype, device=x.device)
+
+
 def _triton_rotary_embedding_impl(
     positions: torch.Tensor,
     query: torch.Tensor,
@@ -1272,6 +1274,7 @@ class rocm_aiter_ops:
                 mutates_args=[],
                 fake_impl=_rocm_aiter_gemm_a8wfp4_fake,
                 dispatch_key=current_platform.dispatch_key,
+            )
 
             # Register rocm aiter rotary embedding custom op
             direct_register_custom_op(
