@@ -337,16 +337,20 @@ class RequestState:
         finished: bool,
         kv_transfer_params: dict[str, Any] | None = None,
     ) -> RequestOutput | PoolingRequestOutput:
+        # If prompt embeds were used, put placeholder prompt token ids
+        prompt_token_ids = self.prompt_token_ids
+        if prompt_token_ids is None and self.prompt_embeds is not None:
+            prompt_token_ids = [0] * len(self.prompt_embeds)
+        assert prompt_token_ids is not None
+
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
             assert len(outputs) == 1
-            # Prompt embeddings are currently not supported by pooling requests.
-            assert self.prompt_token_ids is not None
             return PoolingRequestOutput(
                 request_id=external_req_id,
                 outputs=first_output,
                 num_cached_tokens=self.num_cached_tokens,
-                prompt_token_ids=self.prompt_token_ids,
+                prompt_token_ids=prompt_token_ids,
                 finished=finished,
             )
         assert self.logprobs_processor is not None
@@ -355,11 +359,6 @@ class RequestState:
             prompt_logprobs = self.logprobs_processor.pop_prompt_logprobs()
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
-
-        # If prompt embeds were used, put placeholder prompt token ids
-        prompt_token_ids = self.prompt_token_ids
-        if prompt_token_ids is None and self.prompt_embeds is not None:
-            prompt_token_ids = [0] * len(self.prompt_embeds)
 
         return RequestOutput(
             request_id=external_req_id,  # request_id is what was provided externally
@@ -430,19 +429,12 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
-        self._requests_drained = asyncio.Event()
-        self._requests_drained.set()
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
 
     def has_unfinished_requests(self) -> bool:
         return len(self.request_states) > 0
-
-    async def wait_for_requests_to_drain(self) -> None:
-        if not self.request_states:
-            return
-        await self._requests_drained.wait()
 
     def propagate_error(self, e: Exception):
         """Propagate error to all generate() tasks."""
@@ -511,8 +503,6 @@ class OutputProcessor:
                     child_reqs = self.abort_requests(child_reqs, internal=True)
                     request_ids_to_abort.extend(child_reqs)
                 self.parent_requests.pop(request_id, None)
-        if not self.request_states:
-            self._requests_drained.set()
         return request_ids_to_abort
 
     def add_request(
@@ -539,8 +529,6 @@ class OutputProcessor:
             log_stats=self.log_stats,
             stream_interval=self.stream_interval,
         )
-        if self._requests_drained.is_set():
-            self._requests_drained.clear()
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
@@ -706,9 +694,6 @@ class OutputProcessor:
         parent_req = req_state.parent_req
         if parent_req and not parent_req.child_requests:
             self.parent_requests.pop(parent_req.request_id, None)
-
-        if not self.request_states:
-            self._requests_drained.set()
 
     def update_scheduler_stats(self, scheduler_stats: SchedulerStats | None):
         self.lora_states.update_scheduler_stats(scheduler_stats)
