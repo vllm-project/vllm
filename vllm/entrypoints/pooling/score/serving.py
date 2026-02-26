@@ -31,7 +31,7 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreInputs,
     _cosine_similarity,
     compress_token_type_ids,
-    compute_maxsim_score,
+    compute_maxsim_scores,
     get_score_prompt,
     parse_score_data_single,
     validate_score_input,
@@ -311,19 +311,17 @@ class ServingScores(OpenAIServing):
         # Compute MaxSim scores
         from vllm.outputs import PoolingOutput
 
+        maxsim_scores = compute_maxsim_scores(
+            [emb.outputs.data for emb in emb_data_1],
+            [emb.outputs.data for emb in emb_data_2],
+        )
+
         scores: list[PoolingRequestOutput] = []
         padding: list[int] = []
         if (pad_token_id := tokenizer.pad_token_id) is not None:
             padding = [pad_token_id]
 
-        for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
-            # emb_1.outputs.data: [query_len, dim]
-            # emb_2.outputs.data: [doc_len, dim]
-            q_emb = emb_1.outputs.data
-            d_emb = emb_2.outputs.data
-
-            maxsim_score = compute_maxsim_score(q_emb, d_emb)
-
+        for emb_1, emb_2, maxsim_score in zip(emb_data_1, emb_data_2, maxsim_scores):
             tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
 
             scores.append(

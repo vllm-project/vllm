@@ -261,6 +261,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        # For transferring state from execute_model to subsequent sample_tokens call.
+        self.execute_model_state: tuple | None = None
 
     def _get_prepare_inputs_ring_slot(self) -> int:
         slot = (self._prepare_inputs_ring_slot + 1) % self._prepare_inputs_ring_size
@@ -437,6 +439,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert self.execute_model_state is not None
         hidden_states, _, input_batch, _ = self.execute_model_state
+        self.execute_model_state = None
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -1092,18 +1095,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states,
             input_batch,
             kv_connector_output,
-        )  # type: ignore
+        )
         return None
 
     @torch.inference_mode()
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
-        assert self.execute_model_state is not None
+        if self.execute_model_state is None:
+            # The prior execute_model call must have failed.
+            return None
         hidden_states, aux_hidden_states, input_batch, kv_connector_output = (
             self.execute_model_state
         )
-        self.execute_model_state = None  # type: ignore
+        self.execute_model_state = None
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
