@@ -218,6 +218,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
+        # For transferring state from execute_model to subsequent sample_tokens call.
+        self.execute_model_state: tuple | None = None
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         self.req_states.max_model_len = max_model_len
@@ -356,6 +359,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         assert self.execute_model_state is not None
         input_batch, _, _, _, hidden_states, _, _ = self.execute_model_state
+        self.execute_model_state = None
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
         return hidden_states, sample_hidden_states
@@ -972,7 +976,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             hidden_states,
             aux_hidden_states,
             kv_connector_output,
-        )  # type: ignore
+        )
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: return IntermediateTensors for sending.
@@ -987,7 +991,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def sample_tokens(
         self, grammar_output: GrammarOutput | None
     ) -> AsyncOutput | ModelRunnerOutput | None:
-        assert self.execute_model_state is not None
+        if self.execute_model_state is None:
+            # The prior execute_model call must have failed.
+            return None
         (
             input_batch,
             model_inputs,
@@ -997,7 +1003,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             aux_hidden_states,
             kv_connector_output,
         ) = self.execute_model_state
-        self.execute_model_state = None  # type: ignore
+        self.execute_model_state = None
 
         if not self.is_last_pp_rank:
             # Non-last PP rank: hidden_states is None because this rank produced
@@ -1006,7 +1012,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled, num_sampled, num_rejected = pp_receive(
                 input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
-            self.postprocess(input_batch, sampled, num_sampled, num_rejected)
             return None
 
         # Last rank: sample tokens
