@@ -490,9 +490,16 @@ class Qwen3CoderToolParser(ToolParser):
                         self.prev_tool_call_arr.append(
                             {
                                 "name": self.current_function_name,
-                                "arguments": "{}",  # Placeholder, will be updated later
+                                "arguments": "{}",
                             }
                         )
+
+                    # Initialize streamed args tracking for this tool.
+                    # The serving layer reads streamed_args_for_tool to
+                    # compute remaining arguments at stream end. Without
+                    # this, IndexError occurs when the serving layer
+                    # accesses streamed_args_for_tool[index].
+                    self.streamed_args_for_tool.append("")
 
                     # Send header with function info
                     return DeltaMessage(
@@ -511,9 +518,14 @@ class Qwen3CoderToolParser(ToolParser):
 
         # We've sent header, now handle function body
         if self.in_function:
-            # Send opening brace if not sent yet
-            if not self.json_started and self.parameter_prefix not in delta_text:
+            # Always send opening brace first, regardless of whether
+            # parameter_prefix is in the current delta. With speculative
+            # decoding, a single delta may contain both the opening brace
+            # and parameter data; skipping "{" here would desync
+            # json_started from what was actually streamed.
+            if not self.json_started:
                 self.json_started = True
+                self.streamed_args_for_tool[self.current_tool_index] += "{"
                 return DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
@@ -522,10 +534,6 @@ class Qwen3CoderToolParser(ToolParser):
                         )
                     ]
                 )
-
-            # Make sure json_started is set if we're processing parameters
-            if not self.json_started:
-                self.json_started = True
 
             # Check for function end in accumulated text
             if not self.json_closed and self.function_end_token in tool_text:
@@ -558,7 +566,17 @@ class Qwen3CoderToolParser(ToolParser):
                                     self.prev_tool_call_arr[i]["arguments"] = args
                                     break
                     except Exception:
-                        pass  # Ignore parsing errors during streaming
+                        pass
+
+                # Send closing brace; the serving layer autocomplete
+                # will fill in any missing arguments based on
+                # prev_tool_call_arr vs streamed_args_for_tool.
+                if self.current_tool_index < len(
+                    self.streamed_args_for_tool
+                ):
+                    self.streamed_args_for_tool[
+                        self.current_tool_index
+                    ] += "}"
 
                 result = DeltaMessage(
                     tool_calls=[
@@ -675,6 +693,15 @@ class Qwen3CoderToolParser(ToolParser):
                             )
 
                         self.param_count += 1
+
+                        # Track what we've streamed so the serving
+                        # layer can compute remaining args at the end.
+                        if self.current_tool_index < len(
+                            self.streamed_args_for_tool
+                        ):
+                            self.streamed_args_for_tool[
+                                self.current_tool_index
+                            ] += json_fragment
 
                         return DeltaMessage(
                             tool_calls=[
