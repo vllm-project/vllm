@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
 Dynamic dispatcher for CPU extension operations.
 
@@ -16,9 +18,10 @@ The cpu-build-dispatcher branch builds two separate .so files:
 At runtime, only ONE extension is loaded based on CPU detection.
 This dispatcher routes calls to whichever extension is available.
 """
+
 import warnings
 from functools import lru_cache
-from typing import Any, Optional
+from typing import Any
 
 import torch
 
@@ -34,14 +37,15 @@ def _detect_cpu_extension() -> str:
         "" if no extension detected
     """
     # Check for AVX512 extension first (more specific)
-    if hasattr(torch.ops, '_C_avx512') \
-        and hasattr(torch.ops._C_avx512, 'silu_and_mul'): # Verify it has actual CPU ops registered (not empty)
+    if hasattr(torch.ops, "_C_avx512") and hasattr(
+        torch.ops._C_avx512, "silu_and_mul"
+    ):  # Verify it has actual CPU ops registered (not empty)
         return "_C_avx512"
 
     # Check for AVX2/default extension
     # For CPU builds, check for a CPU-specific op
     # For CUDA builds, _C will have CUDA ops
-    if hasattr(torch.ops, '_C') and hasattr(torch.ops._C, 'silu_and_mul'):
+    if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "silu_and_mul"):
         return "_C"
 
     warnings.warn("No CPU extension available", stacklevel=2)
@@ -80,9 +84,9 @@ def get_utils():
     """
     ext = _detect_cpu_extension()
     if ext == "_C_avx512":
-        if hasattr(torch.ops, '_C_avx512_utils'):
+        if hasattr(torch.ops, "_C_avx512_utils"):
             return torch.ops._C_avx512_utils
-    if hasattr(torch.ops, '_C_utils'):
+    if hasattr(torch.ops, "_C_utils"):
         return torch.ops._C_utils
     # Return None if no utils module found (caller should handle)
     return None
@@ -98,14 +102,16 @@ def get_cpu_ops():
     """
     ext = _detect_cpu_extension()
     if ext == "_C_avx512":
-        if hasattr(torch.ops, '_C_avx512_cpu'):
+        if hasattr(torch.ops, "_C_avx512_cpu"):
             return torch.ops._C_avx512_cpu
-    if hasattr(torch.ops, '_C_cpu'):
+    if hasattr(torch.ops, "_C_cpu"):
         return torch.ops._C_cpu
     return None
 
 
-def has_op(op_name: str) -> bool: # FIXME: this should be equivalent to doing `hasattr(ops, name)`
+def has_op(
+    op_name: str,
+) -> bool:  # FIXME: this should be equivalent to doing `hasattr(ops, name)`
     """
     Check if an operation is available in the loaded extension.
 
@@ -122,7 +128,7 @@ def has_op(op_name: str) -> bool: # FIXME: this should be equivalent to doing `h
         return False
 
 
-def get_op(op_name: str) -> Optional[Any]:
+def get_op(op_name: str) -> Any | None:
     """
     Get an operation by name, or None if not available.
 

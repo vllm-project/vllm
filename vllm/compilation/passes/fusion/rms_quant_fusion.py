@@ -6,11 +6,10 @@ import torch
 import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
 from torch._ops import OpOverload
-from vllm._ops_dispatch import get_ops, has_op
 
+from vllm._ops_dispatch import get_ops, has_op
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (

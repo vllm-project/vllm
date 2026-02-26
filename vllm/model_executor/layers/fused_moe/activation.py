@@ -9,6 +9,7 @@ import torch.nn.functional as F
 
 from vllm._ops_dispatch import get_ops
 
+
 class MoEActivation(Enum):
     """Activation functions for MoE layers."""
 

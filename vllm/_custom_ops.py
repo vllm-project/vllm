@@ -20,7 +20,7 @@ current_platform.import_kernels()
 
 # Import dispatcher for CPU multi-ISA support
 # This routes torch.ops calls to _C or _C_avx512 depending on loaded extension
-from vllm._ops_dispatch import get_ops, get_cpu_ops, has_op, _detect_cpu_extension
+from vllm._ops_dispatch import _detect_cpu_extension, get_cpu_ops, get_ops, has_op
 
 if TYPE_CHECKING:
 
@@ -2879,7 +2879,9 @@ class CPUDNNLGEMMHandler:
             get_ops().release_dnnl_matmul_handler(self.handler_tensor.item())
 
 
-_supports_onednn = bool(has_op("create_onednn_mm_handler")) # FIXME: could be cleaned up
+_supports_onednn = bool(
+    has_op("create_onednn_mm_handler")
+)  # FIXME: could be cleaned up
 
 
 def is_onednn_acl_supported():

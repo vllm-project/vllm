@@ -6,8 +6,8 @@ from collections.abc import Iterable
 
 import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-from vllm._ops_dispatch import get_ops, has_op
 
+from vllm._ops_dispatch import get_ops, has_op
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 

@@ -8,10 +8,10 @@ import torch.nn.functional as F
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
-from vllm._ops_dispatch import get_ops
 import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm._ops_dispatch import get_ops
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
@@ -274,9 +274,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                     assert packed_w13_weight.size() == layer.w13_weight.size()
                     layer.w13_weight.copy_(packed_w13_weight)
                     del packed_w13_weight
-                    packed_w2_weight = get_ops().convert_weight_packed(
-                        layer.w2_weight
-                    )
+                    packed_w2_weight = get_ops().convert_weight_packed(layer.w2_weight)
                     assert packed_w2_weight.size() == layer.w2_weight.size()
                     layer.w2_weight.copy_(packed_w2_weight)
                     self.cpu_fused_moe: Callable = cpu_fused_moe.SGLFusedMOE(layer)

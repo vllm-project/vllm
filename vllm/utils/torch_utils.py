@@ -16,8 +16,8 @@ from packaging import version
 from packaging.version import Version
 from torch.library import Library, infer_schema
 
-from vllm._ops_dispatch import get_ops
 import vllm.envs as envs
+from vllm._ops_dispatch import get_ops
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:

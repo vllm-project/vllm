@@ -5,12 +5,12 @@ from collections.abc import Callable
 from typing import ParamSpec
 
 import torch
+import torch._inductor.pattern_matcher as pm
 from torch import fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
-import torch._inductor.pattern_matcher as pm
 from torch._inductor.pattern_matcher import PatternMatcherPass
-from vllm._ops_dispatch import get_ops
 
+from vllm._ops_dispatch import get_ops
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention

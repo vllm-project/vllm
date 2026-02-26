@@ -6,9 +6,9 @@ from typing import Any
 import torch
 from torch._higher_order_ops import auto_functionalized
 from torch._ops import OpOverload
-from vllm._ops_dispatch import get_ops, has_op
 
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm._ops_dispatch import get_ops, has_op
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.layernorm import RMSNorm

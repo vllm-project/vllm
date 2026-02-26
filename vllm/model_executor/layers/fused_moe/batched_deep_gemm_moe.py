@@ -4,8 +4,8 @@
 
 import torch
 
-from vllm._ops_dispatch import get_ops
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._ops_dispatch import get_ops
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation

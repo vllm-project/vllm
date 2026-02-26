@@ -5,8 +5,8 @@
 import torch
 
 from vllm import _custom_ops as ops
-from vllm._ops_dispatch import get_ops
 from vllm import envs
+from vllm._ops_dispatch import get_ops
 from vllm.model_executor.layers.quantization.utils import replace_parameter
 from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
     convert_to_channelwise,

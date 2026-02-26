@@ -42,8 +42,8 @@ import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
 from torch.distributed import Backend, ProcessGroup
 
-from vllm._ops_dispatch import has_op
 import vllm.envs as envs
+from vllm._ops_dispatch import has_op
 from vllm.distributed.device_communicators.base_device_communicator import (
     DeviceCommunicatorBase,
 )
