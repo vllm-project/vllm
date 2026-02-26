@@ -77,6 +77,7 @@ def fetch_id_to_ragged_triton(
 
 class ROCMAiterMLASparseBackend(AttentionBackend):
     accept_output_buffer: bool = True
+    supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
 
     @staticmethod
     def get_name() -> str:
@@ -103,10 +104,6 @@ class ROCMAiterMLASparseBackend(AttentionBackend):
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
         return (num_blocks, block_size, head_size)
-
-    @classmethod
-    def get_supported_dtypes(cls) -> list[torch.dtype]:
-        return [torch.bfloat16]
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
