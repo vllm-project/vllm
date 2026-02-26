@@ -53,7 +53,7 @@ def get_full_shape_nk(layer: torch.nn.Module, shape_n: int, shape_k: int):
         return shape_n, shape_k
     else:
         raise ValueError("unsupported layer type: " + layer.__class__.__name__)
-    
+
 
 def narrow_tensors(
     tensors: dict[str, torch.Tensor],
@@ -521,7 +521,7 @@ class HummingLinearMethod(LinearMethodBase):
                 shape_k=shape_k,
                 tp_size=layer.tp_size,
                 tp_rank=layer.tp_rank,
-                is_row_parallel=isinstance(layer, RowParallelLinear)
+                is_row_parallel=isinstance(layer, RowParallelLinear),
             )
 
             HummingMethod.load_weight(
@@ -684,7 +684,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             weight_name: str,
             shard_id: int | None = None,
             expert_id: int | None = None,
-            return_success: bool = False
+            return_success: bool = False,
         ):
             param_name = param.param_name
 
