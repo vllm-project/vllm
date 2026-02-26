@@ -1194,6 +1194,26 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         vit_embeds = self.mlp1(vit_embeds)
         return vit_embeds
 
+    def reconfigure_mm_token_handling(self, new_mm_tok: int, is_image: bool):
+        """Ensure that new multimodal tokens passed are configured correctly
+        for OOV requests.
+
+        NOTE: It would be better to handle this at init time, but currently
+        the mm token IDs are passed at inference time through the processor.
+        For now, we reconfigure the mm token handling the first times we see
+        the image / video tokens in warmup.
+        """
+        mm_token_ids = [new_mm_tok]
+        if is_image and self.video_context_token_id is not None:
+            mm_token_ids.append(self.video_context_token_id)
+        elif not is_image and self.img_context_token_id is not None:
+            mm_token_ids.append(self.img_context_token_id)
+
+        self.configure_mm_token_handling(
+            vocab_size=self.config.text_config.vocab_size,
+            mm_token_ids=mm_token_ids,
+        )
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> InternVLImageInputs | None:
@@ -1215,7 +1235,11 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             image_token_id = image_token_id.flatten().unique().item()
 
         assert isinstance(image_token_id, int)
-        self.img_context_token_id = image_token_id
+
+        if self.img_context_token_id is None:
+            # Ensure the img token and potential video token are handled correctly
+            self.reconfigure_mm_token_handling(new_mm_tok=image_token_id, is_image=True)
+            self.img_context_token_id = image_token_id
 
         if pixel_values_flat is not None:
             expected_h = expected_w = self.config.vision_config.image_size
@@ -1251,7 +1275,13 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             video_token_id = video_token_id.flatten().unique().item()
 
         assert isinstance(video_token_id, int)
-        self.video_context_token_id = video_token_id
+
+        if self.video_context_token_id is None:
+            # Ensure the video token and potential img token are handled correctly
+            self.reconfigure_mm_token_handling(
+                new_mm_tok=video_token_id, is_image=False
+            )
+            self.video_context_token_id = video_token_id
 
         if pixel_values_flat_video is not None:
             expected_h = expected_w = self.config.vision_config.image_size
@@ -1347,7 +1377,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         if multimodal_embeddings is not None and len(multimodal_embeddings) > 0:
             self._set_visual_token_mask(input_ids)
@@ -1360,7 +1389,6 @@ class InternVLChatModel(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA)
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

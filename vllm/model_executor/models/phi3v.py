@@ -579,6 +579,11 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         self.multimodal_config = multimodal_config
         self.image_token_id = _IMAGE_TOKEN_ID
 
+        self.configure_mm_token_handling(
+            vocab_size=config.vocab_size,
+            mm_token_ids=[self.image_token_id],
+        )
+
         with self._mark_tower_model(vllm_config, "image"):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
@@ -663,13 +668,11 @@ class Phi3VForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsQuant)
         multimodal_embeddings: MultiModalEmbeddings | None = None,
         *,
         is_multimodal: torch.Tensor | None = None,
-        handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
         inputs_embeds = self._embed_text_input_ids(
             input_ids,
             self.embed_tokens,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
         if multimodal_embeddings is None or len(multimodal_embeddings) == 0:
