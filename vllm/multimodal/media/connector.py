@@ -83,9 +83,7 @@ class MediaConnector:
         self.allowed_media_domains = allowed_media_domains
 
         # Pre-create MediaIO instances to avoid repeated construction
-        self._audio_io = AudioMediaIO(
-            **self.media_io_kwargs.get("audio", {})
-        )
+        self._audio_io = AudioMediaIO(**self.media_io_kwargs.get("audio", {}))
         self._image_io_cache: dict[str, ImageMediaIO] = {}
         self._video_io_cache: dict[str, VideoMediaIO] = {}
         self._audio_embedding_io = AudioEmbeddingMediaIO()
