@@ -86,7 +86,8 @@ class CPUWorker(Worker):
             self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
-            # Use dispatcher to route to correct utils module (_C_utils or _C_avx512_utils)
+            # Use dispatcher to route to correct utils module
+            # (_C_utils or _C_avx512_utils)
             ret = get_utils().init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)

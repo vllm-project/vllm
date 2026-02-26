@@ -989,7 +989,7 @@ if _is_cuda():
 
 if _build_custom_ops():
     ext_modules.append(CMakeExtension(name="vllm._C"))
-    if _is_cpu():
+    if _is_cpu() and torch.cpu._is_avx512_supported():
         ext_modules.append(CMakeExtension(name="vllm._C_avx512"))
 
 package_data = {

@@ -83,9 +83,8 @@ def get_utils():
         torch.ops._C_avx512_utils or torch.ops._C_utils
     """
     ext = _detect_cpu_extension()
-    if ext == "_C_avx512":
-        if hasattr(torch.ops, "_C_avx512_utils"):
-            return torch.ops._C_avx512_utils
+    if ext == "_C_avx512" and hasattr(torch.ops, "_C_avx512_utils"):
+        return torch.ops._C_avx512_utils
     if hasattr(torch.ops, "_C_utils"):
         return torch.ops._C_utils
     # Return None if no utils module found (caller should handle)
@@ -101,9 +100,8 @@ def get_cpu_ops():
         The CPU ops module, or None if not available
     """
     ext = _detect_cpu_extension()
-    if ext == "_C_avx512":
-        if hasattr(torch.ops, "_C_avx512_cpu"):
-            return torch.ops._C_avx512_cpu
+    if ext == "_C_avx512" and hasattr(torch.ops, "_C_avx512_cpu"):
+        return torch.ops._C_avx512_cpu
     if hasattr(torch.ops, "_C_cpu"):
         return torch.ops._C_cpu
     return None
