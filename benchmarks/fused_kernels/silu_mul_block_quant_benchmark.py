@@ -178,8 +178,6 @@ def bench(params: bench_params_t, label: str, sub_label: str) -> Iterable[TMeasu
         )
     )
 
-    print_timers(timers)
-
     return timers
 
 
