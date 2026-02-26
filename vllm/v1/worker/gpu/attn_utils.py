@@ -6,6 +6,7 @@ from typing import Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
+from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
@@ -22,10 +23,22 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
     layer_type = cast(type[Any], AttentionLayerBase)
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
     for layer_name, attn_module in attn_layers.items():
+        if getattr(attn_module, "kv_sharing_target_layer_name", None):
+            # This layer will use KV cache of the sharing target layer.
+            continue
         # Skip modules that don't need KV cache (eg encoder-only attention)
         if spec := attn_module.get_kv_cache_spec(vllm_config):
             kv_cache_spec[layer_name] = spec
     return kv_cache_spec
+
+
+def get_shared_kv_cache_layers(vllm_config: VllmConfig):
+    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
+    return {
+        layer_name: kv_tgt_layer
+        for layer_name, attn_module in attn_layers.items()
+        if (kv_tgt_layer := attn_module.kv_sharing_target_layer_name)
+    }
 
 
 def init_attn_backend(
@@ -95,7 +108,7 @@ def _allocate_kv_cache(kv_cache_config: KVCacheConfig, device: torch.device):
     for group in kv_cache_config.kv_cache_groups:
         for layer_name in group.layer_names:
             layer_names.add(layer_name)
-    assert layer_names == set(kv_cache_raw_tensors.keys()), (
+    assert set(kv_cache_raw_tensors.keys()) <= layer_names, (
         "Some layers are not correctly initialized"
     )
     return kv_cache_raw_tensors
@@ -105,13 +118,18 @@ def _reshape_kv_cache(
     kv_cache_config: KVCacheConfig,
     kv_cache_raw_tensors: dict[str, torch.Tensor],
     attn_backends: dict[str, AttentionBackend],
+    shared_kv_cache_layers: dict[str, str],
 ) -> dict[str, torch.Tensor]:
     kv_caches: dict[str, torch.Tensor] = {}
     for kv_cache_group_spec in kv_cache_config.kv_cache_groups:
         kv_cache_spec = kv_cache_group_spec.kv_cache_spec
         assert isinstance(kv_cache_spec, AttentionSpec)
         for layer_name in kv_cache_group_spec.layer_names:
-            raw_tensor = kv_cache_raw_tensors[layer_name]
+            raw_tensor = kv_cache_raw_tensors.get(layer_name)
+            if raw_tensor is None:
+                # Shared layer — tensor will be assigned after.
+                assert layer_name in shared_kv_cache_layers
+                continue
             assert raw_tensor.numel() % kv_cache_spec.page_size_bytes == 0
             num_blocks = raw_tensor.numel() // kv_cache_spec.page_size_bytes
 
@@ -140,6 +158,11 @@ def _reshape_kv_cache(
             raw_tensor = raw_tensor.view(dtype)
             raw_tensor = raw_tensor.view(kv_cache_shape)
             kv_caches[layer_name] = raw_tensor.permute(*inv_order)
+
+    # Map any sharing layers to their target layer's KV cache.
+    for layer_name, target_layer_name in shared_kv_cache_layers.items():
+        kv_caches[layer_name] = kv_caches[target_layer_name]
+
     return kv_caches
 
 
@@ -149,9 +172,12 @@ def init_kv_cache(
     kv_cache_config: KVCacheConfig,
     attn_backends: dict[str, AttentionBackend],
     device: torch.device,
+    shared_kv_cache_layers: dict[str, str],
 ) -> dict[str, torch.Tensor]:
     kv_cache_raw_tensors = _allocate_kv_cache(kv_cache_config, device)
-    kv_caches = _reshape_kv_cache(kv_cache_config, kv_cache_raw_tensors, attn_backends)
+    kv_caches = _reshape_kv_cache(
+        kv_cache_config, kv_cache_raw_tensors, attn_backends, shared_kv_cache_layers
+    )
     bind_kv_cache(kv_caches, forward_context, runner_kv_caches)
     return kv_caches
 

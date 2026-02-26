@@ -1747,13 +1747,12 @@ def get_layers_from_vllm_config(
         layer_names: The names of the layers to get. If None, return all layers.
     """
 
-    if layer_names is None:
-        layer_names = list(vllm_config.compilation_config.static_forward_context.keys())
-
     forward_context = vllm_config.compilation_config.static_forward_context
+    if layer_names is None:
+        layer_names = forward_context.keys()
 
     return {
-        layer_name: forward_context[layer_name]
+        layer_name: layer
         for layer_name in layer_names
-        if isinstance(forward_context[layer_name], layer_type)
+        if isinstance(layer := forward_context[layer_name], layer_type)
     }

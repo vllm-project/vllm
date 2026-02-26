@@ -49,6 +49,7 @@ from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
     build_slot_mappings_by_layer,
     get_kv_cache_spec,
+    get_shared_kv_cache_layers,
     init_attn_backend,
     init_kv_cache,
 )
@@ -91,6 +92,7 @@ from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.utils import add_kv_sharing_layers_to_kv_cache_groups
 
 logger = init_logger(__name__)
 
@@ -282,6 +284,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         kv_cache_config = deepcopy(kv_cache_config)
         self.kv_cache_config = kv_cache_config
+
+        shared_kv_cache_layers = get_shared_kv_cache_layers(self.vllm_config)
+        add_kv_sharing_layers_to_kv_cache_groups(
+            shared_kv_cache_layers, kv_cache_config.kv_cache_groups
+        )
+
         block_sizes = [
             kv_cache_group.kv_cache_spec.block_size
             for kv_cache_group in kv_cache_config.kv_cache_groups
@@ -317,6 +325,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.attn_backends,
             self.device,
+            shared_kv_cache_layers,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
 
@@ -958,6 +967,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             if self.uses_mrope:
                 input_batch.mrope_positions = self.mrope_states.mrope_positions[
                     :, :num_tokens_after_padding
+                ]
+            if self.supports_mm_inputs and self.is_first_pp_rank:
+                input_batch.inputs_embeds = self.encoder_runner.inputs_embeds[
+                    :num_tokens_after_padding
                 ]
             if not skip_attn_for_dummy_run:
                 self.prepare_dummy_attn_metadata(input_batch)
