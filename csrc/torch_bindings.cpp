@@ -242,7 +242,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
   ops.def(
       "dsv3_fused_a_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
-  ops.impl("dsv3_fused_a_gemm", torch::kCUDA, &dsv3_fused_a_gemm);
+  // conditionally compiled so impl registration is in source file
 
   // Quantized GEMM for AWQ.
   ops.def(
@@ -505,19 +505,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
            &get_cutlass_moe_mm_problem_sizes_from_expert_offsets);
 
   // A function that computes data required to run fused MoE with w8a8 grouped
-  // GEMM and PPLX. It takes expert_num_tokens and non_zero_expert_idxs
+  // GEMM in batched expert format. It takes expert_num_tokens
   // as an input, and computes expert_offsets (token start indices of each
   // expert). In addition to this, it computes problem sizes for each expert's
   // multiplication used by the two mms called from fused MoE operation.
   ops.def(
-      "get_cutlass_pplx_moe_mm_data(Tensor! expert_offsets, "
+      "get_cutlass_batched_moe_mm_data(Tensor! expert_offsets, "
       "                             Tensor! problem_sizes1, "
       "                             Tensor! problem_sizes2, "
       "                             Tensor expert_num_tokens, "
       "                             int num_local_experts, int padded_m, "
       "                             int n, int k) -> ()");
-  ops.impl("get_cutlass_pplx_moe_mm_data", torch::kCUDA,
-           &get_cutlass_pplx_moe_mm_data);
+  ops.impl("get_cutlass_batched_moe_mm_data", torch::kCUDA,
+           &get_cutlass_batched_moe_mm_data);
 
   // Check if cutlass scaled_mm supports block quantization (used by DeepSeekV3)
   ops.def(

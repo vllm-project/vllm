@@ -81,6 +81,11 @@ from vllm.model_executor.models.interfaces_base import (
     is_pooling_model,
     is_text_generation_model,
 )
+from vllm.model_executor.offloader import (
+    create_offloader,
+    get_offloader,
+    set_offloader,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.inputs import (
@@ -95,11 +100,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
 from vllm.utils import length_from_prompt_token_ids_or_embeds
-from vllm.utils.jsontree import json_map_leaves
 from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.nvtx_pytorch_hooks import PytHooks
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.utils.platform_utils import is_pin_memory_available, num_compute_units
 from vllm.utils.torch_utils import (
     get_dtype_size,
     kv_cache_dtype_str_to_dtype,
@@ -114,6 +118,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
+from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     create_fast_prefill_custom_backend,
     get_dcp_local_seq_lens,
@@ -268,6 +273,51 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         return output
 
 
+def _copy_pooler_output_to_cpu(
+    raw_pooler_output: PoolerOutput, finished_mask: list[bool]
+) -> list[torch.Tensor | None]:
+    num_reqs = len(finished_mask)
+
+    if isinstance(raw_pooler_output, torch.Tensor):
+        if raw_pooler_output.shape[0] != num_reqs:
+            raise ValueError(
+                "Pooler output batch size does not match finished mask size: "
+                f"{raw_pooler_output.shape[0]} != {num_reqs}."
+            )
+
+        num_finished = sum(finished_mask)
+        if num_finished == 0:
+            return [None] * num_reqs
+        if num_finished == num_reqs:
+            return list(raw_pooler_output.to("cpu", non_blocking=True))
+
+        # partial finished
+        finished_indices = [i for i, include in enumerate(finished_mask) if include]
+        index_tensor = torch.tensor(
+            finished_indices, device=raw_pooler_output.device, dtype=torch.long
+        )
+        finished_outputs = raw_pooler_output.index_select(0, index_tensor).to(
+            "cpu", non_blocking=True
+        )
+        partial_pooler_output: list[torch.Tensor | None] = [None] * num_reqs
+        for i, out in zip(finished_indices, finished_outputs):
+            partial_pooler_output[i] = out
+        return partial_pooler_output
+
+    assert isinstance(raw_pooler_output, list)
+    if len(raw_pooler_output) != num_reqs:
+        raise ValueError(
+            "Pooler output batch size does not match finished mask size: "
+            f"{len(raw_pooler_output)} != {num_reqs}."
+        )
+
+    pooler_output: list[torch.Tensor | None] = [None] * num_reqs
+    for i, (out, include) in enumerate(zip(raw_pooler_output, finished_mask)):
+        if include and out is not None:
+            pooler_output[i] = out.to("cpu", non_blocking=True)
+    return pooler_output
+
+
 class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
     def __init__(
         self,
@@ -289,15 +339,11 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         default_stream = torch.cuda.current_stream()
         with torch.cuda.stream(async_output_copy_stream):
             async_output_copy_stream.wait_stream(default_stream)
-            raw_pooler_output_cpu = json_map_leaves(
-                lambda x: None if x is None else x.to("cpu", non_blocking=True),
-                self._raw_pooler_output,
+            self._model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
+                raw_pooler_output=self._raw_pooler_output,
+                finished_mask=finished_mask,
             )
             self.async_copy_ready_event.record()
-            self._model_runner_output.pooler_output = [
-                out if include else None
-                for out, include in zip(raw_pooler_output_cpu, finished_mask)
-            ]
 
     def get_output(self) -> ModelRunnerOutput:
         """Copy the device tensors to the host and return a ModelRunnerOutput.
@@ -337,6 +383,7 @@ class GPUModelRunner(
         self.vllm_config = vllm_config
         self.model_config = vllm_config.model_config
         self.cache_config = vllm_config.cache_config
+        self.offload_config = vllm_config.offload_config
         self.compilation_config = vllm_config.compilation_config
         self.lora_config = vllm_config.lora_config
         self.load_config = vllm_config.load_config
@@ -344,14 +391,6 @@ class GPUModelRunner(
         self.scheduler_config = vllm_config.scheduler_config
         self.speculative_config = vllm_config.speculative_config
         self.observability_config = vllm_config.observability_config
-
-        from vllm.model_executor.models.utils import (
-            set_cpu_offload_max_bytes,
-            set_cpu_offload_params,
-        )
-
-        set_cpu_offload_max_bytes(int(self.cache_config.cpu_offload_gb * 1024**3))
-        set_cpu_offload_params(self.cache_config.cpu_offload_params)
 
         model_config = self.model_config
         cache_config = self.cache_config
@@ -708,6 +747,10 @@ class GPUModelRunner(
                     pin_memory=self.pin_memory,
                 )
 
+        # Model weight offloader
+        # Make sure this is called before any get_offloader call
+        set_offloader(create_offloader(self.offload_config))
+
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
@@ -868,8 +911,8 @@ class GPUModelRunner(
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
         """Initialize attributes from torch.cuda.get_device_properties"""
-        self.device_properties = torch.cuda.get_device_properties(self.device)
-        self.num_sms = self.device_properties.multi_processor_count
+
+        self.num_sms = num_compute_units(self.device.index)
 
     # Note: used for model runner override.
     def _sync_device(self) -> None:
@@ -1812,7 +1855,9 @@ class GPUModelRunner(
             )
 
             extra_attn_metadata_args = {}
-            if use_spec_decode and isinstance(builder, GDNAttentionMetadataBuilder):
+            if use_spec_decode and isinstance(
+                builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
+            ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
@@ -2705,14 +2750,10 @@ class GPUModelRunner(
                 async_output_copy_stream=self.async_output_copy_stream,
             )
 
-        raw_pooler_output = json_map_leaves(
-            lambda x: None if x is None else x.to("cpu", non_blocking=True),
-            raw_pooler_output,
+        model_runner_output.pooler_output = _copy_pooler_output_to_cpu(
+            raw_pooler_output=raw_pooler_output,
+            finished_mask=finished_mask,
         )
-        model_runner_output.pooler_output = [
-            out if include else None
-            for out, include in zip(raw_pooler_output, finished_mask)
-        ]
         self._sync_device()
 
         return model_runner_output
@@ -4303,6 +4344,8 @@ class GPUModelRunner(
                     self.model, self.vllm_config, CUDAGraphMode.NONE, self.device
                 )
 
+        get_offloader().post_init()
+
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.
 
@@ -4689,7 +4732,7 @@ class GPUModelRunner(
         # Set num_scheduled_tokens based on num_tokens and max_num_seqs
         # for dummy run with LoRA so that the num_reqs collectively
         # has num_tokens in total.
-        assert num_tokens <= self.scheduler_config.max_num_batched_tokens
+        assert num_tokens <= self.max_num_tokens
         max_num_reqs = self.scheduler_config.max_num_seqs
         if create_mixed_batch:
             assert not uniform_decode
@@ -4813,6 +4856,7 @@ class GPUModelRunner(
                     ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
                     for_cudagraph_capture=is_graph_capturing,
                     slot_mappings=slot_mappings_by_group,
+                    use_spec_decode=self.speculative_config is not None,
                 )
 
         with self.maybe_dummy_run_with_lora(
@@ -5740,7 +5784,7 @@ class GPUModelRunner(
         if block_sizes != [self.cache_config.block_size] or kernel_block_sizes != [
             self.cache_config.block_size
         ]:
-            assert self.cache_config.cpu_offload_gb == 0, (
+            assert self.offload_config.uva.cpu_offload_gb == 0, (
                 "Cannot re-initialize the input batch when CPU weight "
                 "offloading is enabled. See https://github.com/vllm-project/vllm/pull/18298 "  # noqa: E501
                 "for more details."
