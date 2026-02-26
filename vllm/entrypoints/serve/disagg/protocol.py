@@ -16,6 +16,14 @@ from vllm.utils import random_uuid
 
 
 ####### Tokens IN <> Tokens OUT #######
+class MultiModalFeature(BaseModel):
+    """JSON-serializable metadata for a cached multimodal item."""
+    modality: str
+    mm_hash: str
+    offset: int
+    length: int
+
+
 class GenerateRequest(BaseModel):
     request_id: str = Field(
         default_factory=lambda: f"{random_uuid()}",
@@ -28,9 +36,7 @@ class GenerateRequest(BaseModel):
     token_ids: list[int]
     """The token ids to generate text from."""
 
-    # features: MultiModalFeatureSpec
-    # TODO (NickLucche): implement once Renderer work is completed
-    features: str | None = None
+    features: list[MultiModalFeature] | None = None
     """The processed MM inputs for the model."""
 
     sampling_params: SamplingParams
