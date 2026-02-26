@@ -112,6 +112,28 @@ async def test_bge_m3_sparse_plugin_online_no_tokens(server: RemoteOpenAIServer)
         assert entry.token is None
 
 
+def _check_sparse_embedding(data, check_tokens=False):
+    expected_weights = [
+        {"token_id": 32, "weight": 0.0552978515625, "token": "?"},
+        {"token_id": 70, "weight": 0.09808349609375, "token": "the"},
+        {"token_id": 83, "weight": 0.08154296875, "token": "is"},
+        {"token_id": 111, "weight": 0.11810302734375, "token": "of"},
+        {"token_id": 4865, "weight": 0.1171875, "token": "What"},
+        {"token_id": 9942, "weight": 0.292236328125, "token": "France"},
+        {"token_id": 10323, "weight": 0.2802734375, "token": "capital"},
+    ]
+    expected_embed = {x["token_id"]: x for x in expected_weights}
+
+    assert len(data) == len(expected_embed)
+    for entry in data:
+        expected_val = expected_embed[entry["token_id"]]
+        assert expected_val["weight"] == entry["weight"], (
+            f"actual embed {entry} not equal to {expected_val}"
+        )
+        if check_tokens:
+            assert expected_val["token"] == entry["token"]
+
+
 @pytest.mark.parametrize(
     "return_tokens",
     [True, False],
@@ -150,13 +172,8 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
         # Each output should have sparse embeddings
         sparse_embedding = output.sparse_embedding
         assert isinstance(sparse_embedding, list)
-        for idx, entry in enumerate(sparse_embedding):
-            # Verify token presence based on return_tokens
-            if return_tokens:
-                # For offline mode, tokens might be None depending on renderer
-                # but token_id and weight should always be present
-                assert isinstance(entry.token_id, int)
-                assert isinstance(entry.weight, (float, int))
+        _check_sparse_embedding(sparse_embedding, return_tokens)
+
     # Verify usage
     assert response.usage.prompt_tokens > 0
     assert response.usage.total_tokens == response.usage.prompt_tokens
