@@ -1,5 +1,22 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""
+NOTE: Coding style guide for this file:
+This model runner is shared by all models: text and multimodal, generative
+and embedding, public and private. As a result, this file must only contain
+code that is common to every model. Model-specific behavior belongs in the
+appropriate model-specific files.
+
+In other words:
+* Be paranoid about changing this file. It should remain stable.
+* Be even more paranoid about adding new lines. It should remain minimal.
+
+Even for shared features (for example, different parallelism modes), keep the
+complexity out of this path. The less common the feature, the more it should be
+hidden. Prefer utility functions defined elsewhere and call them from here,
+instead of embedding feature-specific logic directly.
+"""
+
 import functools
 import gc
 import time
