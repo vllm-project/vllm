@@ -8,5 +8,4 @@ server_args: >-
   --tensor-parallel-size 2
   --enable-expert-parallel
   --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}'
-env:
-  VLLM_USE_FLASHINFER_MOE_FP4: "1"
+  --moe-backend=flashinfer_trtllm

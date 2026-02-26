@@ -27,6 +27,63 @@ from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNo
 
 logger = init_logger(__name__)
 
+# Min hidden size per device capability for sequence parallelism
+# Only apply sequence parallelism for models with hidden_size >= threshold
+SP_MIN_HIDDEN_SIZE: dict[int, int] = {
+    90: 8192,  # H100: only for models with hidden_size >= 8192
+}
+
+# Min size per GPU per device capability for sequence parallelism
+# Total min size = min_per_gpu_size * tp_size
+# This ensures the threshold scales appropriately with tensor parallelism
+SP_MIN_PER_GPU_SIZE_MB: dict[int, float] = {
+    90: 8,  # 8MB per GPU for H100
+}
+
+
+def get_sequence_parallelism_threshold(
+    hidden_size: int,
+    tp_size: int,
+    element_size: int,
+) -> int | None:
+    """
+    Calculate the minimum token threshold for applying sequence parallelism.
+
+    Returns None if sequence parallelism should not be applied based on model size.
+
+    Branching logic based on device capability:
+    - Check if hidden_size >= SP_MIN_HIDDEN_SIZE[device_capability]
+    - If not, returns None (SP disabled for small models on this device)
+    - If yes, calculates threshold based on per-GPU size
+
+    Formula: min_token_num = (min_per_gpu_size_mb * tp_size * MiB) //
+             (hidden_size * element_size)
+    """
+    from vllm.platforms import current_platform
+
+    if not current_platform.is_cuda():
+        return None
+
+    capability = current_platform.get_device_capability()
+    if capability is None:
+        return None
+    device_capability = capability.to_int()
+
+    # Check if device has configured thresholds
+    min_hidden_size = SP_MIN_HIDDEN_SIZE.get(device_capability)
+    min_per_gpu_size_mb = SP_MIN_PER_GPU_SIZE_MB.get(device_capability)
+
+    if min_hidden_size is None or min_per_gpu_size_mb is None:
+        return None
+
+    # Only apply sequence parallelism for models meeting the size threshold
+    if hidden_size < min_hidden_size:
+        return None
+
+    MiB = 1024 * 1024
+    min_size = min_per_gpu_size_mb * MiB * tp_size
+    return int(min_size // (hidden_size * element_size))
+
 
 def get_first_out_wrapper(
     fn: Callable[..., Sequence[torch.Tensor]],
@@ -309,6 +366,23 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
 
+        # Get min_token_num threshold
+        # Read min_token_num from config (calculated during config init)
+        self.min_token_num = None
+        if config.model_config is not None:
+            pass_config = config.compilation_config.pass_config
+            self.min_token_num = pass_config.sp_min_token_num
+
+            if self.min_token_num is not None:
+                # Take the min to avoid exceeding max_num_batched_tokens
+                max_batched = config.scheduler_config.max_num_batched_tokens
+                if max_batched is not None:
+                    self.min_token_num = min(self.min_token_num, max_batched)
+                logger.debug_once(
+                    f"Sequence parallelism min token threshold: {self.min_token_num}",
+                    scope="global",
+                )
+
         # Used to clean up redundant views created temporarily
         # to circumvent residual shape change issues
         self.noop_cleanup = NoOpEliminationPass(config)
@@ -339,29 +413,36 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
         self.dump_patterns(config, self.patterns)
 
     def is_applicable_for_range(self, compile_range: Range) -> bool:
-        # When sequence parallelism is enabled, the residual tensor from RMSNorm
-        # needs to be split along the sequence dimension. However, this dimension
-        # is symbolic during piecewise compilation, and splitting symbolic shapes
-        # is not supported.
-        #
-        # This pass is therefore only applied when the sequence dimension is
-        # concrete:
-        # 1. In full-graph compilation mode (no Dynamo splitting ops are used).
-        #   For this case we always pad num_tokens to be a multiple of
-        #   tensor_parallel_size, so there's no need to check shape % tp_size == 0.
-        # 2. For specific shape provided during compilation (e.g., from
-        #    `compile_sizes`), which must be divisible by the tensor-parallel
-        #    size.
+        """
+        Determines if sequence parallelism should be applied for the given
+        compile range.
+
+        SP is only beneficial for larger batch sizes where the communication
+        overhead is amortized. For small batches, the overhead of splitting
+        and gathering tensors across TP ranks outweighs the benefits.
+
+        Returns False (SP disabled) when:
+        - Using piecewise compilation with non-concrete or TP-indivisible sizes
+        - min_token_num is None (SP disabled for this device/config)
+        - The compile range starts below the minimum token threshold
+        """
+        # For piecewise compilation (not using inductor graph partition),
+        # we need concrete sizes that are divisible by TP for correct splitting
         if (
-            not self.compilation_config.splitting_ops
-            or self.compilation_config.use_inductor_graph_partition
+            not self.compilation_config.use_inductor_graph_partition
+            and self.compilation_config.splitting_ops
         ):
-            return True
-        tp_size = get_tensor_model_parallel_world_size()
-        result: bool = (compile_range.is_single_size()) and (
-            compile_range.end % tp_size == 0
-        )
-        return result
+            tp_size = get_tensor_model_parallel_world_size()
+            if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
+                return False
+
+        # min_token_num is None when SP is disabled for this device/config
+        # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)
+        if self.min_token_num is None:
+            return False
+
+        # Only apply SP when batch size meets the minimum threshold
+        return compile_range.start >= self.min_token_num
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
