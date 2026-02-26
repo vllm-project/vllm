@@ -862,6 +862,57 @@ def _rocm_aiter_gemm_a8wfp4_fake(
     out_dtype: torch.dtype,
 ) -> torch.Tensor:
     return torch.empty(x.shape[0], w.shape[0], dtype=out_dtype, device=x.device)
+def _triton_rotary_embedding_impl(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox: bool,
+    offsets: torch.Tensor | None = None,
+) -> None:
+    # Modifies query and key in-place
+    from aiter.ops.triton.rope.rope import (
+        rope_cached_thd_positions_offsets_2c_fwd_inplace,
+    )
+
+    num_tokens = positions.numel()
+    cos, sin = cos_sin_cache.chunk(2, dim=-1)
+    query_shape = query.shape
+    key_shape = key.shape
+    rotate_style = 0 if is_neox else 1
+    rotary_dim = head_size
+
+    query = query.view(num_tokens, -1, head_size)
+    key = key.view(num_tokens, -1, head_size)
+    query_ = query[..., :rotary_dim]
+    key_ = key[..., :rotary_dim]
+    positions = positions.view(*query.shape[:1])
+    rope_cached_thd_positions_offsets_2c_fwd_inplace(
+        query_,
+        key_,
+        cos,
+        sin,
+        positions,
+        offsets,
+        rotate_style,
+        reuse_freqs_front_part=True,
+        nope_first=False,
+    )
+    query = query.view(query_shape)
+    key = key.view(key_shape)
+
+
+def _triton_rotary_embedding_fake(
+    positions: torch.Tensor,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    head_size: int,
+    cos_sin_cache: torch.Tensor,
+    is_neox_style: bool,
+    offsets: torch.Tensor | None = None,
+) -> None:
+    return
 
 
 # Global flag to ensure ops are registered only once
@@ -1032,12 +1083,16 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950()
 
     @classmethod
     @if_aiter_supported
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
 
     @classmethod
     @if_aiter_supported
@@ -1217,6 +1272,13 @@ class rocm_aiter_ops:
                 mutates_args=[],
                 fake_impl=_rocm_aiter_gemm_a8wfp4_fake,
                 dispatch_key=current_platform.dispatch_key,
+
+            # Register rocm aiter rotary embedding custom op
+            direct_register_custom_op(
+                op_name="rocm_aiter_triton_rotary_embedding",
+                op_func=_triton_rotary_embedding_impl,
+                mutates_args=["query", "key"],  # These tensors are modified in-place
+                fake_impl=_triton_rotary_embedding_fake,
             )
 
             _OPS_REGISTERED = True
@@ -1260,6 +1322,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_triton_add_rmsnorm_pad_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_triton_add_rmsnorm_pad.default
+
+    @staticmethod
+    def get_triton_rotary_embedding_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_triton_rotary_embedding.default
 
     @staticmethod
     def rms_norm(
@@ -1536,40 +1602,43 @@ class rocm_aiter_ops:
         return y
 
     @staticmethod
-    def triton_rotary_embed(
-        positions: torch.Tensor,
+    def triton_rope_and_cache(
         query: torch.Tensor,
         key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
         cos_sin_cache: torch.Tensor,
-        head_size: int,
-        rotary_dim: int,
-        is_neox_style: bool,
+        is_neox: bool,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+        k_scale: torch.Tensor,
+        v_scale: torch.Tensor,
+        flash_layout: bool,
+        apply_scale: bool,
     ):
-        from aiter.ops.triton.rope import rope_cached_thd_positions_2c_fwd_inplace
+        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
 
-        num_tokens = positions.numel()
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
-        query_shape = query.shape
-        key_shape = key.shape
-        rotate_style = 0 if is_neox_style else 1
-
-        query = query.view(num_tokens, -1, head_size)
-        key = key.view(num_tokens, -1, head_size)
-        query_ = query[..., :rotary_dim]
-        key_ = key[..., :rotary_dim]
-        positions = positions.view(*query.shape[:1])
-        rope_cached_thd_positions_2c_fwd_inplace(
-            query_,
-            key_,
+        fused_qk_rope_reshape_and_cache(
+            query,
+            key,
+            value,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            positions,
             cos,
             sin,
-            positions,
-            rotate_style,
-            reuse_freqs_front_part=True,
-            nope_first=False,
+            k_scale,
+            v_scale,
+            is_neox,
+            flash_layout=flash_layout,
+            apply_scale=apply_scale,
+            q_out=query,
+            k_out=key,
+            output_zeros=False,
         )
-        query = query.view(query_shape)
-        key = key.view(key_shape)
 
     @staticmethod
     def batched_gemm_a16wfp4(

@@ -1365,7 +1365,7 @@ class ModelConfig:
 
         return diff_sampling_param
 
-    @property
+    @cached_property
     def is_encoder_decoder(self) -> bool:
         """Extract the HF encoder/decoder model flag."""
         return is_encoder_decoder(self.hf_config)

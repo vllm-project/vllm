@@ -13,8 +13,6 @@
 # This backward pass is faster for dimensions up to 8k, but after that it's much slower due to register spilling.
 # The models we train have hidden dim up to 8k anyway (e.g. Llama 70B), so this is fine.
 
-from functools import lru_cache
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,6 +20,7 @@ from einops import rearrange
 
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv, next_power_of_2
+from vllm.utils.platform_utils import num_compute_units
 
 from .utils import input_guard
 
@@ -85,6 +84,7 @@ def layer_norm_fwd_kernel(
     HAS_Z: tl.constexpr,
     NORM_BEFORE_GATE: tl.constexpr,
     IS_RMS_NORM: tl.constexpr,
+    ACTIVATION: tl.constexpr,
 ):
     # Map the program id to the starting row of X and Y it should compute.
     row_start = tl.program_id(0) * ROWS_PER_BLOCK
@@ -113,7 +113,10 @@ def layer_norm_fwd_kernel(
     if HAS_Z and not NORM_BEFORE_GATE:
         Z_base = Z + rows[:, None] * stride_z_row + col_offsets
         z = tl.load(Z_base, mask=mask, other=0.0).to(tl.float32)
-        x *= z * tl.sigmoid(z)
+        if ACTIVATION == "swish" or ACTIVATION == "silu":
+            x *= z * tl.sigmoid(z)
+        elif ACTIVATION == "sigmoid":
+            x *= tl.sigmoid(z)
 
     # Compute mean and variance per row (reduce along axis 1)
     if not IS_RMS_NORM:
@@ -156,21 +159,17 @@ def layer_norm_fwd_kernel(
     if HAS_Z and NORM_BEFORE_GATE:
         Z_base = Z + rows[:, None] * stride_z_row + col_offsets
         z = tl.load(Z_base, mask=mask, other=0.0).to(tl.float32)
-        y *= z * tl.sigmoid(z)
+        if ACTIVATION == "swish" or ACTIVATION == "silu":
+            y *= z * tl.sigmoid(z)
+        elif ACTIVATION == "sigmoid":
+            y *= tl.sigmoid(z)
 
     # Write output
     tl.store(Y_base, y, mask=mask)
 
 
-@lru_cache
-def _get_sm_count(device: torch.device) -> int:
-    """Get and cache the SM count for a given device."""
-    props = torch.cuda.get_device_properties(device)
-    return props.multi_processor_count
-
-
 def calc_rows_per_block(M: int, device: torch.device) -> int:
-    sm_count = _get_sm_count(device)
+    sm_count = num_compute_units(device.index)
     rows_per_block = next_power_of_2(cdiv(M, 2 * sm_count))
     rows_per_block = min(rows_per_block, 4)
     return rows_per_block
@@ -186,6 +185,7 @@ def layer_norm_fwd(
     group_size: int = None,
     norm_before_gate: bool = True,
     is_rms_norm: bool = False,
+    activation: str = "swish",
 ):
     M, N = x.shape
     if group_size is None:
@@ -240,9 +240,12 @@ def layer_norm_fwd(
         eps,
         BLOCK_N=BLOCK_N,
         ROWS_PER_BLOCK=rows_per_block,
+        HAS_BIAS=bias is not None,
+        HAS_Z=z is not None,
         NORM_BEFORE_GATE=norm_before_gate,
         IS_RMS_NORM=is_rms_norm,
         num_warps=num_warps,
+        ACTIVATION=activation,
     )
     return out, mean, rstd
 
@@ -260,6 +263,7 @@ class LayerNormFn(torch.autograd.Function):
         group_size=None,
         norm_before_gate=True,
         is_rms_norm=False,
+        activation: str = "swish",
     ):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
 
@@ -285,6 +289,7 @@ class LayerNormFn(torch.autograd.Function):
             group_size=group_size,
             norm_before_gate=norm_before_gate,
             is_rms_norm=is_rms_norm,
+            activation=activation,
         )
         ctx.save_for_backward(x, weight, bias, mean, rstd, z)
         ctx.x_shape_og = x_shape_og
@@ -292,6 +297,7 @@ class LayerNormFn(torch.autograd.Function):
         ctx.group_size = group_size
         ctx.norm_before_gate = norm_before_gate
         ctx.is_rms_norm = is_rms_norm
+        ctx.activation = activation
         return y.reshape(x_shape_og)
 
 
@@ -304,17 +310,25 @@ def layernorm_fn(
     group_size=None,
     norm_before_gate=True,
     is_rms_norm=False,
+    activation: str = "swish",
 ):
     return LayerNormFn.apply(
-        x, weight, bias, z, eps, group_size, norm_before_gate, is_rms_norm
+        x, weight, bias, z, eps, group_size, norm_before_gate, is_rms_norm, activation
     )
 
 
 def rmsnorm_fn(
-    x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True
+    x,
+    weight,
+    bias,
+    z=None,
+    eps=1e-6,
+    group_size=None,
+    norm_before_gate=True,
+    activation: str = "swish",
 ):
     return LayerNormFn.apply(
-        x, weight, bias, z, eps, group_size, norm_before_gate, True
+        x, weight, bias, z, eps, group_size, norm_before_gate, True, activation
     )
 
 
@@ -367,6 +381,7 @@ class RMSNormGated(nn.Module):
         norm_before_gate: bool = False,
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
+        activation: str = "swish",
     ):
         """If group_size is not None, we do GroupNorm with each group having group_size elements.
         group_size=None is equivalent to group_size=hidden_size (i.e. there's only 1 group).
@@ -374,6 +389,7 @@ class RMSNormGated(nn.Module):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.eps = eps
+        self.activation = activation
         self.weight = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
         self.register_parameter("bias", None)
         self.group_size = group_size
@@ -393,4 +409,5 @@ class RMSNormGated(nn.Module):
             eps=self.eps,
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
         )

@@ -172,7 +172,7 @@ __device__ void _moe_align_block_size(
     }
   }
 
-  // Fill remaining expert_ids with 0
+  // Fill remaining expert_ids with -1
   const size_t fill_start_idx =
       cumsum[cumsum_offset + num_experts] / block_size + threadIdx.x;
   for (size_t i = fill_start_idx; i < max_num_m_blocks; i += blockDim.x) {
@@ -265,7 +265,7 @@ __device__ void _moe_align_block_size_small_batch_expert(
     }
   }
 
-  // Fill remaining expert_ids with 0
+  // Fill remaining expert_ids with -1
   const size_t fill_start_idx = cumsum[num_experts] / block_size + tid;
   for (size_t i = fill_start_idx; i < max_num_m_blocks; i += stride) {
     expert_ids[expert_ids_offset + i] = inactive_expert_id;
@@ -332,7 +332,7 @@ __global__ void moe_align_block_size_kernel(
       topk_ids, sorted_token_ids, expert_ids, total_tokens_post_pad, expert_map,
       num_experts, padded_num_experts, experts_per_warp, block_size, numel,
       cumsum, max_num_tokens_padded, CEILDIV(max_num_tokens_padded, block_size),
-      0, 0, topk_num, nullptr, has_expert_map);
+      0, -1, topk_num, nullptr, has_expert_map);
 }
 
 template <typename scalar_t>
@@ -373,7 +373,7 @@ __global__ void moe_align_block_size_small_batch_expert_kernel(
   _moe_align_block_size_small_batch_expert<scalar_t, fill_threads>(
       topk_ids, sorted_token_ids, expert_ids, total_tokens_post_pad, expert_map,
       num_experts, block_size, numel, max_num_tokens_padded,
-      CEILDIV(max_num_tokens_padded, block_size), 0, 0, topk_num, nullptr,
+      CEILDIV(max_num_tokens_padded, block_size), -1, 0, topk_num, nullptr,
       has_expert_map);
 }
 
