@@ -20,6 +20,7 @@ from vllm.distributed import (
 from vllm.distributed.eplb.eplb_state import EplbLayerState, EplbState
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -500,7 +501,7 @@ class FusedMoE(CustomOp):
         # TODO(bnell): end attributes
 
         self.apply_router_weight_on_input = apply_router_weight_on_input
-        self.activation = activation
+        self.activation = MoEActivation.from_str(activation)
 
         self.router = create_fused_moe_router(
             top_k=top_k,
@@ -549,12 +550,13 @@ class FusedMoE(CustomOp):
             num_logical_experts=self.logical_num_experts,
             moe_parallel_config=self.moe_parallel_config,
             in_dtype=moe_in_dtype,
+            moe_backend=vllm_config.kernel_config.moe_backend,
             router_logits_dtype=router_logits_dtype,
             max_num_tokens=envs.VLLM_MOE_DP_CHUNK_SIZE,
             has_bias=has_bias,
             is_act_and_mul=is_act_and_mul,
             is_lora_enabled=vllm_config.lora_config is not None,
-            activation=activation,
+            activation=self.activation,
             device=vllm_config.device_config.device,
             routing_method=self.routing_method_type,
             # TODO: in_dtype == out_dtype?
@@ -654,6 +656,16 @@ class FusedMoE(CustomOp):
             enable_dbo=self.vllm_config.parallel_config.enable_dbo,
         )
 
+    # TODO(bnell): This method is provided as a hook so vllm/lora/layers/fused_moe.py
+    # can safely swap out the quant_method. We should figure out a less
+    # intrusive way to do this.
+    def _replace_quant_method(self, mk: FusedMoEMethodBase):
+        self.quant_method = mk
+        # We need to force reconstruction of runner because we're swapping out
+        # the quant_method with a FusedMoEModularMethod. This logic can go
+        # away once the FusedMoEModularMethod is eliminated.
+        self.runner = self._init_runner()
+
     # Note: maybe_init_modular_kernel should only be called by
     # prepare_communication_buffer_for_model.
     # This is called after all weight loading and post-processing, so it
@@ -675,17 +687,15 @@ class FusedMoE(CustomOp):
             logger.debug(
                 "%s for %s(%s)", prepare_finalize.__class__.__name__, self, id(self)
             )
-            self.quant_method = FusedMoEModularMethod.make(
-                self,
-                self.quant_method,
-                prepare_finalize,
-                self.shared_experts,
-                inplace=not self.moe_config.disable_inplace,
+            self._replace_quant_method(
+                FusedMoEModularMethod.make(
+                    self,
+                    self.quant_method,
+                    prepare_finalize,
+                    self.shared_experts,
+                    inplace=not self.moe_config.disable_inplace,
+                )
             )
-            # We need to force reconstruction of runner because we're swapping out
-            # the quant_method with a FusedMoEModularMethod. This logic can go
-            # away once the FusedMoEModularMethod is eliminated.
-            self.runner = self._init_runner()
 
     @property
     def shared_experts(self) -> torch.nn.Module | None:
@@ -700,7 +710,7 @@ class FusedMoE(CustomOp):
 
     @property
     def gate(self) -> torch.nn.Module | None:
-        return self._gate
+        return self._gate if self.use_overlapped else None
 
     @property
     def tp_size(self):
@@ -725,7 +735,7 @@ class FusedMoE(CustomOp):
     @property
     def is_internal_router(self) -> bool:
         # By default, router/gate is called before FusedMoE forward pass
-        return self._gate is not None
+        return self.gate is not None
 
     def _maybe_init_expert_routing_tables(
         self,
@@ -1457,7 +1467,6 @@ class FusedMoE(CustomOp):
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        self.ensure_moe_quant_config_init()
         return self.runner.forward(
             hidden_states,
             router_logits,

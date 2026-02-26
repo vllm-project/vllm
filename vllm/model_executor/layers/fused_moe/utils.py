@@ -4,7 +4,6 @@ import functools
 from math import prod
 
 import torch
-import torch.nn.functional as F
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
@@ -196,11 +195,12 @@ def _mxfp8_e4m3_quantize(
     A_scale: torch.Tensor | None,
     per_act_token_quant: bool,
     block_shape: list[int] | None = None,
+    is_sf_swizzled_layout: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert A_scale is None
     assert not per_act_token_quant
     assert block_shape is None
-    return mxfp8_e4m3_quantize(A)
+    return mxfp8_e4m3_quantize(A, is_sf_swizzled_layout)
 
 
 def _mxfp6_e3m2_quantize(
@@ -276,23 +276,19 @@ def moe_kernel_quantize_input(
     elif quant_dtype == "mxfp8":
         # TODO: `quant_dtype == "mxfp8"` is ambiguous,
         # should be fp8_e4m3. OCP MX also defines `fp8_e5m2`.
-        return _mxfp8_e4m3_quantize(A, A_scale, per_act_token_quant, block_shape)
+        return _mxfp8_e4m3_quantize(
+            A,
+            A_scale,
+            per_act_token_quant,
+            block_shape,
+            is_sf_swizzled_layout=is_fp4_scale_swizzled,
+        )
     elif quant_dtype == "mxfp6_e3m2":
         return _mxfp6_e3m2_quantize(A, A_scale, per_act_token_quant, block_shape)
     elif quant_dtype == "mxfp6_e2m3":
         return _mxfp6_e2m3_quantize(A, A_scale, per_act_token_quant, block_shape)
     else:
         return A, A_scale
-
-
-def _fp8_perm(m: torch.Tensor, idx: torch.Tensor) -> torch.Tensor:
-    """
-    A permutation routine that works on fp8 types.
-    """
-    if torch.is_floating_point(m) and m.dtype.itemsize == 1:
-        return m.view(dtype=torch.uint8)[idx, ...].view(dtype=m.dtype)
-    else:
-        return m[idx, ...]
 
 
 def normalize_scales_shape(scales: torch.Tensor | None) -> torch.Tensor | None:
@@ -339,65 +335,6 @@ def _validate_scale_shape(
         assert block_shape is not None
         expected = (a.shape[0], cdiv(a.shape[1], block_shape[1]))
         assert a_scale.shape == expected, f"{a_scale.shape} == {expected}"
-
-
-def activation_without_mul(activation: str) -> str:
-    return activation + "_no_mul"
-
-
-RELU2_NO_MUL: str = activation_without_mul("relu2")
-SILU_NO_MUL: str = activation_without_mul("silu")
-GELU_NO_MUL: str = activation_without_mul("gelu")
-
-
-def apply_moe_activation(
-    activation: str,
-    output: torch.Tensor,
-    input: torch.Tensor,
-) -> torch.Tensor:
-    """
-    Apply MoE activation function.
-
-    For *_and_mul activations (silu, gelu, swigluoai):
-        - Expects output.size(-1) * 2 == input.size(-1)
-
-    For *_no_mul activations (silu_no_mul, gelu_no_mul, relu2_no_mul):
-        - Expects output.size(-1) == input.size(-1)
-    """
-    is_no_mul = activation.endswith("_no_mul")
-    if is_no_mul:
-        assert output.size(-1) == input.size(-1), (
-            f"{activation} expects equal sizes: {output.size(-1)} vs {input.size(-1)}"
-        )
-    else:
-        assert output.size(-1) * 2 == input.size(-1), (
-            f"{activation} expects 2x ratio: {output.size(-1) * 2} vs {input.size(-1)}"
-        )
-
-    # Activations with gated multiplication (gate × activation(up))
-    if activation == "silu":
-        torch.ops._C.silu_and_mul(output, input)
-    elif activation == "gelu":
-        torch.ops._C.gelu_and_mul(output, input)
-    elif activation == "swigluoai":
-        torch.ops._C.swigluoai_and_mul(output, input)
-    elif activation == "swiglustep":
-        from vllm.model_executor.layers.activation import swiglustep_and_mul_triton
-
-        swiglustep_and_mul_triton(output, input)
-
-    # Activations without gated multiplication
-    elif activation == SILU_NO_MUL:
-        output.copy_(F.silu(input))
-    elif activation == GELU_NO_MUL:
-        output.copy_(F.gelu(input))
-    elif activation == RELU2_NO_MUL:
-        F.relu(input, inplace=True)
-        torch.square(input, out=output)
-    else:
-        raise ValueError(f"Unsupported FusedMoe activation: {activation}")
-
-    return output
 
 
 # Torch custom ops can't deal with outputs aliasing inputs so we need to
