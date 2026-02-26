@@ -89,7 +89,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     StreamingResponsesResponse,
 )
 from vllm.entrypoints.openai.responses.streaming_events import (
-    HarmonyStreamingState,
+    StreamingState,
     emit_content_delta_events,
     emit_previous_item_done_events,
     emit_tool_action_events,
@@ -1591,7 +1591,7 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        state = HarmonyStreamingState()
+        state = StreamingState()
 
         async for ctx in result_generator:
             assert isinstance(ctx, StreamingHarmonyContext)

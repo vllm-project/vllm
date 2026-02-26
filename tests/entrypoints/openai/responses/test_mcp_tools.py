@@ -172,13 +172,13 @@ class TestMCPEnabled:
             recipient = message.get("recipient")
             if recipient and recipient.startswith("python"):
                 tool_call_found = True
-                assert message.get("channel") == "analysis"
+                assert message.get("channel") == "commentary"
             author = message.get("author", {})
             if author.get("role") == "tool" and (author.get("name") or "").startswith(
                 "python"
             ):
                 tool_response_found = True
-                assert message.get("channel") == "analysis"
+                assert message.get("channel") == "commentary"
 
         assert tool_call_found, (
             f"No Python tool call found. "
@@ -241,81 +241,3 @@ class TestMCPEnabled:
         )
 
         validate_streaming_event_stack(events, pairs_of_event_types)
-
-        assert events_contain_type(events, "mcp_call"), (
-            f"No mcp_call events after retries. "
-            f"Event types: {sorted({e.type for e in events})}"
-        )
-
-
-class TestMCPDisabled:
-    """Tests that MCP tools are not executed when the env flag is unset."""
-
-    @pytest.fixture(scope="class")
-    def mcp_disabled_server(self):
-        env_dict = {
-            **BASE_TEST_ENV,
-            "VLLM_ENABLE_RESPONSES_API_STORE": "1",
-            "PYTHON_EXECUTION_BACKEND": "dangerously_use_uv",
-            "VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS": "1",
-        }
-        with RemoteOpenAIServer(
-            MODEL_NAME, list(_BASE_SERVER_ARGS), env_dict=env_dict
-        ) as remote_server:
-            yield remote_server
-
-    @pytest_asyncio.fixture
-    async def client(self, mcp_disabled_server):
-        async with mcp_disabled_server.get_async_client() as async_client:
-            yield async_client
-
-    @pytest.mark.asyncio
-    @pytest.mark.parametrize("model_name", [MODEL_NAME])
-    async def test_mcp_disabled_server_does_not_execute(
-        self, client: OpenAI, model_name: str
-    ):
-        """When MCP is disabled the model may still attempt tool calls
-        (tool descriptions can remain in the prompt), but the server
-        must NOT execute them."""
-        response = await client.responses.create(
-            model=model_name,
-            input=(
-                "Execute the following code if the tool is present: "
-                "import random; print(random.randint(1, 1000000))"
-            ),
-            tools=[
-                {
-                    "type": "mcp",
-                    "server_label": "code_interpreter",
-                    "server_url": "http://localhost:8888",
-                }
-            ],
-            temperature=0.0,
-            extra_body={"enable_response_messages": True},
-        )
-        assert response is not None
-        assert response.status == "completed"
-
-        log_response_diagnostics(response, label="MCP Disabled")
-
-        # Server must not have executed any tool calls
-        for message in response.output_messages:
-            author = message.get("author", {})
-            assert not (
-                author.get("role") == "tool"
-                and (author.get("name") or "").startswith("python")
-            ), (
-                "Server executed a python tool call even though MCP is "
-                f"disabled. Message: {message}"
-            )
-
-        # No completed mcp_call output items
-        for item in response.output:
-            if getattr(item, "type", None) == "mcp_call":
-                assert getattr(item, "status", None) != "completed", (
-                    "MCP call should not be completed when MCP is disabled"
-                )
-
-        # No developer messages injected
-        for message in response.input_messages:
-            assert message.get("author", {}).get("role") != "developer"

@@ -26,7 +26,6 @@ from openai.types.responses.response_reasoning_item import (
 from openai.types.responses.tool import Tool
 from openai_harmony import (
     Author,
-    ChannelConfig,
     Conversation,
     DeveloperContent,
     HarmonyEncodingName,
@@ -126,13 +125,6 @@ def get_system_message(
         sys_msg_content = sys_msg_content.with_tools(python_description)
     if container_description is not None:
         sys_msg_content = sys_msg_content.with_tools(container_description)
-    if not with_custom_tools:
-        channel_config = sys_msg_content.channel_config
-        invalid_channel = "commentary"
-        new_config = ChannelConfig.require_channels(
-            [c for c in channel_config.valid_channels if c != invalid_channel]
-        )
-        sys_msg_content = sys_msg_content.with_channel_config(new_config)
     sys_msg = Message.from_role_and_content(Role.SYSTEM, sys_msg_content)
     return sys_msg
 
@@ -686,6 +678,22 @@ def _parse_mcp_call(message: Message, recipient: str) -> list[ResponseOutputItem
     return output_items
 
 
+def _parse_message_no_recipient(
+    message: Message,
+) -> list[ResponseOutputItem]:
+    """Parse a Harmony message with no recipient based on its channel."""
+    if message.channel == "analysis":
+        return _parse_reasoning(message)
+
+    if message.channel in ("commentary", "final"):
+        # Per Harmony format, preambles (commentary with no recipient) and
+        # final channel content are both intended to be shown to end-users.
+        # See: https://cookbook.openai.com/articles/openai-harmony
+        return [_parse_final_message(message)]
+
+    raise ValueError(f"Unknown channel: {message.channel}")
+
+
 def parse_output_message(message: Message) -> list[ResponseOutputItem]:
     """
     Parse a Harmony message into a list of output response items.
@@ -717,19 +725,8 @@ def parse_output_message(message: Message) -> list[ResponseOutputItem]:
             output_items.extend(_parse_mcp_call(message, recipient))
 
     # No recipient - handle based on channel for non-tool messages
-    elif message.channel == "analysis":
-        output_items.extend(_parse_reasoning(message))
-
-    elif message.channel == "commentary":
-        # Per Harmony format, commentary channel can contain preambles to calling
-        # multiple functions - explanatory text with no recipient
-        output_items.extend(_parse_reasoning(message))
-
-    elif message.channel == "final":
-        output_items.append(_parse_final_message(message))
-
     else:
-        raise ValueError(f"Unknown channel: {message.channel}")
+        output_items.extend(_parse_message_no_recipient(message))
 
     return output_items
 
@@ -786,7 +783,26 @@ def parse_remaining_state(parser: StreamableParser) -> list[ResponseOutputItem]:
                 )
             ]
 
-    if parser.current_channel in ("commentary", "analysis"):
+    if parser.current_channel == "commentary":
+        # Per Harmony format, preambles (commentary with no recipient) are
+        # intended to be shown to end-users, unlike analysis channel content.
+        output_text = ResponseOutputText(
+            text=parser.current_content,
+            annotations=[],
+            type="output_text",
+            logprobs=None,
+        )
+        return [
+            ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[output_text],
+                role="assistant",
+                status="incomplete",
+                type="message",
+            )
+        ]
+
+    if parser.current_channel == "analysis":
         return [
             ResponseReasoningItem(
                 id=f"rs_{random_uuid()}",
@@ -855,17 +871,30 @@ def parse_chat_output(
     is_tool_call = False  # TODO: update this when tool call is supported
 
     # Get completed messages from the parser
+    # - analysis channel: hidden reasoning
+    # - commentary channel without recipient (preambles): visible to user
+    # - final channel: visible to user
+    # - commentary with recipient (tool calls): handled separately by tool parser
     reasoning_texts = [
         msg.content[0].text for msg in output_msgs if msg.channel == "analysis"
     ]
     final_texts = [
-        msg.content[0].text for msg in output_msgs if msg.channel != "analysis"
+        msg.content[0].text
+        for msg in output_msgs
+        if msg.channel == "final" or (msg.channel == "commentary" and not msg.recipient)
     ]
 
     # Extract partial messages from the parser
     if parser.current_channel == "analysis" and parser.current_content:
         reasoning_texts.append(parser.current_content)
-    elif parser.current_channel != "analysis" and parser.current_content:
+    elif parser.current_channel == "final" and parser.current_content:
+        final_texts.append(parser.current_content)
+    elif (
+        parser.current_channel == "commentary"
+        and not parser.current_recipient
+        and parser.current_content
+    ):
+        # Preambles (commentary without recipient) are visible to user
         final_texts.append(parser.current_content)
 
     # Flatten multiple messages into a single string
