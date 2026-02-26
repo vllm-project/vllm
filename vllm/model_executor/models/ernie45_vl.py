@@ -834,17 +834,17 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         if override_size := mm_kwargs.get("size"):
             size = size | override_size
         if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
-            size = size | {"min_pixels": override_min_pixels}
+            size = size | {"shortest_edge": override_min_pixels}
         if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
-            size = size | {"max_pixels": override_max_pixels}
+            size = size | {"longest_edge": override_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_conv_size,
-                min_pixels=size["min_pixels"],
-                max_pixels=size["max_pixels"],
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
