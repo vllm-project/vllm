@@ -19,12 +19,14 @@ from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
 )
 from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.fp8 import Fp8LinearMethod
+from vllm.tracing import instrument
 from vllm.utils.deep_gemm import (
     fp8_gemm_nt,
     get_mk_alignment_for_contiguous_layout,
     m_grouped_fp8_gemm_nt_contiguous,
 )
 from vllm.utils.math_utils import cdiv
+from vllm.utils.platform_utils import num_compute_units
 
 
 def _generate_optimal_warmup_m_values(
@@ -43,7 +45,7 @@ def _generate_optimal_warmup_m_values(
     # DeepGEMM's possible block sizes
     block_ms = [64, 128, 256]
     block_ns = list(range(16, min(257, n + 1), 16))
-    num_sms = torch.cuda.get_device_properties(device).multi_processor_count
+    num_sms = num_compute_units(device.index)
 
     m_values = set()
 
@@ -358,6 +360,7 @@ def _count_warmup_iterations(model: torch.nn.Module, max_tokens: int) -> int:
     return total
 
 
+@instrument(span_name="DeepGemm warmup")
 def deep_gemm_warmup(model: torch.nn.Module, max_tokens: int):
     total = _count_warmup_iterations(model, max_tokens)
     if total == 0:

@@ -187,7 +187,7 @@ def test_schedule_request_multi_images_respect_compute_limit():
 def test_encoder_cache_with_is_embed_mask():
     class MockRequestWithMask(MockRequest):
         def get_num_encoder_embeds(self, input_id: int) -> int:
-            return self.mm_features[input_id].mm_position.get_num_embeds
+            return self.mm_features[input_id].mm_position.get_num_embeds()
 
     is_embed = torch.zeros(100, dtype=torch.bool)
     is_embed[torch.tensor([5, 15, 25, 35, 45, 55, 65, 75])] = True
@@ -207,7 +207,7 @@ def test_encoder_cache_with_is_embed_mask():
     assert "img1" in manager.cached
 
     old_size = 100
-    new_size = request.mm_features[0].mm_position.get_num_embeds
+    new_size = request.mm_features[0].mm_position.get_num_embeds()
     assert new_size == 8
     savings_ratio = old_size / new_size
     assert savings_ratio == 12.5
@@ -216,7 +216,7 @@ def test_encoder_cache_with_is_embed_mask():
 def test_encoder_cache_mask_based_retrieval():
     class MockRequestWithMask(MockRequest):
         def get_num_encoder_embeds(self, input_id: int) -> int:
-            return self.mm_features[input_id].mm_position.get_num_embeds
+            return self.mm_features[input_id].mm_position.get_num_embeds()
 
     is_embed = torch.tensor(
         [False, False, True, True, False, True, True, True, False, False]
@@ -233,7 +233,7 @@ def test_encoder_cache_mask_based_retrieval():
     manager = EncoderCacheManager(cache_size=50)
     manager.allocate(request, 0)
 
-    assert request.mm_features[0].mm_position.get_num_embeds == 5
+    assert request.mm_features[0].mm_position.get_num_embeds() == 5
 
     start_idx = 2
     end_idx = 8

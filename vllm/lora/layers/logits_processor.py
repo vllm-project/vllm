@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-
 import torch
 import torch.nn as nn
 from transformers import PretrainedConfig
@@ -89,9 +88,9 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         # TODO: Verify if this condition can be further relaxed
-        if 32000 < self.base_layer.vocab_size > 257024:
+        if self.base_layer.vocab_size <= 32000 or self.base_layer.vocab_size > 258048:
             raise ValueError(
-                "When using LoRA, vocab size must be 32000 >= vocab_size <= 257024"
+                "When using LoRA, vocab size must be > 32000 and <= 258048"
             )
         self.lora_a_stacked = torch.zeros(
             (
@@ -148,7 +147,11 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         embedding_bias: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         # Get the logits for the next tokens.
-        logits = lm_head.quant_method.apply(lm_head, hidden_states)
+        if hasattr(lm_head, "base_layer"):
+            actual_lm_head = lm_head.base_layer
+        else:
+            actual_lm_head = lm_head
+        logits = actual_lm_head.quant_method.apply(actual_lm_head, hidden_states)
         if embedding_bias is not None:
             logits += embedding_bias
 

@@ -610,7 +610,7 @@ class FunAudioChatDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = int(feature_extractor.sampling_rate)
@@ -629,7 +629,7 @@ class FunAudioChatDummyInputsBuilder(
         )
         num_audios = int(mm_counts.get("audio", 0))
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
@@ -656,7 +656,7 @@ class FunAudioChatMultiModalProcessor(
         if not audios:
             return BatchFeature({"input_ids": input_ids})
 
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
 
@@ -819,9 +819,6 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def _get_continuous_audio_features(
         self,
