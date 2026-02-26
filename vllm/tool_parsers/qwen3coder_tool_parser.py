@@ -567,8 +567,7 @@ class Qwen3CoderToolParser(ToolParser):
                                     break
                     except Exception:
                         logger.debug(
-                            "Failed to parse tool call during "
-                            "streaming: %s",
+                            "Failed to parse tool call during streaming: %s",
                             tool_text,
                             exc_info=True,
                         )
@@ -576,16 +575,11 @@ class Qwen3CoderToolParser(ToolParser):
                 # Send closing brace; the serving layer autocomplete
                 # will fill in any missing arguments based on
                 # prev_tool_call_arr vs streamed_args_for_tool.
-                if self.current_tool_index < len(
-                    self.streamed_args_for_tool
-                ):
-                    self.streamed_args_for_tool[
-                        self.current_tool_index
-                    ] += "}"
+                if self.current_tool_index < len(self.streamed_args_for_tool):
+                    self.streamed_args_for_tool[self.current_tool_index] += "}"
                 else:
                     logger.warning(
-                        "streamed_args_for_tool out of sync: "
-                        "index=%d len=%d",
+                        "streamed_args_for_tool out of sync: index=%d len=%d",
                         self.current_tool_index,
                         len(self.streamed_args_for_tool),
                     )
@@ -708,16 +702,13 @@ class Qwen3CoderToolParser(ToolParser):
 
                         # Track what we've streamed so the serving
                         # layer can compute remaining args at the end.
-                        if self.current_tool_index < len(
-                            self.streamed_args_for_tool
-                        ):
-                            self.streamed_args_for_tool[
-                                self.current_tool_index
-                            ] += json_fragment
+                        if self.current_tool_index < len(self.streamed_args_for_tool):
+                            self.streamed_args_for_tool[self.current_tool_index] += (
+                                json_fragment
+                            )
                         else:
                             logger.warning(
-                                "streamed_args_for_tool out of sync: "
-                                "index=%d len=%d",
+                                "streamed_args_for_tool out of sync: index=%d len=%d",
                                 self.current_tool_index,
                                 len(self.streamed_args_for_tool),
                             )

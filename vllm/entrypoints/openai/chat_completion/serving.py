@@ -1265,9 +1265,7 @@ class OpenAIServingChat(OpenAIServing):
                             if isinstance(args, str):
                                 expected_call = args
                             else:
-                                expected_call = json.dumps(
-                                    args, ensure_ascii=False
-                                )
+                                expected_call = json.dumps(args, ensure_ascii=False)
 
                             # get what we've streamed so far for arguments
                             # for the current tool
