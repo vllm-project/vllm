@@ -10,6 +10,7 @@ This means:
   - No vllm import chain needed (avoids Python 3.10+ dependency in CI for
     pure-unit tests).
 """
+
 from __future__ import annotations
 
 import ast
@@ -26,6 +27,7 @@ import pytest
 # dynamically-loaded AdaptiveOffloadingPolicy without requiring a full vllm
 # import at type-check time.
 if TYPE_CHECKING:
+
     class AdaptiveOffloadingPolicy(Protocol):  # pragma: no cover
         paused: bool
         baseline_ttft: float | None
@@ -85,15 +87,28 @@ if not TYPE_CHECKING:
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_policy(**kwargs) -> "AdaptiveOffloadingPolicy":
-    defaults = dict(overhead_threshold_pct=5.0, window=20, warmup_steps=3)
-    defaults.update(kwargs)
-    return AdaptiveOffloadingPolicy(**defaults)
+
+def make_policy(**kwargs: Any) -> AdaptiveOffloadingPolicy:
+    overhead_threshold_pct: float = float(kwargs.get("overhead_threshold_pct", 5.0))
+    window: int = int(kwargs.get("window", 20))
+    warmup_steps: int = int(kwargs.get("warmup_steps", 3))
+    extra = {
+        k: v
+        for k, v in kwargs.items()
+        if k not in ("overhead_threshold_pct", "window", "warmup_steps")
+    }
+    return AdaptiveOffloadingPolicy(  # type: ignore[abstract,misc]
+        overhead_threshold_pct=overhead_threshold_pct,
+        window=window,
+        warmup_steps=warmup_steps,
+        **extra,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Tests: warm-up behaviour
 # ---------------------------------------------------------------------------
+
 
 class TestAdaptiveOffloadingPolicyWarmup:
     def test_starts_paused(self):
@@ -126,6 +141,7 @@ class TestAdaptiveOffloadingPolicyWarmup:
 # ---------------------------------------------------------------------------
 # Tests: regression detection and auto-resume
 # ---------------------------------------------------------------------------
+
 
 class TestAdaptiveOffloadingPolicyRegression:
     def _activated(self, baseline: float = 10.0, **kwargs):
@@ -161,6 +177,7 @@ class TestAdaptiveOffloadingPolicyRegression:
 # ---------------------------------------------------------------------------
 # Tests: effective_load_mode property
 # ---------------------------------------------------------------------------
+
 
 class TestAdaptiveOffloadingPolicyEffectiveLoadMode:
     def test_blocking_when_paused(self):
