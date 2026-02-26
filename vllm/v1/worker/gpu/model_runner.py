@@ -1010,6 +1010,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampled, num_sampled, num_rejected = pp_receive(
                 input_batch.num_reqs, max_sample_len=self.num_speculative_steps + 1
             )
+            self.postprocess(input_batch, sampled, num_sampled, num_rejected)
             return None
 
         # Last rank: sample tokens
