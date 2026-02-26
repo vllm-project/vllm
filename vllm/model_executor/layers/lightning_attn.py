@@ -616,8 +616,8 @@ def _linear_attn_decode_kernel(
     # Load slot index for the current batch
     slot_id = tl.load(slot_idx + pid_b).to(tl.int64)
 
-    # Skip if slot_id is -1 (padding)
-    if slot_id == -1:
+    # Skip if slot_id is 0 (null block, used for padding)
+    if slot_id == 0:
         return
 
     batch_id = pid_b
