@@ -29,8 +29,57 @@ See [LICENSE](../../LICENSE).
 The first step of contributing to vLLM is to clone the GitHub repository:
 
 ```bash
-git clone https://github.com/vllm-project/vllm.git
+git clone <your-fork-url>
 cd vllm
+```
+
+If your fork was created from `github.com/vllm-project/vllm`, add the project remote and name it `upstream`:
+
+```bash
+git remote add upstream https://github.com/vllm-project/vllm.git
+git remote -v
+```
+
+If your remotes are reversed, use `git remote rename` to make your fork `origin` and project repo `upstream`.
+
+If this checkout still has only `origin` pointing at the main vLLM repo, run:
+
+```bash
+git remote rename origin upstream
+git remote add origin <your-fork-url>
+```
+
+### Contributor Workspace Setup
+
+Before you begin, check your branch health:
+
+```bash
+scripts/contributor-workspace.sh status
+```
+
+If your branch is behind or missing `upstream/main`, sync your local `main` first:
+
+```bash
+scripts/contributor-workspace.sh sync-main
+```
+
+### Baseline Version Guidance
+
+For day-to-day contributions to vLLM, work from `main` unless a maintainer explicitly asks for a stable release branch.
+
+Find the latest stable tagged release in this repo:
+
+```bash
+git tag -l 'v[0-9]*.[0-9]*.[0-9]*' \
+  | grep -Ev 'rc|post|dev' \
+  | sort -V \
+  | tail -n 1
+```
+
+Then create a short-lived branch when you need a stable snapshot:
+
+```bash
+git switch -c contrib/<area>-<date> vX.Y.Z
 ```
 
 Then, configure your Python virtual environment.
@@ -98,6 +147,14 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
     pre-commit run --hook-stage manual mypy-3.10
     ```
 
+If your environment has restricted access to `~/.cache`, use the repo-local helper:
+
+```bash
+scripts/run-pre-commit.sh run -a  # runs on all files
+```
+
+Use this helper whenever you run pre-commit manually.
+
 ### Documentation
 
 MkDocs is a fast, simple and downright gorgeous static site generator that's geared towards building project documentation. Documentation source files are written in Markdown, and configured with a single YAML configuration file, [mkdocs.yaml](../../mkdocs.yaml).
@@ -158,6 +215,16 @@ pytest -s -v tests/test_logger.py
     Currently, not all unit tests pass when run on CPU platforms. If you don't have access to a GPU
     platform to run unit tests locally, rely on the continuous integration system to run the tests for
     now.
+
+### Choosing PR Candidates
+
+Use this order when selecting work:
+
+- Start with `good first issue` labels, since they are curated for new contributors.
+- Follow issues tagged by a maintainer for component-specific work you can reproduce.
+- If there is no existing issue, open one first and wait for maintainer alignment before writing significant code.
+- For larger refactors, ask for an RFC before implementation; `rfc-required` labels usually indicate this.
+- Keep first PRs narrow: one behavior, one test area, one subsystem.
 
 ## Issues
 
@@ -223,6 +290,20 @@ The PR needs to meet the following code quality standards:
   includes both unit tests and integration tests.
 - Please add documentation to `docs/` if the PR modifies the user-facing behaviors of vLLM.
   It helps vLLM users understand and utilize the new features or changes.
+
+## First PR Checklist
+
+Before you open your first PR, use this checklist as a concrete execution path:
+
+- Open or find a relevant issue and link it in your PR description.
+- Keep your branch focused on one change only.
+- Choose a PR title with the required type prefix (for example, `[Bugfix]`, `[Doc]`, or `[Model]`).
+- Add the smallest sufficient test coverage for code changes; for docs-only changes, validate docs build.
+- Run `pre-commit` locally before pushing.
+- Include a short test plan and test results section in the PR description.
+- Ensure your commit has DCO sign-off (`git commit -s`).
+
+A small PR with complete checkboxes is easier to review and more likely to move quickly through review.
 
 ### Adding or Changing Kernels
 
