@@ -12,6 +12,7 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import graph_capture, is_global_first_rank
 from vllm.forward_context import BatchDescriptor, set_forward_context
+from vllm.model_executor.offloader.base import get_offloader
 from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
@@ -189,6 +190,11 @@ class CudaGraphManager:
         # Capture the graph.
         assert num_tokens not in self.graphs
         graph = torch.cuda.CUDAGraph()
+
+        # Sync offloader's copy stream before capture.
+        # Ensure any pre-capture prefetches from offloader are complete.
+        get_offloader().sync_prev_onload()
+
         with (
             set_forward_context(
                 attn_metadata=attn_metadata,
@@ -205,6 +211,11 @@ class CudaGraphManager:
                 positions=positions,
                 inputs_embeds=inputs_embeds,
             )
+            # Join offloader's copy stream after forward to avoid unjoined
+            # stream error. The last layer's start_prefetch forks copy_stream,
+            # but wait_prefetch only happens in the next forward pass.
+            get_offloader().join_after_forward()
+
             if self.use_aux_hidden_state_outputs:
                 hidden_states, aux_hidden_states = model_output
             else:
@@ -329,6 +340,13 @@ class CudaGraphManager:
         self, num_tokens: int
     ) -> torch.Tensor | tuple[torch.Tensor, list[torch.Tensor]]:
         assert num_tokens in self.graphs, f"No cudagraph for {num_tokens} tokens"
+        # Sync offloader before replay - needed when transitioning from
+        # eager/piecewise to full cudagraph (e.g., prefill → decode).
+        # The previous eager iteration's start_prefetch may have queued
+        # H2D copies on copy_stream that the graph's captured events
+        # cannot see. Without this, replay could overwrite static buffers
+        # while those copies are still in flight.
+        get_offloader().sync_prev_onload()
         self.graphs[num_tokens].replay()
         assert self.hidden_states is not None
         hidden_states = self.hidden_states[:num_tokens]
