@@ -193,7 +193,9 @@ class GPT2Model(nn.Module):
 
         self.config = config
         assert not config.add_cross_attention
-        assert config.scale_attn_weights, "vLLM's GPT-2 implementation does not support scale_attn_weights=False"
+        assert config.scale_attn_weights, (
+            "vLLM's GPT-2 implementation does not support scale_attn_weights=False"
+        )
         assert not config.scale_attn_by_inverse_layer_idx
         assert not config.reorder_and_upcast_attn
         self.embed_dim = config.hidden_size
