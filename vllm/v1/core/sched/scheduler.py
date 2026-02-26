@@ -1050,6 +1050,11 @@ class Scheduler(SchedulerInterface):
                     mm_hash, compute_time
                 )
 
+        # Run one step of the Lagrangian replacement algorithm.
+        # This updates advantage scores for all cached entries and
+        # adjusts the dual variable (lambda) based on cache pressure.
+        self.encoder_cache_manager.step()
+
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
         kv_connector_stats: KVConnectorStats | None = (
