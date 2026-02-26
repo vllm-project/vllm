@@ -878,8 +878,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             input_batch = self.prepare_inputs(
                 scheduler_output, num_tokens_after_padding
             )
-            model_inputs = self.model_state.prepare_inputs(input_batch, self.req_states)
-
             if self.lora_config:
                 # Activate LoRA adapters.
                 lora_inputs = self.lora_state.make_lora_inputs(
@@ -909,10 +907,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_buffers=self.input_buffers,
                 device=self.device,
             )
-            model_inputs = self.model_state.prepare_inputs(input_batch, self.req_states)
             if not skip_attn_for_dummy_run:
                 self.prepare_dummy_attn_metadata(input_batch)
             # FIXME(woosuk): Fix warmup for LoRA.
+
+        model_inputs = {
+            "input_ids": input_batch.input_ids,
+            "positions": input_batch.positions,
+            "inputs_embeds": input_batch.inputs_embeds,
+        }
+        extra_model_inputs = self.model_state.prepare_inputs(
+            input_batch, self.req_states
+        )
+        # NOTE: We should use `.update()` to enable overriding the default inputs.
+        model_inputs.update(extra_model_inputs)
 
         # Run model.
         if cudagraph_runtime_mode == CUDAGraphMode.FULL:

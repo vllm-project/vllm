@@ -52,14 +52,9 @@ class ModelState:
         input_batch: InputBatch,
         req_states: RequestState,
     ) -> dict[str, torch.Tensor | None]:
-        model_inputs = {
-            "input_ids": input_batch.input_ids,
-            "positions": input_batch.positions,
-            "inputs_embeds": input_batch.inputs_embeds,
-        }
         if not self.uses_mrope:
             # Common case (1D positions).
-            return model_inputs
+            return {}
 
         # Prepare M-RoPE positions.
         self.mrope_states.prepare_mrope_positions(
@@ -71,8 +66,7 @@ class ModelState:
         mrope_positions = self.mrope_states.mrope_positions[
             :, : input_batch.num_tokens_after_padding
         ]
-        model_inputs["positions"] = mrope_positions
-        return model_inputs
+        return {"positions": mrope_positions}
 
     def create_dummy_inputs_for_capture(
         self,
