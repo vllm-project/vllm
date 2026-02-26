@@ -828,7 +828,7 @@ def unified_mla_attention(
     k_pe: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    attn_metadata, layer, kv_cache = get_attention_context(layer_name)
+    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
     return output
@@ -862,7 +862,7 @@ def unified_mla_attention_with_output(
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
 ) -> None:
-    attn_metadata, layer, kv_cache = get_attention_context(layer_name)
+    attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     layer.forward_impl(
         q,
         kv_c_normed,
@@ -950,7 +950,10 @@ def dynamic_per_batched_tensor_quant(
 logger = init_logger(__name__)
 
 
-@CustomOp.register("mla_decode_concat_quant_fp8")
+@CustomOp.register(
+    "mla_decode_concat_quant_fp8",
+    dynamic_arg_dims={"decode_ql_nope": 0, "decode_q_pe": 0},
+)
 class _DecodeConcatQuantFP8(QuantFP8):
     """
     QuantFP8 variant that concatenates decode_ql_nope and decode_q_pe before
