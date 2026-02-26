@@ -171,7 +171,7 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
                 offsets,
             )
             return query, key
-        return self.forward_native(positions, query, key, offsets)
+        return self.forward_cuda(positions, query, key, offsets)
 
     def forward_cuda(
         self,
@@ -180,9 +180,10 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         key: torch.Tensor | None = None,
         offsets: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        positions = torch.add(positions, offsets) if offsets is not None else positions
         if self.use_flashinfer:
             torch.ops.vllm.flashinfer_rotary_embedding(
-                torch.add(positions, offsets) if offsets is not None else positions,
+                positions,
                 query,
                 key,
                 self.head_size,
@@ -190,5 +191,19 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
                 self.is_neox_style,
             )
             return query, key
-        else:
-            return self.forward_native(positions, query, key, offsets)
+
+        from vllm import _custom_ops as ops
+
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
+
+        # ops.rotary_embedding() is an in-place operation
+        # that updates the query and key tensors.
+        ops.rotary_embedding(
+            positions,
+            query,
+            key,
+            self.head_size,
+            cos_sin_cache,
+            self.is_neox_style,
+        )
+        return query, key
