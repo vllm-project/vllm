@@ -91,17 +91,88 @@ class TorchDistributedEplbCommunicator(EplbCommunicator):
         if not self._p2p_ops:
             return
         try:
-            if self._cuda_stream is not None:
-                with torch.cuda.stream(self._cuda_stream):
-                    reqs = batch_isend_irecv(self._p2p_ops)
-                    for req in reqs:
-                        req.wait()
-            else:
+            with torch.cuda.stream(self._cuda_stream):
                 reqs = batch_isend_irecv(self._p2p_ops)
                 for req in reqs:
                     req.wait()
         finally:
             self._p2p_ops.clear()
+
+
+class GlooCpuStagedEplbCommunicator(EplbCommunicator):
+    """EPLB communicator using gloo P2P with CPU staging."""
+
+    def __init__(
+        self,
+        cpu_group: ProcessGroup,
+        cuda_stream: torch.cuda.Stream | None = None,
+    ) -> None:
+        self._cpu_group = cpu_group
+        self._cuda_stream = cuda_stream
+        self._ops: list[tuple[str, torch.Tensor, int]] = []
+        self._rank_to_global = {
+            rank: get_global_rank(cpu_group, rank) for rank in range(cpu_group.size())
+        }
+
+    def add_send(self, tensor: torch.Tensor, dst_rank: int) -> None:
+        self._ops.append(("send", tensor, dst_rank))
+
+    def add_recv(self, tensor: torch.Tensor, src_rank: int) -> None:
+        self._ops.append(("recv", tensor, src_rank))
+
+    def execute(self) -> None:
+        if not self._ops:
+            return
+
+        try:
+            p2p_ops: list[P2POp] = []
+            recv_staging: list[tuple[torch.Tensor, torch.Tensor]] = []
+
+            def build_ops() -> None:
+                for op, tensor, peer_rank in self._ops:
+                    peer_global_rank = self._rank_to_global[peer_rank]
+                    if op == "send":
+                        cpu_tensor = tensor.to(device="cpu", non_blocking=True)
+                        p2p_ops.append(
+                            P2POp(
+                                torch.distributed.isend,
+                                cpu_tensor,
+                                peer_global_rank,
+                                self._cpu_group,
+                            )
+                        )
+                        continue
+                    cpu_tensor = torch.empty_like(tensor, device="cpu")
+                    p2p_ops.append(
+                        P2POp(
+                            torch.distributed.irecv,
+                            cpu_tensor,
+                            peer_global_rank,
+                            self._cpu_group,
+                        )
+                    )
+                    recv_staging.append((tensor, cpu_tensor))
+
+            with torch.cuda.stream(self._cuda_stream):
+                build_ops()
+            if self._cuda_stream is not None:
+                self._cuda_stream.synchronize()
+            else:
+                torch.cuda.current_stream().synchronize()
+
+            reqs = batch_isend_irecv(p2p_ops)
+            for req in reqs:
+                req.wait()
+
+            if not recv_staging:
+                return
+            with torch.cuda.stream(self._cuda_stream):
+                for dst_tensor, cpu_tensor in recv_staging:
+                    dst_tensor.copy_(
+                        cpu_tensor, non_blocking=self._cuda_stream is not None
+                    )
+        finally:
+            self._ops.clear()
 
 
 class PyNcclEplbCommunicator(EplbCommunicator):
@@ -408,6 +479,11 @@ def create_eplb_communicator(
     backend: str,
     expert_weights: Sequence[torch.Tensor],
 ) -> EplbCommunicator:
+    if backend == "torch_gloo":
+        cpu_group = get_ep_group().cpu_group
+        return GlooCpuStagedEplbCommunicator(cpu_group=cpu_group)
+    if backend == "torch_nccl":
+        return TorchDistributedEplbCommunicator(ep_group=ep_group)
     if backend == "pynccl":
         unsupported_dtypes = sorted(
             {

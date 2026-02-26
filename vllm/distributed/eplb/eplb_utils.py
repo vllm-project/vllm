@@ -22,7 +22,7 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
     async_eplb = parallel_config.eplb_config.use_async
     is_deepep_ll = parallel_config.all2all_backend == "deepep_low_latency"
     is_nccl_based_eplb_communicator = (
-        parallel_config.eplb_config.communicator == "nccl"
+        parallel_config.eplb_config.communicator == "torch_nccl"
         or parallel_config.eplb_config.communicator == "pynccl"
     )
     is_symm_mem_eplb_communicator = (
@@ -62,7 +62,8 @@ def override_envs_for_eplb(parallel_config: ParallelConfig) -> None:
         os.environ["NCCL_MAX_CTAS"] = str(override_value)
         logger.info_once(
             f"EPLB: Setting NCCL_MAX_CTAS={override_value} "
-            "for expert parallel with EPLB-nccl and deepep_low_latency backend",
+            "for expert parallel with NCCL-based EPLB communicator and "
+            "deepep_low_latency backend",
             scope="global",
         )
     if is_symm_mem_eplb_communicator:
