@@ -576,7 +576,7 @@ class SweepPlotArgs:
         parser.add_argument(
             "--var-y",
             type=str,
-            default="p99_e2el_ms",
+            default="p99_ttft_ms",
             help="The variable for the y-axis",
         )
         parser.add_argument(
