@@ -3,12 +3,14 @@
 from dataclasses import asdict
 from typing import NamedTuple
 
+import pytest
 from PIL import Image
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.image import ImageAsset
-from vllm.config import KVTransferConfig
+from vllm.config import AttentionConfig, KVTransferConfig
 from vllm.multimodal.utils import encode_image_url
+from vllm.platforms import current_platform
 
 MODEL_NAME = "RedHatAI/Qwen2.5-VL-3B-Instruct-quantized.w8a8"
 
@@ -108,7 +110,17 @@ def process_prompt(processor, llm: LLM, question: str, image_urls: list[Image]):
         print("-" * 50)
 
 
-def test_shared_storage_connector_hashes(tmp_path):
+@pytest.mark.parametrize(
+    "attn_backend",
+    (
+        ["FLASH_ATTN", "TRITON_ATTN"]
+        if current_platform.is_cuda()
+        else ["TRITON_ATTN"]
+        if current_platform.is_rocm()
+        else []
+    ),
+)
+def test_shared_storage_connector_hashes(tmp_path, attn_backend):
     """
     Tests that ExampleConnector saves KV to the storage locations
     with proper hashes; that are unique for inputs with identical text but
@@ -129,6 +141,7 @@ def test_shared_storage_connector_hashes(tmp_path):
         max_model_len=8192,
         max_num_seqs=1,
         gpu_memory_utilization=0.4,
+        attention_config=AttentionConfig(backend=attn_backend),
         enforce_eager=True,
         kv_transfer_config=kv_transfer_config,
         limit_mm_per_prompt={"image": 2},
