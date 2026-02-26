@@ -47,24 +47,27 @@ run_tests() {
   echo "✅ All ${label} tests passed!"
 }
 
-# Run tests
+# Set backend
+label="default backend"
+cmdline_args=""
 if [[ -n "${ROCM_ATTN:-}" ]]; then
   echo "ROCM_ATTN is set, running with --attention-backend ROCM_ATTN"
-  run_tests "ROCM_ATTN backend" "--attention-backend ROCM_ATTN"
+  label="ROCM_ATTN backend"
+  cmdline_args=" --attention-backend ROCM_ATTN "
+elif [[ -n "${FLASHINFER:-}" ]]; then
+  echo "FLASHINFER is set, running with --attention-backend FLASHINFER"
+  label="FLASHINFER backend"
+  cmdline_args=" --attention-backend FLASHINFER "
 else
-  run_tests "default backend" ""
-fi
-
-# Check if FLASHINFER is set (non-empty)
-if [[ -n "${FLASHINFER:-}" ]]; then
-  echo "FLASHINFER is set, rerunning with --attention-backend FLASHINFER"
-  run_tests "FLASHINFER backend" "--attention-backend FLASHINFER"
-else
-  echo "FLASHINFER not set, skipping FLASHINFER runs."
+  echo "running with default attention backend"
 fi
 
 # Check if cross-layers is enabled (non-empty)
 if [[ -n "${CROSS_LAYERS_BLOCKS:-}" ]]; then
-  echo "CROSS_LAYERS_BLOCKS is set, rerunning with --enable-cross-layers"
-  run_tests "default backend" "--enable-cross-layers"
+  echo "CROSS_LAYERS_BLOCKS is set, running with --enable-cross-layers"
+  label+=" - CROSS_LAYERS_BLOCKS enabled"
+  cmdline_args+=" --enable-cross-layers "
 fi
+
+# Run tests
+run_tests "${label}" "${cmdline_args}"
