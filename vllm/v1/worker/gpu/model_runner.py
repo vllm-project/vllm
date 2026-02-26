@@ -190,7 +190,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        self.model_state = ModelState(self.vllm_config, self.model, self.device)
         self.sampler = Sampler(
             max_num_reqs=self.max_num_reqs,
             vocab_size=self.vocab_size,
