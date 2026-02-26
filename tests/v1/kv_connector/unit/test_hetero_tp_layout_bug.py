@@ -52,7 +52,8 @@ for entry in AttentionBackendEnum:
     # Only test backends with the standard 5-dim shape (has a `2` dim for K/V).
     try:
         shape = cls.get_kv_cache_shape(
-            num_blocks=4, block_size=16, num_kv_heads=8, head_size=64)
+            num_blocks=4, block_size=16, num_kv_heads=8, head_size=64
+        )
     except Exception:
         continue
     if len(shape) != 5 or 2 not in shape:
@@ -76,6 +77,7 @@ if not _STANDARD_BACKENDS:
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def clean_layout_cache():
     """Reset the lru_cache on get_kv_cache_layout between tests."""
@@ -89,6 +91,7 @@ def clean_layout_cache():
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _get_physical_dim_names(backend_cls, layout):
     """Return the physical dimension order as human-readable names."""
     set_kv_cache_layout(layout)
@@ -97,7 +100,8 @@ def _get_physical_dim_names(backend_cls, layout):
 
     # Map logical dim indices to names based on the backend's shape.
     shape = backend_cls.get_kv_cache_shape(
-        num_blocks=4, block_size=16, num_kv_heads=8, head_size=64)
+        num_blocks=4, block_size=16, num_kv_heads=8, head_size=64
+    )
 
     # Identify which dim index is which by value.
     # shape has exactly one dim with value 2 (K/V split).
@@ -122,6 +126,7 @@ def _get_physical_dim_names(backend_cls, layout):
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestStrideOrderRespectsLayout:
     """
