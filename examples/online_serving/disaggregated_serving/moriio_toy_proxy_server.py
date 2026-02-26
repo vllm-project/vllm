@@ -103,9 +103,6 @@ def start_service_discovery(hostname, port):
 async def send_request_to_prefill(
     endpoint, req_data, request_id, d_endpoint, dip, dport, selected_prefill_dp_rank
 ):
-    print(
-        f"send_request_to_prefill:request_id={request_id}, url={endpoint}, port={dport}"
-    )
     req_data_copy = req_data
 
     req_data_copy["kv_transfer_params"].update(
