@@ -809,6 +809,8 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        current_platform.apply_config_platform_defaults(self)
+
         if self.compilation_config.mode is None:
             if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
