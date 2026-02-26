@@ -544,6 +544,11 @@ class LlavaForConditionalGeneration(
         self.config = config
         self.multimodal_config = multimodal_config
 
+        self.configure_mm_token_handling(
+            vocab_size=config.text_config.vocab_size,
+            mm_token_ids=[config.image_token_index],
+        )
+
         # NOTE: These are special cases for Pixtral-12B in the HF-format
         # https://huggingface.co/mistral-community/pixtral-12b/blob/main/config.json  # noqa
         if (
