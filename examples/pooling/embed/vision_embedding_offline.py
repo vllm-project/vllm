@@ -264,10 +264,8 @@ def run_vlm2vec_qwen2vl(seed: int):
         runner="pooling",
         max_model_len=4096,
         mm_processor_kwargs={
-            "size": {
-                "shortest_edge": 3136,
-                "longest_edge": 12845056,
-            },
+            "min_pixels": 3136,
+            "max_pixels": 12845056,
         },
         limit_mm_per_prompt={"image": 1},
     )

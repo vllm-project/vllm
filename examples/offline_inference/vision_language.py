@@ -1768,10 +1768,8 @@ def run_qwen2_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_num_seqs=5,
         # Note - mm_processor_kwargs can also be passed to generate/chat calls
         mm_processor_kwargs={
-            "size": {
-                "shortest_edge": 28 * 28,
-                "longest_edge": 1280 * 28 * 28,
-            },
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
         },
         limit_mm_per_prompt={modality: 1},
     )
@@ -1806,10 +1804,8 @@ def run_qwen2_5_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=5,
         mm_processor_kwargs={
-            "size": {
-                "shortest_edge": 28 * 28,
-                "longest_edge": 1280 * 28 * 28,
-            },
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
@@ -1845,10 +1841,8 @@ def run_qwen2_5_omni(questions: list[str], modality: str):
         max_model_len=4096,
         max_num_seqs=5,
         mm_processor_kwargs={
-            "size": {
-                "shortest_edge": 28 * 28,
-                "longest_edge": 1280 * 28 * 28,
-            },
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
@@ -1889,10 +1883,8 @@ def run_qwen3_vl(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=5,
         mm_processor_kwargs={
-            "size": {
-                "shortest_edge": 28 * 28,
-                "longest_edge": 1280 * 28 * 28,
-            },
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},
@@ -1928,10 +1920,8 @@ def run_qwen3_vl_moe(questions: list[str], modality: str) -> ModelRequestData:
         max_model_len=4096,
         max_num_seqs=5,
         mm_processor_kwargs={
-            "size": {
-                "shortest_edge": 28 * 28,
-                "longest_edge": 1280 * 28 * 28,
-            },
+            "min_pixels": 28 * 28,
+            "max_pixels": 1280 * 28 * 28,
             "fps": 1,
         },
         limit_mm_per_prompt={modality: 1},

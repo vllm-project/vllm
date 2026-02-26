@@ -11,10 +11,6 @@ from ....conftest import ImageTestAssets
 from ...utils import build_model_context
 
 
-@pytest.mark.skipif(
-    Version(TRANSFORMERS_VERSION) < Version("5.2.0"),
-    reason="`size` ignored by __call__",
-)
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
 @pytest.mark.parametrize(
     ("mm_processor_kwargs", "expected_toks_per_img", "expected_pixels_shape"),
@@ -45,6 +41,12 @@ def test_processor_override(
     kwargs_on_init: bool,
 ):
     """Ensure Qwen2VLMultiModalProcessor handles min/max pixels properly."""
+    if (
+        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
+        and "size" in mm_processor_kwargs
+    ):
+        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
+
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs if kwargs_on_init else None,
@@ -75,10 +77,6 @@ def test_processor_override(
     assert pixel_shape[1] == expected_pixels_shape[1]
 
 
-@pytest.mark.skipif(
-    Version(TRANSFORMERS_VERSION) < Version("5.2.0"),
-    reason="`size` ignored by __call__",
-)
 @pytest.mark.parametrize("model_id", ["Qwen/Qwen2-VL-2B-Instruct"])
 @pytest.mark.parametrize(
     "mm_processor_kwargs",
@@ -94,6 +92,12 @@ def test_get_image_size_with_most_features(
     model_id: str,
     mm_processor_kwargs: dict[str, object],
 ):
+    if (
+        Version(TRANSFORMERS_VERSION) < Version("5.2.0")
+        and "size" in mm_processor_kwargs
+    ):
+        pytest.skip("`size` ignored by `Qwen2VLProcessor.__call__`")
+
     ctx = build_model_context(
         model_id,
         mm_processor_kwargs=mm_processor_kwargs,

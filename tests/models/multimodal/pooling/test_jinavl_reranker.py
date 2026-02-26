@@ -18,10 +18,8 @@ from ....conftest import HfRunner, VllmRunner
 MODELS = ["jinaai/jina-reranker-m0"]
 
 MM_PROCESSOR_KWARGS = {
-    "size": {
-        "shortest_edge": 3136,
-        "longest_edge": 602112,
-    },
+    "min_pixels": 3136,
+    "max_pixels": 602112,
 }
 
 LIMIT_MM_PER_PROMPT = {"image": 2}

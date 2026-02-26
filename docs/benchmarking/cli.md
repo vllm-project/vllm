@@ -856,7 +856,7 @@ vllm serve Qwen/Qwen2.5-VL-3B-Instruct \
   --dtype bfloat16 \
   --max-model-len 16384 \
   --limit-mm-per-prompt '{"image": 3, "video": 0}' \
-  --mm-processor-kwargs.size '{"shortest_edge": 784, "longest_edge": 1003520}'
+  --mm-processor-kwargs max_pixels=1003520
 ```
 
 Benchmark. It is recommended to use the flag `--ignore-eos` to simulate real responses. You can set the size of the output via the arg `random-output-len`.
