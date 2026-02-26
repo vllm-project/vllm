@@ -498,9 +498,9 @@ class CpuPlatform(Platform):
             # NOTE: we should order this so that the highest performing
             # libraries are always imported first
             # e.g. if amx avx512_bf16 before avx_512, avx512 before avx2...
-            torch.cpu._is_avx512_bf16_supported: "vllm._C_avx512_bf16",
-            torch.cpu._is_vnni_supported: "vllm._C_avx512_vnni",
-            torch.cpu._is_amx_tile_supported: "vllm._C_amx",
+            # torch.cpu._is_avx512_bf16_supported: "vllm._C_avx512_bf16",
+            # torch.cpu._is_vnni_supported: "vllm._C_avx512_vnni",
+            # torch.cpu._is_amx_tile_supported: "vllm._C_amx",
             torch.cpu._is_avx512_supported: "vllm._C_avx512",
             torch.cpu._is_avx2_supported: "vllm._C",
         }
