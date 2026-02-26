@@ -71,7 +71,8 @@ foreach(_FA_COMPONENT _vllm_fa2_C _vllm_fa3_C)
   install(CODE "file(MAKE_DIRECTORY \"\${CMAKE_INSTALL_PREFIX}/vllm/vllm_flash_attn\")"
     COMPONENT ${_FA_COMPONENT})
 
-  # Copy vllm_flash_attn python files (except flash_attn_interface.py which is source-controlled in vllm)
+  # Copy vllm_flash_attn python files (except __init__.py and flash_attn_interface.py
+  # which are source-controlled in vllm)
   install(
     DIRECTORY ${vllm-flash-attn_SOURCE_DIR}/vllm_flash_attn/
     DESTINATION vllm/vllm_flash_attn
