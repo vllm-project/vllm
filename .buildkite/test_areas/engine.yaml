@@ -30,7 +30,7 @@ steps:
     - pytest -v -s v1/engine --ignore v1/engine/test_preprocess_error_handling.py
   mirror:
     amd:
-      device: mi325_8
+      device: mi325_1
       depends_on:
       - image-build-amd
       commands:
