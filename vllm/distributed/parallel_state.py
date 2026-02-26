@@ -1422,11 +1422,8 @@ def init_distributed_environment(
         # Pass device_id for NCCL backend to enable eager communicator
         # init and ncclCommSplit for sub-groups. This avoids hangs from
         # lazy ncclCommInitRankConfig on the first collective call.
-        # Only set device_id for multi-rank setups; for single-rank the
-        # eager init is unnecessary and consumes significant GPU memory.
         device_id = None
-        if (backend == "nccl" and torch.cuda.is_available()
-                and world_size > 1):
+        if backend == "nccl" and torch.cuda.is_available():
             device_id = torch.device(f"cuda:{local_rank}")
         # this backend is used for WORLD
         torch.distributed.init_process_group(
