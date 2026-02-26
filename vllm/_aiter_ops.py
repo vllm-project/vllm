@@ -433,7 +433,7 @@ def _rocm_aiter_triton_gemm_a8w8_blockscale_impl(
     Bs: torch.Tensor,
     output_dtype: torch.dtype = torch.float16,
 ) -> torch.Tensor:
-    from aiter.ops.triton.gemm_a8w8_blockscale import gemm_a8w8_blockscale
+    from aiter.ops.triton.gemm.basic.gemm_a8w8_blockscale import gemm_a8w8_blockscale
 
     return gemm_a8w8_blockscale(A, B, As, Bs, dtype=output_dtype)
 
@@ -663,7 +663,7 @@ def _rocm_aiter_rmsnorm_with_add_fp8_group_quant_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+    from aiter.ops.triton.quant.fused_fp8_quant import fused_rms_fp8_group_quant
 
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
         x,
@@ -705,7 +705,7 @@ def _rocm_aiter_rmsnorm_fp8_group_quant_impl(
     variance_epsilon: float,
     group_size: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_fp8_quant import fused_rms_fp8_group_quant
+    from aiter.ops.triton.quant.fused_fp8_quant import fused_rms_fp8_group_quant
 
     (x_quant, x_quant_scales), _, _, res = fused_rms_fp8_group_quant(
         x,
@@ -803,7 +803,9 @@ def _rocm_aiter_triton_add_rmsnorm_pad_impl(
     residual: torch.Tensor,
     x_pad_to_multiple: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    from aiter.ops.triton.fused_add_rmsnorm_pad import fused_add_rmsnorm_pad
+    from aiter.ops.triton.normalization.fused_add_rmsnorm_pad import (
+        fused_add_rmsnorm_pad,
+    )
 
     return fused_add_rmsnorm_pad(
         x,
@@ -1531,7 +1533,7 @@ class rocm_aiter_ops:
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from aiter.ops.triton.gemm_afp4wfp4 import gemm_afp4wfp4
+        from aiter.ops.triton.gemm.basic.gemm_afp4wfp4 import gemm_afp4wfp4
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
 
         if x_scales is None:
@@ -1563,7 +1565,9 @@ class rocm_aiter_ops:
         flash_layout: bool,
         apply_scale: bool,
     ):
-        from aiter.ops.triton.fused_kv_cache import fused_qk_rope_reshape_and_cache
+        from aiter.ops.triton.fusions.fused_kv_cache import (
+            fused_qk_rope_reshape_and_cache,
+        )
 
         cos, sin = cos_sin_cache.chunk(2, dim=-1)
         fused_qk_rope_reshape_and_cache(
@@ -1597,7 +1601,9 @@ class rocm_aiter_ops:
         y_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # ruff: noqa: E501 # isort: skip
-        from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+        from aiter.ops.triton.gemm.batched.batched_gemm_a16wfp4 import (
+            batched_gemm_a16wfp4,
+        )
 
         return batched_gemm_a16wfp4(
             X,
@@ -1623,7 +1629,7 @@ class rocm_aiter_ops:
         config: dict | None = None,
     ) -> torch.Tensor:
         # ruff: noqa: E501 # isort: skip
-        from aiter.ops.triton.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
+        from aiter.ops.triton.gemm.batched.batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant import (
             batched_gemm_a8w8_a_per_token_group_prequant_w_per_batched_tensor_quant as aiter_triton_fp8_bmm,
         )
 

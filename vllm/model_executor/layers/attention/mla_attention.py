@@ -579,7 +579,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q_pe = mqa_pe_padded
 
             if self.is_aiter_triton_fp4_bmm_enabled:
-                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+                from aiter.ops.triton.gemm.batched.batched_gemm_a16wfp4 import (
+                    batched_gemm_a16wfp4,
+                )
 
                 mqa_ql_nope = batched_gemm_a16wfp4(
                     mqa_q_nope,
