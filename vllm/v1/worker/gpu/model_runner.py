@@ -198,18 +198,31 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        # reused staging buffers for prepare_inputs
+        # ring-buffered staging for prepare_inputs
+        self._prepare_inputs_ring_size = max(self.pp_size, 2)
+        self._prepare_inputs_ring_slot = -1
+        self._prepare_inputs_slot_in_use = [False] * self._prepare_inputs_ring_size
+        self._prepare_inputs_slot_events = [
+            torch.cuda.Event() for _ in range(self._prepare_inputs_ring_size)
+        ]
+
         self._idx_mapping_cpu = torch.empty(
-            self.max_num_reqs, dtype=torch.int32, pin_memory=True
+            (self._prepare_inputs_ring_size, self.max_num_reqs),
+            dtype=torch.int32,
+            pin_memory=True,
         )
         self._idx_mapping_gpu = torch.empty(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
         self._query_start_loc_cpu = torch.empty(
-            self.max_num_reqs + 1, dtype=torch.int32, pin_memory=True
+            (self._prepare_inputs_ring_size, self.max_num_reqs + 1),
+            dtype=torch.int32,
+            pin_memory=True,
         )
         self._cu_num_logits_cpu = torch.empty(
-            self.max_num_reqs + 1, dtype=torch.int32, pin_memory=True
+            (self._prepare_inputs_ring_size, self.max_num_reqs + 1),
+            dtype=torch.int32,
+            pin_memory=True,
         )
         self._cu_num_logits_gpu = torch.empty(
             self.max_num_reqs + 1, dtype=torch.int32, device=self.device
@@ -248,6 +261,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+
+    def _get_prepare_inputs_ring_slot(self) -> int:
+        slot = (self._prepare_inputs_ring_slot + 1) % self._prepare_inputs_ring_size
+        self._prepare_inputs_ring_slot = slot
+        if self._prepare_inputs_slot_in_use[slot]:
+            event = self._prepare_inputs_slot_events[slot]
+            if not event.query():
+                event.synchronize()
+        return slot
+
+    def _mark_prepare_inputs_ring_slot_inflight(self, slot: int) -> None:
+        event = self._prepare_inputs_slot_events[slot]
+        event.record(torch.cuda.current_stream(self.device))
+        self._prepare_inputs_slot_in_use[slot] = True
 
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
@@ -615,6 +642,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert num_tokens > 0
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
+        slot = self._get_prepare_inputs_ring_slot()
 
         # Decode first, then prefill.
         # batch_idx -> req_id
@@ -624,7 +652,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
-        idx_mapping_cpu = self._idx_mapping_cpu[:num_reqs]
+        idx_mapping_cpu = self._idx_mapping_cpu[slot, :num_reqs]
         np.copyto(idx_mapping_cpu.numpy(), idx_mapping_np, casting="no")
         idx_mapping = self._idx_mapping_gpu[:num_reqs]
         idx_mapping.copy_(idx_mapping_cpu, non_blocking=True)
@@ -648,7 +676,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits = num_reqs + total_num_draft_tokens
 
             num_logits = num_draft_tokens + 1
-            cu_num_logits_cpu = self._cu_num_logits_cpu[: num_reqs + 1]
+            cu_num_logits_cpu = self._cu_num_logits_cpu[slot, : num_reqs + 1]
             cu_num_logits_cpu_np = cu_num_logits_cpu.numpy()
             cu_num_logits_cpu_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_cpu_np[1:])
@@ -665,7 +693,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         block_tables = self.block_tables.gather_block_tables(idx_mapping)
 
         # Get query_start_loc.
-        query_start_loc_cpu_full = self._query_start_loc_cpu
+        query_start_loc_cpu_full = self._query_start_loc_cpu[slot]
         query_start_loc_np_full = query_start_loc_cpu_full.numpy()
         query_start_loc_np_full[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np_full[1 : num_reqs + 1])
@@ -675,6 +703,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.input_buffers.query_start_loc.copy_(
             query_start_loc_cpu_full, non_blocking=True
         )
+        self._mark_prepare_inputs_ring_slot_inflight(slot)
 
         query_start_loc_cpu = query_start_loc_cpu_full[: num_reqs + 1]
         query_start_loc_np = query_start_loc_np_full[: num_reqs + 1]
