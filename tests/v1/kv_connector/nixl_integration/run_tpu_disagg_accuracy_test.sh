@@ -63,8 +63,8 @@ launch_baseline() {
       --block-size ${BLOCK_SIZE} \
       --gpu-memory-utilization 0.5 \
       --enforce-eager"
-  echo ${BASELINE_BASE_CMD}
-  ssh -tt ${BASELINE_HOST} "${BASELINE_BASE_CMD}" &
+  echo "${BASELINE_BASE_CMD}"
+  ssh -tt "${BASELINE_HOST}" "${BASELINE_BASE_CMD}" &
 }
 
 launch_pd() {
@@ -103,17 +103,17 @@ launch_pd() {
       --gpu-memory-utilization 0.5 \
       --kv-transfer-config '{\"kv_connector\":\"NixlConnector\",\"kv_role\":\"kv_both\",\"kv_buffer_device\":\"cpu\"}'"
 
-  echo ${PREFILL_BASE_CMD}
-  echo ${DECODE_BASE_CMD}
+  echo "${PREFILL_BASE_CMD}"
+  echo "${DECODE_BASE_CMD}"
   sleep 2
 
   # execute on hosts
-  ssh -tt ${PREFILL_HOST} "${PREFILL_BASE_CMD}" &
-  ssh -tt ${DECODE_HOST} "${DECODE_BASE_CMD}" &
+  ssh -tt "${PREFILL_HOST}" "${PREFILL_BASE_CMD}" &
+  ssh -tt "${DECODE_HOST}" "${DECODE_BASE_CMD}" &
   sleep 1
-  wait_for_server ${PREFILL_HOST} ${PREFILL_PORT}
+  wait_for_server "${PREFILL_HOST}" "${PREFILL_PORT}"
   sleep 1
-  wait_for_server ${DECODE_HOST} ${DECODE_PORT}
+  wait_for_server "${DECODE_HOST}" "${DECODE_PORT}"
   sleep 1
 }
 
@@ -123,21 +123,21 @@ launch_pd_proxy(){
   --prefiller-host ${PREFILL_HOST} --prefiller-port ${PREFILL_PORT} \
   --decoder-host ${DECODE_HOST} --decoder-port ${DECODE_PORT} \
   --host=${PROXY_HOST} --port ${PROXY_PORT}"
-  echo ${PROXY_BASE_CMD}
-  ssh -tt ${PROXY_HOST} "${PROXY_BASE_CMD}" &
+  echo "${PROXY_BASE_CMD}"
+  ssh -tt "${PROXY_HOST}" "${PROXY_BASE_CMD}" &
 }
 
 run_tests(){
   local service_url=$1
   local mode=$2
-  python3 ${EXP_ROOT}/test_disagg_accuracy.py --service_url=${service_url} --model_name=${MODEL_NAME} --mode=${mode} --file_name=${OUTPUT_FILE}
+  python3 "${EXP_ROOT}"/test_disagg_accuracy.py --service_url="${service_url}" --model_name="${MODEL_NAME}" --mode="${mode}" --file_name="${OUTPUT_FILE}"
 }
 
 
 # run non-disagg. baseline & save outputs
 launch_baseline
 sleep 2
-wait_for_server ${BASELINE_HOST} ${BASELINE_PORT}
+wait_for_server "${BASELINE_HOST}" "${BASELINE_PORT}"
 run_tests "http://${BASELINE_HOST}:${BASELINE_PORT}" "baseline"
 cleanup
 sleep 10
@@ -150,7 +150,7 @@ sleep 10
 run_tests "http://${PROXY_HOST}:${PROXY_PORT}" "disagg"
 echo "-----P/D success----"
 
-rm ${OUTPUT_FILE}
+rm "${OUTPUT_FILE}"
 cleanup
 
 exit 0

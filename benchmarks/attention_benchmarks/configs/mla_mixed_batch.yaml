@@ -45,10 +45,10 @@ batch_specs:
   - "4q4k_60q1s4k"          # 4 prefill + 60 decode
 
 backends:
-  - cutlass_mla
-  - flashinfer_mla
-  - flashattn_mla   # Hopper only
-  - flashmla        # Hopper only
+  - CUTLASS_MLA
+  - FLASHINFER_MLA
+  - FLASH_ATTN_MLA   # Hopper only
+  - FLASHMLA         # Hopper only
 
 device: "cuda:0"
 repeats: 5

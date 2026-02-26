@@ -319,6 +319,7 @@ class Qwen2VisionAttention(nn.Module):
             num_heads=self.num_attention_heads_per_partition,
             head_size=self.hidden_size_per_attention_head,
             scale=self.hidden_size_per_attention_head**-0.5,
+            prefix=f"{prefix}.attn",
         )
 
         self.apply_rotary_emb = ApplyRotaryEmb(enforce_enable=True)
@@ -641,6 +642,7 @@ class Qwen2VisionTransformer(nn.Module):
         if self.attn_backend in {
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.ROCM_AITER_FA,
+            AttentionBackendEnum.TRITON_ATTN,
         }:
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
@@ -831,24 +833,31 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         image_height: int,
         num_frames: int = 1,
         do_resize: bool = True,
-        image_processor: Qwen2VLImageProcessor | None,
+        image_processor: Qwen2VLImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> tuple[ImageSize, int]:
-        if image_processor is None:
-            image_processor = self.get_image_processor()
-
         hf_config = self.get_hf_config()
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
         temporal_patch_size = vision_config.temporal_patch_size
 
+        mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {"shortest_edge": override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {"longest_edge": override_max_pixels}
+
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * merge_size,
-                min_pixels=image_processor.size["shortest_edge"],
-                max_pixels=image_processor.size["longest_edge"],
+                min_pixels=size["shortest_edge"],
+                max_pixels=size["longest_edge"],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:
@@ -872,13 +881,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         *,
         image_width: int,
         image_height: int,
-        image_processor: Qwen2VLImageProcessor | None,
+        image_processor: Qwen2VLImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_image_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             num_frames=1,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
         )
         return num_image_tokens
 
@@ -888,13 +899,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         image_width: int,
         image_height: int,
         num_frames: int,
-        image_processor: Qwen2VLImageProcessor | None,
+        image_processor: Qwen2VLImageProcessor,
+        mm_kwargs: Mapping[str, object],
     ) -> int:
         _, num_video_tokens = self._get_vision_info(
             image_width=image_width,
             image_height=image_height,
             num_frames=num_frames,
             image_processor=image_processor,
+            mm_kwargs=mm_kwargs,
         )
         return num_video_tokens
 
@@ -918,9 +931,21 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
         merge_size = vision_config.spatial_merge_size
+
         if max_pixels is None:
             image_processor = self.get_image_processor()
-            max_pixels = image_processor.size["longest_edge"]
+
+            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
+            size = image_processor.size
+            if override_size := mm_kwargs.get("size"):
+                size = size | override_size
+            if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+                size = size | {"shortest_edge": override_min_pixels}
+            if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+                size = size | {"longest_edge": override_max_pixels}
+
+            max_pixels = size["longest_edge"]
+
         unit = patch_size * merge_size
         max_seq_len = max_pixels // (unit * unit)
 
@@ -940,15 +965,18 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         return ImageSize(width=unit * width_factor, height=unit * height_factor)
 
     def get_max_image_tokens(self) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
 
     def _get_max_video_frames(self, max_tokens: int, start_num_frames: int = 1) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         num_frames = start_num_frames
@@ -959,7 +987,8 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
                 image_width=target_width,
                 image_height=target_height,
                 num_frames=next_num_frames,
-                image_processor=None,
+                image_processor=image_processor,
+                mm_kwargs={},
             )
 
             if next_max_tokens > max_tokens:
@@ -989,13 +1018,15 @@ class Qwen2VLProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> int:
+        image_processor = self.get_image_processor()
         target_width, target_height = self.get_image_size_with_most_features()
 
         return self.get_num_video_tokens(
             image_width=target_width,
             image_height=target_height,
             num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
-            image_processor=None,
+            image_processor=image_processor,
+            mm_kwargs={},
         )
 
 
@@ -1014,7 +1045,7 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
         num_videos = mm_counts.get("video", 0)
@@ -1024,8 +1055,8 @@ class Qwen2VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen2VLProcessingInfo]):
             seq_len, mm_counts
         )
 
-        image_overrides = mm_options.get("image") if mm_options else None
-        video_overrides = mm_options.get("video") if mm_options else None
+        image_overrides = mm_options.get("image")
+        video_overrides = mm_options.get("video")
 
         return {
             "image": self._get_dummy_images(
@@ -1462,15 +1493,15 @@ class Tarsier2ImageProcessor(Qwen2VLImageProcessor):
 class Tarsier2Processor(Qwen2VLProcessor):
     def __init__(
         self,
-        vision_config: dict,
+        image_processor: Tarsier2ImageProcessor,
         tokenizer: TokenizerLike,
+        video_processor: Qwen2VLVideoProcessor,
         **kwargs,
     ):
-        self.image_processor = Tarsier2ImageProcessor(**vision_config)
         super().__init__(
-            image_processor=self.image_processor,
+            image_processor=image_processor,
             tokenizer=tokenizer,
-            video_processor=Qwen2VLVideoProcessor(**vision_config),
+            video_processor=video_processor,
             chat_template=None,
             **kwargs,
         )
@@ -1484,8 +1515,12 @@ class Tarsier2ProcessingInfo(Qwen2VLProcessingInfo):
         return correct_config
 
     def get_hf_processor(self, **kwargs: object) -> Tarsier2Processor:
+        vision_config = self.ctx.get_hf_image_processor_config()
+        image_processor = Tarsier2ImageProcessor(**vision_config)
+        video_processor = Qwen2VLVideoProcessor(**vision_config)
         return Tarsier2Processor(
-            vision_config=self.ctx.get_hf_image_processor_config(),
+            image_processor=image_processor,
+            video_processor=video_processor,
             tokenizer=self.get_tokenizer(),
             **kwargs,
         )

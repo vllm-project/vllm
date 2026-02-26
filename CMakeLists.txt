@@ -56,8 +56,8 @@ endif()
 # requirements.txt files and should be kept consistent.  The ROCm torch
 # versions are derived from docker/Dockerfile.rocm
 #
-set(TORCH_SUPPORTED_VERSION_CUDA "2.9.1")
-set(TORCH_SUPPORTED_VERSION_ROCM "2.9.1")
+set(TORCH_SUPPORTED_VERSION_CUDA "2.10.0")
+set(TORCH_SUPPORTED_VERSION_ROCM "2.10.0")
 
 #
 # Try to find python package with an executable that exactly matches
@@ -293,6 +293,7 @@ set(VLLM_EXT_SRC
   "csrc/fused_qknorm_rope_kernel.cu"
   "csrc/layernorm_quant_kernels.cu"
   "csrc/sampler.cu"
+  "csrc/topk.cu"
   "csrc/cuda_view.cu"
   "csrc/quantization/gptq/q_gemm.cu"
   "csrc/quantization/w8a8/int8/scaled_quant.cu"
@@ -433,7 +434,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_BF16_KERNEL_SRC})
     endif()
 
-    if (MARLIN_SM75_ARCHS) 
+    if (MARLIN_SM75_ARCHS)
       file(GLOB MARLIN_TEMPLATE_SM75_KERNEL_SRC "csrc/quantization/marlin/sm75_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_SM75_KERNEL_SRC}"
@@ -445,7 +446,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_EXT_SRC ${MARLIN_TEMPLATE_SM75_KERNEL_SRC})
     endif()
 
-    if (MARLIN_FP8_ARCHS) 
+    if (MARLIN_FP8_ARCHS)
       file(GLOB MARLIN_TEMPLATE_FP8_KERNEL_SRC "csrc/quantization/marlin/sm89_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_TEMPLATE_FP8_KERNEL_SRC}"
@@ -724,7 +725,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # CUTLASS MoE kernels
 
   # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and ONLY works
-  # on Hopper). get_cutlass_(pplx_)moe_mm_data should only be compiled
+  # on Hopper). get_cutlass_(batched_)moe_mm_data should only be compiled
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
@@ -768,6 +769,24 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       message(STATUS "Not building grouped_mm_c3x as no compatible archs found "
                      "in CUDA target architectures.")
     endif()
+  endif()
+
+  # DeepSeek V3 fused A GEMM kernel (requires SM 9.0+, Hopper and later)
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(DSV3_FUSED_A_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_FUSED_A_GEMM_ARCHS)
+    set(DSV3_FUSED_A_GEMM_SRC "csrc/dsv3_fused_a_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV3_FUSED_A_GEMM_SRC}"
+      CUDA_ARCHS "${DSV3_FUSED_A_GEMM_ARCHS}")
+    list(APPEND VLLM_EXT_SRC ${DSV3_FUSED_A_GEMM_SRC})
+    message(STATUS "Building dsv3_fused_a_gemm for archs: ${DSV3_FUSED_A_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building dsv3_fused_a_gemm as no compatible archs found "
+                   "in CUDA target architectures.")
   endif()
 
   # moe_data.cu is used by all CUTLASS MoE kernels.
@@ -1042,7 +1061,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       list(APPEND VLLM_MOE_EXT_SRC ${MARLIN_MOE_SRC})
     endif()
 
-    if (MARLIN_MOE_SM75_ARCHS) 
+    if (MARLIN_MOE_SM75_ARCHS)
       file(GLOB MARLIN_MOE_SM75_SRC "csrc/moe/marlin_moe_wna16/sm75_kernel_*.cu")
       set_gencode_flags_for_srcs(
         SRCS "${MARLIN_MOE_SM75_SRC}"
@@ -1080,6 +1099,27 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   else()
     message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
                    " in CUDA target architectures")
+  endif()
+
+  # DeepSeek V3 router GEMM kernel - requires SM90+
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
+    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0f;11.0f" "${CUDA_ARCHS}")
+  else()
+    cuda_archs_loose_intersection(DSV3_ROUTER_GEMM_ARCHS "9.0a;10.0a;10.1a;10.3a" "${CUDA_ARCHS}")
+  endif()
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND DSV3_ROUTER_GEMM_ARCHS)
+    set(DSV3_ROUTER_GEMM_SRC
+      "csrc/moe/dsv3_router_gemm_entry.cu"
+      "csrc/moe/dsv3_router_gemm_float_out.cu"
+      "csrc/moe/dsv3_router_gemm_bf16_out.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${DSV3_ROUTER_GEMM_SRC}"
+      CUDA_ARCHS "${DSV3_ROUTER_GEMM_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC "${DSV3_ROUTER_GEMM_SRC}")
+    message(STATUS "Building DSV3 router GEMM kernel for archs: ${DSV3_ROUTER_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building DSV3 router GEMM kernel as no compatible archs found"
+                   " (requires SM90+ and CUDA >= 12.0)")
   endif()
 endif()
 

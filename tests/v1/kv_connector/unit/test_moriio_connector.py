@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import importlib.util
 import os
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import msgspec
@@ -17,6 +18,7 @@ from vllm.config import (
     ModelConfig,
     SchedulerConfig,
     VllmConfig,
+    set_current_vllm_config,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
@@ -39,6 +41,19 @@ from .utils import create_request, create_scheduler
 
 aiter_available = importlib.util.find_spec("aiter") is not None
 mori_available = importlib.util.find_spec("mori") is not None
+
+
+def _rdma_available() -> bool:
+    """Check if RDMA devices are available."""
+    try:
+        result = subprocess.run(["ibv_devinfo"], capture_output=True, text=True)
+        return "No IB devices found" not in result.stderr
+    except FileNotFoundError:
+        return False
+
+
+rdma_available = _rdma_available()
+
 pytestmark = pytest.mark.skipif(
     not (current_platform.is_rocm() and mori_available),
     reason="MoRIIOs are only available on ROCm with aiter package installed",
@@ -392,6 +407,7 @@ def test_read_mode_loads_remote_block_ids(moriio_read_mode):
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
+@pytest.mark.skipif(not rdma_available, reason="No RDMA devices available")
 def test_register_kv_caches(mock_parallel_groups):
     """Test that MoRIIOConnector.register_kv_caches correctly registers kv caches."""
     ROLE = "kv_consumer"
@@ -433,10 +449,11 @@ def test_register_kv_caches(mock_parallel_groups):
             }
         )
 
-        connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
-        connector.connector_worker = FakeMorIIOConnectorWorker(
-            vllm_config, connector.engine_id, hand_shake_latency=0
-        )
+        with set_current_vllm_config(vllm_config):
+            connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
+            connector.connector_worker = FakeMorIIOConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0
+            )
 
         from mori.io import (
             MemoryDesc,
@@ -486,6 +503,7 @@ def test_register_kv_caches(mock_parallel_groups):
 @pytest.mark.skipif(
     not aiter_available, reason="Requires aiter package for ROCm FlashAttention backend"
 )
+@pytest.mark.skipif(not rdma_available, reason="No RDMA devices available")
 def test_moriio_handshake_returns_metadata(mock_parallel_groups):
     """MoRIIO handshake socket returns valid agent metadata over ZMQ."""
 
@@ -523,7 +541,8 @@ def test_moriio_handshake_returns_metadata(mock_parallel_groups):
                 "handshake_port": handshake_port,
             }
         )
-        connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
+        with set_current_vllm_config(vllm_config):
+            connector = MoRIIOConnector(vllm_config, KVConnectorRole.WORKER)
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)

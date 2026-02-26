@@ -236,7 +236,7 @@ def test_prefix_caching_for_multi_turn():
         req._all_token_ids = req.prompt_token_ids.copy()
         req.all_token_ids = ConstantList(req._all_token_ids)
         req.block_hashes = []
-        req.block_hashes = req.get_hash_new_full_blocks()
+        req.update_block_hashes()
 
     # Schedule the next-turn requests.
     for req in next_turn_requests:

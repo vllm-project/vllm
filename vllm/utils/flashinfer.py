@@ -396,6 +396,53 @@ def use_trtllm_attention(
 
 
 if has_flashinfer():
+    from vllm.utils.torch_utils import direct_register_custom_op
+
+    def _flashinfer_concat_mla_k(
+        k: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+    ) -> None:
+        """Custom op wrapper for flashinfer's concat_mla_k.
+
+        This is an in-place operation that concatenates k_nope and k_pe into k.
+
+        The kernel is optimized for DeepSeek V3 dimensions:
+        - num_heads=128
+        - nope_dim=128
+        - rope_dim=64
+
+        Key optimizations:
+        - Warp-based processing with software pipelining
+        - Vectorized memory access (int2 for nope, int for rope)
+        - L2 prefetching for next row while processing current
+        - Register reuse for rope values across all heads
+
+        Args:
+            k: Output tensor, shape [num_tokens, num_heads, nope_dim + rope_dim].
+                Modified in-place.
+            k_nope: The nope part of k, shape [num_tokens, num_heads, nope_dim].
+            k_pe: The rope part of k (shared), shape [num_tokens, 1, rope_dim].
+                  This is broadcast to all heads.
+        """
+        from flashinfer.concat_ops import concat_mla_k
+
+        concat_mla_k(k, k_nope, k_pe)
+
+    def _flashinfer_concat_mla_k_fake(
+        k: torch.Tensor,
+        k_nope: torch.Tensor,
+        k_pe: torch.Tensor,
+    ) -> None:
+        return
+
+    # Register flashinfer concat_mla_k custom op
+    direct_register_custom_op(
+        op_name="flashinfer_concat_mla_k",
+        op_func=_flashinfer_concat_mla_k,
+        mutates_args=["k"],  # k tensor is modified in-place
+        fake_impl=_flashinfer_concat_mla_k_fake,
+    )
 
     @torch.library.custom_op(
         "vllm::flashinfer_mm_fp4",
@@ -505,6 +552,83 @@ if has_flashinfer():
         return torch.empty(m, n // 2, dtype=torch.uint8, device=a.device), torch.empty(
             rounded_m, rounded_n, dtype=torch.uint8, device=a.device
         )
+
+    @torch.library.custom_op(
+        "vllm::mm_mxfp8",
+        mutates_args=[],
+        device_types="cuda",
+    )
+    def mm_mxfp8(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+        backend: str = "cutlass",
+    ) -> torch.Tensor:
+        from flashinfer import mm_mxfp8 as mm_mxfp8_
+
+        return mm_mxfp8_(
+            A,
+            B,
+            A_scale,
+            B_scale,
+            out=None,
+            out_dtype=out_dtype,
+            backend=backend,
+        )
+
+    @torch.library.register_fake(
+        "vllm::mm_mxfp8",
+    )
+    def mm_mxfp8_fake(
+        A: torch.Tensor,
+        B: torch.Tensor,
+        A_scale: torch.Tensor,
+        B_scale: torch.Tensor,
+        out_dtype: torch.dtype,
+        backend: str = "cutlass",
+    ) -> torch.Tensor:
+        # A is [m, k], B is [k, n] -> output [m, n]
+        return torch.empty(A.shape[0], B.shape[1], dtype=out_dtype, device=A.device)
+
+
+def flashinfer_mm_mxfp8(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    block_scale_a: torch.Tensor,
+    block_scale_b: torch.Tensor,
+    out_dtype: torch.dtype,
+    backend: str = "cutlass",
+) -> torch.Tensor:
+    """MXFP8 MM helper - mirrors flashinfer_scaled_fp4_mm API.
+
+    Takes non-transposed weights and handles transpose internally.
+
+    CRITICAL: mm_mxfp8 CUTLASS kernel requires SWIZZLED 1D scales for optimal
+    performance and accuracy. Both input and weight scales should be in
+    swizzled format from FlashInfer's mxfp8_quantize(is_sf_swizzled_layout=True).
+    """
+    # a shape [M, K]
+    # b shape [K, N]
+    assert a.ndim == 2 and b.ndim == 2
+    assert a.shape[1] == b.shape[1]  # K dimension must match
+
+    if block_scale_b.ndim != 1:
+        raise ValueError(
+            "mm_mxfp8 expects 1D swizzled weight scales for CUTLASS; "
+            f"got shape={tuple(block_scale_b.shape)}"
+        )
+
+    # Output tensor [M, N]
+    return mm_mxfp8(
+        a,
+        b.t(),  # Transpose weight: [N, K] -> [K, N]
+        block_scale_a,
+        block_scale_b,
+        out_dtype,
+        backend=backend,
+    )
 
 
 def flashinfer_scaled_fp4_mm(
