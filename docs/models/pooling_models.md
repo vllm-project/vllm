@@ -498,6 +498,67 @@ curl -s http://localhost:8000/pooling -H "Content-Type: application/json" -d '{
 - Multi-vector retrieval: [examples/pooling/token_embed/colqwen3_token_embed_online.py](../../examples/pooling/token_embed/colqwen3_token_embed_online.py)
 - Reranking (text + multi-modal): [examples/pooling/score/colqwen3_rerank_online.py](../../examples/pooling/score/colqwen3_rerank_online.py)
 
+### Llama Nemotron Multimodal Embedding Models
+
+Llama Nemotron VL Embedding models combine the bidirectional Llama embedding backbone
+(from `nvidia/llama-nemotron-embed-1b-v2`) with SigLIP as the vision encoder to produce
+single-vector embeddings from text and/or images.
+
+| Architecture | Backbone | Example HF Models |
+|---|---|---|
+| `LlamaNemotronVLModel` | Bidirectional Llama + SigLIP | `nvidia/llama-nemotron-embed-vl-1b-v2` |
+
+Start the server:
+
+```shell
+vllm serve nvidia/llama-nemotron-embed-vl-1b-v2 \
+    --trust-remote-code \
+    --chat-template examples/pooling/embed/template/nemotron_embed_vl.jinja
+```
+
+!!! note
+    The chat template bundled with this model's tokenizer is not suitable for
+    the embeddings API. Use the provided override template above when serving
+    with the `messages`-based (chat-style) embeddings endpoint.
+
+    The override template uses the message `role` to automatically prepend the
+    appropriate prefix: set `role` to `"query"` for queries (prepends `query: `)
+    or `"document"` for passages (prepends `passage: `). Any other role omits
+    the prefix.
+
+Embed text queries:
+
+```shell
+curl -s http://localhost:8000/v1/embeddings -H "Content-Type: application/json" -d '{
+    "model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+    "messages": [
+        {
+            "role": "query",
+            "content": [
+                {"type": "text", "text": "What is machine learning?"}
+            ]
+        }
+    ]
+}'
+```
+
+Embed images via the chat-style `messages` field:
+
+```shell
+curl -s http://localhost:8000/v1/embeddings -H "Content-Type: application/json" -d '{
+    "model": "nvidia/llama-nemotron-embed-vl-1b-v2",
+    "messages": [
+        {
+            "role": "document",
+            "content": [
+                {"type": "image_url", "image_url": {"url": "data:image/png;base64,<BASE64>"}},
+                {"type": "text", "text": "Describe the image."}
+            ]
+        }
+    ]
+}'
+```
+
 ### BAAI/bge-m3
 
 The `BAAI/bge-m3` model comes with extra weights for sparse and colbert embeddings but unfortunately in its `config.json`
