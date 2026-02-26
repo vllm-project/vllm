@@ -297,10 +297,7 @@ def test_fusion_silu_and_mul_quant(
             atol, rtol = 1e-3, 1e-3
         elif model_class == TestSiluMulNvfp4QuantModel:
             atol, rtol = 1e-1, 1e-1
-        elif (
-            model_class == TestSiluMulGroupFp8QuantModel
-            or model_class == TestSiluMulBlockQuantModel
-        ):
+        elif model_class in (TestSiluMulGroupFp8QuantModel, TestSiluMulBlockQuantModel):
             atol, rtol = 5e-2, 5e-2
 
         torch.testing.assert_close(
