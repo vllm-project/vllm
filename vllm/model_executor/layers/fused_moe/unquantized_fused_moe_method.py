@@ -33,7 +33,7 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
-from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
+from vllm.utils.flashinfer import (
     convert_moe_weights_to_flashinfer_trtllm_block_layout,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
