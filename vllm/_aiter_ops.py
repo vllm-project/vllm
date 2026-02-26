@@ -1052,12 +1052,16 @@ class rocm_aiter_ops:
     @classmethod
     @if_aiter_supported
     def is_fp4bmm_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and cls._FP4BMM_ENABLED and on_gfx950()
 
     @classmethod
     @if_aiter_supported
     def is_asm_fp4_gemm_dynamic_quant_enabled(cls) -> bool:
-        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM
+        from vllm.platforms.rocm import on_gfx950
+
+        return cls._AITER_ENABLED and cls._FP4_GEMM_DYNAMIC_QUANT_ASM and on_gfx950()
 
     @classmethod
     @if_aiter_supported
