@@ -10,7 +10,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
 from batch_spec import get_batch_type, parse_batch_spec
 from rich.console import Console
@@ -62,10 +61,7 @@ class MockHfConfig:
 # Import AttentionLayerBase at module level to avoid circular dependencies
 try:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-
-    _HAS_ATTENTION_LAYER_BASE = True
 except ImportError:
-    _HAS_ATTENTION_LAYER_BASE = False
     AttentionLayerBase = object  # Fallback
 
 
@@ -165,95 +161,6 @@ class MockLayer(AttentionLayerBase):
     def get_kv_cache_spec(self):
         """Get the KV cache spec (required by AttentionLayerBase)."""
         return self._kv_cache_spec
-
-
-class MockModelConfig:
-    """Mock model configuration."""
-
-    def __init__(
-        self,
-        num_q_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        dtype: torch.dtype = torch.float16,
-        max_model_len: int = 32768,
-    ):
-        self._n_q = num_q_heads
-        self._n_kv = num_kv_heads
-        self._d = head_dim
-        self.dtype = dtype
-        self.max_model_len = max_model_len
-
-    def get_num_attention_heads(self, _=None) -> int:
-        return self._n_q
-
-    def get_num_kv_heads(self, _=None) -> int:
-        return self._n_kv
-
-    def get_head_size(self) -> int:
-        return self._d
-
-    def get_num_layers(self) -> int:
-        """Mock method for layer count queries."""
-        return 1
-
-    def get_sliding_window_for_layer(self, _layer_idx: int):
-        """Mock method for sliding window queries."""
-        return None
-
-    def get_logits_soft_cap_for_layer(self, _layer_idx: int):
-        """Mock method for logits soft cap queries."""
-        return None
-
-    def get_sm_scale_for_layer(self, _layer_idx: int) -> float:
-        """Mock method for SM scale queries."""
-        return 1.0 / (self.get_head_size() ** 0.5)
-
-
-class MockParallelConfig:
-    """Mock parallel configuration."""
-
-    pass
-
-
-class MockCompilationConfig:
-    """Mock compilation configuration."""
-
-    def __init__(self):
-        self.full_cuda_graph = False
-        self.static_forward_context = {}
-
-
-class MockVLLMConfig:
-    """Mock VLLM configuration."""
-
-    def __init__(self):
-        self.compilation_config = MockCompilationConfig()
-
-
-class MockRunner:
-    """Mock GPU runner for metadata builders."""
-
-    def __init__(
-        self,
-        seq_lens: np.ndarray,
-        query_start_locs: np.ndarray,
-        device: torch.device,
-        num_q_heads: int,
-        num_kv_heads: int,
-        head_dim: int,
-        dtype: torch.dtype,
-    ):
-        self.model_config = MockModelConfig(num_q_heads, num_kv_heads, head_dim, dtype)
-        self.parallel_config = MockParallelConfig()
-        self.vllm_config = MockVLLMConfig()
-        self.seq_lens_np = seq_lens
-        self.query_start_loc_np = query_start_locs
-        self.device = device
-        self.attention_chunk_size = None
-        self.num_query_heads = num_q_heads
-        self.num_kv_heads = num_kv_heads
-        self.dtype = dtype
 
 
 @dataclass
