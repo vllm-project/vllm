@@ -802,9 +802,11 @@ class OffloadingConnectorWorker:
             # Evaluate cost model: is recomputing faster than waiting?
             estimated_ms = self.timing_stats.estimate_ms(prefix_len)
             # Recomputing 0 tokens costs 0 ms — trigger fallback immediately.
+            # Guard model_tokens_per_ms > 0 to prevent ZeroDivisionError when
+            # a user misconfigures the parameter.
             recompute_ms = (
                 prefix_len / self._model_tokens_per_ms
-                if prefix_len > 0
+                if prefix_len > 0 and self._model_tokens_per_ms > 0
                 else 0.0
             )
             prefer_recompute = estimated_ms >= recompute_ms
@@ -851,12 +853,15 @@ class OffloadingConnectorWorker:
                 )
                 if not store:
                     # Feed load timing stats for the Strategy B cost model.
-                    # Bytes -> approx tokens: assume 2 bytes per KV element.
-                    approx_tokens = transfer_result.transfer_size // 2
-                    self.timing_stats.record(
-                        tokens=approx_tokens,
-                        elapsed_ms=transfer_result.transfer_time * 1e3,
-                    )
+                    # Use the exact prefix_len (in tokens) already recorded in
+                    # _pending_load_info — far more accurate than bytes // 2
+                    # which ignores head_size, num_heads, num_layers etc.
+                    if req_id in self._pending_load_info:
+                        _, prefix_len = self._pending_load_info[req_id]
+                        self.timing_stats.record(
+                            tokens=prefix_len,
+                            elapsed_ms=transfer_result.transfer_time * 1e3,
+                        )
             if store:
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
