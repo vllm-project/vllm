@@ -458,7 +458,7 @@ class ThinkingTokenBudgetLogitsProcessor(LogitsProcessor):
         # eg with 999: [2,4,5,999] -> [3,-1,-1,-1]
 
         if state["in_end"] and \
-        self.think_end_token_ids[0] not in state.get("output_tok_ids", []):
+            absolute_end_pos < 0 :
             state["in_think"] = True
             state["in_end"] = False
             state["end_count"] = 0
