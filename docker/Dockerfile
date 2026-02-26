@@ -795,6 +795,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
                 libcublas-dev-${CUDA_VERSION_DASH} \
                 libcusolver-dev-${CUDA_VERSION_DASH}"; \
     if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
+        if [ "$CUDA_MAJOR" -ge 13 ]; then \
+            uv pip install --system nixl-cu13; \
+        fi; \
         uv pip install --system -r /tmp/kv_connectors.txt --no-build || ( \
             # if the above fails, install from source
             apt-get update -y && \

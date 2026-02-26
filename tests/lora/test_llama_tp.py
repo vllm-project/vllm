@@ -224,7 +224,6 @@ def test_tp2_serialize_and_deserialize_lora(
         max_model_len=1024,
         tensor_parallel_size=2,
         max_loras=2,
-        gpu_memory_utilization=0.85,
     )
 
     tc_as_dict = tensorizer_config.to_serializable()

@@ -56,6 +56,7 @@ for BACK in "${BACKENDS[@]}"; do
     --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}' \
     --trust-remote-code \
     --max-model-len 2048 \
+    --gpu-memory-utilization 0.9 \
     "${PLATFORM_ARGS[@]}" \
     --port "$PORT" &
   SERVER_PID=$!
