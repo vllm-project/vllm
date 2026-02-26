@@ -46,7 +46,6 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, m) {
   // that it is divisible by the block size.
   m.def(
       "moe_lora_align_block_size(Tensor topk_ids,"
-      "                     Tensor lora_ids,"
       "                     Tensor adapter_enabled,"
       "                     Tensor token_lora_mapping,"
       "                     Tensor lora_id_to_slot,"

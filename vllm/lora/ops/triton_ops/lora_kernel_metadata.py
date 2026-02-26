@@ -35,9 +35,16 @@ class LoRAKernelMeta:
     # lora_id_to_slot[lora_id] = slot_index, or -1 if lora_id is not active.
     lora_id_to_slot: torch.Tensor
 
-    # Number of active LoRAs (unique non-(-1) values in token_lora_mapping)
-    # Stored as a Python int to avoid GPU->CPU sync during forward pass
-    num_active_loras: int = 0
+    # Number of active LoRAs (unique non-(-1) values in token_lora_mapping).
+    # Stored as a CPU tensor (not a Python int) so that torch.compile treats
+    # it as a dynamic value rather than baking it as a constant at trace time.
+    # This follows the same pattern as no_lora_flag_cpu above.
+    num_active_loras_cpu: torch.Tensor
+
+    # Default num_active_loras value (max_loras + 1) as a CPU tensor,
+    # used when specialize_active_lora is False to avoid allocating a
+    # new tensor on every meta_args() call.
+    default_num_active_loras_cpu: torch.Tensor
 
     # Captured LoRA counts for cudagraph specialization (sorted list).
     # When specialize_active_lora is enabled, num_active_loras is rounded up
@@ -79,6 +86,11 @@ class LoRAKernelMeta:
 
         no_lora_flag_cpu = torch.tensor([False], dtype=torch.bool, device="cpu")
 
+        num_active_loras_cpu = torch.tensor([0], dtype=torch.int32, device="cpu")
+        default_num_active_loras_cpu = torch.tensor(
+            [max_loras + 1], dtype=torch.int32, device="cpu"
+        )
+
         # Inverse mapping: lora_id -> lora_slot
         # Initialized to -1 (invalid slot) for all lora_ids
         lora_id_to_slot = torch.full((max_loras,), -1, dtype=torch.int32, device=device)
@@ -90,6 +102,8 @@ class LoRAKernelMeta:
             num_tokens_per_lora=num_tokens_per_lora,
             lora_token_start_loc=lora_token_start_loc,
             no_lora_flag_cpu=no_lora_flag_cpu,
+            num_active_loras_cpu=num_active_loras_cpu,
+            default_num_active_loras_cpu=default_num_active_loras_cpu,
             lora_id_to_slot=lora_id_to_slot,
             captured_lora_counts=sorted(captured_lora_counts)
             if captured_lora_counts
@@ -102,8 +116,7 @@ class LoRAKernelMeta:
         self.lora_token_start_loc.fill_(0)
         self.no_lora_flag_cpu.fill_(False)
         self.lora_id_to_slot.fill_(-1)
-        self.num_active_loras = 0
-        self.captured_lora_counts = []
+        self.num_active_loras_cpu.fill_(0)
 
     def prepare_tensors(self, token_lora_mapping: torch.Tensor) -> None:
         """
@@ -149,7 +162,7 @@ class LoRAKernelMeta:
             num_tokens_per_lora, non_blocking=True
         )
 
-        self.num_active_loras = lora_ids.size(0)
+        num_active_loras = lora_ids.size(0)
 
         # Build inverse mapping: lora_id -> lora_slot
         # For each active lora_id, store its slot index in the inverse map
@@ -160,10 +173,12 @@ class LoRAKernelMeta:
 
         # Round up num_active_loras to match cudagraph capture keys.
         # This ensures the kernel grid dimension matches the captured graph.
-        if self.captured_lora_counts and self.num_active_loras > 0:
-            idx = bisect.bisect_left(self.captured_lora_counts, self.num_active_loras)
+        if self.captured_lora_counts and num_active_loras > 0:
+            idx = bisect.bisect_left(self.captured_lora_counts, num_active_loras)
             if idx < len(self.captured_lora_counts):
-                self.num_active_loras = self.captured_lora_counts[idx]
+                num_active_loras = self.captured_lora_counts[idx]
+
+        self.num_active_loras_cpu[0] = num_active_loras
 
         # lora_token_start_loc
         lora_token_start_loc = torch.cumsum(num_tokens_per_lora, dim=0)
@@ -182,7 +197,7 @@ class LoRAKernelMeta:
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
-        int,
+        torch.Tensor,
         torch.Tensor,
     ]:
         """
@@ -207,7 +222,10 @@ class LoRAKernelMeta:
                     when specialize_active_lora, else max_loras + 1)
                 - lora_id_to_slot: Inverse mapping (lora_id -> slot)
         """
-        max_loras = self.active_lora_ids.size(0) - 1
+        if specialize_active_lora:
+            num_active_loras = self.num_active_loras_cpu
+        else:
+            num_active_loras = self.default_num_active_loras_cpu
         return (
             self.token_lora_mapping[:token_nums],
             self.token_indices_sorted_by_lora_ids[:token_nums],
@@ -215,6 +233,6 @@ class LoRAKernelMeta:
             self.lora_token_start_loc,
             self.active_lora_ids,
             self.no_lora_flag_cpu,
-            self.num_active_loras if specialize_active_lora else max_loras + 1,
+            num_active_loras,
             self.lora_id_to_slot,
         )

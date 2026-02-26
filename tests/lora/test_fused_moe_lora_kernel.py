@@ -173,7 +173,6 @@ def use_fused_moe_lora_kernel(
 
     ops.moe_lora_align_block_size(
         topk_ids,
-        lora_ids,
         adapter_enabled,
         token_lora_mapping,
         lora_id_to_slot,

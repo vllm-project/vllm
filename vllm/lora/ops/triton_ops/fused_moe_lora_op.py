@@ -100,12 +100,13 @@ def _fused_moe_lora_kernel(
     """
     Fused MoE LoRA kernel using combined virtual expert indexing.
 
-    expert_ids contains combined (lora_id, expert_id) encoded as:
-        virtual_expert_id = lora_id * num_experts + expert_id
+    expert_ids contains combined (lora_slot, expert_id) encoded as:
+        virtual_expert_id = lora_slot * num_experts + expert_id
 
     We decode:
-        lora_id = virtual_expert_id // num_experts
+        lora_slot = virtual_expert_id // num_experts
         expert_id = virtual_expert_id % num_experts
+        lora_id = lora_ids[lora_slot]
     """
     pid = tl.program_id(axis=0)
     slice_id = tl.program_id(axis=1)

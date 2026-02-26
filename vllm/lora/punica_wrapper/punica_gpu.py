@@ -353,11 +353,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             _,
             lora_ids,
             _,
-            num_loras,
+            num_loras_tensor,
             lora_id_to_slot,
         ) = self.token_mapping_meta.meta_args(
             num_tokens, self.lora_config.specialize_active_lora
         )
+        num_loras = num_loras_tensor.item()
         if naive_block_assignment:
             expert_ids = topk_ids.reshape(-1)
             sorted_ids = None
@@ -365,7 +366,7 @@ class PunicaWrapperGPU(PunicaWrapperBase):
         else:
             # When specialize_active_lora is enabled, num_loras is
             # num_active_loras; otherwise it's max_loras + 1.
-            # Use max_loras for allocation to ensure sufficient space.
+            # Add +1 in specialize mode to account for the no-lora slot.
             num_loras = (
                 num_loras
                 if not self.lora_config.specialize_active_lora
@@ -399,7 +400,6 @@ class PunicaWrapperGPU(PunicaWrapperBase):
 
             ops.moe_lora_align_block_size(
                 topk_ids,
-                lora_ids,
                 adapter_enabled,
                 token_lora_mapping,
                 lora_id_to_slot,

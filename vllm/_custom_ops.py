@@ -2103,7 +2103,6 @@ def batched_moe_align_block_size(
 
 def moe_lora_align_block_size(
     topk_ids: torch.Tensor,
-    lora_ids: torch.Tensor,
     adapter_enabled: torch.Tensor,
     token_lora_mapping: torch.Tensor,
     lora_id_to_slot: torch.Tensor,
@@ -2118,7 +2117,6 @@ def moe_lora_align_block_size(
 ) -> None:
     torch.ops._moe_C.moe_lora_align_block_size(
         topk_ids,
-        lora_ids,
         adapter_enabled,
         token_lora_mapping,
         lora_id_to_slot,

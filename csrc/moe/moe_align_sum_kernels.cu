@@ -318,7 +318,6 @@ template <typename scalar_t>
 __global__ void moe_lora_align_block_size_kernel(
     const scalar_t* __restrict__ topk_ids,
     const int32_t* __restrict__ token_lora_mapping,
-    const int32_t* __restrict__ lora_ids,
     const int32_t* __restrict__ adapter_enabled,
     const int32_t* __restrict__ lora_id_to_slot,
     int32_t* __restrict__ sorted_token_ids, int32_t* __restrict__ expert_ids,
@@ -834,16 +833,13 @@ void moe_sum(torch::Tensor& input,   // [num_tokens, topk, hidden_size]
   }
 }
 
-void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
-                               torch::Tensor adapter_enabled,
-                               torch::Tensor token_lora_mapping,
-                               torch::Tensor lora_id_to_slot,
-                               int64_t num_virtual_experts, int64_t num_loras,
-                               int64_t max_loras, int64_t block_size,
-                               torch::Tensor sorted_token_ids,
-                               torch::Tensor expert_ids,
-                               torch::Tensor num_tokens_post_pad,
-                               std::optional<torch::Tensor> maybe_expert_map) {
+void moe_lora_align_block_size(
+    torch::Tensor topk_ids, torch::Tensor adapter_enabled,
+    torch::Tensor token_lora_mapping, torch::Tensor lora_id_to_slot,
+    int64_t num_virtual_experts, int64_t num_loras, int64_t max_loras,
+    int64_t block_size, torch::Tensor sorted_token_ids,
+    torch::Tensor expert_ids, torch::Tensor num_tokens_post_pad,
+    std::optional<torch::Tensor> maybe_expert_map) {
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
 
   int64_t num_experts = num_virtual_experts / num_loras;
@@ -935,7 +931,7 @@ void moe_lora_align_block_size(torch::Tensor topk_ids, torch::Tensor lora_ids,
           align_kernel<<<2, threads, shared_mem_size, stream>>>(
               topk_ids.data_ptr<scalar_t>(),
               token_lora_mapping.data_ptr<int32_t>(),
-              lora_ids.data_ptr<int32_t>(), adapter_enabled.data_ptr<int32_t>(),
+              adapter_enabled.data_ptr<int32_t>(),
               lora_id_to_slot.data_ptr<int32_t>(),
               sorted_token_ids.data_ptr<int32_t>(),
               expert_ids.data_ptr<int32_t>(),
