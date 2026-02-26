@@ -276,9 +276,12 @@ def test_rejects_custom_logitsprocs(
         monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "fork")
 
         llm = LLM(**llm_kwargs)
-        # Require that no logitsprocs have been loaded
+        # Require that no custom logitsprocs have been loaded
+        # (built-in processors may exist: MinTokensLogitsProcessor,
+        # LogitBiasLogitsProcessor, MinPLogitsProcessor)
         worker = llm.llm_engine.model_executor.driver_worker.worker
-        assert sum([1 for _ in worker.model_runner.input_batch.logitsprocs.all]) == 0
+        for proc in worker.model_runner.input_batch.logitsprocs.all:
+            assert not isinstance(proc, DummyLogitsProcessor)
         return
 
     if logitproc_source == CustomLogitprocSource.LOGITPROC_SOURCE_FQCN:
