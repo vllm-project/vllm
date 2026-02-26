@@ -738,12 +738,15 @@ class WorkerProc:
                 except EOFError:
                     # Parent process has exited, terminate this worker.
                     logger.info_once("Parent process exited, terminating worker")
-                    # Send SIGTERM to the main thread so the existing
-                    # signal_handler raises SystemExit.  shutdown_event alone
-                    # is not sufficient: the worker may be blocked inside a
-                    # CUDA kernel or waiting on the MQ and never polls it.
-                    os.kill(os.getpid(), signal.SIGTERM)
+                    # First attempt graceful shutdown via the event, giving
+                    # the worker a chance to exit cleanly (e.g. when the
+                    # parent intentionally closes the pipe).
                     shutdown_event.set()
+                    # If the worker is still alive after a short grace
+                    # period (e.g. blocked in a CUDA kernel), send SIGTERM
+                    # so the signal_handler raises SystemExit.
+                    time.sleep(5)
+                    os.kill(os.getpid(), signal.SIGTERM)
                 except Exception as e:
                     logger.warning("Death monitoring error: %s", e)
 
