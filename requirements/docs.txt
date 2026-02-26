@@ -1,13 +1,6 @@
-mkdocs<2.0.0
-mkdocs-api-autonav
-mkdocs-material
+# docs - zensical
+zensical
 mkdocstrings-python
-mkdocs-gen-files
-mkdocs-awesome-nav
-mkdocs-glightbox
-mkdocs-git-revision-date-localized-plugin
-mkdocs-minify-plugin
-mkdocs-redirects
 regex
 ruff
 pydantic
