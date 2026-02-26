@@ -124,10 +124,11 @@ class SpeculativeConfig:
     # Rejection sampling control
     acceptance_threshold: float = 0.0
     """Threshold to bias rejection sampling toward accepting more draft tokens.
-    Must be in [0, 1). The uniform probability used in rejection sampling is
+    Must be in [0, 1]. The uniform probability used in rejection sampling is
     scaled by (1 - acceptance_threshold). A value of 0 gives standard behavior,
     while higher values make acceptance more likely, trading output quality for
-    speed. Only affects random (non-greedy) sampling."""
+    speed. A value of 1.0 means all tokens are accepted.
+    Only affects random (non-greedy) sampling."""
 
     # Alternative drafting strategies
     speculative_token_tree: str | None = None
