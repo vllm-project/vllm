@@ -3,7 +3,10 @@
 import pytest
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
-from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
+from vllm.v1.core.encoder_cache_manager import (
+    EncoderCacheManager,
+    EncoderCacheStats,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -178,3 +181,194 @@ def test_schedule_request_multi_images_respect_compute_limit():
     compute_budget -= req.get_num_encoder_tokens(0)
 
     assert not manager.can_allocate(req, 1, compute_budget, num_tokens_to_schedule)
+
+
+# ---------- Computation time tracking tests ----------
+
+
+def test_cache_hit_miss_stats():
+    """Cache hits and misses are counted correctly."""
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("r1", ["imgA"], [4])
+
+    # Miss
+    assert not manager.check_and_update_cache(req, 0)
+    assert manager.stats.num_cache_misses == 1
+    assert manager.stats.num_cache_hits == 0
+
+    manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+
+    # Hit
+    req2 = MockRequest("r2", ["imgA"], [4])
+    assert manager.check_and_update_cache(req2, 0)
+    assert manager.stats.num_cache_hits == 1
+    assert manager.stats.num_cache_misses == 1
+    assert manager.stats.hit_rate == pytest.approx(0.5)
+
+
+def test_record_compute_time():
+    """record_compute_time stores time in entry_meta and aggregates."""
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("r1", ["imgA", "imgB"], [4, 6])
+
+    manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+    manager.record_compute_time("imgA", 0.05)
+
+    manager.can_allocate(req, 1, int(1e9), 0)
+    manager.allocate(req, 1)
+    manager.record_compute_time("imgB", 0.10)
+
+    assert manager.stats.total_compute_time == pytest.approx(0.15)
+
+    meta_a = manager.get_entry_meta("imgA")
+    assert meta_a is not None
+    assert meta_a.compute_time == pytest.approx(0.05)
+    assert meta_a.num_tokens == 4
+
+    meta_b = manager.get_entry_meta("imgB")
+    assert meta_b is not None
+    assert meta_b.compute_time == pytest.approx(0.10)
+    assert meta_b.num_tokens == 6
+
+
+def test_time_saved_on_cache_hit():
+    """Cache hits accumulate total_time_saved from recorded compute_time."""
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("r1", ["imgA"], [4])
+
+    manager.check_and_update_cache(req, 0)  # miss
+    manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+    manager.record_compute_time("imgA", 0.05)
+
+    # Hit from a different request
+    req2 = MockRequest("r2", ["imgA"], [4])
+    assert manager.check_and_update_cache(req2, 0)
+    assert manager.stats.total_time_saved == pytest.approx(0.05)
+
+    # Another hit
+    req3 = MockRequest("r3", ["imgA"], [4])
+    assert manager.check_and_update_cache(req3, 0)
+    assert manager.stats.total_time_saved == pytest.approx(0.10)
+    assert manager.stats.num_cache_hits == 2
+
+
+def test_eviction_preserves_meta_for_recompute_tracking():
+    """Evicted entries' metadata is preserved so re-computation cost is
+    tracked."""
+    manager = EncoderCacheManager(cache_size=10)
+
+    req1 = MockRequest("r1", ["x"], [6])
+    req2 = MockRequest("r2", ["y"], [5])
+
+    manager.can_allocate(req1, 0, int(1e9), 0)
+    manager.allocate(req1, 0)
+    manager.record_compute_time("x", 0.08)
+    manager.free_encoder_input(req1, 0)
+
+    # Eviction of 'x' happens here
+    manager.can_allocate(req2, 0, int(1e9), 0)
+    manager.allocate(req2, 0)
+
+    assert "x" not in manager.entry_meta
+    assert "x" in manager.evicted_meta
+    assert manager.evicted_meta["x"].compute_time == pytest.approx(0.08)
+
+
+def test_recompute_after_eviction_stats():
+    """Re-computing a previously evicted entry updates eviction cost stats."""
+    manager = EncoderCacheManager(cache_size=10)
+
+    req1 = MockRequest("r1", ["x"], [6])
+    req2 = MockRequest("r2", ["y"], [5])
+    req3 = MockRequest("r3", ["x"], [6])
+
+    # Allocate and record time for 'x'
+    manager.check_and_update_cache(req1, 0)  # miss
+    manager.can_allocate(req1, 0, int(1e9), 0)
+    manager.allocate(req1, 0)
+    manager.record_compute_time("x", 0.08)
+    manager.free_encoder_input(req1, 0)
+
+    # Evict 'x' by allocating 'y'
+    manager.check_and_update_cache(req2, 0)  # miss
+    manager.can_allocate(req2, 0, int(1e9), 0)
+    manager.allocate(req2, 0)
+    manager.free_encoder_input(req2, 0)
+
+    # Now re-allocate 'x' (miss after eviction)
+    manager.check_and_update_cache(req3, 0)  # miss — 'x' was evicted
+    # Evict 'y' to make room for 'x' again
+    manager.can_allocate(req3, 0, int(1e9), 0)
+    manager.allocate(req3, 0)
+    manager.record_compute_time("x", 0.09)
+
+    assert manager.stats.num_recomputed_after_eviction == 1
+    assert manager.stats.total_time_lost_to_eviction == pytest.approx(0.09)
+    assert "x" not in manager.evicted_meta  # cleaned up after re-compute
+
+
+def test_cost_density():
+    """cost_density = compute_time / num_tokens."""
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("r1", ["imgA"], [4])
+
+    manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+    manager.record_compute_time("imgA", 0.08)
+
+    meta = manager.get_entry_meta("imgA")
+    assert meta is not None
+    assert meta.cost_density == pytest.approx(0.02)
+
+
+def test_get_all_entry_meta():
+    """get_all_entry_meta returns all tracked entries."""
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("r1", ["a", "b"], [3, 5])
+
+    manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+    manager.can_allocate(req, 1, int(1e9), 0)
+    manager.allocate(req, 1)
+
+    all_meta = manager.get_all_entry_meta()
+    assert set(all_meta.keys()) == {"a", "b"}
+    assert all_meta["a"].num_tokens == 3
+    assert all_meta["b"].num_tokens == 5
+
+
+def test_hit_increments_num_hits_in_entry_meta():
+    """Each cache hit increments the entry's num_hits counter."""
+    manager = EncoderCacheManager(cache_size=20)
+    req = MockRequest("r1", ["imgA"], [4])
+
+    manager.check_and_update_cache(req, 0)  # miss
+    manager.can_allocate(req, 0, int(1e9), 0)
+    manager.allocate(req, 0)
+    manager.record_compute_time("imgA", 0.05)
+
+    # Two hits from different requests
+    for i in range(2):
+        r = MockRequest(f"r{i+2}", ["imgA"], [4])
+        manager.check_and_update_cache(r, 0)
+
+    meta = manager.get_entry_meta("imgA")
+    assert meta is not None
+    assert meta.num_hits == 2
+
+
+def test_stats_repr():
+    """EncoderCacheStats has a meaningful string representation."""
+    stats = EncoderCacheStats(
+        num_cache_hits=10,
+        num_cache_misses=5,
+        total_time_saved=0.5,
+        total_compute_time=0.3,
+    )
+    s = repr(stats)
+    assert "hits=10" in s
+    assert "misses=5" in s
+    assert "hit_rate=66.67%" in s

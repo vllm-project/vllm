@@ -367,6 +367,10 @@ class GPUModelRunner(
 
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
+        # mm_hash -> wall-clock computation time (seconds) for the current step
+        # Cleared after each execute_model call and reported via
+        # ModelRunnerOutput.encoder_compute_times.
+        self._encoder_compute_times: dict[str, float] = {}
 
         self.use_aux_hidden_state_outputs = False
         # Set up speculative decoding.
@@ -2103,6 +2107,8 @@ class GPUModelRunner(
         # encoder outputs.
         model = cast(SupportsMultiModal, self.model)
         encoder_outputs: list[torch.Tensor] = []
+        # Track per-group timing for computation cost analysis
+        group_start_idx = 0
         for modality, num_items, mm_kwargs_group in group_mm_kwargs_by_modality(
             mm_kwargs,
             device=self.device,
@@ -2128,6 +2134,7 @@ class GPUModelRunner(
                 for video_mm_kwargs_item in filter(
                     lambda item: item.modality == "video", mm_kwargs
                 ):
+                    t0 = time.perf_counter()
                     _, _, micro_batch_mm_inputs = next(
                         group_mm_kwargs_by_modality(
                             [video_mm_kwargs_item],
@@ -2140,6 +2147,15 @@ class GPUModelRunner(
                     micro_batch_outputs = model.embed_multimodal(
                         **micro_batch_mm_inputs
                     )
+                    torch.cuda.synchronize()
+                    t1 = time.perf_counter()
+
+                    # Each micro-batch processes exactly 1 item
+                    for out in micro_batch_outputs:
+                        idx = group_start_idx + len(curr_group_outputs)
+                        if idx < len(mm_hashes_pos):
+                            mm_hash = mm_hashes_pos[idx][0]
+                            self._encoder_compute_times[mm_hash] = t1 - t0
 
                     curr_group_outputs.extend(micro_batch_outputs)
             else:
@@ -2150,13 +2166,35 @@ class GPUModelRunner(
                 # 2. A list or tuple (length: num_items) of tensors,
                 # each of shape (feature_size, hidden_size) in case the feature
                 # size is dynamic depending on the input multimodal items.
+                t0 = time.perf_counter()
                 curr_group_outputs = model.embed_multimodal(**mm_kwargs_group)  # type: ignore[assignment]
+                torch.cuda.synchronize()
+                t1 = time.perf_counter()
+                group_time = t1 - t0
+
+                # Distribute the batch time across items proportional to their
+                # token counts (best approximation for batched execution).
+                group_hashes_pos = mm_hashes_pos[
+                    group_start_idx : group_start_idx + num_items
+                ]
+                total_tokens = sum(
+                    pos.length for _, pos in group_hashes_pos
+                )
+                for mm_hash, pos_info in group_hashes_pos:
+                    if total_tokens > 0:
+                        item_time = group_time * (
+                            pos_info.length / total_tokens
+                        )
+                    else:
+                        item_time = group_time / max(num_items, 1)
+                    self._encoder_compute_times[mm_hash] = item_time
 
             sanity_check_mm_encoder_outputs(
                 curr_group_outputs,
                 expected_num_items=num_items,
             )
             encoder_outputs.extend(curr_group_outputs)
+            group_start_idx += num_items
 
         # Cache the encoder outputs by mm_hash
         for (mm_hash, pos_info), output in zip(mm_hashes_pos, encoder_outputs):
@@ -2391,6 +2429,9 @@ class GPUModelRunner(
             output = raw_output if seq_len == prompt_len else None
             pooler_output.append(output)
 
+        # Collect and clear encoder compute times for this step.
+        encoder_compute_times = self._encoder_compute_times.copy() or None
+        self._encoder_compute_times.clear()
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
@@ -2398,6 +2439,7 @@ class GPUModelRunner(
             logprobs=None,
             prompt_logprobs_dict={},
             pooler_output=pooler_output,
+            encoder_compute_times=encoder_compute_times,
         )
 
     def _pad_for_sequence_parallelism(self, num_scheduled_tokens: int) -> int:
@@ -3221,6 +3263,9 @@ class GPUModelRunner(
 
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
+        # Collect and clear encoder compute times for this step.
+        encoder_compute_times = self._encoder_compute_times.copy() or None
+        self._encoder_compute_times.clear()
         with record_function_or_nullcontext("gpu_model_runner: ModelRunnerOutput"):
             output = ModelRunnerOutput(
                 req_ids=req_ids_output_copy,
@@ -3235,6 +3280,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                encoder_compute_times=encoder_compute_times,
             )
 
         if not self.use_async_scheduling:

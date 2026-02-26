@@ -1,8 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from collections import OrderedDict
 from collections.abc import Mapping
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
@@ -13,6 +15,72 @@ if TYPE_CHECKING:
     from vllm.config import ModelConfig, SchedulerConfig
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class EncoderCacheStats:
+    """Statistics for encoder cache computation time tracking.
+
+    Tracks per-entry computation times and aggregate cache hit/miss
+    statistics to inform cache replacement algorithm design.
+    """
+    # Total number of cache hits (across all check_and_update_cache calls)
+    num_cache_hits: int = 0
+    # Total number of cache misses
+    num_cache_misses: int = 0
+    # Total computation time saved by cache hits (seconds)
+    total_time_saved: float = 0.0
+    # Total computation time spent on cache misses (seconds)
+    total_compute_time: float = 0.0
+    # Total computation time lost due to evictions of entries that were
+    # later requested again (seconds)
+    total_time_lost_to_eviction: float = 0.0
+    # Number of evictions that resulted in a later re-computation
+    num_recomputed_after_eviction: int = 0
+
+    @property
+    def hit_rate(self) -> float:
+        total = self.num_cache_hits + self.num_cache_misses
+        return self.num_cache_hits / total if total > 0 else 0.0
+
+    def __repr__(self) -> str:
+        return (
+            f"EncoderCacheStats("
+            f"hits={self.num_cache_hits}, "
+            f"misses={self.num_cache_misses}, "
+            f"hit_rate={self.hit_rate:.2%}, "
+            f"time_saved={self.total_time_saved:.4f}s, "
+            f"compute_time={self.total_compute_time:.4f}s, "
+            f"time_lost_to_eviction={self.total_time_lost_to_eviction:.4f}s, "
+            f"recomputed_after_eviction={self.num_recomputed_after_eviction})"
+        )
+
+
+@dataclass
+class EncoderCacheEntryMeta:
+    """Metadata for a single encoder cache entry, used for replacement
+    algorithm design.
+
+    Attributes:
+        compute_time: Wall-clock time (seconds) to compute the encoder output.
+        num_tokens: Number of encoder tokens for this entry.
+        num_hits: Number of times this entry has been used as a cache hit.
+        last_access_time: Monotonic timestamp of the last access.
+        first_compute_time_stamp: Monotonic timestamp of the first computation.
+        cost_density: Computed cost per token (compute_time / num_tokens),
+            useful for cost-aware replacement algorithms.
+    """
+    compute_time: float = 0.0
+    num_tokens: int = 0
+    num_hits: int = 0
+    last_access_time: float = field(default_factory=time.monotonic)
+    first_compute_time_stamp: float = field(default_factory=time.monotonic)
+
+    @property
+    def cost_density(self) -> float:
+        """Cost per token — higher means more expensive to recompute."""
+        return self.compute_time / self.num_tokens if self.num_tokens > 0 \
+            else 0.0
 
 
 class EncoderCacheManager:
@@ -71,6 +139,15 @@ class EncoderCacheManager:
         self.freeable: OrderedDict[str, int] = OrderedDict()
         self.freed: list[str] = []
 
+        # --- Computation time tracking ---
+        # mm_hash => metadata for the cached encoder output
+        self.entry_meta: dict[str, EncoderCacheEntryMeta] = {}
+        # mm_hashes that were evicted but had compute time recorded,
+        # kept to detect re-computation after eviction
+        self.evicted_meta: dict[str, EncoderCacheEntryMeta] = {}
+        # Aggregate statistics
+        self.stats = EncoderCacheStats()
+
     def check_and_update_cache(self, request: Request, input_id: int) -> bool:
         """Check if encoder output for a specific multimodal input is cached.
 
@@ -78,6 +155,9 @@ class EncoderCacheManager:
         to the set of request ids that reference the cached encoder output.
         If the encoder output was previously not referenced by any request,
         update `freeable` and `num_freeable_slots` accordingly.
+
+        Also updates computation time statistics: on a hit, records the
+        saved computation time; on a miss, increments the miss counter.
 
         Args:
             request: The request containing the multimodal input
@@ -89,7 +169,16 @@ class EncoderCacheManager:
         mm_hash = request.mm_features[input_id].identifier
         # Not cached at all
         if mm_hash not in self.cached:
+            self.stats.num_cache_misses += 1
             return False
+
+        # Cache hit — update stats
+        self.stats.num_cache_hits += 1
+        meta = self.entry_meta.get(mm_hash)
+        if meta is not None:
+            meta.num_hits += 1
+            meta.last_access_time = time.monotonic()
+            self.stats.total_time_saved += meta.compute_time
 
         # Cached but currently not referenced by any request
         if not self.cached[mm_hash]:
@@ -158,6 +247,10 @@ class EncoderCacheManager:
             del self.cached[mm_hash]
             self.freed.append(mm_hash)
             self.num_free_slots += num_free_token
+            # Preserve metadata of evicted entries so we can detect and
+            # measure the cost of re-computation after eviction.
+            if mm_hash in self.entry_meta:
+                self.evicted_meta[mm_hash] = self.entry_meta.pop(mm_hash)
         return True
 
     def allocate(self, request: Request, input_id: int) -> None:
@@ -166,6 +259,10 @@ class EncoderCacheManager:
         This reserves cache space for storing the encoder output of the
         specified multimodal input. The actual encoder output storage happens in
         the model runner; this method updates the manager's bookkeeping.
+
+        Also initializes an :class:`EncoderCacheEntryMeta` for the entry so
+        that computation time can later be recorded via
+        :meth:`record_compute_time`.
 
         Note:
             This method assumes can_allocate() returned True for the same input.
@@ -186,6 +283,16 @@ class EncoderCacheManager:
         self.cached[mm_hash].add(request_id)
         self.num_free_slots -= num_encoder_tokens
         self.num_freeable_slots -= num_encoder_tokens
+
+        # Initialize entry metadata (compute_time will be set later via
+        # record_compute_time once the worker reports it back).
+        if mm_hash not in self.entry_meta:
+            now = time.monotonic()
+            self.entry_meta[mm_hash] = EncoderCacheEntryMeta(
+                num_tokens=num_encoder_tokens,
+                last_access_time=now,
+                first_compute_time_stamp=now,
+            )
 
     def get_cached_input_ids(self, request: Request) -> set[int]:
         """Get all cached multimodal input IDs for a request.
@@ -247,6 +354,81 @@ class EncoderCacheManager:
         freed = self.freed
         self.freed = []
         return freed
+
+    # ---------- Computation time tracking API ----------
+
+    def record_compute_time(
+        self,
+        mm_hash: str,
+        compute_time: float,
+    ) -> None:
+        """Record the computation time for an encoder output.
+
+        Called by the scheduler after the model runner reports back the
+        actual wall-clock time spent computing each encoder output.
+
+        If the ``mm_hash`` was previously evicted and is now being
+        re-computed, the eviction cost is recorded in
+        :pyattr:`stats.total_time_lost_to_eviction`.
+
+        Args:
+            mm_hash: The multimodal hash identifying the encoder output.
+            compute_time: Wall-clock time in seconds to compute the output.
+        """
+        self.stats.total_compute_time += compute_time
+
+        # Check if this is a re-computation after eviction
+        if mm_hash in self.evicted_meta:
+            prev_meta = self.evicted_meta.pop(mm_hash)
+            self.stats.total_time_lost_to_eviction += compute_time
+            self.stats.num_recomputed_after_eviction += 1
+            logger.debug(
+                "Re-computing previously evicted encoder output %s "
+                "(prev_time=%.4fs, new_time=%.4fs, prev_hits=%d)",
+                mm_hash,
+                prev_meta.compute_time,
+                compute_time,
+                prev_meta.num_hits,
+            )
+
+        meta = self.entry_meta.get(mm_hash)
+        if meta is not None:
+            meta.compute_time = compute_time
+
+    def get_entry_meta(self, mm_hash: str) -> EncoderCacheEntryMeta | None:
+        """Get the metadata for a cached encoder output entry.
+
+        Args:
+            mm_hash: The multimodal hash identifying the encoder output.
+
+        Returns:
+            The entry metadata, or None if the entry is not tracked.
+        """
+        return self.entry_meta.get(mm_hash)
+
+    def get_stats(self) -> EncoderCacheStats:
+        """Get aggregate cache statistics.
+
+        Returns:
+            A snapshot of the current cache statistics including hit rates,
+            computation times saved, and eviction costs.
+        """
+        return self.stats
+
+    def get_all_entry_meta(self) -> dict[str, EncoderCacheEntryMeta]:
+        """Get metadata for all currently tracked entries.
+
+        Useful for analyzing cache behavior and testing replacement
+        algorithm candidates offline.
+
+        Returns:
+            Dict mapping mm_hash to its :class:`EncoderCacheEntryMeta`.
+        """
+        return self.entry_meta
+
+    def log_stats(self) -> None:
+        """Log current cache statistics at INFO level."""
+        logger.info("Encoder cache stats: %s", self.stats)
 
 
 def compute_encoder_budget(
