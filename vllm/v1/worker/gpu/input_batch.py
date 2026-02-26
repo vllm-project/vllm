@@ -65,8 +65,6 @@ class InputBatch:
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
-    # [3, num_tokens_after_padding]
-    mrope_positions: torch.Tensor | None
     # [num_tokens_after_padding, hidden_size]
     inputs_embeds: torch.Tensor | None
 
@@ -143,7 +141,6 @@ class InputBatch:
             seq_lens=seq_lens,
             input_ids=input_ids,
             positions=positions,
-            mrope_positions=None,
             inputs_embeds=None,
             attn_metadata=None,  # type: ignore
             slot_mappings=None,  # type: ignore
