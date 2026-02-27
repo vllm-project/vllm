@@ -847,6 +847,21 @@ class EngineCoreProc(EngineCore):
                 internal_dp_balancing,
             )
 
+            # Shutdown watchdog: wakes up idle engine via input_queue when shutdown
+            # is requested,
+            self.shutdown_event = threading.Event()
+
+            def _shutdown_watchdog():
+                self.shutdown_event.wait()
+                self.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
+
+            shutdown_watchdog = threading.Thread(
+                target=_shutdown_watchdog,
+                daemon=True,
+                name="shutdown-watchdog",
+            )
+            shutdown_watchdog.start()
+
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
             # and to overlap some serialization/deserialization with the
@@ -1038,6 +1053,7 @@ class EngineCoreProc(EngineCore):
         def signal_handler(signum, frame):
             if engine_core is not None:
                 engine_core.shutdown_state = EngineShutdownState.REQUESTED
+                engine_core.shutdown_event.set()
             else:
                 raise SystemExit
 
@@ -1135,6 +1151,10 @@ class EngineCoreProc(EngineCore):
 
         waited = False
         while not self.has_work():
+            # Check if shutdown was requested - don't wait for more work
+            if self.shutdown_state != EngineShutdownState.RUNNING:
+                return
+
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1147,6 +1167,8 @@ class EngineCoreProc(EngineCore):
             block = self.process_input_queue_block
             try:
                 req = self.input_queue.get(block=block)
+                if req[0] == EngineCoreRequestType.WAKEUP:
+                    continue
                 self._handle_client_request(*req)
             except queue.Empty:
                 break
@@ -1159,6 +1181,8 @@ class EngineCoreProc(EngineCore):
         # Handle any more client requests.
         while not self.input_queue.empty():
             req = self.input_queue.get_nowait()
+            if req[0] == EngineCoreRequestType.WAKEUP:
+                continue
             self._handle_client_request(*req)
 
     def _process_engine_step(self) -> bool:
