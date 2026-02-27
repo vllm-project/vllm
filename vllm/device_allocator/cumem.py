@@ -13,16 +13,13 @@ import gc
 import os
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import torch
 
 from vllm.logger import init_logger
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.system_utils import find_loaded_library
-
-if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
 logger = init_logger(__name__)
 
@@ -35,6 +32,7 @@ try:
         python_create_and_map,
         python_unmap_and_release,
     )
+    from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
 
     lib_name = find_loaded_library("cumem_allocator")
     libcudart = CudaRTLibrary()
