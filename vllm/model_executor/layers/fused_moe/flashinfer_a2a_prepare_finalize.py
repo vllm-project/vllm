@@ -268,21 +268,6 @@ class FlashInferMoeA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
     def topk_indices_dtype(self) -> torch.dtype | None:
         return None
 
-    def _apply_router_weight_on_input(
-        self,
-        a1: torch.Tensor,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        apply_router_weight_on_input: bool,
-    ) -> None:
-        """Apply router weight on input if needed."""
-        if apply_router_weight_on_input:
-            topk = topk_ids.size(1)
-            assert topk == 1, (
-                "apply_router_weight_on_input is only implemented for topk=1"
-            )
-            a1.mul_(topk_weights.to(a1.dtype))
-
     def prepare(
         self,
         a1: torch.Tensor,
@@ -294,9 +279,12 @@ class FlashInferMoeA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         quant_config: FusedMoEQuantConfig,
         defer_input_quant: bool = False,
     ) -> mk.PrepareResultType:
-        self._apply_router_weight_on_input(
-            a1, topk_weights, topk_ids, apply_router_weight_on_input
-        )
+        if apply_router_weight_on_input:
+            topk = topk_ids.size(1)
+            assert topk == 1, (
+                "apply_router_weight_on_input is only implemented for topk=1"
+            )
+            a1.mul_(topk_weights.to(a1.dtype))
 
         global_num_tokens_cpu = get_local_sizes()
         self.runtime_max_tokens_per_rank = (
@@ -318,9 +306,6 @@ class FlashInferMoeA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         payloads.append(a1q)
         if a1q_scale is not None:
             payloads.append(a1q_scale)
-            expert_id_payload_index = 2
-        else:
-            expert_id_payload_index = 1
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
@@ -328,8 +313,6 @@ class FlashInferMoeA2APrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             token_selected_experts=topk_ids,
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
-            # invalid_token_expert_id=-1,
-            # expert_id_payload_index=expert_id_payload_index,
         )
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
