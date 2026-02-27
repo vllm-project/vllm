@@ -7,5 +7,4 @@ server_args: >-
   --max-model-len 4096
   --tensor-parallel-size 2
   --enable-expert-parallel
-  --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":1}'
   --moe-backend=flashinfer_trtllm
