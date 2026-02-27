@@ -68,7 +68,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsXDRoPE,
-    is_mixture_of_experts,
+    get_mixture_of_experts_model,
     supports_eagle3,
     supports_mrope,
     supports_multimodal_pruning,
@@ -2707,7 +2707,7 @@ class GPUModelRunner(
 
         assert self.eplb_state is not None
         model = self.get_model()
-        assert is_mixture_of_experts(model)
+        assert get_mixture_of_experts_model(model) is not None
         self.eplb_state.step(
             is_dummy,
             is_profile,
@@ -4209,16 +4209,25 @@ class GPUModelRunner(
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)
+                    drafter_moe_model = (
+                        get_mixture_of_experts_model(self.drafter.model)
+                        if hasattr(self.drafter, "model")
+                        else None
+                    )
+
                     if (
-                        hasattr(self.drafter, "model")
-                        and is_mixture_of_experts(self.drafter.model)
+                        drafter_moe_model is not None
                         and self.parallel_config.enable_eplb
                     ):
                         spec_config = self.vllm_config.speculative_config
+                        assert hasattr(self.drafter, "model")
                         assert spec_config is not None
                         assert spec_config.draft_model_config is not None
                         logger.info_once(
-                            "EPLB is enabled for drafter model %s.",
+                            "EPLB is enabled for %s drafter model %s.",
+                            ""
+                            if drafter_moe_model == self.drafter.model
+                            else "MoE part of",
                             spec_config.draft_model_config.model,
                         )
 
@@ -4237,7 +4246,7 @@ class GPUModelRunner(
                                 self.parallel_config, self.device
                             )
                         self.eplb_state.add_model(
-                            self.drafter.model,
+                            drafter_moe_model,
                             spec_config.draft_model_config,
                             global_expert_load,
                             old_global_expert_indices,
@@ -4295,8 +4304,13 @@ class GPUModelRunner(
             and mm_config.is_multimodal_pruning_enabled()
         )
 
-        if is_mixture_of_experts(self.model) and self.parallel_config.enable_eplb:
-            logger.info_once("EPLB is enabled for model %s.", self.model_config.model)
+        moe_model = get_mixture_of_experts_model(self.model)
+        if moe_model is not None and self.parallel_config.enable_eplb:
+            logger.info_once(
+                "EPLB is enabled for %s model %s.",
+                "" if moe_model == self.model else "MoE part of",
+                self.model_config.model,
+            )
             global_expert_load = (
                 global_expert_loads[eplb_models] if global_expert_loads else None
             )
@@ -4307,7 +4321,7 @@ class GPUModelRunner(
             )
             assert self.eplb_state is not None
             self.eplb_state.add_model(
-                self.model,
+                moe_model,
                 self.model_config,
                 global_expert_load,
                 old_global_expert_indices,

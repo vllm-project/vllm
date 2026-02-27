@@ -39,7 +39,9 @@ from vllm.distributed.parallel_state import (
 from vllm.distributed.weight_transfer import WeightTransferEngineFactory
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
-from vllm.model_executor.models.interfaces import is_mixture_of_experts
+from vllm.model_executor.models.interfaces import (
+    get_mixture_of_experts_model,
+)
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
@@ -924,7 +926,10 @@ class Worker(WorkerBase):
             self.model_runner.drafter, "model"
         ):
             drafter_model = self.model_runner.drafter.model
-        if drafter_model is not None and is_mixture_of_experts(drafter_model):
+        if (
+            drafter_model is not None
+            and get_mixture_of_experts_model(drafter_model) is not None
+        ):
             drafter_moe_modules = get_moe_modules(drafter_model)
             # Check if drafter and model have matching configs
             assert (
