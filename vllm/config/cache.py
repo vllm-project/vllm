@@ -40,11 +40,14 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: int | None = Field(default=None)
+    block_size: int = Field(default=DEFAULT_BLOCK_SIZE)
     """Size of a contiguous cache block in number of tokens.
 
-    This is None until the platform sets it. Always an int by the time
-    the engine starts."""
+    Defaults to DEFAULT_BLOCK_SIZE and may be overridden by the platform
+    or attention backend."""
+    user_specified_block_size: bool = Field(default=False, init=False)
+    """Whether the user explicitly set --block-size. When True, platform
+    and backend auto-selection will not override block_size."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory

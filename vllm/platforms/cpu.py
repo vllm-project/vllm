@@ -185,7 +185,7 @@ class CpuPlatform(Platform):
 
         cache_config = vllm_config.cache_config
 
-        if cache_config.block_size is None:
+        if not cache_config.user_specified_block_size:
             cache_config.block_size = 128
 
         if cache_config.block_size % 32 != 0:
