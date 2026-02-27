@@ -758,9 +758,8 @@ class Worker(WorkerBase):
                 elif profiler_type == "cuda":
                     self.profiler = CudaProfilerWrapper(self.profiler_config)
                     logger.debug("Starting CUDA profiler")
-
-                # This should not be none but just in case
-                assert self.profiler is not None
+                else:  # This should not happen but just in case
+                    assert self.profiler is not None, "Profiler is not initialized."
 
             # If profiler already initialized, restart profiling but keep
             # the original trace name from the first initialization.
