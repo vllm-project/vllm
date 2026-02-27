@@ -5,8 +5,6 @@ import queue
 import signal
 import threading
 import time
-import traceback
-import uuid
 from collections import defaultdict, deque
 from collections.abc import Callable, Generator
 from concurrent.futures import Future
@@ -58,8 +56,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
-from vllm.v1.engine.base_sentinel import BaseSentinel
-from vllm.v1.engine.exceptions import EngineLoopPausedError, FaultInfo
+from vllm.v1.engine.exceptions import EngineLoopPausedError
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
@@ -70,6 +67,7 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.stats import SchedulerStats
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
+from vllm.v1.sentinel import EngineCoreSentinel
 from vllm.v1.serial_utils import (
     MsgpackDecoder,
     MsgpackEncoder,
@@ -84,194 +82,6 @@ logger = init_logger(__name__)
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar("_R")  # Return type for collective_rpc
-
-
-class EngineCoreSentinel(BaseSentinel):
-    """
-    EngineCoreSentinel monitors a single EngineCore instance, responsible for:
-      1. Receiving fault signals (exceptions raised in EngineCore busy loop)
-      2. Receiving and executing commands from ClientSentinel
-      3. Reporting execution results or faults back to the ClientSentinel
-    """
-
-    def __init__(
-        self,
-        engine_index: int,
-        fault_signal_q: queue.Queue,
-        cmd_q: queue.Queue,
-        busy_loop_active: threading.Event,
-        engine_input_q: queue.Queue,
-        upstream_cmd_addr: str,
-        downstream_cmd_addr: str,
-        engine_fault_socket_addr: str,
-        sentinel_identity: bytes,
-        vllm_config: VllmConfig,
-    ):
-        self.engine_index = engine_index
-        super().__init__(
-            upstream_cmd_addr=upstream_cmd_addr,
-            downstream_cmd_addr=downstream_cmd_addr,
-            sentinel_identity=sentinel_identity,
-            sentinel_tag=f"DP_{engine_index}",
-            vllm_config=vllm_config,
-        )
-
-        self.fault_signal_q = fault_signal_q
-        self.cmd_q = cmd_q
-        self.busy_loop_active = busy_loop_active
-        self.engine_input_q = engine_input_q
-        parallel_config = vllm_config.parallel_config
-        self.tp_size = parallel_config.tensor_parallel_size
-        self.pp_size = parallel_config.pipeline_parallel_size
-        self.dp_size = parallel_config.data_parallel_size
-
-        # Client <-> EngineCoreSentinel sockets
-        self.engine_fault_socket = make_zmq_socket(
-            self.ctx,
-            engine_fault_socket_addr,
-            zmq.DEALER,
-            bind=False,
-            identity=sentinel_identity,
-        )
-
-        self.poller = zmq.Poller()
-        self.communicator_aborted = False
-        self.engine_running = True
-        threading.Thread(
-            target=self.run, daemon=True, name="EngineCoreSentinelMonitorThread"
-        ).start()
-
-    def run(self):
-        """
-        Continuously poll for fault signals and commands.
-        """
-        while not self.sentinel_dead:
-            # Check for engine fault signals
-            self.poll_and_report_fault_events()
-            # Check for commands from ClientSentinel
-            self.poll_and_execute_upstream_cmd()
-
-    def poll_and_report_fault_events(self):
-        try:
-            engine_exception = self.fault_signal_q.get_nowait()
-            if isinstance(engine_exception, EngineLoopPausedError):
-                # The busy loop stopped due to another critical exception,
-                # put it back
-                self.logger("Engine paused", level="info")
-            else:
-                self.logger(
-                    "Detected exception %s: %s\n Call Stack:\n%s",
-                    type(engine_exception).__name__,
-                    engine_exception,
-                    "".join(traceback.format_tb(engine_exception.__traceback__)),
-                    level="error",
-                )
-                self._report_exception_to_client_sentinel(engine_exception)
-            self.engine_running = False
-        except queue.Empty:
-            pass
-
-    def _report_exception_to_client_sentinel(self, exception: Exception) -> None:
-        msg = FaultInfo.from_exception(exception, self.engine_index)
-        msg_bytes = msgspec.msgpack.encode(msg)
-        self.engine_fault_socket.send_multipart([b"", msg_bytes])
-
-    def pause(self, timeout: int = 1, **kwargs) -> bool:
-        """
-        Pause the busy loop safely.
-        Args:
-            timeout:wait for the busy loop to acknowledge the pause signal
-        """
-        self.logger("Start pausing EngineCore", level="info")
-        soft_pause = kwargs.get("soft_pause", False)
-        start_time = time.monotonic()
-        if self.engine_running:
-            # Clear the flag to signal busy loop should pause
-            self.busy_loop_active.clear()
-            # Put a sentinel (empty request) to unblock the busy loop
-            # if it's blocked on input_queue.get()
-            self.engine_input_q.put((EngineCoreRequestType.PAUSE, None))
-            success, _ = self._broadcast_command_to_downstream(
-                "pause",
-                self._get_target_worker_identity(),
-                timeout=timeout,
-                soft_pause=soft_pause,
-            )
-            elapsed = time.monotonic() - start_time
-            if success:
-                remaining_timeout = max(0, timeout - elapsed)
-                try:
-                    # Wait for engine to acknowledge the pause via fault_signal_q
-                    exception = self.fault_signal_q.get(timeout=remaining_timeout)
-                    self.fault_signal_q.put(exception)
-                    success = True
-                    self.engine_running = False
-                except queue.Empty:
-                    # Timeout waiting for pause acknowledgment
-                    success = False
-        else:
-            # already paused
-            success = True
-            if not soft_pause:
-                # abort the communicators
-                success, _ = self._broadcast_command_to_downstream(
-                    "pause",
-                    self._get_target_worker_identity(),
-                    timeout=timeout,
-                    soft_pause=False,
-                )
-        return success
-
-    def retry(self, timeout: int = 1, **kwargs) -> bool:
-        """
-        Handle the retry instruction from the ClientSentinel.
-        This instruction tells the EngineCore to continue its busy loop
-        after being suspended due to an exception.
-        """
-        if self.engine_running:
-            return True
-        new_stateless_dp_group_port = kwargs.get("new_stateless_dp_group_port")
-        start_time = time.monotonic()
-        identities = self._get_target_worker_identity()
-        success, _ = self._broadcast_command_to_downstream(
-            "retry", identities, timeout=timeout
-        )
-        if not success:
-            return success
-
-        if self.dp_size > 1:
-            # If the Gloo communication times out
-            # the data parallel group (dp_group) needs to be reinitialized
-            command = "reinit_dp_group_on_fault_tolerance"
-            reinit_request = FaultToleranceRequest(
-                instruction=command,
-                request_id=str(uuid.uuid4()),
-                params={"new_stateless_dp_group_port": new_stateless_dp_group_port},
-            )
-            self.cmd_q.put(reinit_request)
-        else:
-            self.cmd_q.put(None)
-
-        # Ensure busy loop has been recovered.
-        elapsed = time.monotonic() - start_time
-        remaining_timeout = max(0, timeout - elapsed)
-        success = self.busy_loop_active.wait(timeout=remaining_timeout)
-        self.engine_running = success
-        assert self.cmd_q.empty(), "cmd_q must be empty after execution"
-        return success
-
-    def _get_target_worker_identity(self):
-        identities = set()
-        for tp_rank in range(self.tp_size):
-            for pp_rank in range(self.pp_size):
-                identity = f"PP{pp_rank}_TP{tp_rank}".encode()
-                identities.add(identity)
-        return identities
-
-    def shutdown(self):
-        if self.engine_fault_socket is not None:
-            self.engine_fault_socket.close(linger=0)
-        super().shutdown()
 
 
 def busy_loop_wrapper(busy_loop_func):

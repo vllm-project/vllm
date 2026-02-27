@@ -15,7 +15,9 @@ from msgspec import msgpack
 
 from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
 from vllm.v1.engine import FaultToleranceRequest, FaultToleranceResult
-from vllm.v1.engine.core import EngineCoreSentinel, EngineLoopPausedError
+from vllm.v1.engine.core import EngineLoopPausedError
+from vllm.v1.engine.exceptions import FaultInfo
+from vllm.v1.sentinel import EngineCoreSentinel
 
 
 def _find_free_port() -> int:
@@ -118,7 +120,8 @@ def test_busy_loop_exception_forwarded_to_client(addr_dict):
 
     parts = engine_fault_receiver.recv_multipart()
     assert len(parts) >= 2
-    assert "test exception" in parts[-1].decode("utf-8")
+    fault_info = msgpack.decode(parts[-1], type=FaultInfo)
+    assert "test exception" in fault_info.message
 
     engine_fault_receiver.close()
     sentinel.shutdown()

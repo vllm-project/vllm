@@ -15,8 +15,8 @@ import zmq
 
 from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
 from vllm.v1.engine import EngineStatusType, FaultToleranceRequest, FaultToleranceResult
-from vllm.v1.engine.core_client import ClientSentinel
 from vllm.v1.engine.exceptions import FaultInfo
+from vllm.v1.sentinel import ClientSentinel
 
 
 def _find_free_port() -> int:
