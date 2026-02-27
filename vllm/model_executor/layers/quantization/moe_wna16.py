@@ -5,7 +5,7 @@ from typing import Any
 
 import torch
 
-from vllm.distributed import get_tensor_model_parallel_rank, get_tp_group
+from vllm.distributed import get_tp_group
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
