@@ -96,12 +96,12 @@ from vllm.entrypoints.serve.tokenize.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import (
-    ProcessorInputs,
+from vllm.inputs import (
+    EngineInput,
     PromptType,
     SingletonPrompt,
     TokensPrompt,
-    token_inputs,
+    tokens_input,
 )
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob, PromptLogprobs
@@ -211,7 +211,7 @@ class ServeContext(Generic[RequestT]):
     request_id: str
     created_time: int = field(default_factory=lambda: int(time.time()))
     lora_request: LoRARequest | None = None
-    engine_prompts: list[ProcessorInputs] | None = None
+    engine_inputs: list[EngineInput] | None = None
 
     result_generator: AsyncGenerator[tuple[int, PoolingRequestOutput], None] | None = (
         None
@@ -254,7 +254,7 @@ class OpenAIServing:
 
     async def beam_search(
         self,
-        prompt: ProcessorInputs,
+        prompt: EngineInput,
         request_id: str,
         params: BeamSearchParams,
         lora_request: LoRARequest | None = None,
@@ -546,21 +546,21 @@ class OpenAIServing:
             if isinstance(pooling_params, ErrorResponse):
                 return pooling_params
 
-            if ctx.engine_prompts is None:
+            if ctx.engine_inputs is None:
                 return self.create_error_response("Engine prompts not available")
 
-            for i, engine_prompt in enumerate(ctx.engine_prompts):
+            for i, engine_input in enumerate(ctx.engine_inputs):
                 request_id_item = f"{ctx.request_id}-{i}"
 
                 self._log_inputs(
                     request_id_item,
-                    engine_prompt,
+                    engine_input,
                     params=pooling_params,
                     lora_request=ctx.lora_request,
                 )
 
                 generator = self.engine_client.encode(
-                    engine_prompt,
+                    engine_input,
                     pooling_params,
                     request_id_item,
                     lora_request=ctx.lora_request,
@@ -583,10 +583,10 @@ class OpenAIServing:
     ) -> ErrorResponse | None:
         """Collect batch results from the result generator."""
         try:
-            if ctx.engine_prompts is None:
+            if ctx.engine_inputs is None:
                 return self.create_error_response("Engine prompts not available")
 
-            num_prompts = len(ctx.engine_prompts)
+            num_prompts = len(ctx.engine_inputs)
             final_res_batch: list[PoolingRequestOutput | None]
             final_res_batch = [None] * num_prompts
 
@@ -930,7 +930,7 @@ class OpenAIServing:
         request: RendererRequest,
         prompt_input: str | list[str] | list[int] | list[list[int]] | None,
         prompt_embeds: bytes | list[bytes] | None,
-    ) -> list[ProcessorInputs]:
+    ) -> list[EngineInput]:
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(prompt_to_seq(prompt_embeds))
@@ -943,7 +943,7 @@ class OpenAIServing:
         self,
         request: RendererRequest,
         prompts: Sequence[PromptType | bytes],
-    ) -> list[ProcessorInputs]:
+    ) -> list[EngineInput]:
         renderer = self.renderer
         model_config = self.model_config
 
@@ -976,7 +976,7 @@ class OpenAIServing:
         default_template_kwargs: dict[str, Any] | None,
         tool_dicts: list[dict[str, Any]] | None = None,
         tool_parser: Callable[[TokenizerLike], ToolParser] | None = None,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]]:
+    ) -> tuple[list[ConversationMessage], list[EngineInput]]:
         renderer = self.renderer
 
         default_template_kwargs = merge_kwargs(
@@ -992,7 +992,7 @@ class OpenAIServing:
             default_template, default_template_content_format
         ).with_defaults(default_template_kwargs)
 
-        (conversation,), (engine_prompt,) = await renderer.render_chat_async(
+        (conversation,), (engine_input,) = await renderer.render_chat_async(
             [messages],
             chat_params,
             tok_params,
@@ -1020,15 +1020,15 @@ class OpenAIServing:
                 tokenizer = renderer.get_tokenizer()
                 request = tool_parser(tokenizer).adjust_request(request=request)  # type: ignore[arg-type]
 
-        return conversation, [engine_prompt]
+        return conversation, [engine_input]
 
-    def _extract_prompt_components(self, prompt: PromptType | ProcessorInputs):
+    def _extract_prompt_components(self, prompt: PromptType | EngineInput):
         return extract_prompt_components(self.model_config, prompt)
 
-    def _extract_prompt_text(self, prompt: ProcessorInputs):
+    def _extract_prompt_text(self, prompt: PromptType | EngineInput):
         return self._extract_prompt_components(prompt).text
 
-    def _extract_prompt_len(self, prompt: ProcessorInputs):
+    def _extract_prompt_len(self, prompt: EngineInput):
         return extract_prompt_len(self.model_config, prompt)
 
     async def _render_next_turn(
@@ -1044,7 +1044,7 @@ class OpenAIServing:
             request_input=messages,
         )
 
-        _, engine_prompts = await self._preprocess_chat(
+        _, engine_inputs = await self._preprocess_chat(
             request,
             new_messages,
             default_template=chat_template,
@@ -1053,12 +1053,12 @@ class OpenAIServing:
             tool_dicts=tool_dicts,
             tool_parser=tool_parser,
         )
-        return engine_prompts
+        return engine_inputs
 
     async def _generate_with_builtin_tools(
         self,
         request_id: str,
-        engine_prompt: ProcessorInputs,
+        engine_input: EngineInput,
         sampling_params: SamplingParams,
         context: ConversationContext,
         lora_request: LoRARequest | None = None,
@@ -1075,13 +1075,13 @@ class OpenAIServing:
 
             self._log_inputs(
                 sub_request_id,
-                engine_prompt,
+                engine_input,
                 params=sampling_params,
                 lora_request=lora_request,
             )
 
             generator = self.engine_client.generate(
-                engine_prompt,
+                engine_input,
                 sampling_params,
                 sub_request_id,
                 lora_request=lora_request,
@@ -1109,11 +1109,11 @@ class OpenAIServing:
             # Render the next prompt token ids and update sampling_params.
             if isinstance(context, (HarmonyContext, StreamingHarmonyContext)):
                 token_ids = context.render_for_completion()
-                engine_prompt = token_inputs(token_ids)
+                engine_input = tokens_input(token_ids)
 
                 sampling_params.max_tokens = max_model_len - len(token_ids)
             elif isinstance(context, ParsableContext):
-                (engine_prompt,) = await self._render_next_turn(
+                (engine_input,) = await self._render_next_turn(
                     context.request,
                     context.parser.response_messages,
                     context.tool_dicts,
@@ -1125,7 +1125,7 @@ class OpenAIServing:
                 sampling_params.max_tokens = get_max_tokens(
                     max_model_len,
                     context.request.max_output_tokens,
-                    self._extract_prompt_len(engine_prompt),
+                    self._extract_prompt_len(engine_input),
                     self.default_sampling_params,  # type: ignore
                     self.override_max_tokens,  # type: ignore
                 )
@@ -1137,7 +1137,7 @@ class OpenAIServing:
     def _log_inputs(
         self,
         request_id: str,
-        inputs: PromptType | ProcessorInputs,
+        inputs: PromptType | EngineInput,
         params: SamplingParams | PoolingParams | BeamSearchParams | None,
         lora_request: LoRARequest | None,
     ) -> None:

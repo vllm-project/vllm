@@ -20,17 +20,15 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict, MultiModalInput, mm_input
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
-    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -773,7 +771,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
         self,
         inputs: ProcessorInputs,
         timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
+    ) -> MultiModalInput:
         hf_config = self.info.get_hf_config()
         image_token_id = hf_config.image_token_index
 
@@ -829,7 +827,7 @@ class MantisMultiModalProcessor(LlavaMultiModalProcessor):
             for modality, placeholders in mm_placeholders.items()
         }
 
-        return mm_inputs(
+        return mm_input(
             prompt_token_ids=prompt_ids,
             mm_kwargs=mm_kwargs,
             mm_hashes=mm_hashes,

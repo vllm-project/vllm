@@ -12,6 +12,7 @@ import numpy as np
 import numpy.typing as npt
 from PIL import Image
 
+from vllm.inputs import MultiModalPlaceholders
 from vllm.utils.import_utils import LazyLoader
 
 from .hasher import MultiModalHasher
@@ -19,7 +20,6 @@ from .inputs import (
     BatchedTensorInputs,
     MultiModalFieldElem,
     MultiModalKwargsItem,
-    MultiModalPlaceholderDict,
     MultiModalSharedField,
 )
 from .media import AudioMediaIO, ImageMediaIO, MediaConnector, VideoMediaIO
@@ -127,10 +127,10 @@ def encode_video_url(
 
 
 def argsort_mm_positions(
-    mm_positions: MultiModalPlaceholderDict,
+    mm_positions: MultiModalPlaceholders,
 ) -> list[tuple[str, int]]:
     """
-    Given a `MultiModalPlaceholderDict`, output a sequence of keys to
+    Given a `MultiModalPlaceholders`, output a sequence of keys to
     sort the dictionary by `offset` (starting index in the input sequence)
     in ascending order.
 

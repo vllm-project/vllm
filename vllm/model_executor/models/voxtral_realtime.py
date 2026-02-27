@@ -19,7 +19,7 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.engine.protocol import StreamingInput
 from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
 from vllm.model_executor.models.voxtral import (
@@ -30,9 +30,7 @@ from vllm.model_executor.models.voxtral import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
-from vllm.multimodal.inputs import (
-    MultiModalKwargsOptionalItems,
-)
+from vllm.multimodal.inputs import MultiModalKwargsOptionalItems
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (

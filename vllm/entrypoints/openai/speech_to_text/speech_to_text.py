@@ -38,7 +38,7 @@ from vllm.entrypoints.openai.speech_to_text.protocol import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import FlatLogprobs, Logprob
 from vllm.model_executor.models import (
@@ -297,7 +297,7 @@ class OpenAISpeechToText(OpenAIServing):
         request: SpeechToTextRequest,
         audio_data: bytes,
         request_id: str,
-    ) -> tuple[list[ProcessorInputs], float]:
+    ) -> tuple[list[EngineInput], float]:
         # Validate request
         language = self.model_cls.validate_language(request.language)
         # Skip to_language validation to avoid extra logging for Whisper.
@@ -370,9 +370,9 @@ class OpenAISpeechToText(OpenAIServing):
 
             parsed_prompts.append(parsed_prompt)
 
-        engine_prompts = await self.renderer.render_cmpl_async(parsed_prompts)
+        engine_inputs = await self.renderer.render_cmpl_async(parsed_prompts)
 
-        return engine_prompts, duration
+        return engine_inputs, duration
 
     def _preprocess_verbose_prompt(self, prompt: EncoderDecoderDictPrompt):
         dec_prompt = prompt["decoder_prompt"]
@@ -505,7 +505,7 @@ class OpenAISpeechToText(OpenAIServing):
         try:
             lora_request = self._maybe_get_adapters(request)
 
-            engine_prompts, duration_s = await self._preprocess_speech_to_text(
+            engine_inputs, duration_s = await self._preprocess_speech_to_text(
                 request=request,
                 audio_data=audio_data,
                 request_id=request_id,
@@ -538,12 +538,12 @@ class OpenAISpeechToText(OpenAIServing):
                 sampling_params.logprobs = 1
 
             list_result_generator = []
-            for i, engine_prompt in enumerate(engine_prompts):
+            for i, engine_input in enumerate(engine_inputs):
                 request_id_item = f"{request_id}_{i}"
 
                 self._log_inputs(
                     request_id_item,
-                    engine_prompt,
+                    engine_input,
                     params=sampling_params,
                     lora_request=lora_request,
                 )
@@ -555,7 +555,7 @@ class OpenAISpeechToText(OpenAIServing):
                 )
 
                 generator = self.engine_client.generate(
-                    engine_prompt,
+                    engine_input,
                     sampling_params,
                     request_id_item,
                     lora_request=lora_request,

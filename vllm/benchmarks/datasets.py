@@ -34,9 +34,9 @@ import numpy as np
 from PIL import Image
 from typing_extensions import deprecated
 
+from vllm.inputs import MultiModalDataDict
 from vllm.lora.request import LoRARequest
 from vllm.lora.utils import get_adapter_absolute_path
-from vllm.multimodal import MultiModalDataDict
 from vllm.multimodal.image import convert_image_mode
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.argparse_utils import FlexibleArgumentParser

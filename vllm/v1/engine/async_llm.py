@@ -20,7 +20,7 @@ from vllm.distributed.weight_transfer.base import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.inputs import ProcessorInputs, PromptType
+from vllm.inputs import EngineInput, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -137,7 +137,7 @@ class AsyncLLM(EngineClient):
             self.model_config.io_processor_plugin,
         )
 
-        # Convert TokPrompt --> EngineCoreRequest.
+        # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
         # Converts EngineCoreOutputs --> RequestOutput.
@@ -289,7 +289,7 @@ class AsyncLLM(EngineClient):
         request_id: str,
         prompt: EngineCoreRequest
         | PromptType
-        | ProcessorInputs
+        | EngineInput
         | AsyncGenerator[StreamingInput, None],
         params: SamplingParams | PoolingParams,
         arrival_time: float | None = None,
@@ -529,7 +529,7 @@ class AsyncLLM(EngineClient):
         self,
         prompt: EngineCoreRequest
         | PromptType
-        | ProcessorInputs
+        | EngineInput
         | AsyncGenerator[StreamingInput, None],
         sampling_params: SamplingParams,
         request_id: str,
@@ -771,7 +771,7 @@ class AsyncLLM(EngineClient):
 
     async def encode(
         self,
-        prompt: PromptType | ProcessorInputs,
+        prompt: PromptType | EngineInput,
         pooling_params: PoolingParams,
         request_id: str,
         lora_request: LoRARequest | None = None,

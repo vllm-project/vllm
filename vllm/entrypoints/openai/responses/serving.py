@@ -105,7 +105,7 @@ from vllm.entrypoints.openai.responses.utils import (
 )
 from vllm.entrypoints.utils import get_max_tokens
 from vllm.exceptions import VLLMValidationError
-from vllm.inputs.data import ProcessorInputs, token_inputs
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob as SampleLogprob
 from vllm.logprobs import SampleLogprobs
@@ -269,10 +269,10 @@ class OpenAIServingResponses(OpenAIServing):
 
     def _validate_generator_input(
         self,
-        engine_prompt: ProcessorInputs,
+        engine_input: EngineInput,
     ) -> ErrorResponse | None:
         """Add validations to the input to the generator here."""
-        prompt_len = self._extract_prompt_len(engine_prompt)
+        prompt_len = self._extract_prompt_len(engine_input)
         max_model_len = self.model_config.max_model_len
 
         if prompt_len >= max_model_len:
@@ -370,11 +370,11 @@ class OpenAIServingResponses(OpenAIServing):
             model_name = self.models.model_name(lora_request)
 
             if self.use_harmony:
-                messages, engine_prompts = self._make_request_with_harmony(
+                messages, engine_inputs = self._make_request_with_harmony(
                     request, prev_response
                 )
             else:
-                messages, engine_prompts = await self._make_request(
+                messages, engine_inputs = await self._make_request(
                     request, prev_response
                 )
 
@@ -427,15 +427,15 @@ class OpenAIServingResponses(OpenAIServing):
         try:
             tokenizer = self.renderer.get_tokenizer()
 
-            for engine_prompt in engine_prompts:
-                maybe_error = self._validate_generator_input(engine_prompt)
+            for engine_input in engine_inputs:
+                maybe_error = self._validate_generator_input(engine_input)
                 if maybe_error is not None:
                     return maybe_error
 
                 default_max_tokens = get_max_tokens(
                     max_model_len,
                     request.max_output_tokens,
-                    self._extract_prompt_len(engine_prompt),
+                    self._extract_prompt_len(engine_input),
                     self.default_sampling_params,
                     self.override_max_tokens,
                 )
@@ -494,7 +494,7 @@ class OpenAIServingResponses(OpenAIServing):
                         )
                 generator = self._generate_with_builtin_tools(
                     request_id=request.request_id,
-                    engine_prompt=engine_prompt,
+                    engine_input=engine_input,
                     sampling_params=sampling_params,
                     context=context,
                     lora_request=lora_request,
@@ -607,7 +607,7 @@ class OpenAIServingResponses(OpenAIServing):
             prev_response_output=prev_response.output if prev_response else None,
         )
 
-        _, engine_prompts = await self._preprocess_chat(
+        _, engine_inputs = await self._preprocess_chat(
             request,
             messages,
             default_template=self.chat_template,
@@ -616,7 +616,7 @@ class OpenAIServingResponses(OpenAIServing):
             tool_dicts=tool_dicts,
             tool_parser=self.parser.tool_parser_cls if self.parser else None,
         )
-        return messages, engine_prompts
+        return messages, engine_inputs
 
     def _make_request_with_harmony(
         self,
@@ -630,13 +630,9 @@ class OpenAIServingResponses(OpenAIServing):
 
         messages = self._construct_input_messages_with_harmony(request, prev_response)
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = token_inputs(prompt_token_ids)
+        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
+        return messages, [engine_input]
 
     async def _initialize_tool_sessions(
         self,

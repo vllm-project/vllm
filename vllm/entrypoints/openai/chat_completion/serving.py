@@ -67,7 +67,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
 )
 from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
 from vllm.entrypoints.utils import get_max_tokens, should_include_usage
-from vllm.inputs.data import ProcessorInputs, TokensPrompt
+from vllm.inputs import EngineInput, tokens_input
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import CompletionOutput, RequestOutput
@@ -216,12 +216,12 @@ class OpenAIServingChat(OpenAIServing):
     async def render_chat_request(
         self,
         request: ChatCompletionRequest,
-    ) -> tuple[list[ConversationMessage], list[ProcessorInputs]] | ErrorResponse:
+    ) -> tuple[list[ConversationMessage], list[EngineInput]] | ErrorResponse:
         """
         render chat request by validating and preprocessing inputs.
 
         Returns:
-            A tuple of (conversation, engine_prompts) on success,
+            A tuple of (conversation, engine_inputs) on success,
             or an ErrorResponse on failure.
         """
         error_check_ret = await self._check_model(request)
@@ -292,7 +292,7 @@ class OpenAIServingChat(OpenAIServing):
                 if error_check_ret is not None:
                     return error_check_ret
 
-                conversation, engine_prompts = await self._preprocess_chat(
+                conversation, engine_inputs = await self._preprocess_chat(
                     request,
                     request.messages,
                     default_template=self.chat_template,
@@ -304,14 +304,14 @@ class OpenAIServingChat(OpenAIServing):
             else:
                 # For GPT-OSS.
                 should_include_tools = tool_dicts is not None
-                conversation, engine_prompts = self._make_request_with_harmony(
+                conversation, engine_inputs = self._make_request_with_harmony(
                     request, should_include_tools
                 )
         except (ValueError, TypeError, RuntimeError, jinja2.TemplateError) as e:
             logger.exception("Error in preprocessing prompt inputs")
             return self.create_error_response(e)
 
-        return conversation, engine_prompts
+        return conversation, engine_inputs
 
     async def create_chat_completion(
         self,
@@ -347,7 +347,7 @@ class OpenAIServingChat(OpenAIServing):
         if isinstance(result, ErrorResponse):
             return result
 
-        conversation, engine_prompts = result
+        conversation, engine_inputs = result
 
         request_id = (
             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
@@ -374,15 +374,15 @@ class OpenAIServingChat(OpenAIServing):
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
         try:
-            for i, engine_prompt in enumerate(engine_prompts):
+            for i, engine_input in enumerate(engine_inputs):
                 prompt_token_ids = self._extract_prompt_components(
-                    engine_prompt
+                    engine_input
                 ).token_ids
 
                 # If we are creating sub requests for multiple prompts, ensure that they
                 # have unique request ids.
                 sub_request_id = (
-                    request_id if len(engine_prompts) == 1 else f"{request_id}_{i}"
+                    request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
                 )
 
                 max_tokens = get_max_tokens(
@@ -390,7 +390,7 @@ class OpenAIServingChat(OpenAIServing):
                     request.max_completion_tokens
                     if request.max_completion_tokens is not None
                     else request.max_tokens,
-                    self._extract_prompt_len(engine_prompt),
+                    self._extract_prompt_len(engine_input),
                     self.default_sampling_params,
                     self.override_max_tokens,
                 )
@@ -408,7 +408,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 self._log_inputs(
                     sub_request_id,
-                    engine_prompt,
+                    engine_input,
                     params=sampling_params,
                     lora_request=lora_request,
                 )
@@ -421,7 +421,7 @@ class OpenAIServingChat(OpenAIServing):
 
                 if isinstance(sampling_params, BeamSearchParams):
                     generator = self.beam_search(
-                        prompt=engine_prompt,
+                        prompt=engine_input,
                         request_id=sub_request_id,
                         params=sampling_params,
                         lora_request=lora_request,
@@ -435,7 +435,7 @@ class OpenAIServingChat(OpenAIServing):
                     )
 
                     generator = self.engine_client.generate(
-                        engine_prompt,
+                        engine_input,
                         sampling_params,
                         sub_request_id,
                         lora_request=lora_request,
@@ -1972,10 +1972,6 @@ class OpenAIServingChat(OpenAIServing):
 
         # Render prompt token ids.
         prompt_token_ids = render_for_completion(messages)
-        engine_prompt = TokensPrompt(prompt_token_ids=prompt_token_ids)
+        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
 
-        # Add cache_salt if provided in the request
-        if request.cache_salt is not None:
-            engine_prompt["cache_salt"] = request.cache_salt
-
-        return messages, [engine_prompt]
+        return messages, [engine_input]

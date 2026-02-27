@@ -29,7 +29,7 @@ from vllm.entrypoints.openai.responses.serving import (
 from vllm.entrypoints.openai.responses.streaming_events import (
     StreamingState,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs import TokensPrompt
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
 

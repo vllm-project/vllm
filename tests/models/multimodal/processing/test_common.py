@@ -18,9 +18,10 @@ from vllm.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalInput
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
+from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.utils.mistral import is_mistral_tokenizer
@@ -488,8 +489,8 @@ def test_processing_correctness(
 
 
 def _assert_inputs_equal(
-    a: MultiModalInputs,
-    b: MultiModalInputs,
+    a: MultiModalInput,
+    b: MultiModalInput,
     *,
     ignore_mm_keys: set[str] | None = None,
     msg: str = "",

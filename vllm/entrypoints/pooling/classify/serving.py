@@ -74,7 +74,7 @@ class ServingClassification(OpenAIServing):
                 if error_check_ret:
                     return error_check_ret
 
-                _, ctx.engine_prompts = await self._preprocess_chat(
+                _, ctx.engine_inputs = await self._preprocess_chat(
                     ctx.request,
                     ctx.request.messages,
                     default_template=self.chat_template,
@@ -82,7 +82,7 @@ class ServingClassification(OpenAIServing):
                     default_template_kwargs=None,
                 )
             elif isinstance(ctx.request, ClassificationCompletionRequest):
-                ctx.engine_prompts = await self._preprocess_completion(
+                ctx.engine_inputs = await self._preprocess_completion(
                     ctx.request,
                     prompt_input=ctx.request.input,
                     prompt_embeds=None,

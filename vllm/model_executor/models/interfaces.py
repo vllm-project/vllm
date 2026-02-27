@@ -29,8 +29,7 @@ from transformers.models.whisper.tokenization_whisper import LANGUAGES
 from typing_extensions import Self, TypeIs
 
 from vllm.config import ModelConfig, SpeechToTextConfig
-from vllm.inputs import TokensPrompt
-from vllm.inputs.data import PromptType
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.layers.mamba.mamba_utils import MambaStateCopyFunc
 from vllm.model_executor.layers.quantization import QuantizationConfig

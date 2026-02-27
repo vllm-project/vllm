@@ -10,17 +10,32 @@ from typing import TYPE_CHECKING, Any, Generic, overload
 from typing_extensions import TypeVar
 
 from vllm.inputs import (
-    EmbedsInputs,
+    EmbedsInput,
     EmbedsPrompt,
-    EncoderDecoderInputs,
-    ProcessorInputs,
-    SingletonInputs,
+    EncoderDecoderInput,
+    EngineInput,
+    MultiModalDataDict,
+    MultiModalInput,
+    MultiModalUUIDDict,
+    SingletonInput,
     TextPrompt,
-    TokenInputs,
+    TokensInput,
     TokensPrompt,
+    build_enc_dec_input,
+    embeds_input,
+    tokens_input,
 )
-from vllm.inputs.data import build_enc_dec_inputs, embeds_inputs, token_inputs
 from vllm.logger import init_logger
+from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
+from vllm.multimodal.cache import BaseMultiModalProcessorCache
+from vllm.multimodal.parse import (
+    MultiModalDataItems,
+    MultiModalUUIDItems,
+    parse_mm_uuids,
+)
+from vllm.multimodal.processing import BaseMultiModalProcessor
+from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
+from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import AsyncMicrobatchTokenizer
 from vllm.utils.counter import AtomicCounter
@@ -45,14 +60,6 @@ if TYPE_CHECKING:
         ChatCompletionMessageParam,
         ConversationMessage,
     )
-    from vllm.multimodal.cache import BaseMultiModalProcessorCache
-    from vllm.multimodal.inputs import (
-        MultiModalDataDict,
-        MultiModalInputs,
-        MultiModalUUIDDict,
-    )
-    from vllm.multimodal.parse import MultiModalDataItems, MultiModalUUIDItems
-    from vllm.multimodal.processing import BaseMultiModalProcessor
 
 logger = init_logger(__name__)
 
@@ -84,9 +91,6 @@ class BaseRenderer(ABC, Generic[_T]):
         self.mm_processor: BaseMultiModalProcessor | None = None
         self._mm_cache_stats: MultiModalCacheStats | None = None
         if config.model_config.is_multimodal_model:
-            from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
-            from vllm.multimodal.registry import MultiModalTimingRegistry
-
             mm_processor_cache = mm_registry.processor_cache_from_config(config)
 
             with set_default_torch_num_threads():
@@ -465,9 +469,9 @@ class BaseRenderer(ABC, Generic[_T]):
     # Step 4: Convert to engine inputs
     def _validate_mm_uuids(
         self,
-        mm_data: "MultiModalDataDict",
-        mm_data_items: "MultiModalDataItems",
-        mm_uuid_items: "MultiModalUUIDItems",
+        mm_data: MultiModalDataDict,
+        mm_data_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems,
     ) -> None:
         # NOTE: Keys corresponding to `None` in `mm_data` don't appear in
         # `mm_data_items`
@@ -501,11 +505,11 @@ class BaseRenderer(ABC, Generic[_T]):
 
     def _process_mm_uuids(
         self,
-        mm_data: "MultiModalDataDict",
-        mm_data_items: "MultiModalDataItems",
-        mm_uuid_items: "MultiModalUUIDItems",
+        mm_data: MultiModalDataDict,
+        mm_data_items: MultiModalDataItems,
+        mm_uuid_items: MultiModalUUIDItems,
         mm_req_id: str,
-    ):
+    ) -> MultiModalUUIDItems:
         model_config = self.model_config
 
         # NOTE: When users explicitly turn off BOTH prefix caching and input
@@ -531,14 +535,11 @@ class BaseRenderer(ABC, Generic[_T]):
     def _process_multimodal(
         self,
         prompt: list[int] | str,
-        mm_data: "MultiModalDataDict",
-        mm_uuids: "MultiModalUUIDDict | None",
+        mm_data: MultiModalDataDict,
+        mm_uuids: MultiModalUUIDDict | None,
         mm_processor_kwargs: Mapping[str, object] | None,
         tokenization_kwargs: dict[str, Any] | None,
-    ) -> "MultiModalInputs":
-        from vllm.multimodal.parse import parse_mm_uuids
-        from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
-
+    ) -> MultiModalInput:
         mm_req_id = f"renderer-mm-{self._mm_req_counter.inc(1)}"
 
         mm_processor = self.get_mm_processor()
@@ -569,12 +570,12 @@ class BaseRenderer(ABC, Generic[_T]):
     def _process_tokens(
         self,
         prompt: TokensPrompt,
-    ) -> "TokenInputs | MultiModalInputs":
+    ) -> TokensInput | MultiModalInput:
         prompt_token_ids = prompt["prompt_token_ids"]
 
-        inputs: TokenInputs | MultiModalInputs
+        engine_input: TokensInput | MultiModalInput
         if multi_modal_data := prompt.get("multi_modal_data"):
-            inputs = self._process_multimodal(
+            engine_input = self._process_multimodal(
                 prompt_token_ids,
                 multi_modal_data,
                 mm_processor_kwargs=prompt.get("mm_processor_kwargs"),
@@ -582,19 +583,16 @@ class BaseRenderer(ABC, Generic[_T]):
                 mm_uuids=prompt.get("multi_modal_uuids"),
             )
         else:
-            inputs = token_inputs(prompt_token_ids)
+            engine_input = tokens_input(prompt_token_ids)
 
         if prompt_text := prompt.get("prompt"):
-            inputs["prompt"] = prompt_text
+            engine_input["prompt"] = prompt_text
         if cache_salt := prompt.get("cache_salt"):
-            inputs["cache_salt"] = cache_salt
+            engine_input["cache_salt"] = cache_salt
 
-        return inputs
+        return engine_input
 
-    def _process_embeds(
-        self,
-        prompt: EmbedsPrompt,
-    ) -> EmbedsInputs:
+    def _process_embeds(self, prompt: EmbedsPrompt) -> EmbedsInput:
         if not self.model_config.enable_prompt_embeds:
             raise ValueError(
                 "You must set `--enable-prompt-embeds` to input `prompt_embeds`."
@@ -617,15 +615,12 @@ class BaseRenderer(ABC, Generic[_T]):
         # hidden device transfer in the critical path of generation.
         prompt_embeds = prompt_embeds.cpu()
 
-        return embeds_inputs(
+        return embeds_input(
             prompt_embeds=prompt_embeds,
             cache_salt=prompt.get("cache_salt"),
         )
 
-    def _process_singleton(
-        self,
-        prompt: SingletonTokPrompt,
-    ) -> SingletonInputs:
+    def _process_singleton(self, prompt: SingletonTokPrompt) -> SingletonInput:
         if "prompt_embeds" in prompt:
             return self._process_embeds(prompt)  # type: ignore[arg-type]
 
@@ -634,30 +629,28 @@ class BaseRenderer(ABC, Generic[_T]):
     def _process_enc_dec(
         self,
         prompt: EncoderDecoderTokPrompt,
-    ) -> EncoderDecoderInputs:
+    ) -> EncoderDecoderInput:
         enc_prompt = prompt["encoder_prompt"]
         dec_prompt = prompt["decoder_prompt"]
 
-        return build_enc_dec_inputs(
-            encoder_inputs=self._process_singleton(enc_prompt),
-            decoder_inputs=(
+        return build_enc_dec_input(
+            encoder_input=self._process_singleton(enc_prompt),
+            decoder_input=(
                 None if dec_prompt is None else self._process_singleton(dec_prompt)
             ),
             decoder_start_token_id=self.get_dec_start_token_id(),
         )
 
-    def process_for_engine(
-        self, prompt: TokPrompt, arrival_time: float
-    ) -> ProcessorInputs:
-        engine_prompt: ProcessorInputs
+    def process_for_engine(self, prompt: TokPrompt, arrival_time: float) -> EngineInput:
+        engine_input: EngineInput
         if "encoder_prompt" in prompt:
-            engine_prompt = self._process_enc_dec(prompt)  # type: ignore[arg-type]
+            engine_input = self._process_enc_dec(prompt)  # type: ignore[arg-type]
         else:
-            engine_prompt = self._process_singleton(prompt)
+            engine_input = self._process_singleton(prompt)
 
-        engine_prompt["arrival_time"] = arrival_time
+        engine_input["arrival_time"] = arrival_time
 
-        return engine_prompt
+        return engine_input
 
     # Top-level methods
     def render_cmpl(

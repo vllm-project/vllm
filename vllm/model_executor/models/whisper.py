@@ -21,7 +21,12 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
-from vllm.inputs.data import ExplicitEncoderDecoderPrompt, PromptType, TextPrompt
+from vllm.inputs import (
+    ExplicitEncoderDecoderPrompt,
+    MultiModalDataDict,
+    PromptType,
+    TextPrompt,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import (
@@ -43,7 +48,6 @@ from vllm.model_executor.models.whisper_utils import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )

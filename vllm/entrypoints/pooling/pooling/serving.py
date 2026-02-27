@@ -33,7 +33,7 @@ from vllm.entrypoints.pooling.utils import (
     encode_pooling_output_base64,
     encode_pooling_output_float,
 )
-from vllm.inputs import ProcessorInputs
+from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.outputs import PoolingRequestOutput
 from vllm.renderers.inputs.preprocess import prompt_to_seq
@@ -92,7 +92,7 @@ class OpenAIServingPooling(OpenAIServing):
                     "dimensions is currently not supported"
                 )
 
-            engine_prompts: Sequence[ProcessorInputs]
+            engine_inputs: Sequence[EngineInput]
             if use_io_processor := isinstance(request, IOProcessorRequest):
                 if self.io_processor is None:
                     raise ValueError(
@@ -107,7 +107,7 @@ class OpenAIServingPooling(OpenAIServing):
                 raw_prompts = await self.io_processor.pre_process_async(
                     prompt=validated_prompt, request_id=request_id
                 )
-                engine_prompts = await self._preprocess_cmpl(
+                engine_inputs = await self._preprocess_cmpl(
                     request,
                     prompt_to_seq(raw_prompts),
                 )
@@ -120,7 +120,7 @@ class OpenAIServingPooling(OpenAIServing):
                 if error_check_ret is not None:
                     return error_check_ret
 
-                _, engine_prompts = await self._preprocess_chat(
+                _, engine_inputs = await self._preprocess_chat(
                     request,
                     request.messages,
                     default_template=self.chat_template,
@@ -128,7 +128,7 @@ class OpenAIServingPooling(OpenAIServing):
                     default_template_kwargs=None,
                 )
             elif isinstance(request, PoolingCompletionRequest):
-                engine_prompts = await self._preprocess_completion(
+                engine_inputs = await self._preprocess_completion(
                     request,
                     prompt_input=request.input,
                     prompt_embeds=None,
@@ -151,12 +151,12 @@ class OpenAIServingPooling(OpenAIServing):
             else:
                 pooling_params = request.to_pooling_params()  # type: ignore
 
-            for i, engine_prompt in enumerate(engine_prompts):
+            for i, engine_input in enumerate(engine_inputs):
                 request_id_item = f"{request_id}-{i}"
 
                 self._log_inputs(
                     request_id_item,
-                    engine_prompt,
+                    engine_input,
                     params=pooling_params,
                     lora_request=lora_request,
                 )
@@ -168,7 +168,7 @@ class OpenAIServingPooling(OpenAIServing):
                 )
 
                 generator = self.engine_client.encode(
-                    engine_prompt,
+                    engine_input,
                     pooling_params,
                     request_id_item,
                     lora_request=lora_request,
@@ -209,7 +209,7 @@ class OpenAIServingPooling(OpenAIServing):
             return IOProcessorResponse(request_id=request_id, data=output)
 
         assert isinstance(request, (PoolingCompletionRequest, PoolingChatRequest))
-        num_prompts = len(engine_prompts)
+        num_prompts = len(engine_inputs)
 
         # Non-streaming response
         final_res_batch: list[PoolingRequestOutput | None]

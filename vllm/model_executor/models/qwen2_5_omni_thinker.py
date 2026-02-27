@@ -46,6 +46,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
+from vllm.inputs import ModalityData, MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.model_executor.models.qwen2_5_vl import (
@@ -66,8 +67,6 @@ from vllm.model_executor.models.qwen2_vl import Qwen2VLMultiModalDataParser
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     ImageItem,
-    ModalityData,
-    MultiModalDataDict,
     MultiModalFeatureSpec,
     MultiModalFieldConfig,
     MultiModalKwargsItems,

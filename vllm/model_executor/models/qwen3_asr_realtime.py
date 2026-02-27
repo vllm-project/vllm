@@ -24,7 +24,7 @@ import torch
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
-from vllm.inputs.data import PromptType, TokensPrompt
+from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import (
     SupportsRealtime,
