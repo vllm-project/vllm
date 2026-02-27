@@ -112,6 +112,42 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
+class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
+    """Config handler for LlamaNemotronVL embedding models."""
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        from vllm.config.pooler import SequencePoolingType
+
+        hf_config = model_config.hf_config
+
+        # Set bidirectional attention on the language model config
+        hf_config.is_causal = False
+        if hasattr(hf_config, "llm_config"):
+            hf_config.llm_config.is_causal = False
+
+        if hasattr(hf_config, "vision_config"):
+            hf_config.patch_size = hf_config.vision_config.patch_size
+
+        # Set up pooling type
+        pooling_type_map: dict[str, SequencePoolingType] = {
+            "avg": "MEAN",
+            "cls": "CLS",
+            "last": "LAST",
+        }
+
+        # Get pooling type from config (check both top-level and llm_config)
+        pooling = getattr(hf_config, "pooling", None)
+        if pooling is None and hasattr(hf_config, "llm_config"):
+            pooling = getattr(hf_config.llm_config, "pooling", "avg")
+
+        pooling_type = pooling_type_map.get(pooling)
+        if pooling_type is None:
+            raise ValueError(f"pool_type {pooling!r} not supported")
+
+        model_config.pooler_config.seq_pooling_type = pooling_type
+
+
 class NomicBertModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -177,7 +213,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
                     "Nomic context extension is disabled. "
                     "Changing max_model_len from %s to %s. "
                     "To enable context extension, see: "
-                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.html",
+                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.py",
                     max_model_len_before,
                     model_config.max_model_len,
                 )
@@ -619,6 +655,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Gemma3TextModel": Gemma3TextModelConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
+    "LlamaNemotronVLModel": LlamaNemotronVLConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
