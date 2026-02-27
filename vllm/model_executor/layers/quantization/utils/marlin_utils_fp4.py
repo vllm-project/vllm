@@ -27,11 +27,11 @@ def is_fp4_marlin_supported():
     return current_platform.has_device_capability(75)
 
 
-def _nvfp4_compute_scale_factor(marlin_scales_half) -> float:
+def _nvfp4_compute_scale_factor(marlin_scales: torch.Tensor) -> float:
     """Compute the power-of-2 scale_factor needed so that all non-zero
-    values in marlin_scales_half * 2^7 are >= 2 after rescaling.
+    values in marlin_scales * 2^7 are >= 2 after rescaling.
     Returns a Python float (power of 2, >= 1.0)."""
-    ws_float = marlin_scales_half.float() * (2**7)
+    ws_float = marlin_scales.float() * (2**7)
     nonzero_mask = ws_float > 0
     if nonzero_mask.any():
         min_val = ws_float[nonzero_mask].min()
@@ -44,7 +44,27 @@ def _nvfp4_compute_scale_factor(marlin_scales_half) -> float:
     return 1.0
 
 
-def nvfp4_marlin_process_scales(marlin_scales, scale_factor=None):
+def nvfp4_marlin_process_scales(
+    marlin_scales: torch.Tensor,
+    scale_factor: float | None = None,
+) -> tuple[torch.Tensor, float]:
+    """Process NVFP4 weight scales into the special S0E5M3 format for Marlin.
+
+    Args:
+        marlin_scales: Weight scales tensor in half precision, already
+            permuted for the Marlin kernel layout.
+        scale_factor: Optional power-of-2 rescaling factor. If None, the
+            factor is computed automatically so that every non-zero scale
+            satisfies ``scale * 2^7 >= 2`` (i.e., the MSB of the S0E5M3
+            representation is always 1). When provided (e.g., for MoE
+            layers where all experts must share the same factor), the
+            given value is used directly. The caller is responsible for
+            dividing ``global_scale`` by the returned ``scale_factor`` to
+            preserve numerical correctness.
+
+    Returns:
+        A tuple of (processed_scales, scale_factor).
+    """
     if not (marlin_scales >= 0).all():
         logger.warning_once(
             "NVFP4 Marlin assumes the scales to be >=0, but has encountered "
@@ -340,7 +360,7 @@ def prepare_nvfp4_moe_layer_for_marlin(
 
         # All experts share one global_scale, so compute the max
         # scale_factor across all experts first, then apply uniformly.
-        combined_scale_factor = _nvfp4_compute_scale_factor(scales.to(torch.half))
+        combined_scale_factor = _nvfp4_compute_scale_factor(scales)
 
         for i in range(E):
             scale = scales[i].T
@@ -446,7 +466,7 @@ def prepare_moe_fp4_layer_for_marlin(
         # For NVFP4: compute unified scale_factor across all experts
         combined_scale_factor = None
         if is_nvfp4:
-            combined_scale_factor = _nvfp4_compute_scale_factor(scales.to(torch.half))
+            combined_scale_factor = _nvfp4_compute_scale_factor(scales)
 
         for i in range(e):
             scale = scales[i].T
