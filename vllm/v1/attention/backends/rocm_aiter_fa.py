@@ -780,6 +780,7 @@ class AiterFlashAttentionImpl(AttentionImpl):
         logits_soft_cap: float | None = None,
         attn_type: AttentionType = AttentionType.DECODER,
         kv_sharing_target_layer_name: int | None = None,
+        sinks: torch.Tensor | None = None,
     ) -> None:
         self.num_heads = num_heads
         self.head_size = head_size
@@ -804,7 +805,13 @@ class AiterFlashAttentionImpl(AttentionImpl):
 
         if attn_type not in [AttentionType.DECODER, AttentionType.ENCODER_DECODER]:
             raise NotImplementedError(
-                "Encoder self-attention is not implemented for FlashAttentionImpl"
+                "Encoder self-attention is not implemented for FlashAttentionImpl. "
+                "Please use a different attention backend."
+            )
+        if sinks is not None:
+            raise NotImplementedError(
+                "Sinks are not supported for AiterFlashAttentionImpl. "
+                "Please use a different attention backend."
             )
 
     def extend_for_sliding_window(
