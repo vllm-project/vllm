@@ -1751,7 +1751,9 @@ class LLM:
             prompts=(
                 self._preprocess_cmpl_one(prompt, tokenization_kwargs)
                 for prompt in maybe_tqdm(
-                    seq_prompts, use_tqdm=use_tqdm, desc="Rendering prompts"
+                    seq_prompts,
+                    use_tqdm=use_tqdm,
+                    desc="Rendering prompts",
                 )
             ),
             params=seq_params,
