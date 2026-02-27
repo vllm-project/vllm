@@ -5,7 +5,7 @@ import math
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, SkipValidation, field_validator
+from pydantic import Field, field_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -40,7 +40,7 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    block_size: int | None = Field(default=None)
     """Size of a contiguous cache block in number of tokens.
 
     This is None until the platform sets it. Always an int by the time
