@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
+
 import numpy as np
 import pytest
 import torch
@@ -20,6 +22,7 @@ from vllm.distributed.parallel_state import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.mamba.mamba_mixer2 import MambaMixer2
+from vllm.multimodal.inputs import MultiModalFeatureSpec, PlaceholderRange
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
 from vllm.utils.mem_constants import GiB_bytes
@@ -43,6 +46,17 @@ from vllm.v1.worker.utils import AttentionGroup
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
 DEVICE = current_platform.device_type
+
+
+class _DummyMetadataBuilder:
+
+    supports_update_block_table = False
+
+    def build(self, *args, **kwargs):
+        return SimpleNamespace()
+
+    def build_for_cudagraph_capture(self, common_attn_metadata):
+        return SimpleNamespace()
 
 
 def initialize_kv_cache(runner: GPUModelRunner):
@@ -279,6 +293,51 @@ def test_update_states_request_finished(model_runner, dist_init):
     assert _is_sampling_metadata_changed(model_runner, metadata_before)
     assert not _is_req_added(model_runner, req_id)
     assert not _is_req_scheduled(model_runner, req_id)
+
+
+def test_build_attention_metadata_applies_mm_prefix_left_padding(
+    model_runner, dist_init
+):
+    req_id = "req_0"
+    scheduler_output = _schedule_new_request(req_id)
+
+    model_runner.is_mm_prefix_lm = True
+    model_runner.mm_prefix_lm_left_padding = 1
+    model_runner._get_model_hook = lambda _: None  # type: ignore[method-assign]
+
+    model_runner._update_states(scheduler_output)
+    model_runner.requests[req_id].mm_features = [
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img_0",
+            mm_position=PlaceholderRange(offset=1, length=2),
+        )
+    ]
+    num_scheduled_tokens = np.array([3], dtype=np.int32)
+    logits_indices, _ = model_runner._prepare_inputs(
+        scheduler_output, num_scheduled_tokens
+    )
+    slot_mappings_by_gid, _ = model_runner._get_slot_mappings(
+        num_tokens_padded=3,
+        num_reqs_padded=1,
+        num_tokens_unpadded=3,
+    )
+    model_runner.attn_groups[0][0].metadata_builders = [_DummyMetadataBuilder()]
+
+    attn_metadata, _ = model_runner._build_attention_metadata(
+        num_tokens=3,
+        num_reqs=1,
+        max_query_len=3,
+        logits_indices=logits_indices,
+        use_spec_decode=False,
+        num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
+        slot_mappings=slot_mappings_by_gid,
+    )
+
+    assert isinstance(attn_metadata, dict)
+    layer_metadata = next(iter(attn_metadata.values()))
+    assert layer_metadata.mm_prefix_range == {0: [(0, 2)]}
 
 
 def test_update_states_request_resumed(model_runner, dist_init):

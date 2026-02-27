@@ -4,6 +4,7 @@
 import logging
 import os
 from dataclasses import MISSING, Field, asdict, dataclass, field
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -373,6 +374,30 @@ def test_uses_mrope(model_id, uses_mrope):
     config = ModelConfig(model_id)
 
     assert config.uses_mrope == uses_mrope
+
+
+def test_mm_prefix_lm_left_padding_prefers_hf_config():
+    config = object.__new__(ModelConfig)
+    config.hf_config = SimpleNamespace(prefix_lm_left_padding=2)
+    config.hf_text_config = SimpleNamespace(prefix_lm_left_padding=5)
+
+    assert config.mm_prefix_lm_left_padding == 2
+
+
+def test_mm_prefix_lm_left_padding_falls_back_to_hf_text_config():
+    config = object.__new__(ModelConfig)
+    config.hf_config = SimpleNamespace()
+    config.hf_text_config = SimpleNamespace(prefix_lm_left_padding=3)
+
+    assert config.mm_prefix_lm_left_padding == 3
+
+
+def test_mm_prefix_lm_left_padding_defaults_to_zero():
+    config = object.__new__(ModelConfig)
+    config.hf_config = SimpleNamespace()
+    config.hf_text_config = SimpleNamespace()
+
+    assert config.mm_prefix_lm_left_padding == 0
 
 
 def test_generation_config_loading():

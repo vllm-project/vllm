@@ -1133,6 +1133,16 @@ class ModelConfig:
             return False
         return self.hf_config.model_type in MM_PREFIX_LM_MODELS
 
+    @cached_property
+    def mm_prefix_lm_left_padding(self) -> int:
+        """Extra positions before MM embeds to include in prefix-LM spans."""
+        # Multimodal models may define this either at the top config level or
+        # only on the text sub-config.
+        value = getattr(self.hf_config, "prefix_lm_left_padding", None)
+        if value is None:
+            value = getattr(self.hf_text_config, "prefix_lm_left_padding", 0)
+        return int(value)
+
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size
 
