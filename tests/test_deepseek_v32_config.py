@@ -9,17 +9,19 @@ This test file focuses on what CAN be tested without FlashMLA/full environment:
 3. Config update logic (via direct method calls)
 """
 
-import pytest
 from unittest.mock import Mock
+
+import pytest
 
 from vllm.model_executor.models.config import (
     DeepseekV32ForCausalLM,
-    VerifyAndUpdateConfig)
-
+    VerifyAndUpdateConfig,
+)
 
 # ============================================================================
 # Test 1: Config Architecture (These work in any environment)
 # ============================================================================
+
 
 class TestDeepSeekV32ConfigArchitecture:
     """Test the config class architecture and inheritance."""
@@ -34,8 +36,7 @@ class TestDeepSeekV32ConfigArchitecture:
         assert issubclass(DeepseekV32ForCausalLM, VerifyAndUpdateConfig), (
             "DeepseekV32ForCausalLM should inherit from VerifyAndUpdateConfig"
         )
-        print("✓ DeepseekV32ForCausalLM correctly inherits from "
-              "VerifyAndUpdateConfig")
+        print("✓ DeepseekV32ForCausalLM correctly inherits from VerifyAndUpdateConfig")
 
     def test_deepseek_v3_class_removed(self):
         """Verify DeepseekV3ForCausalLM class no longer exists.
@@ -45,14 +46,14 @@ class TestDeepSeekV32ConfigArchitecture:
         """
         from vllm.model_executor.models import config as config_module
 
-        assert not hasattr(config_module, 'DeepseekV3ForCausalLM'), (
+        assert not hasattr(config_module, "DeepseekV3ForCausalLM"), (
             "DeepseekV3ForCausalLM workaround class should be removed"
         )
         print("✓ DeepseekV3ForCausalLM workaround class has been removed")
 
     def test_verify_and_update_config_method_exists(self):
         """Verify the verify_and_update_config method is implemented."""
-        assert hasattr(DeepseekV32ForCausalLM, 'verify_and_update_config'), (
+        assert hasattr(DeepseekV32ForCausalLM, "verify_and_update_config"), (
             "DeepseekV32ForCausalLM should implement verify_and_update_config"
         )
 
@@ -65,6 +66,7 @@ class TestDeepSeekV32ConfigArchitecture:
 # ============================================================================
 # Test 2: Config Update Logic (Direct method testing)
 # ============================================================================
+
 
 class TestDeepSeekV32ConfigUpdateLogic:
     """Test the config update logic by directly calling the method."""
@@ -87,9 +89,7 @@ class TestDeepSeekV32ConfigUpdateLogic:
 
         # Verify it was updated
         cache_dtype = mock_vllm_config.cache_config.cache_dtype
-        assert cache_dtype == "fp8_ds_mla", (
-            f"Expected fp8_ds_mla, got {cache_dtype}"
-        )
+        assert cache_dtype == "fp8_ds_mla", f"Expected fp8_ds_mla, got {cache_dtype}"
         print("✓ fp8 cache_dtype correctly converted to fp8_ds_mla")
 
     def test_verify_and_update_config_updates_fp8_e4m3_to_fp8_ds_mla(self):
@@ -161,19 +161,21 @@ class TestDeepSeekV32ConfigUpdateLogic:
 # Summary Test
 # ============================================================================
 
+
 def test_pr_34899_summary():
     """Summary test that validates the key changes from PR #34899.
 
     This test documents what PR #34899 actually changed and verifies
     those changes.
     """
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("PR #34899 Validation Summary")
-    print("="*70)
+    print("=" * 70)
 
     # Check 1: Class removal
     from vllm.model_executor.models import config as config_module
-    assert not hasattr(config_module, 'DeepseekV3ForCausalLM')
+
+    assert not hasattr(config_module, "DeepseekV3ForCausalLM")
     print("✓ DeepseekV3ForCausalLM workaround class removed")
 
     # Check 2: Correct inheritance
@@ -181,7 +183,7 @@ def test_pr_34899_summary():
     print("✓ DeepseekV32ForCausalLM inherits from VerifyAndUpdateConfig")
 
     # Check 3: Method exists
-    assert hasattr(DeepseekV32ForCausalLM, 'verify_and_update_config')
+    assert hasattr(DeepseekV32ForCausalLM, "verify_and_update_config")
     assert callable(DeepseekV32ForCausalLM.verify_and_update_config)
     print("✓ verify_and_update_config method implemented")
 
@@ -202,16 +204,16 @@ def test_pr_34899_summary():
     assert mock_config.cache_config.cache_dtype == "auto"
     print("✓ Config update logic: bfloat16 → auto conversion works")
 
-    print("\n" + "="*70)
+    print("\n" + "=" * 70)
     print("All PR #34899 changes validated successfully!")
-    print("="*70)
+    print("=" * 70)
     print("\nWhat this PR does:")
     print("1. Removes DeepseekV3ForCausalLM workaround class")
     print("2. Enables AR+Norm fusion BY DEFAULT (no longer disabled)")
     print("3. DeepseekV32ForCausalLM now properly configures cache dtype")
     print("   - fp8/fp8_e4m3 → fp8_ds_mla (custom MLA format)")
     print("   - bfloat16 → auto")
-    print("="*70)
+    print("=" * 70)
 
 
 if __name__ == "__main__":
