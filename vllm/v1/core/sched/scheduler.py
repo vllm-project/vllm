@@ -480,8 +480,8 @@ class Scheduler(SchedulerInterface):
                         break
 
             if new_blocks is None:
-                # Cannot schedule this request.
-                break
+                # Continue scheduling subsequent requests
+                continue
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
