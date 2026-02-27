@@ -34,7 +34,7 @@ from vllm.distributed.parallel_state import get_pp_group
 from vllm.model_executor.layers.activation import ReLUSquaredActivation
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
-    FusedMoE,
+    GateLinear,
     SharedFusedMoE,
     activation_without_mul,
 )
@@ -148,11 +148,11 @@ class NemotronHMoE(nn.Module):
 
         self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
 
-        self.gate = ReplicatedLinear(
+        self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            bias=False,
-            quant_config=None,
+            out_dtype=torch.float32,
+            force_fp32_compute=True,
             prefix=f"{prefix}.gate",
         )
 
@@ -295,6 +295,11 @@ class NemotronHMLPDecoderLayer(nn.Module):
 
         hybrid_override_pattern = config.hybrid_override_pattern
         mlp_index = hybrid_override_pattern[: layer_idx + 1].count("-") - 1
+        # Get per-layer config for heterogeneous models if exist
+        get_layer_config = getattr(config, "get_nemotron_h_config_for_layer", None)
+        layer_config = get_layer_config(layer_idx) if get_layer_config else config
+        config = layer_config
+
         if isinstance(config.intermediate_size, list):
             if len(config.intermediate_size) == 1:
                 intermediate_size = config.intermediate_size[0]
@@ -633,6 +638,9 @@ class NemotronHModel(nn.Module):
         hidden_states, _ = self.norm_f(hidden_states, residual)
         return hidden_states
 
+    def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
+        return weight_name.startswith("mtp.")
+
     def _get_max_n_routed_experts(self) -> int:
         """Get max n_routed_experts from config or block_configs for puzzle models.
 
@@ -664,7 +672,7 @@ class NemotronHModel(nn.Module):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         if self.has_moe:
             # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
                 # - FusedMoe.w1 (aka gate_proj) should be up_proj since that's
                 #   what the activation is applied to
                 # - FusedMoe.w3 (aka up_proj) should be ignored since we're
@@ -698,6 +706,10 @@ class NemotronHModel(nn.Module):
                 name = maybe_remap_kv_scale_name(name, params_dict)
                 if name is None:
                     continue
+
+            # Skip MTP/spec decode layers early (before stacked params mapping)
+            if name.startswith("mtp."):
+                continue
 
             # load stacked params
             for param_name, weight_name, shard_id in stacked_params_mapping:
@@ -842,6 +854,7 @@ class NemotronHForCausalLM(
             head_dim=hf_config.mamba_head_dim,
             state_size=hf_config.ssm_state_size,
             conv_kernel=hf_config.conv_kernel,
+            num_spec=vllm_config.num_speculative_tokens,
         )
 
     @classmethod
