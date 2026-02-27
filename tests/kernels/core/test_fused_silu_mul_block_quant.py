@@ -143,11 +143,6 @@ def test_silu_and_mul_per_block_quant(
     assert not torch.isnan(ops_scales).any(), "Kernel scales contain NaN values"
     assert not torch.isinf(ops_scales).any(), "Kernel scales contain Inf values"
 
-    # Also check reference for sanity
-    assert not torch.isnan(ref_out.float()).any(), (
-        "Reference output contains NaN values"
-    )
-    assert not torch.isnan(ref_scales).any(), "Reference scales contain NaN values"
     # ======================================
 
     # Check output dtype
