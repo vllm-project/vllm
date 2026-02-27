@@ -45,6 +45,7 @@ from vllm.model_executor.models import (
     SupportsTranscription,
     supports_transcription,
 )
+from vllm.multimodal.audio import split_audio
 from vllm.outputs import RequestOutput
 from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
@@ -193,7 +194,7 @@ class OpenAISpeechToText(OpenAIServing):
     def _warmup_input_processor(self) -> None:
         """Warm up input processor with dummy audio to avoid first-request latency.
 
-        The first call to input_processor.process_inputs() with multimodal audio
+        The first call to renderer.render_cmpl() with multimodal audio
         triggers multimodal processing initialization which can take ~2.5s.
         This method processes a dummy audio request to warm up the pipeline.
         """
@@ -323,11 +324,24 @@ class OpenAISpeechToText(OpenAIServing):
             self.asr_config.allow_audio_chunking
             and duration > self.asr_config.max_audio_clip_s
         )
-        chunks = [y] if not do_split_audio else self._split_audio(y, int(sr))
+
+        if not do_split_audio:
+            chunks = [y]
+        else:
+            assert self.asr_config.max_audio_clip_s is not None
+            assert self.asr_config.min_energy_split_window_size is not None
+            chunks = split_audio(
+                audio_data=y,
+                sample_rate=int(sr),
+                max_clip_duration_s=self.asr_config.max_audio_clip_s,
+                overlap_duration_s=self.asr_config.overlap_chunk_second,
+                min_energy_window_size=self.asr_config.min_energy_split_window_size,
+            )
 
         if language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
         ):
+            # Auto-detect language from the first chunk.
             language = await self._detect_language(
                 chunks[0], f"{request_id}-lang_detect"
             )
@@ -754,55 +768,3 @@ class OpenAISpeechToText(OpenAIServing):
             yield f"data: {data}\n\n"
         # Send the final done message after all response.n are finished
         yield "data: [DONE]\n\n"
-
-    def _split_audio(
-        self, audio_data: np.ndarray, sample_rate: int
-    ) -> list[np.ndarray]:
-        assert self.asr_config.max_audio_clip_s is not None, (
-            f"{self.asr_config.max_audio_clip_s=} cannot be None to"
-            " split audio into chunks."
-        )
-        chunk_size = sample_rate * self.asr_config.max_audio_clip_s
-        overlap_size = sample_rate * self.asr_config.overlap_chunk_second
-        chunks = []
-        i = 0
-        while i < audio_data.shape[-1]:
-            if i + chunk_size >= audio_data.shape[-1]:
-                # handle last chunk
-                chunks.append(audio_data[..., i:])
-                break
-
-            # Find the best split point in the overlap region
-            search_start = i + chunk_size - overlap_size
-            search_end = min(i + chunk_size, audio_data.shape[-1])
-            split_point = self._find_split_point(audio_data, search_start, search_end)
-
-            # Extract chunk up to the split point
-            chunks.append(audio_data[..., i:split_point])
-            i = split_point
-        return chunks
-
-    def _find_split_point(self, wav: np.ndarray, start_idx: int, end_idx: int) -> int:
-        """Find the best point to split audio by
-        looking for silence or low amplitude.
-        Args:
-            wav: Audio tensor [1, T]
-            start_idx: Start index of search region
-            end_idx: End index of search region
-        Returns:
-            Index of best splitting point
-        """
-        segment = wav[start_idx:end_idx]
-
-        # Calculate RMS energy in small windows
-        min_energy = math.inf
-        quietest_idx = 0
-        min_energy_window = self.asr_config.min_energy_split_window_size
-        assert min_energy_window is not None
-        for i in range(0, len(segment) - min_energy_window, min_energy_window):
-            window = segment[i : i + min_energy_window]
-            energy = (window**2).mean() ** 0.5
-            if energy < min_energy:
-                quietest_idx = i + start_idx
-                min_energy = energy
-        return quietest_idx
