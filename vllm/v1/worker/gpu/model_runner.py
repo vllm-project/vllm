@@ -344,13 +344,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 device=self.device,
             )
 
-        # Execute the model.
-        self.execute_model(
-            dummy_scheduler_output,
-            intermediate_tensors=intermediate_tensors,
-            dummy_run=True,
-            skip_attn_for_dummy_run=skip_attn,
-        )
+        with self.maybe_dummy_run_with_lora(
+            self.lora_config,
+            num_scheduled_tokens == np.array(num_tokens_per_request, dtype=np.int32),
+            num_sampled_tokens=None,
+            remove_lora=True,
+            num_active_loras=self.lora_config.max_loras
+            if self.lora_config is not None
+            else 0,
+        ):
+            # Execute the model.
+            self.execute_model(
+                dummy_scheduler_output,
+                intermediate_tensors=intermediate_tensors,
+                dummy_run=True,
+                skip_attn_for_dummy_run=skip_attn,
+            )
         self.kv_connector.set_disabled(False)
 
         # Non-last PP ranks don't produce output for sampling.
@@ -895,7 +904,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             else:
                 block_tables = None
                 slot_mappings = None
-            # FIXME(woosuk): Fix warmup for LoRA.
+
 
         attn_metadata = None
         slot_mappings_by_layer = None
