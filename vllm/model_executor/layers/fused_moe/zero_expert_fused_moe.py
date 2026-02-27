@@ -61,33 +61,3 @@ class ZeroExpertFusedMoE(FusedMoE):
         # The actual zero expert handling is done by ZeroExpertRouter.
         self.zero_expert_num = 0
         self.zero_expert_type = None
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ) -> torch.Tensor:
-        """
-        Forward pass with zero expert support.
-
-        The ZeroExpertRouter handles routing with full logits (including zero
-        experts), computes zero expert contributions internally, and returns
-        masked topk_ids suitable for real expert MoE computation.
-
-        Args:
-            hidden_states: Input hidden states
-            router_logits: Full router logits (including zero experts)
-
-        Returns:
-            Combined output from real experts and zero experts
-        """
-        # The router handles full logits internally: routes over all experts
-        # (real + zero), computes zero expert output, masks zero expert IDs.
-        fused_out = super().forward(hidden_states, router_logits)
-
-        # Retrieve zero expert output computed during routing
-        zero_expert_output = self.router.zero_expert_output
-        if zero_expert_output is not None:
-            fused_out = fused_out + zero_expert_output
-
-        return fused_out

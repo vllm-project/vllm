@@ -25,6 +25,9 @@ from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
+    ZeroExpertRouter,
+)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner import MoERunner
 from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
     SharedExperts,
@@ -398,6 +401,19 @@ class MoERunnerBase(MoERunner):
             router_logits, _ = self.gate(hidden_states)
         return router_logits
 
+    def _maybe_add_zero_expert_output(
+        self,
+        result: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(self.router, ZeroExpertRouter):
+            zero_expert_output = self.router.zero_expert_output
+            assert zero_expert_output is not None
+            if isinstance(result, tuple):
+                result = (result[0], result[1] + zero_expert_output)
+            else:
+                result = result + zero_expert_output
+        return result
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -449,7 +465,9 @@ class MoERunnerBase(MoERunner):
             self._encode_layer_name(),
         )
 
-        return self._maybe_reduce_output(fused_output, og_hidden_dims)
+        result = self._maybe_reduce_output(fused_output, og_hidden_dims)
+
+        return self._maybe_add_zero_expert_output(result)
 
     def forward_dispatch(
         self,
