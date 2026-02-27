@@ -8,7 +8,6 @@ import torch
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.platforms import current_platform
-from vllm.triton_utils import triton
 from vllm.utils.import_utils import has_triton_kernels
 from vllm.utils.math_utils import round_up
 from vllm.utils.torch_utils import direct_register_custom_op, is_torch_equal_or_newer
@@ -153,7 +152,7 @@ def maybe_roundup_mxfp4_fused_moe_sizes(
             rounded_intermediate = round_up(rounded_intermediate, 128)
         rounded_hidden_size = round_up(hidden_size, 128)
     elif current_platform.is_rocm():
-        pad_align = get_padding_alignment()
+        pad_align = 256
         if rounded_intermediate is not None:
             rounded_intermediate = round_up(rounded_intermediate, pad_align)
         rounded_hidden_size = round_up(hidden_size, pad_align)
@@ -162,14 +161,6 @@ def maybe_roundup_mxfp4_fused_moe_sizes(
             rounded_intermediate = round_up(rounded_intermediate, 64)
 
     return rounded_hidden_size, rounded_intermediate
-
-
-def get_padding_alignment():
-    return (
-        256
-        if triton.runtime.driver.active.get_current_target().arch in ("gfx950",)
-        else 128
-    )
 
 
 def _dequant_mxfp4(
