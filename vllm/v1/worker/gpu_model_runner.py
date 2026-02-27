@@ -1204,8 +1204,7 @@ class GPUModelRunner(
             .numpy()
         )
         for i, num_tokens in enumerate(num_accepted_tokens):
-            # if not self.is_mamba2_hybrid:
-            if True:
+            if not self.is_mamba2_hybrid:
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
                 continue
 
