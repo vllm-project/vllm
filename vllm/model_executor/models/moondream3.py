@@ -61,7 +61,14 @@ from vllm.multimodal.processing import (
 )
 from vllm.sequence import IntermediateTensors
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    NoOpPerRequestStateAdapter,
+    PerRequestStateAdapter,
+    PerRequestStateExtraOutput,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import (
     extract_layer_index,
     make_empty_intermediate_tensors_factory,
@@ -697,6 +704,177 @@ class DetectPointStateManager:
         # Check max objects limit.
         if len(state.objects) >= state.max_objects:
             state.finished = True
+
+
+class Moondream3PerRequestStateAdapter(NoOpPerRequestStateAdapter):
+    """Per-request state adapter for detect/point orchestration."""
+
+    def __init__(self, model: "Moondream3ForCausalLM") -> None:
+        self.model = model
+
+    def on_new_request(
+        self,
+        *,
+        req_id: str,
+        sampling_params: object | None,
+    ) -> None:
+        """Register detect/point requests from per-request extra args."""
+        if sampling_params is None:
+            return
+        extra = getattr(sampling_params, "extra_args", None) or {}
+        dp_task = extra.get("moondream3_task")
+        if dp_task == "detect":
+            mode: Literal["detect", "point"] = "detect"
+        elif dp_task == "point":
+            mode = "point"
+        else:
+            return
+
+        raw_max = extra.get("moondream3_max_objects", _DEFAULT_MAX_OBJECTS)
+        try:
+            max_obj = int(raw_max)
+        except (TypeError, ValueError):
+            raise ValueError(
+                "moondream3_max_objects must be an integer, "
+                f"got {type(raw_max).__name__}"
+            ) from None
+        if max_obj < 1:
+            raise ValueError(f"moondream3_max_objects must be >= 1, got {max_obj}")
+        self.model.detect_point_manager.register_request(req_id, mode, max_obj)
+
+    def on_requests_finished(self, req_ids: Iterable[str]) -> None:
+        for req_id in req_ids:
+            self.model.detect_point_manager.remove_request(req_id)
+
+    def on_before_model_forward(
+        self,
+        *,
+        req_ids: list[str],
+        logits_indices: torch.Tensor,
+        device: torch.device,
+    ) -> None:
+        """Prepare pending coordinate/size embed replacements for forward."""
+        dp_mgr = self.model.detect_point_manager
+        if not dp_mgr.has_active_requests():
+            self.model._dp_embed_data = None
+            return
+
+        pp = get_pp_group()
+        if pp.world_size > 1:
+            self._sync_dp_pending_embeds(req_ids=req_ids, device=device, pp=pp)
+
+        dp_embed_data: dict[int, dict[str, Any]] = {}
+        for i, rid in enumerate(req_ids):
+            dp_st = dp_mgr.get_state(rid)
+            if dp_st is None or dp_st.pending_embed_type is None:
+                continue
+            pos = int(logits_indices[i].item())
+            if dp_st.pending_embed_type == "coord":
+                dp_embed_data[pos] = {
+                    "type": "coord",
+                    "value": dp_st.pending_embed_coord,
+                }
+            elif dp_st.pending_embed_type == "size":
+                dp_embed_data[pos] = {
+                    "type": "size",
+                    "w": dp_st.pending_embed_w,
+                    "h": dp_st.pending_embed_h,
+                }
+        self.model._dp_embed_data = dp_embed_data or None
+
+    def on_before_compute_logits(self, *, req_ids: list[str]) -> None:
+        dp_mgr = self.model.detect_point_manager
+        if not dp_mgr.has_active_requests():
+            self.model._dp_row_states = None
+            return
+        self.model._dp_row_states = [dp_mgr.get_state(req_id) for req_id in req_ids]
+
+    def on_after_sample(
+        self,
+        *,
+        req_ids: list[str],
+        sampled_token_ids: torch.Tensor,
+    ) -> None:
+        dp_mgr = self.model.detect_point_manager
+        if not dp_mgr.has_active_requests():
+            return
+        for i, req_id in enumerate(req_ids):
+            if dp_mgr.get_state(req_id) is None:
+                continue
+            tok = int(sampled_token_ids[i, 0].item())
+            dp_mgr.update_after_sample(req_id, tok)
+
+    def get_per_request_extra_output(
+        self,
+        *,
+        req_ids: list[str],
+    ) -> PerRequestStateExtraOutput | None:
+        """Return per-request final text overrides for active requests."""
+        dp_mgr = self.model.detect_point_manager
+        if not get_pp_group().is_last_rank or not dp_mgr.has_active_requests():
+            return None
+
+        per_request_extra: PerRequestStateExtraOutput = {}
+        for req_id in req_ids:
+            state = dp_mgr.get_state(req_id)
+            if state is None:
+                continue
+            json_str = dp_mgr.get_json_result(req_id)
+            if json_str is not None:
+                per_request_extra[req_id] = {"text_override": json_str}
+        return per_request_extra or None
+
+    def _sync_dp_pending_embeds(
+        self,
+        *,
+        req_ids: list[str],
+        device: torch.device,
+        pp: Any,
+    ) -> None:
+        """Broadcast detect/point pending embed data across PP ranks."""
+        num_reqs = len(req_ids)
+        sync = torch.zeros(
+            num_reqs,
+            3,
+            device=device,
+            dtype=torch.float32,
+        )
+
+        dp_mgr = self.model.detect_point_manager
+        if pp.is_last_rank:
+            for i, req_id in enumerate(req_ids):
+                st = dp_mgr.get_state(req_id)
+                if st is None or st.pending_embed_type is None:
+                    continue
+                if st.pending_embed_type == "coord":
+                    sync[i, 0] = 1.0
+                    sync[i, 1] = st.pending_embed_coord or 0.0
+                elif st.pending_embed_type == "size":
+                    sync[i, 0] = 2.0
+                    sync[i, 1] = st.pending_embed_w or 0.0
+                    sync[i, 2] = st.pending_embed_h or 0.0
+
+        torch.distributed.broadcast(
+            sync,
+            src=pp.last_rank,
+            group=pp.device_group,
+        )
+
+        if not pp.is_last_rank:
+            for i, req_id in enumerate(req_ids):
+                st = dp_mgr.get_state(req_id)
+                if st is None:
+                    continue
+                state_type = int(sync[i, 0].item())
+                if state_type == 0:
+                    st.pending_embed_type = None
+                elif state_type == 1:
+                    st.pending_embed_type = "coord"
+                    st.pending_embed_coord = sync[i, 1].item()
+                elif state_type == 2:
+                    st.pending_embed_type = "size"
+                    st.pending_embed_w = sync[i, 1].item()
+                    st.pending_embed_h = sync[i, 2].item()
 
 
 # ============================================================================
@@ -1421,7 +1599,7 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         self._eos_id = getattr(hf_config, "region_eos_token_id", 0)
 
         # Detect/point state management and per-step scratch buffers.
-        # These buffers are populated by model hooks invoked by the v1 runner.
+        # These buffers are populated by per-request callbacks from the v1 runner.
         self.detect_point_manager = DetectPointStateManager(
             coord_id=self._coord_id,
             size_id=self._size_id,
@@ -1429,170 +1607,10 @@ class Moondream3ForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
         )
         self._dp_row_states: list[DetectPointState | None] | None = None
         self._dp_embed_data: dict[int, dict] | None = None
+        self._per_request_state_adapter = Moondream3PerRequestStateAdapter(self)
 
-    def on_new_request(
-        self,
-        *,
-        req_id: str,
-        sampling_params: object | None,
-    ) -> None:
-        """Register detect/point requests from per-request extra args."""
-        if sampling_params is None:
-            return
-        extra = getattr(sampling_params, "extra_args", None) or {}
-        dp_task = extra.get("moondream3_task")
-        if dp_task == "detect":
-            mode: Literal["detect", "point"] = "detect"
-        elif dp_task == "point":
-            mode = "point"
-        else:
-            return
-
-        raw_max = extra.get("moondream3_max_objects", _DEFAULT_MAX_OBJECTS)
-        try:
-            max_obj = int(raw_max)
-        except (TypeError, ValueError):
-            raise ValueError(
-                "moondream3_max_objects must be an integer, "
-                f"got {type(raw_max).__name__}"
-            ) from None
-        if max_obj < 1:
-            raise ValueError(f"moondream3_max_objects must be >= 1, got {max_obj}")
-        self.detect_point_manager.register_request(req_id, mode, max_obj)
-
-    def on_requests_finished(self, req_ids: Iterable[str]) -> None:
-        for req_id in req_ids:
-            self.detect_point_manager.remove_request(req_id)
-
-    def on_before_model_forward(
-        self,
-        *,
-        req_ids: list[str],
-        logits_indices: torch.Tensor,
-        device: torch.device,
-    ) -> None:
-        """Prepare pending coordinate/size embed replacements for forward."""
-        dp_mgr = self.detect_point_manager
-        if not dp_mgr.has_active_requests():
-            self._dp_embed_data = None
-            return
-
-        pp = get_pp_group()
-        if pp.world_size > 1:
-            self._sync_dp_pending_embeds(req_ids=req_ids, device=device, pp=pp)
-
-        dp_embed_data: dict[int, dict[str, Any]] = {}
-        for i, rid in enumerate(req_ids):
-            dp_st = dp_mgr.get_state(rid)
-            if dp_st is None or dp_st.pending_embed_type is None:
-                continue
-            pos = int(logits_indices[i].item())
-            if dp_st.pending_embed_type == "coord":
-                dp_embed_data[pos] = {
-                    "type": "coord",
-                    "value": dp_st.pending_embed_coord,
-                }
-            elif dp_st.pending_embed_type == "size":
-                dp_embed_data[pos] = {
-                    "type": "size",
-                    "w": dp_st.pending_embed_w,
-                    "h": dp_st.pending_embed_h,
-                }
-        self._dp_embed_data = dp_embed_data or None
-
-    def on_before_compute_logits(self, *, req_ids: list[str]) -> None:
-        dp_mgr = self.detect_point_manager
-        if not dp_mgr.has_active_requests():
-            self._dp_row_states = None
-            return
-        self._dp_row_states = [dp_mgr.get_state(req_id) for req_id in req_ids]
-
-    def on_after_sample(
-        self,
-        *,
-        req_ids: list[str],
-        sampled_token_ids: torch.Tensor,
-    ) -> None:
-        dp_mgr = self.detect_point_manager
-        if not dp_mgr.has_active_requests():
-            return
-        for i, req_id in enumerate(req_ids):
-            if dp_mgr.get_state(req_id) is None:
-                continue
-            tok = int(sampled_token_ids[i, 0].item())
-            dp_mgr.update_after_sample(req_id, tok)
-
-    def get_per_request_extra_output(
-        self,
-        *,
-        req_ids: list[str],
-    ) -> dict[str, dict[str, Any]] | None:
-        """Return per-request final text overrides for active requests."""
-        dp_mgr = self.detect_point_manager
-        if not get_pp_group().is_last_rank or not dp_mgr.has_active_requests():
-            return None
-
-        per_request_extra: dict[str, dict[str, Any]] = {}
-        for req_id in req_ids:
-            state = dp_mgr.get_state(req_id)
-            if state is None:
-                continue
-            json_str = dp_mgr.get_json_result(req_id)
-            if json_str is not None:
-                per_request_extra[req_id] = {"text_override": json_str}
-        return per_request_extra or None
-
-    def _sync_dp_pending_embeds(
-        self,
-        *,
-        req_ids: list[str],
-        device: torch.device,
-        pp: Any,
-    ) -> None:
-        """Broadcast detect/point pending embed data across PP ranks."""
-        num_reqs = len(req_ids)
-        sync = torch.zeros(
-            num_reqs,
-            3,
-            device=device,
-            dtype=torch.float32,
-        )
-
-        dp_mgr = self.detect_point_manager
-        if pp.is_last_rank:
-            for i, req_id in enumerate(req_ids):
-                st = dp_mgr.get_state(req_id)
-                if st is None or st.pending_embed_type is None:
-                    continue
-                if st.pending_embed_type == "coord":
-                    sync[i, 0] = 1.0
-                    sync[i, 1] = st.pending_embed_coord or 0.0
-                elif st.pending_embed_type == "size":
-                    sync[i, 0] = 2.0
-                    sync[i, 1] = st.pending_embed_w or 0.0
-                    sync[i, 2] = st.pending_embed_h or 0.0
-
-        torch.distributed.broadcast(
-            sync,
-            src=pp.last_rank,
-            group=pp.device_group,
-        )
-
-        if not pp.is_last_rank:
-            for i, req_id in enumerate(req_ids):
-                st = dp_mgr.get_state(req_id)
-                if st is None:
-                    continue
-                state_type = int(sync[i, 0].item())
-                if state_type == 0:
-                    st.pending_embed_type = None
-                elif state_type == 1:
-                    st.pending_embed_type = "coord"
-                    st.pending_embed_coord = sync[i, 1].item()
-                elif state_type == 2:
-                    st.pending_embed_type = "size"
-                    st.pending_embed_w = sync[i, 1].item()
-                    st.pending_embed_h = sync[i, 2].item()
+    def get_per_request_state_adapter(self) -> PerRequestStateAdapter:
+        return self._per_request_state_adapter
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:

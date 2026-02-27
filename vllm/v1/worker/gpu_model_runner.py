@@ -65,8 +65,11 @@ from vllm.model_executor.model_loader.reload import (
 )
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
+    NoOpPerRequestStateAdapter,
+    PerRequestStateAdapter,
     SupportsMRoPE,
     SupportsMultiModal,
+    SupportsPerRequestState,
     SupportsXDRoPE,
     is_mixture_of_experts,
     supports_eagle3,
@@ -439,6 +442,9 @@ class GPUModelRunner(
         self.cascade_attn_enabled = not self.model_config.disable_cascade_attn
         self.is_mm_prefix_lm = self.model_config.is_mm_prefix_lm
         self.mm_prefix_lm_left_padding = self.model_config.mm_prefix_lm_left_padding
+        self.per_request_state_adapter: PerRequestStateAdapter = (
+            NoOpPerRequestStateAdapter()
+        )
 
         # Multi-modal data support
         self.mm_registry = MULTIMODAL_REGISTRY
@@ -919,16 +925,10 @@ class GPUModelRunner(
     def _sync_device(self) -> None:
         torch.cuda.synchronize()
 
-    def _get_model_hook(self, hook_name: str) -> Any:
-        """Return a callable model hook if available."""
-        hook = getattr(self.get_model(), hook_name, None)
-        return hook if callable(hook) else None
-
-    def _call_model_hook(self, hook_name: str, *args: Any, **kwargs: Any) -> Any:
-        hook = self._get_model_hook(hook_name)
-        if hook is None:
-            return None
-        return hook(*args, **kwargs)
+    def _maybe_init_per_request_state_adapter(self, model: nn.Module) -> None:
+        if not isinstance(model, SupportsPerRequestState):
+            return
+        self.per_request_state_adapter = model.get_per_request_state_adapter()
 
     def _update_states(self, scheduler_output: "SchedulerOutput") -> None:
         """Update the cached states and the persistent batch with the scheduler
@@ -946,8 +946,7 @@ class GPUModelRunner(
             self.num_prompt_logprobs.pop(req_id, None)
 
         # Let models clean up per-request state.
-        self._call_model_hook(
-            "on_requests_finished",
+        self.per_request_state_adapter.on_requests_finished(
             scheduler_output.finished_req_ids,
         )
 
@@ -1033,8 +1032,7 @@ class GPUModelRunner(
             self.requests[req_id] = req_state
 
             # Let models register per-request custom decode state.
-            self._call_model_hook(
-                "on_new_request",
+            self.per_request_state_adapter.on_new_request(
                 req_id=req_id,
                 sampling_params=sampling_params,
             )
@@ -3600,8 +3598,7 @@ class GPUModelRunner(
         # When spec decode is enabled, delay clearing connector metadata
         # until after draft model runs in sample_tokens.
         clear_kv_metadata = self.speculative_config is None
-        self._call_model_hook(
-            "on_before_model_forward",
+        self.per_request_state_adapter.on_before_model_forward(
             req_ids=step_req_ids,
             logits_indices=logits_indices,
             device=self.device,
@@ -3661,8 +3658,7 @@ class GPUModelRunner(
 
                 sample_hidden_states = hidden_states[logits_indices]
 
-                self._call_model_hook(
-                    "on_before_compute_logits",
+                self.per_request_state_adapter.on_before_compute_logits(
                     req_ids=step_req_ids,
                 )
                 logits = self.model.compute_logits(sample_hidden_states)
@@ -3684,8 +3680,7 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
-                    self._call_model_hook(
-                        "on_before_compute_logits",
+                    self.per_request_state_adapter.on_before_compute_logits(
                         req_ids=step_req_ids,
                     )
                     logits = self.model.compute_logits(sample_hidden_states)
@@ -3763,8 +3758,7 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: sample"):
             sampler_output = self._sample(logits, spec_decode_metadata)
 
-        self._call_model_hook(
-            "on_after_sample",
+        self.per_request_state_adapter.on_after_sample(
             req_ids=self.input_batch.req_ids[: self.input_batch.num_reqs],
             sampled_token_ids=sampler_output.sampled_token_ids,
         )
@@ -3882,9 +3876,10 @@ class GPUModelRunner(
                 else:
                     logger.error("RoutedExpertsCapturer not initialized.")
 
-            per_request_extra_output = self._call_model_hook(
-                "get_per_request_extra_output",
-                req_ids=req_ids_output_copy,
+            per_request_extra_output = (
+                self.per_request_state_adapter.get_per_request_extra_output(
+                    req_ids=req_ids_output_copy,
+                )
             )
 
             output = ModelRunnerOutput(
@@ -4261,10 +4256,14 @@ class GPUModelRunner(
                 self.model = model_loader.load_model(
                     vllm_config=self.vllm_config, model_config=self.model_config
                 )
+                self._maybe_init_per_request_state_adapter(self.model)
                 if self.lora_config:
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                    # LoRA wrapping can replace the model object, so re-read the
+                    # adapter from the wrapped module.
+                    self._maybe_init_per_request_state_adapter(self.model)
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)

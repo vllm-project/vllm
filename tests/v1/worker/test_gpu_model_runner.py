@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from types import SimpleNamespace
 
 import numpy as np
@@ -284,6 +285,55 @@ def test_update_states_request_finished(model_runner, dist_init):
     assert not _is_req_scheduled(model_runner, req_id)
 
 
+def test_update_states_invokes_per_request_state_adapter(model_runner, dist_init):
+    req_id = "req_0"
+
+    class _RecordingAdapter:
+        def __init__(self) -> None:
+            self.new_requests: list[str] = []
+            self.finished_batches: list[set[str]] = []
+
+        def on_new_request(
+            self, *, req_id: str, sampling_params: object | None
+        ) -> None:
+            self.new_requests.append(req_id)
+
+        def on_requests_finished(self, req_ids: Iterable[str]) -> None:
+            self.finished_batches.append(set(req_ids))
+
+        def on_before_model_forward(self, **kwargs) -> None:
+            pass
+
+        def on_before_compute_logits(self, **kwargs) -> None:
+            pass
+
+        def on_after_sample(self, **kwargs) -> None:
+            pass
+
+        def get_per_request_extra_output(self, *, req_ids: list[str]):
+            return None
+
+    adapter = _RecordingAdapter()
+    model_runner.per_request_state_adapter = adapter
+
+    model_runner._update_states(_schedule_new_request(req_id))
+    assert adapter.new_requests == [req_id]
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={},
+        total_num_scheduled_tokens=0,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids={req_id},
+        free_encoder_mm_hashes=[],
+    )
+    model_runner._update_states(scheduler_output)
+    assert {req_id} in adapter.finished_batches
+
+
 def test_build_attention_metadata_applies_mm_prefix_left_padding(
     model_runner, dist_init
 ):
@@ -292,7 +342,6 @@ def test_build_attention_metadata_applies_mm_prefix_left_padding(
 
     model_runner.is_mm_prefix_lm = True
     model_runner.mm_prefix_lm_left_padding = 1
-    model_runner._get_model_hook = lambda _: None  # type: ignore[method-assign]
 
     model_runner._update_states(scheduler_output)
     model_runner.requests[req_id].mm_features = [
