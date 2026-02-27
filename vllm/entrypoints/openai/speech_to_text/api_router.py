@@ -30,7 +30,7 @@ if TYPE_CHECKING:
 
     from starlette.datastructures import State
 
-    from vllm.engine.protocol import EngineClient
+    from vllm.engine.protocol import EngineClient, RendererClient
     from vllm.entrypoints.logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
@@ -129,6 +129,7 @@ def attach_router(app: FastAPI):
 
 
 def init_transcription_state(
+    renderer_client: "RendererClient",
     engine_client: "EngineClient",
     state: "State",
     args: "Namespace",
@@ -137,8 +138,9 @@ def init_transcription_state(
 ):
     state.openai_serving_transcription = (
         OpenAIServingTranscription(
-            engine_client,
-            state.openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
             enable_force_include_usage=args.enable_force_include_usage,
@@ -148,8 +150,9 @@ def init_transcription_state(
     )
     state.openai_serving_translation = (
         OpenAIServingTranslation(
-            engine_client,
-            state.openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
             request_logger=request_logger,
             log_error_stack=args.log_error_stack,
             enable_force_include_usage=args.enable_force_include_usage,

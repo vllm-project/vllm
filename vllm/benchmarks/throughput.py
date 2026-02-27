@@ -191,8 +191,8 @@ async def run_vllm_async(
     async with build_async_engine_client_from_engine_args(
         engine_args,
         disable_frontend_multiprocessing=disable_frontend_multiprocessing,
-    ) as llm:
-        model_config = llm.model_config
+    ) as (renderer_client, engine_client):
+        model_config = renderer_client.model_config
         assert all(
             model_config.max_model_len
             >= (request.prompt_len + request.expected_output_len)
@@ -233,17 +233,19 @@ async def run_vllm_async(
         generators = []
         start = time.perf_counter()
         if do_profile:
-            await llm.start_profile()
+            await engine_client.start_profile()
         for i, (prompt, sp, lr) in enumerate(
             zip(prompts, sampling_params, lora_requests)
         ):
-            generator = llm.generate(prompt, sp, lora_request=lr, request_id=f"test{i}")
+            generator = engine_client.generate(
+                prompt, sp, lora_request=lr, request_id=f"test{i}"
+            )
             generators.append(generator)
         all_gens = merge_async_iterators(*generators)
         async for i, res in all_gens:
             pass
         if do_profile:
-            await llm.stop_profile()
+            await engine_client.stop_profile()
         end = time.perf_counter()
         return end - start
 
@@ -745,12 +747,7 @@ def add_cli_args(parser: argparse.ArgumentParser):
         default=False,
         help="Use vLLM async engine rather than LLM class.",
     )
-    parser.add_argument(
-        "--disable-frontend-multiprocessing",
-        action="store_true",
-        default=False,
-        help="Disable decoupled async engine frontend.",
-    )
+
     parser.add_argument(
         "--disable-detokenize",
         action="store_true",

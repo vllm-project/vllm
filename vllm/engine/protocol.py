@@ -38,14 +38,11 @@ class StreamingInput:
     sampling_params: SamplingParams | None = None
 
 
-class EngineClient(ABC):
-    """Protocol class for Clients to Engine"""
+class Client(ABC):
+    """Base client interface for liveness and health monitoring.
 
-    vllm_config: VllmConfig
-    model_config: ModelConfig
-    renderer: BaseRenderer
-    io_processor: IOProcessor | None
-    input_processor: InputProcessor
+    Shared by both :class:`RendererClient` and :class:`EngineClient`.
+    """
 
     @property
     @abstractmethod
@@ -62,6 +59,46 @@ class EngineClient(ABC):
     @property
     @abstractmethod
     def dead_error(self) -> BaseException: ...
+
+    @abstractmethod
+    async def check_health(self) -> None:
+        """Raise if unhealthy"""
+        ...
+
+
+class RendererClient(Client):
+    """Client interface for the renderer layer (CPU-only operations).
+
+    Covers configuration, tokenization, and tracing — everything that
+    does not require a running inference engine.
+
+    See :class:`EngineClient` for the tok-in/tok-out inference interface.
+    """
+
+    vllm_config: VllmConfig
+    model_config: ModelConfig
+    renderer: BaseRenderer
+    io_processor: IOProcessor | None
+    input_processor: InputProcessor
+
+    @abstractmethod
+    async def is_tracing_enabled(self) -> bool: ...
+
+
+class EngineClient(Client):
+    """Engine client interface for tok-in/tok-out inference operations.
+
+    Covers generation, encoding, LoRA management, and engine control.
+    Does not extend :class:`RendererClient`; the two interfaces are
+    independently implementable for disaggregated prefill deployments.
+    """
+
+    @abstractmethod
+    async def do_log_stats(self) -> None: ...
+
+    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        """Get supported tasks"""
+        raise NotImplementedError
 
     @abstractmethod
     def generate(
@@ -107,17 +144,6 @@ class EngineClient(ABC):
             request_id: The unique id of the request,
                         or an iterable of such ids.
         """
-        ...
-
-    @abstractmethod
-    async def is_tracing_enabled(self) -> bool: ...
-
-    @abstractmethod
-    async def do_log_stats(self) -> None: ...
-
-    @abstractmethod
-    async def check_health(self) -> None:
-        """Raise if unhealthy"""
         ...
 
     @abstractmethod
@@ -214,10 +240,6 @@ class EngineClient(ABC):
         kwargs: dict | None = None,
     ):
         """Perform a collective RPC call to the given path."""
-        raise NotImplementedError
-
-    async def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
-        """Get supported tasks"""
         raise NotImplementedError
 
     async def init_weight_transfer_engine(

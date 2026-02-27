@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from vllm.config import ModelConfig
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
 )
@@ -28,16 +28,18 @@ LORA_UNLOADING_SUCCESS_MESSAGE = (
 
 
 async def _async_serving_models_init() -> OpenAIServingModels:
+    mock_renderer_client = MagicMock(spec=RendererClient)
     mock_engine_client = MagicMock(spec=EngineClient)
     # Set the max_model_len attribute to avoid missing attribute
     mock_model_config = MagicMock(spec=ModelConfig)
     mock_model_config.max_model_len = 2048
-    mock_engine_client.model_config = mock_model_config
-    mock_engine_client.input_processor = MagicMock()
-    mock_engine_client.io_processor = MagicMock()
-    mock_engine_client.renderer = MagicMock()
+    mock_renderer_client.model_config = mock_model_config
+    mock_renderer_client.input_processor = MagicMock()
+    mock_renderer_client.io_processor = MagicMock()
+    mock_renderer_client.renderer = MagicMock()
 
     serving_models = OpenAIServingModels(
+        renderer_client=mock_renderer_client,
         engine_client=mock_engine_client,
         base_model_paths=BASE_MODEL_PATHS,
         lora_modules=None,

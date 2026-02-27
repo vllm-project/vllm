@@ -14,7 +14,7 @@ from fastapi import Request
 from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
@@ -82,6 +82,7 @@ class OpenAISpeechToText(OpenAIServing):
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -92,6 +93,7 @@ class OpenAISpeechToText(OpenAIServing):
         enable_force_include_usage: bool = False,
     ):
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,

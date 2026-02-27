@@ -23,7 +23,7 @@ from tqdm import tqdm
 
 from vllm.config import config
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.openai.api_server import init_app_state
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
@@ -652,6 +652,7 @@ def make_transcription_wrapper(is_translation: bool) -> WrapperFn:
 
 
 async def build_endpoint_registry(
+    renderer_client: RendererClient,
     engine_client: EngineClient,
     args: Namespace,
 ) -> dict[str, dict[str, Any]]:
@@ -659,6 +660,7 @@ async def build_endpoint_registry(
     Build the endpoint registry with all serving objects and handler configurations.
 
     Args:
+        renderer_client: The renderer client
         engine_client: The engine client
         args: Command line arguments
 
@@ -674,7 +676,7 @@ async def build_endpoint_registry(
     # Initialize all serving objects using init_app_state
     # This provides full functionality including chat template processing,
     # LoRA support, tool servers, etc.
-    await init_app_state(engine_client, state, args, supported_tasks)
+    await init_app_state(renderer_client, engine_client, state, args, supported_tasks)
 
     # Get serving objects from state (defaulting to None if not set)
     openai_serving_chat = getattr(state, "openai_serving_chat", None)
@@ -756,10 +758,12 @@ def validate_run_batch_args(args):
 
 
 async def run_batch(
+    renderer_client: RendererClient,
     engine_client: EngineClient,
     args: Namespace,
 ) -> None:
     endpoint_registry = await build_endpoint_registry(
+        renderer_client=renderer_client,
         engine_client=engine_client,
         args=args,
     )
@@ -822,8 +826,8 @@ async def main(args: Namespace):
         args,
         usage_context=UsageContext.OPENAI_BATCH_RUNNER,
         disable_frontend_multiprocessing=False,
-    ) as engine_client:
-        await run_batch(engine_client, args)
+    ) as (renderer_client, engine_client):
+        await run_batch(renderer_client, engine_client, args)
 
 
 if __name__ == "__main__":

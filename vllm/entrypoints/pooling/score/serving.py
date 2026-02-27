@@ -8,7 +8,7 @@ from typing import Any
 
 from fastapi import Request
 
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -50,6 +50,7 @@ logger = init_logger(__name__)
 class ServingScores(OpenAIServing):
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -58,6 +59,7 @@ class ServingScores(OpenAIServing):
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,

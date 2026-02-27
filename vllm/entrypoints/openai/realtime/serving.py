@@ -8,7 +8,7 @@ from typing import Literal, cast
 
 import numpy as np
 
-from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.engine.protocol import EngineClient, RendererClient, StreamingInput
 from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.serving import OpenAIServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
@@ -29,6 +29,7 @@ class OpenAIServingRealtime(OpenAIServing):
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -36,6 +37,7 @@ class OpenAIServingRealtime(OpenAIServing):
         log_error_stack: bool = False,
     ):
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,

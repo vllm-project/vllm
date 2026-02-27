@@ -40,7 +40,7 @@ from pydantic import TypeAdapter
 
 from vllm import envs
 from vllm.config.utils import replace
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -160,6 +160,7 @@ def _extract_allowed_tools_from_mcp_requests(
 class OpenAIServingResponses(OpenAIServing):
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -177,6 +178,7 @@ class OpenAIServingResponses(OpenAIServing):
         log_error_stack: bool = False,
     ) -> None:
         super().__init__(
+            renderer_client=renderer_client,
             engine_client=engine_client,
             models=models,
             request_logger=request_logger,

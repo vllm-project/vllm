@@ -19,7 +19,7 @@ from vllm.distributed.weight_transfer.base import (
     WeightTransferUpdateRequest,
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.engine.protocol import EngineClient, StreamingInput
+from vllm.engine.protocol import EngineClient, RendererClient, StreamingInput
 from vllm.inputs import ProcessorInputs, PromptType
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -31,7 +31,6 @@ from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
 from vllm.sampling_params import RequestOutputKind, SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.tokenizers import TokenizerLike
 from vllm.tracing import init_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
 from vllm.usage.usage_lib import UsageContext
@@ -131,18 +130,18 @@ class AsyncLLM(EngineClient):
                 "enabling logging without default stat loggers."
             )
 
-        self.renderer = renderer = renderer_from_config(self.vllm_config)
+        self.renderer = renderer_from_config(self.vllm_config)
         self.io_processor = get_io_processor(
             self.vllm_config,
             self.model_config.io_processor_plugin,
         )
 
         # Convert TokPrompt --> EngineCoreRequest.
-        self.input_processor = InputProcessor(self.vllm_config, renderer)
+        self.input_processor = InputProcessor(self.vllm_config, self.renderer)
 
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
-            renderer.tokenizer,
+            self.renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
@@ -852,16 +851,6 @@ class AsyncLLM(EngineClient):
             if q is not None:
                 q.close()
 
-    @property
-    def tokenizer(self) -> TokenizerLike | None:
-        return self.renderer.tokenizer
-
-    def get_tokenizer(self) -> TokenizerLike:
-        return self.renderer.get_tokenizer()
-
-    async def is_tracing_enabled(self) -> bool:
-        return self.observability_config.otlp_traces_endpoint is not None
-
     async def do_log_stats(self) -> None:
         if self.logger_manager:
             self.logger_manager.log()
@@ -1057,3 +1046,56 @@ class AsyncLLM(EngineClient):
         await self.collective_rpc(
             "update_weights", kwargs={"update_info": update_info_dict}
         )
+
+
+class AsyncRenderer(RendererClient):
+    """Standalone RendererClient built directly from a VllmConfig.
+
+    Owns the renderer, io_processor, and input_processor — all CPU-only
+    resources.  Does not depend on :class:`AsyncLLM` or any inference engine.
+    In a disaggregated deployment this class would be replaced by a remote stub
+    that talks to a dedicated renderer process over the network.
+    """
+
+    def __init__(self, vllm_config: VllmConfig) -> None:
+        self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
+        self.renderer = renderer = renderer_from_config(vllm_config)
+        self.io_processor = get_io_processor(
+            vllm_config,
+            self.model_config.io_processor_plugin,
+        )
+        self.input_processor = InputProcessor(vllm_config, renderer)
+        self._observability_config = vllm_config.observability_config
+
+        tracing_endpoint = self._observability_config.otlp_traces_endpoint
+        if tracing_endpoint is not None:
+            init_tracer("vllm.llm_engine", tracing_endpoint)
+
+    # Client base (liveness) — renderer has no long-running background process
+
+    @property
+    def is_running(self) -> bool:
+        return True
+
+    @property
+    def is_stopped(self) -> bool:
+        return False
+
+    @property
+    def errored(self) -> bool:
+        return False
+
+    @property
+    def dead_error(self) -> BaseException:
+        raise RuntimeError("AsyncRenderer has no error state")
+
+    async def check_health(self) -> None:
+        pass  # no background process to check
+
+    def shutdown(self) -> None:
+        if renderer := getattr(self, "renderer", None):
+            renderer.shutdown()
+
+    async def is_tracing_enabled(self) -> bool:
+        return self._observability_config.otlp_traces_endpoint is not None

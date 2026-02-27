@@ -9,7 +9,7 @@ if TYPE_CHECKING:
 
     from starlette.datastructures import State
 
-    from vllm.engine.protocol import EngineClient
+    from vllm.engine.protocol import EngineClient, RendererClient
     from vllm.entrypoints.logger import RequestLogger
     from vllm.tasks import SupportedTask
 else:
@@ -43,6 +43,7 @@ def register_generate_api_routers(app: FastAPI):
 
 
 async def init_generate_state(
+    renderer_client: "RendererClient",
     engine_client: "EngineClient",
     state: "State",
     args: "Namespace",
@@ -74,8 +75,9 @@ async def init_generate_state(
 
     state.openai_serving_responses = (
         OpenAIServingResponses(
-            engine_client,
-            state.openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -94,9 +96,10 @@ async def init_generate_state(
     )
     state.openai_serving_chat = (
         OpenAIServingChat(
-            engine_client,
-            state.openai_serving_models,
-            args.response_role,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
+            response_role=args.response_role,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -121,8 +124,9 @@ async def init_generate_state(
         await state.openai_serving_chat.warmup()
     state.openai_serving_completion = (
         OpenAIServingCompletion(
-            engine_client,
-            state.openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_prompt_tokens_details=args.enable_prompt_tokens_details,
@@ -134,9 +138,10 @@ async def init_generate_state(
     )
     state.anthropic_serving_messages = (
         AnthropicServingMessages(
-            engine_client,
-            state.openai_serving_models,
-            args.response_role,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
+            response_role=args.response_role,
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
@@ -152,8 +157,9 @@ async def init_generate_state(
     )
     state.serving_tokens = (
         ServingTokens(
-            engine_client,
-            state.openai_serving_models,
+            renderer_client=renderer_client,
+            engine_client=engine_client,
+            models=state.openai_serving_models,
             request_logger=request_logger,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             log_error_stack=args.log_error_stack,

@@ -21,7 +21,7 @@ from starlette.datastructures import Headers
 import vllm.envs as envs
 from vllm.beam_search import BeamSearchSequence, create_sort_beams_key_function
 from vllm.config import ModelConfig
-from vllm.engine.protocol import EngineClient
+from vllm.engine.protocol import EngineClient, RendererClient
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
@@ -229,6 +229,7 @@ class OpenAIServing:
 
     def __init__(
         self,
+        renderer_client: RendererClient,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
@@ -238,6 +239,7 @@ class OpenAIServing:
     ):
         super().__init__()
 
+        self.renderer_client = renderer_client
         self.engine_client = engine_client
 
         self.models = models
@@ -247,10 +249,10 @@ class OpenAIServing:
 
         self.log_error_stack = log_error_stack
 
-        self.model_config = engine_client.model_config
-        self.renderer = engine_client.renderer
-        self.io_processor = engine_client.io_processor
-        self.input_processor = engine_client.input_processor
+        self.model_config = renderer_client.model_config
+        self.renderer = renderer_client.renderer
+        self.io_processor = renderer_client.io_processor
+        self.input_processor = renderer_client.input_processor
 
     async def beam_search(
         self,
@@ -1159,7 +1161,7 @@ class OpenAIServing:
         self,
         headers: Headers,
     ) -> Mapping[str, str] | None:
-        is_tracing_enabled = await self.engine_client.is_tracing_enabled()
+        is_tracing_enabled = await self.renderer_client.is_tracing_enabled()
 
         if is_tracing_enabled:
             return extract_trace_headers(headers)
