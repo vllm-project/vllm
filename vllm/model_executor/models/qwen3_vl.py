@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only Qwen3VL model compatible with HuggingFace weights."""
 
+import logging
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from functools import lru_cache, partial
 from itertools import islice
@@ -133,6 +134,30 @@ from .vision import (
 )
 
 logger = init_logger(__name__)
+
+# Fused Triton kernel availability -- checked once at import time so
+# that the per-call overhead is a single boolean test.
+try:
+    import importlib.util as _importlib_util
+    _HAS_FUSED_POS_EMBED = (
+        _importlib_util.find_spec(
+            "vllm.model_executor.kernels.fused_pos_embed_interp"
+        ) is not None
+    )
+    _HAS_FUSED_ROTARY = (
+        _importlib_util.find_spec(
+            "vllm.model_executor.kernels.fused_rotary_2d"
+        ) is not None
+    )
+    _HAS_FUSED_EVS_MROPE = (
+        _importlib_util.find_spec(
+            "vllm.model_executor.kernels.fused_evs_mrope"
+        ) is not None
+    )
+except Exception:
+    _HAS_FUSED_POS_EMBED = False
+    _HAS_FUSED_ROTARY = False
+    _HAS_FUSED_EVS_MROPE = False
 
 # We use 2048 dummy video frames that would generate vision embeddings
 # of the maximum size.
@@ -330,7 +355,13 @@ class Qwen3_VisionTransformer(nn.Module):
             if hasattr(vision_config, "deepstack_visual_indexes")
             else []
         )
-        self.num_grid_per_side = int(self.num_position_embeddings**0.5)
+        self.num_grid_per_side = int(
+            self.num_position_embeddings**0.5,
+        )
+
+        # Per-video merged token counts after early
+        # pruning. None when no pruning was applied.
+        self._pruned_video_sizes: list[int] | None = None
 
         # NOTE: This is used for creating empty tensor for all_gather for
         # DP ViT. Here out_hidden_size is enlarged due to deepstack
@@ -355,6 +386,29 @@ class Qwen3_VisionTransformer(nn.Module):
             is_neox_style=True,
             rope_parameters={"partial_rotary_factor": 0.5},
         )
+
+        # Fused Triton kernel config flags (default: enabled when
+        # the kernels are available).
+        self.use_fused_pos_embed = getattr(
+            vision_config, "use_fused_pos_embed", True,
+        ) and _HAS_FUSED_POS_EMBED
+        self.use_fused_rotary = getattr(
+            vision_config, "use_fused_rotary", True,
+        ) and _HAS_FUSED_ROTARY
+
+        # Pre-compute inv_freq for the fused rotary kernel so we
+        # do not recompute it on every forward call.
+        if self.use_fused_rotary:
+            rotary_dim = int(head_dim * 0.5)  # partial_rotary_factor
+            self._inv_freq = 1.0 / (
+                10000.0
+                ** (
+                    torch.arange(
+                        0, rotary_dim, 2, dtype=torch.float32,
+                    )
+                    / rotary_dim
+                )
+            )
 
         self.merger = Qwen3_VisionPatchMerger(
             d_model=vision_config.out_hidden_size,
@@ -436,7 +490,6 @@ class Qwen3_VisionTransformer(nn.Module):
         return torch.from_numpy(np.stack([hpos_ids, wpos_ids], axis=-1))
 
     def rot_pos_emb(self, grid_thw: list[list[int]]):
-        max_grid_size = max(max(h, w) for _, h, w in grid_thw)
         pos_ids = [
             self.rot_pos_ids(h, w, self.spatial_merge_size)
             if t == 1
@@ -445,7 +498,28 @@ class Qwen3_VisionTransformer(nn.Module):
         ]
         pos_ids = torch.cat(pos_ids, dim=0).to(self.device, non_blocking=True)
 
-        # Use pre-computed cos_sin_cache from RotaryEmbedding
+        # Try fused Triton kernel that computes cos/sin directly
+        # from inv_freq, avoiding the table-lookup path entirely.
+        if self.use_fused_rotary:
+            try:
+                from vllm.model_executor.kernels.fused_rotary_2d import (
+                    fused_rotary_2d,
+                )
+                inv_freq = self._inv_freq.to(
+                    self.device, non_blocking=True,
+                )
+                return fused_rotary_2d(
+                    pos_ids, inv_freq, dtype=self.dtype,
+                )
+            except Exception:
+                logger.debug(
+                    "Fused rotary 2D kernel failed, falling "
+                    "back to PyTorch",
+                    exc_info=True,
+                )
+
+        # PyTorch fallback: table-lookup via cos_sin_cache
+        max_grid_size = max(max(h, w) for _, h, w in grid_thw)
         cos, sin = self.rotary_pos_emb.get_cos_sin(max_grid_size)
 
         cos_combined = cos[pos_ids].flatten(1)
@@ -454,6 +528,37 @@ class Qwen3_VisionTransformer(nn.Module):
         return cos_combined, sin_combined
 
     def fast_pos_embed_interpolate(self, grid_thw: list[list[int]]) -> torch.Tensor:
+        # Try the fused Triton kernel first; fall back to PyTorch on
+        # any failure (e.g., unsupported dtype, Triton compilation
+        # error, CPU device).
+        if self.use_fused_pos_embed:
+            try:
+                from vllm.model_executor.kernels.fused_pos_embed_interp import (
+                    fused_pos_embed_interpolate,
+                )
+                return fused_pos_embed_interpolate(
+                    grid_thw=grid_thw,
+                    embed_weight=self.pos_embed.weight,
+                    num_grid_per_side=self.num_grid_per_side,
+                    merge_size=self.spatial_merge_size,
+                    dtype=self.dtype,
+                    device=self.device,
+                )
+            except Exception:
+                logger.debug(
+                    "Fused pos embed kernel failed, falling back "
+                    "to PyTorch",
+                    exc_info=True,
+                )
+
+        return self._pytorch_pos_embed_interpolate(grid_thw)
+
+    def _pytorch_pos_embed_interpolate(
+        self, grid_thw: list[list[int]],
+    ) -> torch.Tensor:
+        """PyTorch reference implementation of position embedding
+        interpolation with bilinear weights and spatial-merge
+        permutation."""
         num_grid_per_side = self.num_grid_per_side
         m_size = self.spatial_merge_size
         hidden_dim = self.pos_embed.embedding_dim
@@ -526,12 +631,58 @@ class Qwen3_VisionTransformer(nn.Module):
             max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
         return max_seqlen
 
+    def _compute_pruned_sizes(
+        self,
+        cu_seqlens: torch.Tensor,
+        grid_thw_list: list[list[int]],
+    ) -> list[int]:
+        """Compute per-video merged token counts
+        from post-pruning cu_seqlens.
+
+        After early pruning, cu_seqlens tracks per-frame
+        boundaries with potentially different token counts
+        per frame. This sums up all frame tokens for each
+        video and divides by spatial_merge_size^2 to get
+        the merged token count.
+
+        Args:
+            cu_seqlens: Post-pruning cumulative lengths.
+            grid_thw_list: [T, H, W] per video/image.
+
+        Returns:
+            List of merged token counts per video.
+        """
+        merge_unit = self.spatial_merge_size ** 2
+        sizes = []
+        frame_idx = 0
+        for thw in grid_thw_list:
+            t = int(thw[0])
+            video_tokens = (
+                cu_seqlens[frame_idx + t]
+                - cu_seqlens[frame_idx]
+            )
+            # Convert from ViT tokens to merged tokens
+            sizes.append(
+                int(video_tokens.item()) // merge_unit,
+            )
+            frame_idx += t
+        return sizes
+
     def forward(
         self,
         x: torch.Tensor,
         grid_thw: torch.Tensor | list[list[int]],
+        prune_layer: int = -1,
+        prune_rate: float = 0.0,
     ) -> torch.Tensor:
-        hidden_states = x.to(device=self.device, dtype=self.dtype, non_blocking=True)
+        # Reset pruned sizes from any previous call
+        self._pruned_video_sizes = None
+
+        hidden_states = x.to(
+            device=self.device,
+            dtype=self.dtype,
+            non_blocking=True,
+        )
         hidden_states = self.patch_embed(hidden_states)
 
         if isinstance(grid_thw, list):
@@ -541,19 +692,28 @@ class Qwen3_VisionTransformer(nn.Module):
             grid_thw_list = grid_thw.tolist()
             grid_thw = grid_thw.numpy()
 
-        pos_embeds = self.fast_pos_embed_interpolate(grid_thw_list)
-        hidden_states = hidden_states + pos_embeds
-        rotary_pos_emb_cos, rotary_pos_emb_sin = self.rot_pos_emb(grid_thw_list)
-
-        cu_seqlens = np.repeat(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
-            axis=0, dtype=np.int32
+        pos_embeds = self.fast_pos_embed_interpolate(
+            grid_thw_list,
         )
-        cu_seqlens = np.concatenate([np.zeros(1, dtype=np.int32), cu_seqlens])
+        hidden_states = hidden_states + pos_embeds
+        rotary_pos_emb_cos, rotary_pos_emb_sin = (
+            self.rot_pos_emb(grid_thw_list)
+        )
+
+        cu_seqlens = np.repeat(
+            grid_thw[:, 1] * grid_thw[:, 2],
+            grid_thw[:, 0],
+        ).cumsum(axis=0, dtype=np.int32)
+        cu_seqlens = np.concatenate(
+            [np.zeros(1, dtype=np.int32), cu_seqlens],
+        )
         cu_seqlens = torch.from_numpy(cu_seqlens)
 
         hidden_states = hidden_states.unsqueeze(1)
         max_seqlen = self.compute_attn_mask_seqlen(cu_seqlens)
-        cu_seqlens = cu_seqlens.to(self.device, non_blocking=True)
+        cu_seqlens = cu_seqlens.to(
+            self.device, non_blocking=True,
+        )
 
         deepstack_feature_lists = []
         for layer_num, blk in enumerate(self.blocks):
@@ -564,15 +724,70 @@ class Qwen3_VisionTransformer(nn.Module):
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
             )
-            if layer_num in self.deepstack_visual_indexes:
-                deepstack_merger_idx = self.deepstack_visual_indexes.index(layer_num)
-                deepstack_feature = self.deepstack_merger_list[deepstack_merger_idx](
-                    hidden_states
+
+            # Early ViT token pruning: prune at the
+            # specified intermediate layer using EVS
+            # dissimilarity on the current hidden states.
+            if (
+                layer_num == prune_layer
+                and prune_rate > 0
+            ):
+                from vllm.model_executor.kernels.vision_early_prune import (
+                    compute_intermediate_evs,
+                    prune_and_reindex,
                 )
-                deepstack_feature_lists.append(deepstack_feature)
+
+                retention_mask = compute_intermediate_evs(
+                    hidden_states,
+                    grid_thw_list,
+                    self.spatial_merge_size,
+                    prune_rate,
+                )
+                (
+                    hidden_states,
+                    cu_seqlens,
+                    rotary_pos_emb_cos,
+                    rotary_pos_emb_sin,
+                    max_seqlen,
+                ) = prune_and_reindex(
+                    hidden_states,
+                    retention_mask,
+                    cu_seqlens,
+                    rotary_pos_emb_cos,
+                    rotary_pos_emb_sin,
+                    grid_thw_list,
+                    self.spatial_merge_size,
+                )
+
+                # Store per-video retained ViT token
+                # counts so _process_video_input can
+                # compute correct split sizes after
+                # the merger.
+                self._pruned_video_sizes = (
+                    self._compute_pruned_sizes(
+                        cu_seqlens,
+                        grid_thw_list,
+                    )
+                )
+
+            if layer_num in self.deepstack_visual_indexes:
+                ds_idx = (
+                    self.deepstack_visual_indexes.index(
+                        layer_num,
+                    )
+                )
+                deepstack_feature = (
+                    self.deepstack_merger_list[ds_idx](
+                        hidden_states,
+                    )
+                )
+                deepstack_feature_lists.append(
+                    deepstack_feature,
+                )
         hidden_states = self.merger(hidden_states)
         hidden_states = torch.cat(
-            [hidden_states] + deepstack_feature_lists, dim=1
+            [hidden_states] + deepstack_feature_lists,
+            dim=1,
         )  # [seq_len, hidden_size * (1 + depth_of_deepstack)]
         return hidden_states
 
@@ -1267,11 +1482,33 @@ class Qwen3VLForConditionalGeneration(
 
         self.config = config
         self.multimodal_config = multimodal_config
-        self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
-        self.video_pruning_rate = multimodal_config.video_pruning_rate
+        self.use_data_parallel = (
+            multimodal_config.mm_encoder_tp_mode == "data"
+        )
+        self.video_pruning_rate = (
+            multimodal_config.video_pruning_rate
+        )
         self.is_multimodal_pruning_enabled = (
             multimodal_config.is_multimodal_pruning_enabled()
         )
+
+        # Early ViT pruning config: prune tokens at an
+        # intermediate ViT layer using EVS dissimilarity.
+        # vision_prune_layer=-1 disables early pruning.
+        # vision_prune_rate reuses video_pruning_rate by
+        # default but can be overridden.
+        self.vision_prune_layer = getattr(
+            config, "vision_prune_layer", -1,
+        )
+        self.vision_prune_rate = getattr(
+            config, "vision_prune_rate",
+            self.video_pruning_rate or 0.0,
+        )
+
+        # Fused EVS+mRoPE Triton kernel config flag.
+        self.use_fused_evs_mrope = getattr(
+            config, "use_fused_evs_mrope", True,
+        ) and _HAS_FUSED_EVS_MROPE
 
         self.use_deepstack = hasattr(config.vision_config, "deepstack_visual_indexes")
         self.deepstack_num_level = (
@@ -1464,11 +1701,25 @@ class Qwen3VLForConditionalGeneration(
                     self.visual, pixel_values_videos, grid_thw_list, rope_type="rope_3d"
                 )
             else:
-                video_embeds = self.visual(pixel_values_videos, grid_thw=grid_thw)
+                video_embeds = self.visual(
+                    pixel_values_videos,
+                    grid_thw=grid_thw,
+                    prune_layer=self.vision_prune_layer,
+                    prune_rate=self.vision_prune_rate,
+                )
 
-        # Split concatenated embeddings for each video item.
-        merge_size = self.visual.spatial_merge_size
-        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
+        # Split concatenated embeddings for each video.
+        # When early ViT pruning was applied, use the
+        # pruned sizes stored by the ViT forward pass.
+        if self.visual._pruned_video_sizes is not None:
+            sizes = self.visual._pruned_video_sizes
+        else:
+            merge_size = self.visual.spatial_merge_size
+            sizes = (
+                grid_thw.prod(-1)
+                // merge_size
+                // merge_size
+            ).tolist()
         return video_embeds.split(sizes)
 
     def _postprocess_image_embeds_evs(
@@ -1525,22 +1776,50 @@ class Qwen3VLForConditionalGeneration(
         grid_thw_list = grid_thw.tolist()
         merge_size = self.visual.spatial_merge_size
 
-        # Cast to long to match the original code
-        # https://github.com/huggingface/transformers/blob/41980ce93e775f6c88500c51c8db7946fc6a2add/src/transformers/models/qwen2_5_vl/modular_qwen2_5_vl.py#L491 # noqa
         second_per_grid_ts = video_input.get("second_per_grid_ts")
         if second_per_grid_ts is None:
             # For Qwen3-VL, second_per_grid_ts might not be available
             # Use default value of 1.0 for each video
-            second_per_grid_ts = torch.ones(len(grid_thw_list), dtype=torch.long)
-        else:
-            second_per_grid_ts = second_per_grid_ts.long()
+            second_per_grid_ts = torch.ones(len(grid_thw_list),
+                                            dtype=torch.long)
         tokens_per_second = getattr(self.config.vision_config, "tokens_per_second", 1.0)
 
         video_embeds_out = []
         for emb, size, video_second_per_grid_t in zip(
             video_embeds_split, grid_thw_list, second_per_grid_ts
         ):
-            # For each video, we compute retention mask using EVS
+            # Try the fused Triton kernel that combines EVS
+            # dissimilarity + mRoPE position generation into a
+            # single pipeline, avoiding a full (T*H'*W', 4)
+            # mRoPE grid allocation.
+            if self.use_fused_evs_mrope:
+                try:
+                    from vllm.model_executor.kernels.fused_evs_mrope import (
+                        fused_evs_prune_with_mrope,
+                    )
+                    retention_mask, positions = fused_evs_prune_with_mrope(
+                        video_embeds=emb,
+                        video_size_thw=size,
+                        spatial_merge_size=merge_size,
+                        q=self.video_pruning_rate,
+                        tokens_per_second=tokens_per_second,
+                        video_second_per_grid=video_second_per_grid_t,
+                    )
+
+                    emb = emb[retention_mask]
+                    emb = torch.cat(
+                        [emb, positions.to(emb.device)], dim=1,
+                    )
+                    video_embeds_out.append(emb)
+                    continue
+                except Exception:
+                    logger.debug(
+                        "Fused EVS+mRoPE kernel failed, falling "
+                        "back to PyTorch",
+                        exc_info=True,
+                    )
+
+            # PyTorch fallback: separate retention mask + mRoPE
             retention_mask = compute_retention_mask(
                 emb,
                 size,
@@ -1548,24 +1827,30 @@ class Qwen3VLForConditionalGeneration(
                 q=self.video_pruning_rate,
             )
 
-            # Debug logging for EVS pruning
-            logger.debug(
-                "EVS: Video tokens pruned from %d to %d (T=%d,H=%d,W=%d, "
-                "pruning_rate=%.2f, reduction=%.1f%%)",
-                emb.shape[0],
-                retention_mask.sum().item(),
-                size[0],
-                size[1],
-                size[2],
-                self.video_pruning_rate,
-                (1 - retention_mask.float().mean().item()) * 100,
-            )
+            # Debug logging for EVS pruning -- guarded to avoid
+            # GPU-CPU sync (.item()) on the hot path.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "EVS: Video tokens pruned from %d to %d "
+                    "(T=%d,H=%d,W=%d, "
+                    "pruning_rate=%.2f, reduction=%.1f%%)",
+                    emb.shape[0],
+                    retention_mask.sum().item(),
+                    size[0],
+                    size[1],
+                    size[2],
+                    self.video_pruning_rate,
+                    (1 - retention_mask.float().mean().item()) * 100,
+                )
 
+            # Pass tensor scalar directly to avoid GPU-CPU sync
+            # from .item(); compute_mrope_for_media accepts both
+            # Python floats and tensor scalars.
             positions = compute_mrope_for_media(
                 size,
                 merge_size,
                 tokens_per_second=tokens_per_second,
-                video_second_per_grid=video_second_per_grid_t.item(),
+                video_second_per_grid=video_second_per_grid_t,
             ).to(emb.device)
 
             emb = emb[retention_mask]
@@ -1928,12 +2213,31 @@ class Qwen3VLForConditionalGeneration(
                     )
                 multimodal_embeddings += tuple(image_embeddings)
             if modality == "video":
-                video_embeddings = self._process_video_input(multimodal_input)
-                if self.is_multimodal_pruning_enabled:
-                    video_embeddings = self._postprocess_video_embeds_evs(
-                        video_embeddings, multimodal_input
+                video_embeddings = self._process_video_input(
+                    multimodal_input,
+                )
+                # Skip post-ViT EVS when early ViT
+                # pruning was applied: the token counts
+                # no longer match the expected T*H'*W'
+                # grid shape that compute_retention_mask
+                # requires.
+                early_pruned = (
+                    self.visual._pruned_video_sizes
+                    is not None
+                )
+                if (
+                    self.is_multimodal_pruning_enabled
+                    and not early_pruned
+                ):
+                    video_embeddings = (
+                        self._postprocess_video_embeds_evs(
+                            video_embeddings,
+                            multimodal_input,
+                        )
                     )
-                multimodal_embeddings += tuple(video_embeddings)
+                multimodal_embeddings += tuple(
+                    video_embeddings,
+                )
         return multimodal_embeddings
 
     def _compute_deepstack_embeds(

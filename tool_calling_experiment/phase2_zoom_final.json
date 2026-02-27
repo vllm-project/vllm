@@ -1,0 +1,31 @@
+{
+  "experiment": "phase2_zoom_final",
+  "timestamp": "2026-02-16T16:47:30",
+  "task17": {
+    "description": "Zoom false IZ 8B",
+    "accuracy": {
+      "total": 100,
+      "correct": 0,
+      "accuracy": 0.0,
+      "baseline_correct": 0,
+      "baseline_accuracy": 0.0,
+      "delta": 0.0,
+      "used_zoom": 0,
+      "zoom_rate": 0.0
+    }
+  },
+  "task25": {
+    "description": "Token cost analysis",
+    "per_task": {
+      "task17": {
+        "n_samples": 100,
+        "total_zooms": 0,
+        "avg_latency_ms": 0.0,
+        "avg_generation_ms": 0.0,
+        "avg_tool_ms": 0.0,
+        "accuracy": 0.0,
+        "delta": 0.0
+      }
+    }
+  }
+}

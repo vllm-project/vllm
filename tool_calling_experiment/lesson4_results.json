@@ -1,0 +1,4668 @@
+{
+  "experiment": "lesson4_contradictory_tools",
+  "model": "/fsx/models/Qwen3-VL-8B-Instruct",
+  "timestamp": "2026-02-16T06:48:07.464543+00:00",
+  "num_samples": 30,
+  "results": [
+    {
+      "sample_id": 2,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "stop",
+      "predicted_lat_action": "lc_left",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-81e546745f32053b",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-ad57a9fd4e59ec5d",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_left\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a7d9c30e8feb76fc",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-81e546745f32053b"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_left"
+          },
+          "call_id": "chatcmpl-tool-ad57a9fd4e59ec5d"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a7d9c30e8feb76fc"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_left"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_left",
+            "observed": true,
+            "count": 22,
+            "rate": 0.06832298136645963,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": -0.3
+          },
+          "call_id": "chatcmpl-tool-95884bc205c9424b"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": -0.3
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": -0.3,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+stop."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: stop\nFINAL_LAT_ACTION: lc_left\nREVISED: no\nREASON: The prediction is supported by historical data showing that \"stop\" and \"lc_left\" are compatible actions for an \"incident_zone\" (observed 22 times). Although \"incident_zone\" is rare (3.7% base rate) and often confused with \"nominal\" (41% error rate), the action combination is valid. Waypoint feasibility cannot be assessed due to lack of data for this specific combination.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 6,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "stop",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-853cb2ec830f691d",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a0f13cc09afe94f5",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b44a39c326732c6f",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-853cb2ec830f691d"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-a0f13cc09afe94f5"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-b44a39c326732c6f"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null",
+            "observed": true,
+            "count": 81,
+            "rate": 0.2515527950310559,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-bb83c698ccc74293"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+stop."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: stop\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"stop|null\" is observed (25.2% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms this specific combination is valid. The waypoint feasibility check cannot be performed due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 7,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "lc_right",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bdeb15fcea6fbc88",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-84613ab427e49a47",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_right\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b8e1ce935b6995e1",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-bdeb15fcea6fbc88"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "call_id": "chatcmpl-tool-84613ab427e49a47"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-b8e1ce935b6995e1"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right",
+            "observed": true,
+            "count": 23,
+            "rate": 0.07142857142857142,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8
+          },
+          "call_id": "chatcmpl-tool-92949dfb1d451a6a"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: lc_right\nREVISED: no\nREASON: The prediction is supported by historical data showing that \"slowdown\" and \"lc_right\" are compatible actions for an \"incident_zone\" scene (observed 23 times). Although \"incident_zone\" is a rare scene (3.7% base rate) and frequently confused with \"nominal\" (41% error rate), the action combination is valid. The waypoint feasibility check could not be performed due to lack of data for this specific combination, but the scene-action compatibility is confirmed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "lc_left",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a6ffc72caf8661fd",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b0675f69a4632359",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_left\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b19f7110745b8faa",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a6ffc72caf8661fd"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left"
+          },
+          "call_id": "chatcmpl-tool-b0675f69a4632359"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-b19f7110745b8faa"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left",
+            "observed": true,
+            "count": 41,
+            "rate": 0.12732919254658384,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8
+          },
+          "call_id": "chatcmpl-tool-aa55ff74dc587812"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: lc_left\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is rare but plausible (3.7% base rate), the action combination \"slowdown|lc_left\" is observed (12.7% rate), and it is not highly confused with other scenes (41% confusion rate with \"nominal\"). While waypoint feasibility data is unavailable, the scene-action compatibility and low confusion risk justify maintaining the original prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 12,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "lc_right",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a6247b3eace0797e",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-ae27e406ee677c14",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_right\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a10bbb8c107b3591",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a6247b3eace0797e"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "call_id": "chatcmpl-tool-ae27e406ee677c14"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a10bbb8c107b3591"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right",
+            "observed": true,
+            "count": 23,
+            "rate": 0.07142857142857142,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8
+          },
+          "call_id": "chatcmpl-tool-8b917b3aa077f0ba"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: lc_right\nREVISED: no\nREASON: The prediction is supported by historical data showing that \"slowdown\" and \"lc_right\" are compatible actions for an \"incident_zone\" scene (observed 23 times). Although \"incident_zone\" is a rare scene (3.7% base rate) and often confused with \"nominal\" (41% error rate), the action combination is valid. The waypoint feasibility check could not be performed due to lack of data for this specific combination, but the scene-action compatibility is confirmed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 13,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "stop",
+      "predicted_lat_action": "lc_right",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-86b78ebf27084d2a",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-93cf2db207afae43",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_right\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-93ccbac7c2358665",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-86b78ebf27084d2a"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right"
+          },
+          "call_id": "chatcmpl-tool-93cf2db207afae43"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-93ccbac7c2358665"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right",
+            "observed": true,
+            "count": 4,
+            "rate": 0.012422360248447204,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": 0.2
+          },
+          "call_id": "chatcmpl-tool-82d8a64d67ef601f"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": 0.2
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": 0.2,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+stop."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: stop\nFINAL_LAT_ACTION: lc_right\nREVISED: no\nREASON: The prediction is supported by historical data showing that \"stop\" and \"lc_right\" are compatible actions for an \"incident_zone\" scene (observed 4 times). Although \"incident_zone\" is a rare scene (3.7% base rate) and frequently confused with \"nominal\" (41% error rate), the action combination is valid. The waypoint feasibility check returned no data for this specific combination, but the action compatibility and scene rarity are the primary factors. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 14,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "lc_right",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9e42091ae31265d2",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a05959542950ca44",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_right\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-8ca5fcb81eff195f",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-9e42091ae31265d2"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "call_id": "chatcmpl-tool-a05959542950ca44"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-8ca5fcb81eff195f"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right",
+            "observed": true,
+            "count": 23,
+            "rate": 0.07142857142857142,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8
+          },
+          "call_id": "chatcmpl-tool-bf3a1eaa2ea5d07c"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: lc_right\nREVISED: no\nREASON: The prediction is supported by historical data showing that \"slowdown\" and \"lc_right\" are compatible actions for an \"incident_zone\" scene (observed 23 times). Although \"incident_zone\" is a rare scene (3.7% base rate) and often confused with \"nominal\" (41% error rate), the action combination is valid. The waypoint feasibility check could not be performed due to lack of data for this specific combination, but the scene-action compatibility is confirmed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 15,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "lc_left",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-81ca6e42cf27b832",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9fbce54c70bc6769",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_left\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a0e5e0af841bed1b",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-81ca6e42cf27b832"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left"
+          },
+          "call_id": "chatcmpl-tool-9fbce54c70bc6769"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a0e5e0af841bed1b"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left",
+            "observed": true,
+            "count": 41,
+            "rate": 0.12732919254658384,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8
+          },
+          "call_id": "chatcmpl-tool-9fbdde1b4280428c"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: lc_left\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is rare but plausible (3.7% base rate), the action combination \"slowdown|lc_left\" is observed (12.7% rate), and it is not highly confused with other scenes (41% confusion rate with \"nominal\"). While waypoint feasibility data is unavailable, the scene-action compatibility and low confusion risk justify maintaining the original prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 22,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "lc_left",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-90962f1deb500259",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-be44b8c705e9eba3",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_left\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-812ba12f26cfca4f",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-90962f1deb500259"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left"
+          },
+          "call_id": "chatcmpl-tool-be44b8c705e9eba3"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-812ba12f26cfca4f"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left",
+            "observed": true,
+            "count": 41,
+            "rate": 0.12732919254658384,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8
+          },
+          "call_id": "chatcmpl-tool-9e6c30656227799f"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": -2.1,
+            "first_waypoint_y": -1.8,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: lc_left\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is rare but plausible (3.7% base rate), the action combination \"slowdown|lc_left\" is observed (12.7% rate), and it is not highly confused with other scenes (41% confusion rate with \"nominal\"). While waypoint feasibility data is unavailable, the scene-action compatibility and low confusion risk justify maintaining the original prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 26,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "lc_right",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-942cd9a168a48229",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-8961c800c202a0e8",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_right\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a033d70ff07706d8",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-942cd9a168a48229"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "call_id": "chatcmpl-tool-8961c800c202a0e8"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a033d70ff07706d8"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right",
+            "observed": true,
+            "count": 23,
+            "rate": 0.07142857142857142,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8
+          },
+          "call_id": "chatcmpl-tool-823581aa700eb049"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 3.2,
+            "first_waypoint_y": 1.8,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: lc_right\nREVISED: no\nREASON: The prediction is supported by historical data showing that \"slowdown\" and \"lc_right\" are compatible actions for an \"incident_zone\" scene (observed 23 times). Although \"incident_zone\" is a rare scene (3.7% base rate) and often confused with \"nominal\" (41% error rate), the action combination is valid. The waypoint feasibility check could not be performed due to lack of data for this specific combination, but the scene-action compatibility is confirmed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 30,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bb02aede55365a9c",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a5c245400c07d2a5",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b3679e8be09b54f7",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-bb02aede55365a9c"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-a5c245400c07d2a5"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-b3679e8be09b54f7"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null",
+            "observed": true,
+            "count": 104,
+            "rate": 0.32298136645962733,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-b36e4f62e484ed55"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"slowdown|null\" is common for this scene (32.3% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms this combination is typical. The waypoint feasibility check is inconclusive due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 35,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "stop",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a5ac1fbc033f38ae",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b2b41d88a568557d",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b6cba6a056fdd839",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a5ac1fbc033f38ae"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-b2b41d88a568557d"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-b6cba6a056fdd839"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null",
+            "observed": true,
+            "count": 81,
+            "rate": 0.2515527950310559,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-b740c19acae3f03e"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+stop."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: stop\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"stop|null\" is observed (25.2% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms this combination is typical. The waypoint feasibility check is inconclusive due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 38,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "proceed",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a3632166ef6d97f2",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-aaaa9ce7c77d8577",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"proceed\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-82bbe3fd7dd9d456",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a3632166ef6d97f2"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "proceed",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-aaaa9ce7c77d8577"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-82bbe3fd7dd9d456"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "proceed",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "proceed",
+            "lat_action": "null",
+            "observed": true,
+            "count": 34,
+            "rate": 0.10559006211180125,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "proceed",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-9bc100b900bfe45e"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "proceed",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "proceed",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+proceed."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: lc_left\nREVISED: yes\nREASON: The predicted \"incident_zone\" scene is rare (3.7% base rate) and has a high confusion risk with \"nominal\" (41% misclassification rate). The action \"proceed\" is not typical for incident zones (only 10.5% of observed actions), with \"slowdown\" or \"stop\" being more common. Given the high confusion risk and atypical action, the prediction is revised to \"nominal\" with \"slowdown\" and \"lc_left\" as the most compatible actions.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 41,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bc5ff9b8dcc000c0",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a82a7c2b70ad8c00",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b817973eb2ec9f8d",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-bc5ff9b8dcc000c0"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-a82a7c2b70ad8c00"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-b817973eb2ec9f8d"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null",
+            "observed": true,
+            "count": 104,
+            "rate": 0.32298136645962733,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-8e5259d157c1c50d"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"slowdown|null\" is commonly observed in this scene (32.3% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms the prediction is plausible. The waypoint feasibility check is inconclusive due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 42,
+      "category": "A_false_positive",
+      "category_desc": "pred=incident_zone, GT=nominal (should revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "stop",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a1aea61c61a11007",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b8cd32b2769a3025",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a7036522618147c6",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a1aea61c61a11007"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-b8cd32b2769a3025"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a7036522618147c6"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null",
+            "observed": true,
+            "count": 81,
+            "rate": 0.2515527950310559,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-ac2e8c88b0f06b3e"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+stop."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: stop\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"stop|null\" is observed (25.2% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms this combination is typical. The waypoint feasibility check is inconclusive due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8020,
+      "category": "B_true_positive",
+      "category_desc": "pred=incident_zone, GT=incident_zone (should NOT revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "stop",
+      "predicted_lat_action": "lc_right",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "stop",
+      "lat_action_gt": "lc_right",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-be8510ba95190f45",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-82101aebd1af19a9",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_right\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a3e4d435ef477dcb",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-be8510ba95190f45"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right"
+          },
+          "call_id": "chatcmpl-tool-82101aebd1af19a9"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a3e4d435ef477dcb"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right",
+            "observed": true,
+            "count": 4,
+            "rate": 0.012422360248447204,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": 0.2
+          },
+          "call_id": "chatcmpl-tool-90a404386da9ccbc"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": 0.2
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.5,
+            "first_waypoint_y": 0.2,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+stop."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: stop\nFINAL_LAT_ACTION: lc_right\nREVISED: no\nREASON: The prediction is supported by historical data showing that \"stop\" and \"lc_right\" are compatible actions for an \"incident_zone\" scene (observed 4 times). Although \"incident_zone\" is a rare scene (3.7% base rate) and frequently confused with \"nominal\" (41% error rate), the action combination is valid. The waypoint feasibility check returned no data for this specific combination, but the action compatibility and scene rarity are the primary factors. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8021,
+      "category": "B_true_positive",
+      "category_desc": "pred=incident_zone, GT=incident_zone (should NOT revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "slowdown",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8575bf67a7aee7c9",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9a39d2b9a4ffa028",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9fc64698897d173c",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-8575bf67a7aee7c9"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-9a39d2b9a4ffa028"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-9fc64698897d173c"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null",
+            "observed": true,
+            "count": 104,
+            "rate": 0.32298136645962733,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-bf1f14a8504107d1"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"slowdown|null\" is commonly observed in this scene (32.3% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms the prediction is plausible. The waypoint feasibility check is inconclusive due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8022,
+      "category": "B_true_positive",
+      "category_desc": "pred=incident_zone, GT=incident_zone (should NOT revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "slowdown",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8c11f2b37e3c9333",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-98efc3326c340f73",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-acb320a809cd8c08",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-8c11f2b37e3c9333"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-98efc3326c340f73"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-acb320a809cd8c08"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null",
+            "observed": true,
+            "count": 104,
+            "rate": 0.32298136645962733,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-81d2f994c668ef51"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"slowdown|null\" is commonly observed in this scene (32.3% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms the prediction is plausible. The waypoint feasibility check is inconclusive due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8023,
+      "category": "B_true_positive",
+      "category_desc": "pred=incident_zone, GT=incident_zone (should NOT revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "stop",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "stop",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a1996a771fda8715",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9b606db0d19c919b",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-928886820a8f10f1",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-a1996a771fda8715"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-9b606db0d19c919b"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-928886820a8f10f1"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null",
+            "observed": true,
+            "count": 81,
+            "rate": 0.2515527950310559,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-bb79bb162fd42155"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "first_waypoint_x": 0.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+stop."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: stop\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"stop|null\" is observed (25.2% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms this combination is typical. The waypoint feasibility check is inconclusive due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8025,
+      "category": "B_true_positive",
+      "category_desc": "pred=incident_zone, GT=incident_zone (should NOT revise)",
+      "predicted_scene": "incident_zone",
+      "predicted_long_action": "slowdown",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "slowdown",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-948fa19c2213a11a",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-abebfaa3b29fde87",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-adeeb141864bab45",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-948fa19c2213a11a"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-abebfaa3b29fde87"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "call_id": "chatcmpl-tool-adeeb141864bab45"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": true,
+            "warning": "incident_zone is rare (base rate 3.7%). Consider whether this could actually be nominal."
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "null",
+            "observed": true,
+            "count": 104,
+            "rate": 0.32298136645962733,
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.32298136645962733
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.2515527950310559
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.12732919254658384
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "note": "41.0% of incident_zone scenes are misclassified as nominal."
+          }
+        }
+      ],
+      "tool_calls_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "call_id": "chatcmpl-tool-a8f9b0b57a1f0687"
+        }
+      ],
+      "tool_results_turn2": [
+        {
+          "name": "check_waypoint_feasibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "first_waypoint_x": 5.0,
+            "first_waypoint_y": 0.0,
+            "feasible": null,
+            "warning": "No waypoint data for incident_zone+slowdown."
+          }
+        }
+      ],
+      "num_turns": 3,
+      "final_response": "FINAL_SCENE: incident_zone\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The prediction is supported by historical data: \"incident_zone\" is a rare but valid scene type (3.7% base rate), and the action combination \"slowdown|null\" is commonly observed in this scene (32.3% rate). While there is a high confusion risk with \"nominal\" (41% error rate), the action compatibility check confirms the prediction is plausible. The waypoint feasibility check is inconclusive due to lack of data, but this does not invalidate the scene-action prediction.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8019,
+      "category": "C_false_negative",
+      "category_desc": "pred=nominal, GT=incident_zone (under-predicted)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "slowdown",
+      "lat_action_gt": "lc_left",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9cca1827560bb372",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-919603d6cb96347e",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-ab6ae63a620adb57",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-9cca1827560bb372"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-919603d6cb96347e"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-ab6ae63a620adb57"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8028,
+      "category": "C_false_negative",
+      "category_desc": "pred=nominal, GT=incident_zone (under-predicted)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "slowdown",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b02737242a1811fc",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9b94140e56ed9774",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-887551058d70ae34",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-b02737242a1811fc"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-9b94140e56ed9774"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-887551058d70ae34"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8030,
+      "category": "C_false_negative",
+      "category_desc": "pred=nominal, GT=incident_zone (under-predicted)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "stop",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bdcfb2542f9463de",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9d8b035defd53d1a",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b771d3e04744c2f5",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-bdcfb2542f9463de"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-9d8b035defd53d1a"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-b771d3e04744c2f5"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8032,
+      "category": "C_false_negative",
+      "category_desc": "pred=nominal, GT=incident_zone (under-predicted)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "proceed",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9e886a3213ef4522",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-a714a8317c6c6772",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-af5e96ae88c1f676",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-9e886a3213ef4522"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-a714a8317c6c6772"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-af5e96ae88c1f676"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 8034,
+      "category": "C_false_negative",
+      "category_desc": "pred=nominal, GT=incident_zone (under-predicted)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "incident_zone",
+      "long_action_gt": "slowdown",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9754ac6372738ccd",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-812bacc3cdf0b220",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-9f5602a2b5407344",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-9754ac6372738ccd"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-812bacc3cdf0b220"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-9f5602a2b5407344"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 0,
+      "category": "D_correct",
+      "category_desc": "pred matches GT (tools should confirm)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b5d1145d8e2ee40c",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-bb6c7ce26d837b6e",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-aa3994a2fa3435a0",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-b5d1145d8e2ee40c"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-bb6c7ce26d837b6e"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-aa3994a2fa3435a0"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 1,
+      "category": "D_correct",
+      "category_desc": "pred matches GT (tools should confirm)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b9669ca3fb3cc669",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-bbf7405264dc2fcf",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-bc5c8cfef304fd98",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-b9669ca3fb3cc669"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-bbf7405264dc2fcf"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-bc5c8cfef304fd98"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 3,
+      "category": "D_correct",
+      "category_desc": "pred matches GT (tools should confirm)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bacee5177bd7fd96",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-88bf4c4f40bf2c6a",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-83d480d8ef47d594",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-bacee5177bd7fd96"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-88bf4c4f40bf2c6a"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-83d480d8ef47d594"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 4,
+      "category": "D_correct",
+      "category_desc": "pred matches GT (tools should confirm)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9754aa4453f9eaa1",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b370948f939cdb38",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-b8f30a8630cf01e6",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-9754aa4453f9eaa1"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-b370948f939cdb38"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-b8f30a8630cf01e6"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    },
+    {
+      "sample_id": 5,
+      "category": "D_correct",
+      "category_desc": "pred matches GT (tools should confirm)",
+      "predicted_scene": "nominal",
+      "predicted_long_action": "null",
+      "predicted_lat_action": "null",
+      "scene_type_gt": "nominal",
+      "long_action_gt": "null",
+      "lat_action_gt": "null",
+      "turn1_response": {
+        "role": "assistant",
+        "content": null,
+        "refusal": null,
+        "annotations": null,
+        "audio": null,
+        "function_call": null,
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-affd0c96237d7d3a",
+            "type": "function",
+            "function": {
+              "name": "check_scene_prior",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-bc8a4cd992368fba",
+            "type": "function",
+            "function": {
+              "name": "check_scene_action_compatibility",
+              "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+            }
+          },
+          {
+            "id": "chatcmpl-tool-8b65223e7953108f",
+            "type": "function",
+            "function": {
+              "name": "check_confusion_risk",
+              "arguments": "{\"predicted_scene\": \"nominal\"}"
+            }
+          }
+        ],
+        "reasoning": null,
+        "reasoning_content": null
+      },
+      "tool_calls": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-affd0c96237d7d3a"
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "call_id": "chatcmpl-tool-bc8a4cd992368fba"
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "call_id": "chatcmpl-tool-8b65223e7953108f"
+        }
+      ],
+      "tool_results": [
+        {
+          "name": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "is_rare": false,
+            "warning": null
+          }
+        },
+        {
+          "name": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "observed": true,
+            "count": 6741,
+            "rate": 1.0,
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "warning": null
+          }
+        },
+        {
+          "name": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "note": "50.9% of nominal scenes are misclassified as incident_zone."
+          }
+        }
+      ],
+      "num_turns": 2,
+      "final_response": "FINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null\nREVISED: no\nREASON: The predicted scene \"nominal\" is the most common scene type (78.27% base rate) and the combination of \"null|null\" actions is perfectly typical for this scene (100% observed rate). Although there is a high confusion risk with \"incident_zone\" (50.9% error rate), the prediction is statistically sound and action-compatible. No revision is needed.",
+      "category_result": "ACTUALLY_REASONS"
+    }
+  ]
+}

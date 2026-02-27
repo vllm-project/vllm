@@ -1,0 +1,1995 @@
+{
+  "config": {
+    "model": "/fsx/models/Qwen3-VL-8B-Instruct",
+    "gpu_id": 3,
+    "port": 8313,
+    "tool_level": 3,
+    "max_tool_rounds": 5,
+    "temperature": 0,
+    "num_samples": 10
+  },
+  "summary": {
+    "completed": 10,
+    "total": 10,
+    "avg_tool_calls": 2.8,
+    "min_tool_calls": 2,
+    "max_tool_calls": 3,
+    "num_revised": 7,
+    "revision_accuracy": 0.714,
+    "saves": 5,
+    "breaks": 2,
+    "net_improvement": 3,
+    "original_scene_accuracy": 4,
+    "final_scene_accuracy": 7,
+    "mechanics_ok": true,
+    "failure_modes": []
+  },
+  "samples": [
+    {
+      "sample_id": 2,
+      "category": "false_incident_zone",
+      "gt_scene": "nominal",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "original_prediction": "incident_zone",
+      "original_long_action": "stop",
+      "original_lat_action": "lc_left",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_left"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_left",
+            "compatible": true,
+            "count": 22,
+            "total": 322,
+            "rate": 0.068,
+            "valid_actions": [
+              "proceed|lc_left",
+              "proceed|lc_right",
+              "proceed|null",
+              "slowdown|lc_left",
+              "slowdown|lc_right",
+              "slowdown|null",
+              "stop|lc_left",
+              "stop|lc_right",
+              "stop|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.323
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.252
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.127
+              },
+              {
+                "actions": "proceed|null",
+                "count": 34,
+                "rate": 0.106
+              },
+              {
+                "actions": "slowdown|lc_right",
+                "count": 23,
+                "rate": 0.071
+              }
+            ],
+            "interpretation": "The combination (stop, lc_left) with incident_zone is uncommon but observed: 22/322 samples (6.8%). This combination can occur but is not the typical response.",
+            "diagnostic_questions": {
+              "question_1": "Does the visual scene match incident_zone? Verify the scene before evaluating the action.",
+              "question_2": "Given incident_zone, does (stop, lc_left) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?",
+              "lane_change_check": "Lane change (lc_left) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the left?"
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "interpretation": "41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 41% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "distinguishing_incident_zone_from_nominal": [
+                "Emergency lights FLASHING vs. no emergency lights",
+                "Vehicles at ABNORMAL angles vs. normal lane positions",
+                "ACTIVE first responders on road vs. no emergency personnel",
+                "Road BLOCKED by wreckage vs. road clear with construction cones",
+                "Broken glass/debris on pavement vs. clean road surface",
+                "Traffic STOPPED in all lanes vs. normal flow through work zone"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 2,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "null",
+      "final_lat_action": "null",
+      "was_revised": true,
+      "scene_correct": true,
+      "revision_correct": true,
+      "final_text": "The prediction of \"incident_zone\" with actions \"stop\" and \"lc_left\" is technically compatible with the scene type, as the combination has been observed (6.8% of cases). However, \"incident_zone\" has a high confusion risk, being misclassified as \"nominal\" 41% of the time. This means the model is likely over-predicting \"incident_zone\" and the visual evidence must be very strong to confirm it.\n\nGiven the high error rate and the need for strong visual confirmation, I must verify whether the scene truly matches \"incident_zone\" or if it's more likely \"nominal\". The diagnostic checklist indicates that features like emergency vehicles, debris, or active first responders are required to confirm \"incident_zone\". Without such strong visual evidence, the prediction is likely incorrect.\n\nTherefore, I reject the prediction and default to the most common and safest assumption: \"nominal\" scene with no action change.\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: incident_zone\n- Longitudinal action: stop\n- Lateral action: lc_left\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-ac847c566ad912dc",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_left\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-af469bf89b0c3d3a",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-ac847c566ad912dc",
+          "content": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_left\", \"compatible\": true, \"count\": 22, \"total\": 322, \"rate\": 0.068, \"valid_actions\": [\"proceed|lc_left\", \"proceed|lc_right\", \"proceed|null\", \"slowdown|lc_left\", \"slowdown|lc_right\", \"slowdown|null\", \"stop|lc_left\", \"stop|lc_right\", \"stop|null\"], \"typical_actions\": [{\"actions\": \"slowdown|null\", \"count\": 104, \"rate\": 0.323}, {\"actions\": \"stop|null\", \"count\": 81, \"rate\": 0.252}, {\"actions\": \"slowdown|lc_left\", \"count\": 41, \"rate\": 0.127}, {\"actions\": \"proceed|null\", \"count\": 34, \"rate\": 0.106}, {\"actions\": \"slowdown|lc_right\", \"count\": 23, \"rate\": 0.071}], \"interpretation\": \"The combination (stop, lc_left) with incident_zone is uncommon but observed: 22/322 samples (6.8%). This combination can occur but is not the typical response.\", \"diagnostic_questions\": {\"question_1\": \"Does the visual scene match incident_zone? Verify the scene before evaluating the action.\", \"question_2\": \"Given incident_zone, does (stop, lc_left) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?\", \"lane_change_check\": \"Lane change (lc_left) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the left?\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-af469bf89b0c3d3a",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"has_confusion_risk\": true, \"confused_with\": \"nominal\", \"error_rate\": 0.41, \"interpretation\": \"41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 41% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"distinguishing_incident_zone_from_nominal\": [\"Emergency lights FLASHING vs. no emergency lights\", \"Vehicles at ABNORMAL angles vs. normal lane positions\", \"ACTIVE first responders on road vs. no emergency personnel\", \"Road BLOCKED by wreckage vs. road clear with construction cones\", \"Broken glass/debris on pavement vs. clean road surface\", \"Traffic STOPPED in all lanes vs. normal flow through work zone\"]}, \"decision_framework\": \"For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 6,
+      "category": "false_incident_zone",
+      "gt_scene": "nominal",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "original_prediction": "incident_zone",
+      "original_long_action": "stop",
+      "original_lat_action": "null",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "interpretation": "incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.",
+            "classification_risk": "high",
+            "confidence_required": "This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.",
+            "visual_checklist": {
+              "must_be_present": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "commonly_mistaken_triggers": [
+                "Traffic cones used for lane guidance or construction (not accidents)",
+                "Concrete barriers or jersey walls along construction zones",
+                "Parked emergency vehicles with lights OFF (not actively responding)",
+                "Road work signage or detour signs",
+                "Heavy traffic or slow-moving congestion (not an incident)",
+                "Shadows creating dark patches that look like debris",
+                "Construction equipment parked on shoulder"
+              ]
+            },
+            "decision_framework": "Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null",
+            "compatible": true,
+            "count": 81,
+            "total": 322,
+            "rate": 0.252,
+            "valid_actions": [
+              "proceed|lc_left",
+              "proceed|lc_right",
+              "proceed|null",
+              "slowdown|lc_left",
+              "slowdown|lc_right",
+              "slowdown|null",
+              "stop|lc_left",
+              "stop|lc_right",
+              "stop|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.323
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.252
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.127
+              },
+              {
+                "actions": "proceed|null",
+                "count": 34,
+                "rate": 0.106
+              },
+              {
+                "actions": "slowdown|lc_right",
+                "count": 23,
+                "rate": 0.071
+              }
+            ],
+            "interpretation": "The combination (stop, null) with incident_zone is well-established: 81/322 samples (25.2%). This is a common and valid combination.",
+            "diagnostic_questions": {
+              "question_1": "Does the visual scene match incident_zone? Verify the scene before evaluating the action.",
+              "question_2": "Given incident_zone, does (stop, null) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?"
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "interpretation": "41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 41% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "distinguishing_incident_zone_from_nominal": [
+                "Emergency lights FLASHING vs. no emergency lights",
+                "Vehicles at ABNORMAL angles vs. normal lane positions",
+                "ACTIVE first responders on road vs. no emergency personnel",
+                "Road BLOCKED by wreckage vs. road clear with construction cones",
+                "Broken glass/debris on pavement vs. clean road surface",
+                "Traffic STOPPED in all lanes vs. normal flow through work zone"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 3,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "proceed",
+      "final_lat_action": "null",
+      "was_revised": true,
+      "scene_correct": true,
+      "revision_correct": true,
+      "final_text": "The prediction of \"incident_zone\" with \"stop\" and \"null\" actions is technically compatible with historical data, as the combination (stop, null) with incident_zone occurs in 25.2% of samples. However, the scene \"incident_zone\" itself is rare (3.7% base rate) and has a high confusion risk (41% of predictions are actually nominal). This means the model is over-predicting this class, and strong visual evidence is required to justify it.\n\nGiven the high classification risk and the need for unambiguous visual confirmation (e.g., emergency vehicles with flashing lights, debris, or first responders), and since the tools indicate that \"nominal\" is the most common and statistically safer choice unless strong evidence is present, I must reject the \"incident_zone\" prediction.\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: proceed\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: incident_zone\n- Longitudinal action: stop\n- Lateral action: null\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8f15042f310fd322",
+              "type": "function",
+              "function": {
+                "name": "check_scene_prior",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-ab3b504e79f471ae",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"null\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-82edbf87111956c1",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-8f15042f310fd322",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"base_rate\": 0.0374, \"most_common_scene\": \"nominal\", \"most_common_rate\": 0.7827, \"interpretation\": \"incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.\", \"classification_risk\": \"high\", \"confidence_required\": \"This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.\", \"visual_checklist\": {\"must_be_present\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"commonly_mistaken_triggers\": [\"Traffic cones used for lane guidance or construction (not accidents)\", \"Concrete barriers or jersey walls along construction zones\", \"Parked emergency vehicles with lights OFF (not actively responding)\", \"Road work signage or detour signs\", \"Heavy traffic or slow-moving congestion (not an incident)\", \"Shadows creating dark patches that look like debris\", \"Construction equipment parked on shoulder\"]}, \"decision_framework\": \"Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-ab3b504e79f471ae",
+          "content": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"null\", \"compatible\": true, \"count\": 81, \"total\": 322, \"rate\": 0.252, \"valid_actions\": [\"proceed|lc_left\", \"proceed|lc_right\", \"proceed|null\", \"slowdown|lc_left\", \"slowdown|lc_right\", \"slowdown|null\", \"stop|lc_left\", \"stop|lc_right\", \"stop|null\"], \"typical_actions\": [{\"actions\": \"slowdown|null\", \"count\": 104, \"rate\": 0.323}, {\"actions\": \"stop|null\", \"count\": 81, \"rate\": 0.252}, {\"actions\": \"slowdown|lc_left\", \"count\": 41, \"rate\": 0.127}, {\"actions\": \"proceed|null\", \"count\": 34, \"rate\": 0.106}, {\"actions\": \"slowdown|lc_right\", \"count\": 23, \"rate\": 0.071}], \"interpretation\": \"The combination (stop, null) with incident_zone is well-established: 81/322 samples (25.2%). This is a common and valid combination.\", \"diagnostic_questions\": {\"question_1\": \"Does the visual scene match incident_zone? Verify the scene before evaluating the action.\", \"question_2\": \"Given incident_zone, does (stop, null) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-82edbf87111956c1",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"has_confusion_risk\": true, \"confused_with\": \"nominal\", \"error_rate\": 0.41, \"interpretation\": \"41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 41% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"distinguishing_incident_zone_from_nominal\": [\"Emergency lights FLASHING vs. no emergency lights\", \"Vehicles at ABNORMAL angles vs. normal lane positions\", \"ACTIVE first responders on road vs. no emergency personnel\", \"Road BLOCKED by wreckage vs. road clear with construction cones\", \"Broken glass/debris on pavement vs. clean road surface\", \"Traffic STOPPED in all lanes vs. normal flow through work zone\"]}, \"decision_framework\": \"For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 7,
+      "category": "false_incident_zone",
+      "gt_scene": "nominal",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "original_prediction": "incident_zone",
+      "original_long_action": "slowdown",
+      "original_lat_action": "lc_right",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "interpretation": "incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.",
+            "classification_risk": "high",
+            "confidence_required": "This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.",
+            "visual_checklist": {
+              "must_be_present": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "commonly_mistaken_triggers": [
+                "Traffic cones used for lane guidance or construction (not accidents)",
+                "Concrete barriers or jersey walls along construction zones",
+                "Parked emergency vehicles with lights OFF (not actively responding)",
+                "Road work signage or detour signs",
+                "Heavy traffic or slow-moving congestion (not an incident)",
+                "Shadows creating dark patches that look like debris",
+                "Construction equipment parked on shoulder"
+              ]
+            },
+            "decision_framework": "Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_right",
+            "compatible": true,
+            "count": 23,
+            "total": 322,
+            "rate": 0.071,
+            "valid_actions": [
+              "proceed|lc_left",
+              "proceed|lc_right",
+              "proceed|null",
+              "slowdown|lc_left",
+              "slowdown|lc_right",
+              "slowdown|null",
+              "stop|lc_left",
+              "stop|lc_right",
+              "stop|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.323
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.252
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.127
+              },
+              {
+                "actions": "proceed|null",
+                "count": 34,
+                "rate": 0.106
+              },
+              {
+                "actions": "slowdown|lc_right",
+                "count": 23,
+                "rate": 0.071
+              }
+            ],
+            "interpretation": "The combination (slowdown, lc_right) with incident_zone is uncommon but observed: 23/322 samples (7.1%). This combination can occur but is not the typical response.",
+            "diagnostic_questions": {
+              "question_1": "Does the visual scene match incident_zone? Verify the scene before evaluating the action.",
+              "question_2": "Given incident_zone, does (slowdown, lc_right) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?",
+              "lane_change_check": "Lane change (lc_right) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the right?"
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "interpretation": "41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 41% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "distinguishing_incident_zone_from_nominal": [
+                "Emergency lights FLASHING vs. no emergency lights",
+                "Vehicles at ABNORMAL angles vs. normal lane positions",
+                "ACTIVE first responders on road vs. no emergency personnel",
+                "Road BLOCKED by wreckage vs. road clear with construction cones",
+                "Broken glass/debris on pavement vs. clean road surface",
+                "Traffic STOPPED in all lanes vs. normal flow through work zone"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 3,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "proceed",
+      "final_lat_action": "null",
+      "was_revised": true,
+      "scene_correct": true,
+      "revision_correct": true,
+      "final_text": "The prediction of \"incident_zone\" with \"slowdown\" and \"lc_right\" is statistically and contextually questionable. The \"incident_zone\" class is rare (3.7% base rate) and frequently confused with \"nominal\" (41% error rate). The combination of \"slowdown\" and \"lc_right\" is observed but uncommon (7.1% rate). Given the high classification risk and the need for strong visual evidence, the safest prediction is \"nominal\" unless there is clear, unambiguous evidence of an actual incident (e.g., emergency vehicles, debris, first responders).\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: proceed\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: incident_zone\n- Longitudinal action: slowdown\n- Lateral action: lc_right\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b20e03ac82cd9108",
+              "type": "function",
+              "function": {
+                "name": "check_scene_prior",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-b4949d471cad8533",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_right\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-af98af33dab21cd6",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-b20e03ac82cd9108",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"base_rate\": 0.0374, \"most_common_scene\": \"nominal\", \"most_common_rate\": 0.7827, \"interpretation\": \"incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.\", \"classification_risk\": \"high\", \"confidence_required\": \"This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.\", \"visual_checklist\": {\"must_be_present\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"commonly_mistaken_triggers\": [\"Traffic cones used for lane guidance or construction (not accidents)\", \"Concrete barriers or jersey walls along construction zones\", \"Parked emergency vehicles with lights OFF (not actively responding)\", \"Road work signage or detour signs\", \"Heavy traffic or slow-moving congestion (not an incident)\", \"Shadows creating dark patches that look like debris\", \"Construction equipment parked on shoulder\"]}, \"decision_framework\": \"Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-b4949d471cad8533",
+          "content": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_right\", \"compatible\": true, \"count\": 23, \"total\": 322, \"rate\": 0.071, \"valid_actions\": [\"proceed|lc_left\", \"proceed|lc_right\", \"proceed|null\", \"slowdown|lc_left\", \"slowdown|lc_right\", \"slowdown|null\", \"stop|lc_left\", \"stop|lc_right\", \"stop|null\"], \"typical_actions\": [{\"actions\": \"slowdown|null\", \"count\": 104, \"rate\": 0.323}, {\"actions\": \"stop|null\", \"count\": 81, \"rate\": 0.252}, {\"actions\": \"slowdown|lc_left\", \"count\": 41, \"rate\": 0.127}, {\"actions\": \"proceed|null\", \"count\": 34, \"rate\": 0.106}, {\"actions\": \"slowdown|lc_right\", \"count\": 23, \"rate\": 0.071}], \"interpretation\": \"The combination (slowdown, lc_right) with incident_zone is uncommon but observed: 23/322 samples (7.1%). This combination can occur but is not the typical response.\", \"diagnostic_questions\": {\"question_1\": \"Does the visual scene match incident_zone? Verify the scene before evaluating the action.\", \"question_2\": \"Given incident_zone, does (slowdown, lc_right) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?\", \"lane_change_check\": \"Lane change (lc_right) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the right?\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-af98af33dab21cd6",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"has_confusion_risk\": true, \"confused_with\": \"nominal\", \"error_rate\": 0.41, \"interpretation\": \"41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 41% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"distinguishing_incident_zone_from_nominal\": [\"Emergency lights FLASHING vs. no emergency lights\", \"Vehicles at ABNORMAL angles vs. normal lane positions\", \"ACTIVE first responders on road vs. no emergency personnel\", \"Road BLOCKED by wreckage vs. road clear with construction cones\", \"Broken glass/debris on pavement vs. clean road surface\", \"Traffic STOPPED in all lanes vs. normal flow through work zone\"]}, \"decision_framework\": \"For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 8,
+      "category": "false_incident_zone",
+      "gt_scene": "nominal",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "original_prediction": "incident_zone",
+      "original_long_action": "slowdown",
+      "original_lat_action": "lc_left",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "slowdown",
+            "lat_action": "lc_left",
+            "compatible": true,
+            "count": 41,
+            "total": 322,
+            "rate": 0.127,
+            "valid_actions": [
+              "proceed|lc_left",
+              "proceed|lc_right",
+              "proceed|null",
+              "slowdown|lc_left",
+              "slowdown|lc_right",
+              "slowdown|null",
+              "stop|lc_left",
+              "stop|lc_right",
+              "stop|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.323
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.252
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.127
+              },
+              {
+                "actions": "proceed|null",
+                "count": 34,
+                "rate": 0.106
+              },
+              {
+                "actions": "slowdown|lc_right",
+                "count": 23,
+                "rate": 0.071
+              }
+            ],
+            "interpretation": "The combination (slowdown, lc_left) with incident_zone is uncommon but observed: 41/322 samples (12.7%). This combination can occur but is not the typical response.",
+            "diagnostic_questions": {
+              "question_1": "Does the visual scene match incident_zone? Verify the scene before evaluating the action.",
+              "question_2": "Given incident_zone, does (slowdown, lc_left) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?",
+              "lane_change_check": "Lane change (lc_left) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the left?"
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "interpretation": "41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 41% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "distinguishing_incident_zone_from_nominal": [
+                "Emergency lights FLASHING vs. no emergency lights",
+                "Vehicles at ABNORMAL angles vs. normal lane positions",
+                "ACTIVE first responders on road vs. no emergency personnel",
+                "Road BLOCKED by wreckage vs. road clear with construction cones",
+                "Broken glass/debris on pavement vs. clean road surface",
+                "Traffic STOPPED in all lanes vs. normal flow through work zone"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 2,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "proceed",
+      "final_lat_action": "null",
+      "was_revised": true,
+      "scene_correct": true,
+      "revision_correct": true,
+      "final_text": "The prediction of \"incident_zone\" with \"slowdown\" and \"lc_left\" is technically compatible with historical data, but it is uncommon (12.7% of cases) and carries a high risk of being wrong (41% confusion rate with \"nominal\"). The model is over-predicting \"incident_zone\" and often misclassifies nominal scenes as incident zones.\n\nGiven the high confusion risk, the prediction should be rejected unless there is strong visual evidence confirming the presence of an actual incident (e.g., emergency vehicles, debris, active first responders). Without such evidence, the scene is likely \"nominal\".\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: proceed\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: incident_zone\n- Longitudinal action: slowdown\n- Lateral action: lc_left\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b26b52ec1e8b543d",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_left\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-a039b8a5f827964f",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-b26b52ec1e8b543d",
+          "content": "{\"scene\": \"incident_zone\", \"long_action\": \"slowdown\", \"lat_action\": \"lc_left\", \"compatible\": true, \"count\": 41, \"total\": 322, \"rate\": 0.127, \"valid_actions\": [\"proceed|lc_left\", \"proceed|lc_right\", \"proceed|null\", \"slowdown|lc_left\", \"slowdown|lc_right\", \"slowdown|null\", \"stop|lc_left\", \"stop|lc_right\", \"stop|null\"], \"typical_actions\": [{\"actions\": \"slowdown|null\", \"count\": 104, \"rate\": 0.323}, {\"actions\": \"stop|null\", \"count\": 81, \"rate\": 0.252}, {\"actions\": \"slowdown|lc_left\", \"count\": 41, \"rate\": 0.127}, {\"actions\": \"proceed|null\", \"count\": 34, \"rate\": 0.106}, {\"actions\": \"slowdown|lc_right\", \"count\": 23, \"rate\": 0.071}], \"interpretation\": \"The combination (slowdown, lc_left) with incident_zone is uncommon but observed: 41/322 samples (12.7%). This combination can occur but is not the typical response.\", \"diagnostic_questions\": {\"question_1\": \"Does the visual scene match incident_zone? Verify the scene before evaluating the action.\", \"question_2\": \"Given incident_zone, does (slowdown, lc_left) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?\", \"lane_change_check\": \"Lane change (lc_left) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the left?\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-a039b8a5f827964f",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"has_confusion_risk\": true, \"confused_with\": \"nominal\", \"error_rate\": 0.41, \"interpretation\": \"41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 41% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"distinguishing_incident_zone_from_nominal\": [\"Emergency lights FLASHING vs. no emergency lights\", \"Vehicles at ABNORMAL angles vs. normal lane positions\", \"ACTIVE first responders on road vs. no emergency personnel\", \"Road BLOCKED by wreckage vs. road clear with construction cones\", \"Broken glass/debris on pavement vs. clean road surface\", \"Traffic STOPPED in all lanes vs. normal flow through work zone\"]}, \"decision_framework\": \"For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 13,
+      "category": "false_incident_zone",
+      "gt_scene": "nominal",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "original_prediction": "incident_zone",
+      "original_long_action": "stop",
+      "original_lat_action": "lc_right",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "interpretation": "incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.",
+            "classification_risk": "high",
+            "confidence_required": "This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.",
+            "visual_checklist": {
+              "must_be_present": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "commonly_mistaken_triggers": [
+                "Traffic cones used for lane guidance or construction (not accidents)",
+                "Concrete barriers or jersey walls along construction zones",
+                "Parked emergency vehicles with lights OFF (not actively responding)",
+                "Road work signage or detour signs",
+                "Heavy traffic or slow-moving congestion (not an incident)",
+                "Shadows creating dark patches that look like debris",
+                "Construction equipment parked on shoulder"
+              ]
+            },
+            "decision_framework": "Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right",
+            "compatible": true,
+            "count": 4,
+            "total": 322,
+            "rate": 0.012,
+            "valid_actions": [
+              "proceed|lc_left",
+              "proceed|lc_right",
+              "proceed|null",
+              "slowdown|lc_left",
+              "slowdown|lc_right",
+              "slowdown|null",
+              "stop|lc_left",
+              "stop|lc_right",
+              "stop|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.323
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.252
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.127
+              },
+              {
+                "actions": "proceed|null",
+                "count": 34,
+                "rate": 0.106
+              },
+              {
+                "actions": "slowdown|lc_right",
+                "count": 23,
+                "rate": 0.071
+              }
+            ],
+            "interpretation": "The combination (stop, lc_right) with incident_zone is very rare: only 4/322 samples (1.2%). Double-check that both the scene and action are correct.",
+            "diagnostic_questions": {
+              "question_1": "Does the visual scene match incident_zone? Verify the scene before evaluating the action.",
+              "question_2": "Given incident_zone, does (stop, lc_right) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?",
+              "lane_change_check": "Lane change (lc_right) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the right?"
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "interpretation": "41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 41% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "distinguishing_incident_zone_from_nominal": [
+                "Emergency lights FLASHING vs. no emergency lights",
+                "Vehicles at ABNORMAL angles vs. normal lane positions",
+                "ACTIVE first responders on road vs. no emergency personnel",
+                "Road BLOCKED by wreckage vs. road clear with construction cones",
+                "Broken glass/debris on pavement vs. clean road surface",
+                "Traffic STOPPED in all lanes vs. normal flow through work zone"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 3,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "proceed",
+      "final_lat_action": "null",
+      "was_revised": true,
+      "scene_correct": true,
+      "revision_correct": true,
+      "final_text": "The prediction of \"incident_zone\" with \"stop\" and \"lc_right\" is highly questionable based on the available tools. The scene \"incident_zone\" is rare (3.7% base rate) and is frequently confused with \"nominal\" (41% error rate). The specific action combination (stop, lc_right) is also very rare (1.2% of samples). \n\nGiven the high classification risk and the rarity of both the scene and the action combination, the model's confidence in this prediction is likely misplaced. The most statistically sound decision is to reclassify this as \"nominal\" unless there is strong, unambiguous visual evidence of an actual incident (e.g., emergency vehicles with flashing lights, debris, or first responders).\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: proceed\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: incident_zone\n- Longitudinal action: stop\n- Lateral action: lc_right\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b47b9e2e162da6e7",
+              "type": "function",
+              "function": {
+                "name": "check_scene_prior",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-a3cde5caf5e96076",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_right\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-bef9c326e3755891",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-b47b9e2e162da6e7",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"base_rate\": 0.0374, \"most_common_scene\": \"nominal\", \"most_common_rate\": 0.7827, \"interpretation\": \"incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.\", \"classification_risk\": \"high\", \"confidence_required\": \"This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.\", \"visual_checklist\": {\"must_be_present\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"commonly_mistaken_triggers\": [\"Traffic cones used for lane guidance or construction (not accidents)\", \"Concrete barriers or jersey walls along construction zones\", \"Parked emergency vehicles with lights OFF (not actively responding)\", \"Road work signage or detour signs\", \"Heavy traffic or slow-moving congestion (not an incident)\", \"Shadows creating dark patches that look like debris\", \"Construction equipment parked on shoulder\"]}, \"decision_framework\": \"Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-a3cde5caf5e96076",
+          "content": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_right\", \"compatible\": true, \"count\": 4, \"total\": 322, \"rate\": 0.012, \"valid_actions\": [\"proceed|lc_left\", \"proceed|lc_right\", \"proceed|null\", \"slowdown|lc_left\", \"slowdown|lc_right\", \"slowdown|null\", \"stop|lc_left\", \"stop|lc_right\", \"stop|null\"], \"typical_actions\": [{\"actions\": \"slowdown|null\", \"count\": 104, \"rate\": 0.323}, {\"actions\": \"stop|null\", \"count\": 81, \"rate\": 0.252}, {\"actions\": \"slowdown|lc_left\", \"count\": 41, \"rate\": 0.127}, {\"actions\": \"proceed|null\", \"count\": 34, \"rate\": 0.106}, {\"actions\": \"slowdown|lc_right\", \"count\": 23, \"rate\": 0.071}], \"interpretation\": \"The combination (stop, lc_right) with incident_zone is very rare: only 4/322 samples (1.2%). Double-check that both the scene and action are correct.\", \"diagnostic_questions\": {\"question_1\": \"Does the visual scene match incident_zone? Verify the scene before evaluating the action.\", \"question_2\": \"Given incident_zone, does (stop, lc_right) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?\", \"lane_change_check\": \"Lane change (lc_right) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the right?\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-bef9c326e3755891",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"has_confusion_risk\": true, \"confused_with\": \"nominal\", \"error_rate\": 0.41, \"interpretation\": \"41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 41% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"distinguishing_incident_zone_from_nominal\": [\"Emergency lights FLASHING vs. no emergency lights\", \"Vehicles at ABNORMAL angles vs. normal lane positions\", \"ACTIVE first responders on road vs. no emergency personnel\", \"Road BLOCKED by wreckage vs. road clear with construction cones\", \"Broken glass/debris on pavement vs. clean road surface\", \"Traffic STOPPED in all lanes vs. normal flow through work zone\"]}, \"decision_framework\": \"For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 8020,
+      "category": "true_incident_zone",
+      "gt_scene": "incident_zone",
+      "gt_long_action": "stop",
+      "gt_lat_action": "lc_right",
+      "original_prediction": "incident_zone",
+      "original_long_action": "stop",
+      "original_lat_action": "lc_right",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "interpretation": "incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.",
+            "classification_risk": "high",
+            "confidence_required": "This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.",
+            "visual_checklist": {
+              "must_be_present": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "commonly_mistaken_triggers": [
+                "Traffic cones used for lane guidance or construction (not accidents)",
+                "Concrete barriers or jersey walls along construction zones",
+                "Parked emergency vehicles with lights OFF (not actively responding)",
+                "Road work signage or detour signs",
+                "Heavy traffic or slow-moving congestion (not an incident)",
+                "Shadows creating dark patches that look like debris",
+                "Construction equipment parked on shoulder"
+              ]
+            },
+            "decision_framework": "Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "lc_right",
+            "compatible": true,
+            "count": 4,
+            "total": 322,
+            "rate": 0.012,
+            "valid_actions": [
+              "proceed|lc_left",
+              "proceed|lc_right",
+              "proceed|null",
+              "slowdown|lc_left",
+              "slowdown|lc_right",
+              "slowdown|null",
+              "stop|lc_left",
+              "stop|lc_right",
+              "stop|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.323
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.252
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.127
+              },
+              {
+                "actions": "proceed|null",
+                "count": 34,
+                "rate": 0.106
+              },
+              {
+                "actions": "slowdown|lc_right",
+                "count": 23,
+                "rate": 0.071
+              }
+            ],
+            "interpretation": "The combination (stop, lc_right) with incident_zone is very rare: only 4/322 samples (1.2%). Double-check that both the scene and action are correct.",
+            "diagnostic_questions": {
+              "question_1": "Does the visual scene match incident_zone? Verify the scene before evaluating the action.",
+              "question_2": "Given incident_zone, does (stop, lc_right) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?",
+              "lane_change_check": "Lane change (lc_right) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the right?"
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "interpretation": "41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 41% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "distinguishing_incident_zone_from_nominal": [
+                "Emergency lights FLASHING vs. no emergency lights",
+                "Vehicles at ABNORMAL angles vs. normal lane positions",
+                "ACTIVE first responders on road vs. no emergency personnel",
+                "Road BLOCKED by wreckage vs. road clear with construction cones",
+                "Broken glass/debris on pavement vs. clean road surface",
+                "Traffic STOPPED in all lanes vs. normal flow through work zone"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 3,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "proceed",
+      "final_lat_action": "null",
+      "was_revised": true,
+      "scene_correct": false,
+      "revision_correct": false,
+      "final_text": "The prediction of \"incident_zone\" with \"stop\" and \"lc_right\" is highly questionable based on the available tools. The scene \"incident_zone\" is rare (3.7% base rate) and is frequently confused with \"nominal\" (41% error rate). The specific action combination (stop, lc_right) is also very rare (1.2% of samples). \n\nGiven the high classification risk and the rarity of both the scene and the action combination, the model's confidence in this prediction is likely misplaced. The most statistically sound decision, especially given the high error rate for \"incident_zone,\" is to reclassify the scene as \"nominal\" unless there is unambiguous visual evidence of an actual incident (e.g., emergency vehicles with flashing lights, debris, or first responders).\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: proceed\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: incident_zone\n- Longitudinal action: stop\n- Lateral action: lc_right\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9b36817f96ff936d",
+              "type": "function",
+              "function": {
+                "name": "check_scene_prior",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-9e259142fd6e3324",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_right\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-a517ab40b7d6e03e",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-9b36817f96ff936d",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"base_rate\": 0.0374, \"most_common_scene\": \"nominal\", \"most_common_rate\": 0.7827, \"interpretation\": \"incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.\", \"classification_risk\": \"high\", \"confidence_required\": \"This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.\", \"visual_checklist\": {\"must_be_present\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"commonly_mistaken_triggers\": [\"Traffic cones used for lane guidance or construction (not accidents)\", \"Concrete barriers or jersey walls along construction zones\", \"Parked emergency vehicles with lights OFF (not actively responding)\", \"Road work signage or detour signs\", \"Heavy traffic or slow-moving congestion (not an incident)\", \"Shadows creating dark patches that look like debris\", \"Construction equipment parked on shoulder\"]}, \"decision_framework\": \"Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-9e259142fd6e3324",
+          "content": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"lc_right\", \"compatible\": true, \"count\": 4, \"total\": 322, \"rate\": 0.012, \"valid_actions\": [\"proceed|lc_left\", \"proceed|lc_right\", \"proceed|null\", \"slowdown|lc_left\", \"slowdown|lc_right\", \"slowdown|null\", \"stop|lc_left\", \"stop|lc_right\", \"stop|null\"], \"typical_actions\": [{\"actions\": \"slowdown|null\", \"count\": 104, \"rate\": 0.323}, {\"actions\": \"stop|null\", \"count\": 81, \"rate\": 0.252}, {\"actions\": \"slowdown|lc_left\", \"count\": 41, \"rate\": 0.127}, {\"actions\": \"proceed|null\", \"count\": 34, \"rate\": 0.106}, {\"actions\": \"slowdown|lc_right\", \"count\": 23, \"rate\": 0.071}], \"interpretation\": \"The combination (stop, lc_right) with incident_zone is very rare: only 4/322 samples (1.2%). Double-check that both the scene and action are correct.\", \"diagnostic_questions\": {\"question_1\": \"Does the visual scene match incident_zone? Verify the scene before evaluating the action.\", \"question_2\": \"Given incident_zone, does (stop, lc_right) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?\", \"lane_change_check\": \"Lane change (lc_right) is valid for incident_zone. Verify: Is the current lane blocked? Is there an adjacent lane available to the right?\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-a517ab40b7d6e03e",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"has_confusion_risk\": true, \"confused_with\": \"nominal\", \"error_rate\": 0.41, \"interpretation\": \"41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 41% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"distinguishing_incident_zone_from_nominal\": [\"Emergency lights FLASHING vs. no emergency lights\", \"Vehicles at ABNORMAL angles vs. normal lane positions\", \"ACTIVE first responders on road vs. no emergency personnel\", \"Road BLOCKED by wreckage vs. road clear with construction cones\", \"Broken glass/debris on pavement vs. clean road surface\", \"Traffic STOPPED in all lanes vs. normal flow through work zone\"]}, \"decision_framework\": \"For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 8023,
+      "category": "true_incident_zone",
+      "gt_scene": "incident_zone",
+      "gt_long_action": "stop",
+      "gt_lat_action": "null",
+      "original_prediction": "incident_zone",
+      "original_long_action": "stop",
+      "original_lat_action": "null",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_prior",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "base_rate": 0.0374,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "interpretation": "incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.",
+            "classification_risk": "high",
+            "confidence_required": "This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.",
+            "visual_checklist": {
+              "must_be_present": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "commonly_mistaken_triggers": [
+                "Traffic cones used for lane guidance or construction (not accidents)",
+                "Concrete barriers or jersey walls along construction zones",
+                "Parked emergency vehicles with lights OFF (not actively responding)",
+                "Road work signage or detour signs",
+                "Heavy traffic or slow-moving congestion (not an incident)",
+                "Shadows creating dark patches that look like debris",
+                "Construction equipment parked on shoulder"
+              ]
+            },
+            "decision_framework": "Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "incident_zone",
+            "long_action": "stop",
+            "lat_action": "null",
+            "compatible": true,
+            "count": 81,
+            "total": 322,
+            "rate": 0.252,
+            "valid_actions": [
+              "proceed|lc_left",
+              "proceed|lc_right",
+              "proceed|null",
+              "slowdown|lc_left",
+              "slowdown|lc_right",
+              "slowdown|null",
+              "stop|lc_left",
+              "stop|lc_right",
+              "stop|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "slowdown|null",
+                "count": 104,
+                "rate": 0.323
+              },
+              {
+                "actions": "stop|null",
+                "count": 81,
+                "rate": 0.252
+              },
+              {
+                "actions": "slowdown|lc_left",
+                "count": 41,
+                "rate": 0.127
+              },
+              {
+                "actions": "proceed|null",
+                "count": 34,
+                "rate": 0.106
+              },
+              {
+                "actions": "slowdown|lc_right",
+                "count": 23,
+                "rate": 0.071
+              }
+            ],
+            "interpretation": "The combination (stop, null) with incident_zone is well-established: 81/322 samples (25.2%). This is a common and valid combination.",
+            "diagnostic_questions": {
+              "question_1": "Does the visual scene match incident_zone? Verify the scene before evaluating the action.",
+              "question_2": "Given incident_zone, does (stop, null) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?"
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "incident_zone"
+          },
+          "result": {
+            "predicted_scene": "incident_zone",
+            "has_confusion_risk": true,
+            "confused_with": "nominal",
+            "error_rate": 0.41,
+            "interpretation": "41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 41% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "distinguishing_incident_zone_from_nominal": [
+                "Emergency lights FLASHING vs. no emergency lights",
+                "Vehicles at ABNORMAL angles vs. normal lane positions",
+                "ACTIVE first responders on road vs. no emergency personnel",
+                "Road BLOCKED by wreckage vs. road clear with construction cones",
+                "Broken glass/debris on pavement vs. clean road surface",
+                "Traffic STOPPED in all lanes vs. normal flow through work zone"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 3,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "proceed",
+      "final_lat_action": "null",
+      "was_revised": true,
+      "scene_correct": false,
+      "revision_correct": false,
+      "final_text": "The prediction of \"incident_zone\" with \"stop\" and \"null\" actions is technically compatible with historical data, as the combination \"stop|null\" with \"incident_zone\" occurs in 25.2% of samples. However, the scene \"incident_zone\" itself is rare (3.7% base rate) and is frequently confused with \"nominal\" (41% error rate). This means that even if the action is correct, the scene classification is likely incorrect unless there is very strong, unambiguous visual evidence.\n\nGiven the high confusion risk and the fact that \"incident_zone\" is over-predicted 12.5x, the safest decision is to reclassify the scene as \"nominal\" unless the visual evidence clearly shows emergency vehicles, debris, or first responders on the roadway.\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: proceed\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: incident_zone\n- Longitudinal action: stop\n- Lateral action: null\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b5573b223568aad4",
+              "type": "function",
+              "function": {
+                "name": "check_scene_prior",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-84fb6035610c34ba",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"null\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-be45293c77cf2a35",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"incident_zone\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-b5573b223568aad4",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"base_rate\": 0.0374, \"most_common_scene\": \"nominal\", \"most_common_rate\": 0.7827, \"interpretation\": \"incident_zone occurs in only 3.7% of real scenes, making it a rare class. The model predicts incident_zone at ~46.8%, which is 12.5x more than the true rate. The most common scene is nominal at 78.3%. If you are not highly confident in the visual evidence, nominal is the statistically safer choice.\", \"classification_risk\": \"high\", \"confidence_required\": \"This is a rare class (3.7% base rate). Strong, unambiguous visual evidence is required to justify this prediction.\", \"visual_checklist\": {\"must_be_present\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"commonly_mistaken_triggers\": [\"Traffic cones used for lane guidance or construction (not accidents)\", \"Concrete barriers or jersey walls along construction zones\", \"Parked emergency vehicles with lights OFF (not actively responding)\", \"Road work signage or detour signs\", \"Heavy traffic or slow-moving congestion (not an incident)\", \"Shadows creating dark patches that look like debris\", \"Construction equipment parked on shoulder\"]}, \"decision_framework\": \"Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm incident_zone. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-84fb6035610c34ba",
+          "content": "{\"scene\": \"incident_zone\", \"long_action\": \"stop\", \"lat_action\": \"null\", \"compatible\": true, \"count\": 81, \"total\": 322, \"rate\": 0.252, \"valid_actions\": [\"proceed|lc_left\", \"proceed|lc_right\", \"proceed|null\", \"slowdown|lc_left\", \"slowdown|lc_right\", \"slowdown|null\", \"stop|lc_left\", \"stop|lc_right\", \"stop|null\"], \"typical_actions\": [{\"actions\": \"slowdown|null\", \"count\": 104, \"rate\": 0.323}, {\"actions\": \"stop|null\", \"count\": 81, \"rate\": 0.252}, {\"actions\": \"slowdown|lc_left\", \"count\": 41, \"rate\": 0.127}, {\"actions\": \"proceed|null\", \"count\": 34, \"rate\": 0.106}, {\"actions\": \"slowdown|lc_right\", \"count\": 23, \"rate\": 0.071}], \"interpretation\": \"The combination (stop, null) with incident_zone is well-established: 81/322 samples (25.2%). This is a common and valid combination.\", \"diagnostic_questions\": {\"question_1\": \"Does the visual scene match incident_zone? Verify the scene before evaluating the action.\", \"question_2\": \"Given incident_zone, does (stop, null) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-be45293c77cf2a35",
+          "content": "{\"predicted_scene\": \"incident_zone\", \"has_confusion_risk\": true, \"confused_with\": \"nominal\", \"error_rate\": 0.41, \"interpretation\": \"41.0% of incident_zone predictions are actually nominal (132 errors out of 322 predictions). incident_zone is the most over-predicted class: it is predicted 12.5x more often than it actually occurs. Most incident_zone predictions are actually nominal scenes with visual triggers like traffic cones, barriers, or construction equipment.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 41% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"distinguishing_incident_zone_from_nominal\": [\"Emergency lights FLASHING vs. no emergency lights\", \"Vehicles at ABNORMAL angles vs. normal lane positions\", \"ACTIVE first responders on road vs. no emergency personnel\", \"Road BLOCKED by wreckage vs. road clear with construction cones\", \"Broken glass/debris on pavement vs. clean road surface\", \"Traffic STOPPED in all lanes vs. normal flow through work zone\"]}, \"decision_framework\": \"For each feature in 'features_confirming_incident_zone', check if it is present. Then for each feature in 'features_confirming_nominal', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer nominal when incident_zone has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 0,
+      "category": "correct_prediction",
+      "gt_scene": "nominal",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "original_prediction": "nominal",
+      "original_long_action": "null",
+      "original_lat_action": "null",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "interpretation": "nominal is the most common class at 78.3%. This prediction is statistically likely to be correct based on base rate alone.",
+            "classification_risk": "low",
+            "confidence_required": "This is a common class (78.3% base rate). Standard visual confirmation is sufficient.",
+            "visual_checklist": {
+              "must_be_present": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "commonly_mistaken_triggers": [
+                "Construction zone cones (could indicate flagger or incident_zone)",
+                "Emergency vehicle parked with lights off (could be incident_zone)",
+                "Wet road surface (could be flooded)"
+              ]
+            },
+            "decision_framework": "Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm nominal. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "compatible": true,
+            "count": 6741,
+            "total": 6741,
+            "rate": 1.0,
+            "valid_actions": [
+              "null|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "interpretation": "The combination (null, null) with nominal is well-established: 6741/6741 samples (100.0%). This is a common and valid combination.",
+            "diagnostic_questions": {
+              "question_1": "Is the scene actually nominal? If yes, the ONLY valid action is (null, null).",
+              "question_2": "If you predicted a non-null action, reconsider whether the scene might actually be incident_zone, flooded, or flagger."
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "interpretation": "50.9% of nominal predictions are actually incident_zone (3430 errors out of 6741 predictions). This is a critical confusion: over half of nominal predictions may actually be incident_zone. However, note that this high error rate is partly because nominal is the largest class. In absolute terms, nominal is still correct more often than any other class.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 51% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "distinguishing_nominal_from_incident_zone": [
+                "Cones in orderly lane-guidance pattern vs. scattered around wreckage",
+                "Construction workers in work zone vs. first responders at crash scene",
+                "Traffic flowing (even if slowly) vs. traffic completely stopped",
+                "No damaged vehicles visible vs. visible vehicle damage",
+                "Standard work zone signage vs. emergency scene tape/barriers"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_nominal', check if it is present. Then for each feature in 'features_confirming_incident_zone', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer incident_zone when nominal has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 3,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "null",
+      "final_lat_action": "null",
+      "was_revised": false,
+      "scene_correct": true,
+      "revision_correct": null,
+      "final_text": "The prediction is: Scene: nominal, Longitudinal action: null, Lateral action: null.\n\nAnalysis:\n1. The scene \"nominal\" is the most common class (78.3% base rate), making this prediction statistically likely.\n2. The action combination (null, null) with nominal is 100% compatible and is the only valid action for a nominal scene.\n3. However, there is a high confusion risk: 50.9% of nominal predictions are actually incident_zone. This means strong visual evidence is required to confirm nominal.\n\nGiven the high confusion risk, I must verify the visual evidence. Since the tools do not provide the actual image, I must rely on the checklist provided. The checklist requires confirming the presence of:\n- Normal traffic flow with no obstructions\n- Standard road conditions (dry, clear lanes)\n- No emergency vehicles, flaggers, horses, or standing water\n\nIf all three are confirmed, the prediction is valid. If any of these are missing, the scene should be reconsidered.\n\nSince the tools do not provide the image, I cannot definitively confirm or reject the prediction. However, based on the tools' output, the prediction is statistically likely to be correct, but the high confusion risk means it must be verified with strong visual evidence.\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: nominal\n- Longitudinal action: null\n- Lateral action: null\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9a47c86119c13dba",
+              "type": "function",
+              "function": {
+                "name": "check_scene_prior",
+                "arguments": "{\"predicted_scene\": \"nominal\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-b124a43a4be1f827",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-bd2827d7b50b588b",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"nominal\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-9a47c86119c13dba",
+          "content": "{\"predicted_scene\": \"nominal\", \"base_rate\": 0.7827, \"most_common_scene\": \"nominal\", \"most_common_rate\": 0.7827, \"interpretation\": \"nominal is the most common class at 78.3%. This prediction is statistically likely to be correct based on base rate alone.\", \"classification_risk\": \"low\", \"confidence_required\": \"This is a common class (78.3% base rate). Standard visual confirmation is sufficient.\", \"visual_checklist\": {\"must_be_present\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"commonly_mistaken_triggers\": [\"Construction zone cones (could indicate flagger or incident_zone)\", \"Emergency vehicle parked with lights off (could be incident_zone)\", \"Wet road surface (could be flooded)\"]}, \"decision_framework\": \"Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm nominal. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-b124a43a4be1f827",
+          "content": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\", \"compatible\": true, \"count\": 6741, \"total\": 6741, \"rate\": 1.0, \"valid_actions\": [\"null|null\"], \"typical_actions\": [{\"actions\": \"null|null\", \"count\": 6741, \"rate\": 1.0}], \"interpretation\": \"The combination (null, null) with nominal is well-established: 6741/6741 samples (100.0%). This is a common and valid combination.\", \"diagnostic_questions\": {\"question_1\": \"Is the scene actually nominal? If yes, the ONLY valid action is (null, null).\", \"question_2\": \"If you predicted a non-null action, reconsider whether the scene might actually be incident_zone, flooded, or flagger.\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-bd2827d7b50b588b",
+          "content": "{\"predicted_scene\": \"nominal\", \"has_confusion_risk\": true, \"confused_with\": \"incident_zone\", \"error_rate\": 0.509, \"interpretation\": \"50.9% of nominal predictions are actually incident_zone (3430 errors out of 6741 predictions). This is a critical confusion: over half of nominal predictions may actually be incident_zone. However, note that this high error rate is partly because nominal is the largest class. In absolute terms, nominal is still correct more often than any other class.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 51% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"distinguishing_nominal_from_incident_zone\": [\"Cones in orderly lane-guidance pattern vs. scattered around wreckage\", \"Construction workers in work zone vs. first responders at crash scene\", \"Traffic flowing (even if slowly) vs. traffic completely stopped\", \"No damaged vehicles visible vs. visible vehicle damage\", \"Standard work zone signage vs. emergency scene tape/barriers\"]}, \"decision_framework\": \"For each feature in 'features_confirming_nominal', check if it is present. Then for each feature in 'features_confirming_incident_zone', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer incident_zone when nominal has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 1,
+      "category": "correct_prediction",
+      "gt_scene": "nominal",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "original_prediction": "nominal",
+      "original_long_action": "null",
+      "original_lat_action": "null",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_prior",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "base_rate": 0.7827,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "interpretation": "nominal is the most common class at 78.3%. This prediction is statistically likely to be correct based on base rate alone.",
+            "classification_risk": "low",
+            "confidence_required": "This is a common class (78.3% base rate). Standard visual confirmation is sufficient.",
+            "visual_checklist": {
+              "must_be_present": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "commonly_mistaken_triggers": [
+                "Construction zone cones (could indicate flagger or incident_zone)",
+                "Emergency vehicle parked with lights off (could be incident_zone)",
+                "Wet road surface (could be flooded)"
+              ]
+            },
+            "decision_framework": "Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm nominal. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "nominal",
+            "long_action": "null",
+            "lat_action": "null",
+            "compatible": true,
+            "count": 6741,
+            "total": 6741,
+            "rate": 1.0,
+            "valid_actions": [
+              "null|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "null|null",
+                "count": 6741,
+                "rate": 1.0
+              }
+            ],
+            "interpretation": "The combination (null, null) with nominal is well-established: 6741/6741 samples (100.0%). This is a common and valid combination.",
+            "diagnostic_questions": {
+              "question_1": "Is the scene actually nominal? If yes, the ONLY valid action is (null, null).",
+              "question_2": "If you predicted a non-null action, reconsider whether the scene might actually be incident_zone, flooded, or flagger."
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "nominal"
+          },
+          "result": {
+            "predicted_scene": "nominal",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.509,
+            "interpretation": "50.9% of nominal predictions are actually incident_zone (3430 errors out of 6741 predictions). This is a critical confusion: over half of nominal predictions may actually be incident_zone. However, note that this high error rate is partly because nominal is the largest class. In absolute terms, nominal is still correct more often than any other class.",
+            "classification_risk": "high",
+            "confidence_required": "This prediction is wrong 51% of the time. Very strong visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_nominal": [
+                "Normal traffic flow with no obstructions",
+                "Standard road conditions (dry, clear lanes)",
+                "No emergency vehicles, flaggers, horses, or standing water"
+              ],
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "distinguishing_nominal_from_incident_zone": [
+                "Cones in orderly lane-guidance pattern vs. scattered around wreckage",
+                "Construction workers in work zone vs. first responders at crash scene",
+                "Traffic flowing (even if slowly) vs. traffic completely stopped",
+                "No damaged vehicles visible vs. visible vehicle damage",
+                "Standard work zone signage vs. emergency scene tape/barriers"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_nominal', check if it is present. Then for each feature in 'features_confirming_incident_zone', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer incident_zone when nominal has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 3,
+      "num_rounds": 2,
+      "final_scene": "nominal",
+      "final_long_action": "null",
+      "final_lat_action": "null",
+      "was_revised": false,
+      "scene_correct": true,
+      "revision_correct": null,
+      "final_text": "The prediction of \"nominal\" scene with \"null\" longitudinal and lateral actions is statistically valid and commonly observed. However, the high confusion rate with \"incident_zone\" (50.9%) requires strong visual confirmation.\n\nGiven the tools' findings:\n- \"nominal\" is the most common scene (78.3% base rate).\n- The action combination (null, null) is 100% compatible with \"nominal\".\n- The high confusion risk with \"incident_zone\" means we must verify the scene is truly nominal.\n\nSince the model's prediction is based on a nominal scene with no obstructions, standard road conditions, and no emergency vehicles or flaggers, and since the action (null, null) is perfectly valid for nominal scenes, the prediction is reasonable.\n\nFINAL_SCENE: nominal\nFINAL_LONG_ACTION: null\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: nominal\n- Longitudinal action: null\n- Lateral action: null\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9c00c124fe11bd5a",
+              "type": "function",
+              "function": {
+                "name": "check_scene_prior",
+                "arguments": "{\"predicted_scene\": \"nominal\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-9ee33f67c977d7a0",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-97927e966aba132f",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"nominal\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-9c00c124fe11bd5a",
+          "content": "{\"predicted_scene\": \"nominal\", \"base_rate\": 0.7827, \"most_common_scene\": \"nominal\", \"most_common_rate\": 0.7827, \"interpretation\": \"nominal is the most common class at 78.3%. This prediction is statistically likely to be correct based on base rate alone.\", \"classification_risk\": \"low\", \"confidence_required\": \"This is a common class (78.3% base rate). Standard visual confirmation is sufficient.\", \"visual_checklist\": {\"must_be_present\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"commonly_mistaken_triggers\": [\"Construction zone cones (could indicate flagger or incident_zone)\", \"Emergency vehicle parked with lights off (could be incident_zone)\", \"Wet road surface (could be flooded)\"]}, \"decision_framework\": \"Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm nominal. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-9ee33f67c977d7a0",
+          "content": "{\"scene\": \"nominal\", \"long_action\": \"null\", \"lat_action\": \"null\", \"compatible\": true, \"count\": 6741, \"total\": 6741, \"rate\": 1.0, \"valid_actions\": [\"null|null\"], \"typical_actions\": [{\"actions\": \"null|null\", \"count\": 6741, \"rate\": 1.0}], \"interpretation\": \"The combination (null, null) with nominal is well-established: 6741/6741 samples (100.0%). This is a common and valid combination.\", \"diagnostic_questions\": {\"question_1\": \"Is the scene actually nominal? If yes, the ONLY valid action is (null, null).\", \"question_2\": \"If you predicted a non-null action, reconsider whether the scene might actually be incident_zone, flooded, or flagger.\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-97927e966aba132f",
+          "content": "{\"predicted_scene\": \"nominal\", \"has_confusion_risk\": true, \"confused_with\": \"incident_zone\", \"error_rate\": 0.509, \"interpretation\": \"50.9% of nominal predictions are actually incident_zone (3430 errors out of 6741 predictions). This is a critical confusion: over half of nominal predictions may actually be incident_zone. However, note that this high error rate is partly because nominal is the largest class. In absolute terms, nominal is still correct more often than any other class.\", \"classification_risk\": \"high\", \"confidence_required\": \"This prediction is wrong 51% of the time. Very strong visual evidence is required.\", \"visual_checklist\": {\"features_confirming_nominal\": [\"Normal traffic flow with no obstructions\", \"Standard road conditions (dry, clear lanes)\", \"No emergency vehicles, flaggers, horses, or standing water\"], \"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"distinguishing_nominal_from_incident_zone\": [\"Cones in orderly lane-guidance pattern vs. scattered around wreckage\", \"Construction workers in work zone vs. first responders at crash scene\", \"Traffic flowing (even if slowly) vs. traffic completely stopped\", \"No damaged vehicles visible vs. visible vehicle damage\", \"Standard work zone signage vs. emergency scene tape/barriers\"]}, \"decision_framework\": \"For each feature in 'features_confirming_nominal', check if it is present. Then for each feature in 'features_confirming_incident_zone', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer incident_zone when nominal has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    },
+    {
+      "sample_id": 25,
+      "category": "wildcard",
+      "gt_scene": "nominal",
+      "gt_long_action": "null",
+      "gt_lat_action": "null",
+      "original_prediction": "flagger",
+      "original_long_action": "slowdown",
+      "original_lat_action": "null",
+      "tool_calls": [
+        {
+          "round": 1,
+          "tool": "check_scene_prior",
+          "args": {
+            "predicted_scene": "flagger"
+          },
+          "result": {
+            "predicted_scene": "flagger",
+            "base_rate": 0.0766,
+            "most_common_scene": "nominal",
+            "most_common_rate": 0.7827,
+            "interpretation": "flagger occurs at 7.7% -- a moderately common class. Verify that the visual evidence matches the expected features for this scene type.",
+            "classification_risk": "moderate",
+            "confidence_required": "This is an uncommon class (7.7% base rate). Clear visual evidence should be present.",
+            "visual_checklist": {
+              "must_be_present": [
+                "A human figure standing on or near the roadway",
+                "Person wearing high-visibility vest or clothing",
+                "Person holding a STOP/SLOW sign, flag, or paddle",
+                "Active hand signals directing traffic flow"
+              ],
+              "commonly_mistaken_triggers": [
+                "Pedestrians near the road (not directing traffic)",
+                "Road signs on posts (no human holding them)",
+                "Construction workers not actively flagging",
+                "Mannequins or sign holders at businesses"
+              ]
+            },
+            "decision_framework": "Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm flagger. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_scene_action_compatibility",
+          "args": {
+            "scene": "flagger",
+            "long_action": "slowdown",
+            "lat_action": "null"
+          },
+          "result": {
+            "scene": "flagger",
+            "long_action": "slowdown",
+            "lat_action": "null",
+            "compatible": true,
+            "count": 207,
+            "total": 660,
+            "rate": 0.314,
+            "valid_actions": [
+              "proceed|null",
+              "slowdown|null",
+              "stop|null"
+            ],
+            "typical_actions": [
+              {
+                "actions": "stop|null",
+                "count": 384,
+                "rate": 0.582
+              },
+              {
+                "actions": "slowdown|null",
+                "count": 207,
+                "rate": 0.314
+              },
+              {
+                "actions": "proceed|null",
+                "count": 69,
+                "rate": 0.105
+              }
+            ],
+            "interpretation": "The combination (slowdown, null) with flagger is well-established: 207/660 samples (31.4%). This is a common and valid combination.",
+            "diagnostic_questions": {
+              "question_1": "Does the visual scene match flagger? Verify the scene before evaluating the action.",
+              "question_2": "Given flagger, does (slowdown, null) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?"
+            },
+            "resolution_guide": "Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.",
+            "_level": 3
+          }
+        },
+        {
+          "round": 1,
+          "tool": "check_confusion_risk",
+          "args": {
+            "predicted_scene": "flagger"
+          },
+          "result": {
+            "predicted_scene": "flagger",
+            "has_confusion_risk": true,
+            "confused_with": "incident_zone",
+            "error_rate": 0.344,
+            "interpretation": "34.4% of flagger predictions are actually incident_zone (227 errors out of 660 predictions). flagger scenes are often confused with incident_zone because both involve construction/work zones. The key distinguishing feature is a human actively directing traffic.",
+            "classification_risk": "moderate",
+            "confidence_required": "This prediction is wrong 34% of the time. Clear visual evidence is required.",
+            "visual_checklist": {
+              "features_confirming_flagger": [
+                "A human figure standing on or near the roadway",
+                "Person wearing high-visibility vest or clothing",
+                "Person holding a STOP/SLOW sign, flag, or paddle",
+                "Active hand signals directing traffic flow"
+              ],
+              "features_confirming_incident_zone": [
+                "Emergency vehicles with flashing lights actively responding",
+                "Crashed or damaged vehicles on the roadway",
+                "Debris or wreckage scattered on the road surface",
+                "Road physically blocked by accident or emergency",
+                "First responders (police, fire, EMS) on foot in the roadway"
+              ],
+              "distinguishing_flagger_from_incident_zone": [
+                "Person with STOP/SLOW sign vs. first responders without flagging equipment",
+                "Organized construction zone vs. chaotic emergency scene",
+                "Traffic being DIRECTED through vs. traffic STOPPED by blockage",
+                "High-vis vest and flag/sign visible vs. emergency uniforms"
+              ]
+            },
+            "decision_framework": "For each feature in 'features_confirming_flagger', check if it is present. Then for each feature in 'features_confirming_incident_zone', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer incident_zone when flagger has a high error rate.",
+            "_level": 3
+          }
+        }
+      ],
+      "num_tool_calls": 3,
+      "num_rounds": 2,
+      "final_scene": "flagger",
+      "final_long_action": "slowdown",
+      "final_lat_action": "null",
+      "was_revised": false,
+      "scene_correct": false,
+      "revision_correct": null,
+      "final_text": "The prediction is reasonable based on the available data. The scene \"flagger\" has a base rate of 7.7%, which is moderately common, and the combination of \"slowdown\" and \"null\" actions is well-established for this scene type, occurring in 31.4% of samples. Additionally, while \"flagger\" has a moderate confusion risk with \"incident_zone\" (34.4% error rate), the visual checklist confirms that the scene likely matches \"flagger\" if the human figure is actively directing traffic with a flag or sign.\n\nFINAL_SCENE: flagger\nFINAL_LONG_ACTION: slowdown\nFINAL_LAT_ACTION: null",
+      "full_conversation": [
+        {
+          "role": "system",
+          "content": "You are a driving scene analysis assistant. You have access to statistical tools that can help you verify predictions about driving scenes. Use the tools to check predictions before giving your final answer. You MUST call at least one tool before giving your final answer."
+        },
+        {
+          "role": "user",
+          "content": "You are verifying a driving scene prediction. A model analyzed a dashcam image and predicted:\n- Scene: flagger\n- Longitudinal action: slowdown\n- Lateral action: null\n\nBefore accepting or rejecting this prediction, use the available tools to check whether it's reasonable. Call whichever tools you think are relevant. After checking, give your final prediction.\n\nOutput format:\nFINAL_SCENE: <scene_type>\nFINAL_LONG_ACTION: <action>\nFINAL_LAT_ACTION: <action>"
+        },
+        {
+          "role": "assistant",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9d609e62d6e557f0",
+              "type": "function",
+              "function": {
+                "name": "check_scene_prior",
+                "arguments": "{\"predicted_scene\": \"flagger\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-936276bde151ae50",
+              "type": "function",
+              "function": {
+                "name": "check_scene_action_compatibility",
+                "arguments": "{\"scene\": \"flagger\", \"long_action\": \"slowdown\", \"lat_action\": \"null\"}"
+              }
+            },
+            {
+              "id": "chatcmpl-tool-a880adaf0927b40d",
+              "type": "function",
+              "function": {
+                "name": "check_confusion_risk",
+                "arguments": "{\"predicted_scene\": \"flagger\"}"
+              }
+            }
+          ]
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-9d609e62d6e557f0",
+          "content": "{\"predicted_scene\": \"flagger\", \"base_rate\": 0.0766, \"most_common_scene\": \"nominal\", \"most_common_rate\": 0.7827, \"interpretation\": \"flagger occurs at 7.7% -- a moderately common class. Verify that the visual evidence matches the expected features for this scene type.\", \"classification_risk\": \"moderate\", \"confidence_required\": \"This is an uncommon class (7.7% base rate). Clear visual evidence should be present.\", \"visual_checklist\": {\"must_be_present\": [\"A human figure standing on or near the roadway\", \"Person wearing high-visibility vest or clothing\", \"Person holding a STOP/SLOW sign, flag, or paddle\", \"Active hand signals directing traffic flow\"], \"commonly_mistaken_triggers\": [\"Pedestrians near the road (not directing traffic)\", \"Road signs on posts (no human holding them)\", \"Construction workers not actively flagging\", \"Mannequins or sign holders at businesses\"]}, \"decision_framework\": \"Count how many items from 'must_be_present' you can identify in the image. If ZERO, reclassify as nominal. If ONE, state which feature you see and your confidence level. If TWO or more, confirm flagger. Also check 'commonly_mistaken_triggers' -- if what you see matches those more than 'must_be_present', reconsider your classification.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-936276bde151ae50",
+          "content": "{\"scene\": \"flagger\", \"long_action\": \"slowdown\", \"lat_action\": \"null\", \"compatible\": true, \"count\": 207, \"total\": 660, \"rate\": 0.314, \"valid_actions\": [\"proceed|null\", \"slowdown|null\", \"stop|null\"], \"typical_actions\": [{\"actions\": \"stop|null\", \"count\": 384, \"rate\": 0.582}, {\"actions\": \"slowdown|null\", \"count\": 207, \"rate\": 0.314}, {\"actions\": \"proceed|null\", \"count\": 69, \"rate\": 0.105}], \"interpretation\": \"The combination (slowdown, null) with flagger is well-established: 207/660 samples (31.4%). This is a common and valid combination.\", \"diagnostic_questions\": {\"question_1\": \"Does the visual scene match flagger? Verify the scene before evaluating the action.\", \"question_2\": \"Given flagger, does (slowdown, null) match what you see? E.g., is the road blocked (stop), partially obstructed (slowdown), or clear (proceed)?\"}, \"resolution_guide\": \"Work through the diagnostic questions in order. If any question suggests the scene or action is wrong, adjust your prediction accordingly.\", \"_level\": 3}"
+        },
+        {
+          "role": "tool",
+          "tool_call_id": "chatcmpl-tool-a880adaf0927b40d",
+          "content": "{\"predicted_scene\": \"flagger\", \"has_confusion_risk\": true, \"confused_with\": \"incident_zone\", \"error_rate\": 0.344, \"interpretation\": \"34.4% of flagger predictions are actually incident_zone (227 errors out of 660 predictions). flagger scenes are often confused with incident_zone because both involve construction/work zones. The key distinguishing feature is a human actively directing traffic.\", \"classification_risk\": \"moderate\", \"confidence_required\": \"This prediction is wrong 34% of the time. Clear visual evidence is required.\", \"visual_checklist\": {\"features_confirming_flagger\": [\"A human figure standing on or near the roadway\", \"Person wearing high-visibility vest or clothing\", \"Person holding a STOP/SLOW sign, flag, or paddle\", \"Active hand signals directing traffic flow\"], \"features_confirming_incident_zone\": [\"Emergency vehicles with flashing lights actively responding\", \"Crashed or damaged vehicles on the roadway\", \"Debris or wreckage scattered on the road surface\", \"Road physically blocked by accident or emergency\", \"First responders (police, fire, EMS) on foot in the roadway\"], \"distinguishing_flagger_from_incident_zone\": [\"Person with STOP/SLOW sign vs. first responders without flagging equipment\", \"Organized construction zone vs. chaotic emergency scene\", \"Traffic being DIRECTED through vs. traffic STOPPED by blockage\", \"High-vis vest and flag/sign visible vs. emergency uniforms\"]}, \"decision_framework\": \"For each feature in 'features_confirming_flagger', check if it is present. Then for each feature in 'features_confirming_incident_zone', check if it is present. Whichever list has MORE confirmed features is the likely correct class. Use the 'distinguishing' list to break ties. If equal or uncertain, prefer incident_zone when flagger has a high error rate.\", \"_level\": 3}"
+        }
+      ]
+    }
+  ]
+}
