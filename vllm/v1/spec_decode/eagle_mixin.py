@@ -8,7 +8,9 @@ import torch
 class EagleMixin:
     compute_logits: Any
 
-    def sample_chain(self, hidden_states: torch.Tensor, use_local_argmax_reduction: bool = False) -> torch.Tensor:
+    def sample_chain(
+        self, hidden_states: torch.Tensor, use_local_argmax_reduction: bool = False
+    ) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
         if use_local_argmax_reduction:
             return self.get_top_tokens(hidden_states)
@@ -54,11 +56,12 @@ class Eagle3Mixin:
         logits_new[:, targets] = logits
         return logits_new
 
-    def sample_chain(self, hidden_states: torch.Tensor, use_local_argmax_reduction: bool = False) -> torch.Tensor:
-        if (
-            use_local_argmax_reduction
-            and not (hasattr(self, "draft_id_to_target_id")
-            and self.draft_id_to_target_id is not None)
+    def sample_chain(
+        self, hidden_states: torch.Tensor, use_local_argmax_reduction: bool = False
+    ) -> torch.Tensor:
+        if use_local_argmax_reduction and not (
+            hasattr(self, "draft_id_to_target_id")
+            and self.draft_id_to_target_id is not None
         ):
             return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
         else:
