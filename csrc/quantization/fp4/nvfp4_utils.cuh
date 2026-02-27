@@ -36,11 +36,6 @@ constexpr int CVT_FP4_SF_VEC_SIZE = 16;
 
 namespace vllm {
 
-template <bool use_256b>
-struct PackedVec<__nv_fp8_e4m3, use_256b> {
-  __nv_fp8x2_e4m3 elts[8];
-};
-
 template <typename Int>
 __host__ __device__ inline Int round_up(Int x, Int y) {
   static_assert(std::is_integral_v<Int>,
