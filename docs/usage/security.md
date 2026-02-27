@@ -178,7 +178,7 @@ These endpoints are **only available when the environment variable `VLLM_SERVER_
 - `/is_sleeping` - Check if engine is sleeping
 - `/collective_rpc` - Execute arbitrary RPC methods on the engine (extremely dangerous)
 
-**Profiler endpoints (only when `VLLM_TORCH_PROFILER_DIR` or `VLLM_TORCH_CUDA_PROFILE` are set):**
+**Profiler endpoints (only when profiling is enabled via `--profiler-config`):**
 
 These endpoints are only available when profiling is enabled and should only be used for local development:
 
@@ -207,7 +207,7 @@ An attacker who can reach the vLLM HTTP server can:
 - Cache manipulation that can disrupt service
 - Detailed server configuration disclosure
 
-Similarly, never enable profiler endpoints (`VLLM_TORCH_PROFILER_DIR` or `VLLM_TORCH_CUDA_PROFILE`) in production.
+Similarly, never enable profiler endpoints in production.
 
 **Be cautious with `--enable-tokenizer-info-endpoint`:** Only enable the `/tokenizer_info` endpoint if you need to expose tokenizer configuration information. This endpoint reveals chat templates and tokenizer settings that may contain sensitive implementation details or prompt engineering strategies.
 

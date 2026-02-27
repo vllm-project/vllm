@@ -14,7 +14,7 @@ import jinja2.nodes
 import jinja2.parser
 import jinja2.sandbox
 
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormat,
@@ -25,7 +25,6 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
-from vllm.inputs import EmbedsPrompt, TextPrompt, TokensPrompt
 from vllm.logger import init_logger
 from vllm.tokenizers import cached_get_tokenizer
 from vllm.tokenizers.hf import CachedHfTokenizer, HfTokenizer
@@ -33,8 +32,10 @@ from vllm.transformers_utils.chat_templates import get_chat_template_fallback_pa
 from vllm.transformers_utils.processor import cached_get_processor
 from vllm.utils.func_utils import supports_kw
 
+from .base import BaseRenderer
+from .inputs import DictPrompt
+from .inputs.preprocess import parse_dec_only_prompt
 from .params import ChatParams
-from .protocol import BaseRenderer
 
 if TYPE_CHECKING:
     from vllm.multimodal.inputs import MultiModalDataDict, MultiModalUUIDDict
@@ -584,27 +585,15 @@ def replace_vision_chunk_video_placeholder(
     return prompt_raw
 
 
-class HfRenderer(BaseRenderer):
+class HfRenderer(BaseRenderer[HfTokenizer]):
     @classmethod
-    def from_config(
+    def from_config(  # type: ignore[override]
         cls,
-        config: ModelConfig,
+        config: VllmConfig,
         tokenizer_kwargs: dict[str, Any],
-    ) -> "BaseRenderer":
-        return cls(config, tokenizer_kwargs)
-
-    def __init__(
-        self,
-        config: ModelConfig,
-        tokenizer_kwargs: dict[str, Any],
-    ) -> None:
-        super().__init__(config)
-
-        self.use_unified_vision_chunk = getattr(
-            config.hf_config, "use_unified_vision_chunk", False
-        )
-
-        if config.skip_tokenizer_init:
+    ) -> "HfRenderer":
+        model_config = config.model_config
+        if model_config.skip_tokenizer_init:
             tokenizer = None
         else:
             tokenizer = cast(
@@ -615,25 +604,25 @@ class HfRenderer(BaseRenderer):
                 ),
             )
 
-        self._tokenizer = tokenizer
+        return cls(config, tokenizer)
 
-    @property
-    def tokenizer(self) -> HfTokenizer | None:
-        return self._tokenizer
+    def __init__(
+        self,
+        config: VllmConfig,
+        tokenizer: HfTokenizer | None,
+    ) -> None:
+        super().__init__(config, tokenizer)
 
-    def get_tokenizer(self) -> HfTokenizer:
-        tokenizer = self.tokenizer
-        if tokenizer is None:
-            raise ValueError("Tokenizer not available when `skip_tokenizer_init=True`")
-
-        return tokenizer
+        self.use_unified_vision_chunk = getattr(
+            config.model_config.hf_config, "use_unified_vision_chunk", False
+        )
 
     def render_messages(
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
-        model_config = self.config
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = parse_chat_messages(
@@ -674,7 +663,7 @@ class HfRenderer(BaseRenderer):
                 video_placeholder,
             )
 
-        prompt = self.render_completion(prompt_raw)
+        prompt = parse_dec_only_prompt(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:
@@ -686,8 +675,8 @@ class HfRenderer(BaseRenderer):
         self,
         messages: list[ChatCompletionMessageParam],
         params: ChatParams,
-    ) -> tuple[list[ConversationMessage], TextPrompt | TokensPrompt | EmbedsPrompt]:
-        model_config = self.config
+    ) -> tuple[list[ConversationMessage], DictPrompt]:
+        model_config = self.model_config
         tokenizer = self.get_tokenizer()
 
         conversation, mm_data, mm_uuids = await parse_chat_messages_async(
@@ -726,7 +715,7 @@ class HfRenderer(BaseRenderer):
                 video_placeholder,
             )
 
-        prompt = self.render_completion(prompt_raw)
+        prompt = parse_dec_only_prompt(prompt_raw)
         if mm_data is not None:
             prompt["multi_modal_data"] = mm_data
         if mm_uuids is not None:

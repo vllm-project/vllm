@@ -1,0 +1,41 @@
+{
+  "defaults": {
+    "qps_list": [
+      "inf"
+    ],
+    "max_concurrency_list": [
+      32,
+      64,
+      128
+    ],
+    "server_environment_variables": {
+      "VLLM_RPC_TIMEOUT": 100000,
+      "VLLM_ALLOW_LONG_MAX_MODEL_LEN": 1,
+      "VLLM_ENGINE_ITERATION_TIMEOUT_S": 120,
+      "VLLM_CPU_SGL_KERNEL": 1,
+      "VLLM_CPU_KVCACHE_SPACE": 40
+    },
+    "server_parameters": {
+      "dtype": "bfloat16",
+      "model": "jinaai/jina-embeddings-v3",
+      "trust_remote_code": ""
+    },
+    "client_parameters": {
+      "model": "jinaai/jina-embeddings-v3",
+      "backend": "openai-embeddings",
+      "endpoint": "/v1/embeddings",
+      "dataset_name": "sharegpt",
+      "dataset_path": "ShareGPT_V3_unfiltered_cleaned_split.json",
+      "num_prompts": 200
+    }
+  },
+  "tests": [
+    {
+      "test_name": "serving_jina_embed_v3_tp1_sharegpt",
+      "server_parameters": {
+        "tensor_parallel_size": 1
+      },
+      "client_parameters": {}
+    }
+  ]
+}

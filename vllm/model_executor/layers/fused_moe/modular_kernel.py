@@ -12,6 +12,10 @@ import torch
 import vllm.envs as envs
 from vllm.forward_context import get_forward_context, is_forward_context_available
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEParallelConfig,
@@ -19,13 +23,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.fused_moe.utils import (
     _resize_cache,
-    apply_moe_activation,
     count_expert_num_tokens,
     disable_inplace,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
+from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import (
     dbo_enabled,
@@ -495,15 +499,19 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
             return f"kernel does not support {reason}"
 
         if not cls._supports_current_device():
-            return False, _make_reason("current device")
+            return False, _make_reason(f"current device {current_platform.device_name}")
         elif not (moe_config.is_act_and_mul or cls._supports_no_act_and_mul()):
             return False, _make_reason("no act_and_mul MLP layer")
         elif not cls._supports_activation(moe_config.activation):
             return False, _make_reason(f"{moe_config.activation} activation")
         elif not cls._supports_quant_scheme(weight_key, activation_key):
-            return False, _make_reason("quantization scheme")
+            return False, _make_reason(
+                f"quantization scheme {weight_key}x{activation_key}"
+            )
         elif not cls._supports_parallel_config(moe_config.moe_parallel_config):
-            return False, _make_reason("parallel config")
+            return False, _make_reason(
+                f"parallel config {moe_config.moe_parallel_config}"
+            )
         elif activation_format != cls.activation_format():
             return False, _make_reason(f"{activation_format.value} activation format")
         return True, None
@@ -536,7 +544,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
     @staticmethod
     @abstractmethod
-    def _supports_activation(activation: str) -> bool:
+    def _supports_activation(activation: MoEActivation) -> bool:
         """
         Whether the kernel supports a particular act function.
         """
@@ -556,8 +564,12 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
     #
 
     @property
-    def quant_dtype(self) -> torch.dtype | None:
+    def quant_dtype(self) -> torch.dtype | str | None:
         return self.quant_config.quant_dtype
+
+    @property
+    def weight_quant_dtype(self) -> torch.dtype | str | None:
+        return self.quant_config.weight_quant_dtype
 
     @property
     def block_shape(self) -> list[int] | None:
@@ -658,7 +670,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
         """
         Compute the shapes for the temporary and final outputs of the two gemms
@@ -690,7 +702,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         raise NotImplementedError
 
     @staticmethod
-    def adjust_N_for_activation(N: int, activation: str) -> int:
+    def adjust_N_for_activation(N: int, activation: MoEActivation) -> int:
         """
         Calculate the output dimension for the activation function.
 
@@ -702,16 +714,15 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
 
         Args:
             N: The intermediate size (width of w1/w3 weights).
-            activation: The activation function name.
+            activation: The activation function enum.
 
         Returns:
             The output dimension after activation.
         """
-        is_no_mul = activation.endswith("_no_mul")
-        return N if is_no_mul else N // 2
+        return N if not activation.is_gated else N // 2
 
     def activation(
-        self, activation: str, output: torch.Tensor, input: torch.Tensor
+        self, activation: MoEActivation, output: torch.Tensor, input: torch.Tensor
     ) -> None:
         apply_moe_activation(activation, output, input)
 
@@ -732,7 +743,7 @@ class FusedMoEPermuteExpertsUnpermute(ABC):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         expert_map: torch.Tensor | None,
         a1q_scale: torch.Tensor | None,
@@ -811,11 +822,13 @@ class FusedMoEModularKernel(torch.nn.Module):
         fused_experts: FusedMoEPermuteExpertsUnpermute,
         shared_experts: torch.nn.Module | None = None,
         moe_parallel_config: FusedMoEParallelConfig | None = None,
+        inplace: bool = False,
     ):
         super().__init__()
         self.prepare_finalize = prepare_finalize
         self.fused_experts = fused_experts
         self.shared_experts = shared_experts
+        self.inplace = inplace
 
         # prefer an explicit FusedMoEParallelConfig when available (from
         # FusedMoE layers / tests).
@@ -890,7 +903,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         global_num_experts: int,
         local_num_experts: int,
         expert_tokens_meta: ExpertTokensMetadata | None,
-        activation: str,
+        activation: MoEActivation,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Allocate temporary and output buffers for the fused experts op.
@@ -1133,7 +1146,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        activation: str,
+        activation: MoEActivation,
         global_num_experts: int,
         local_num_experts: int,
         expert_map: torch.Tensor | None,
@@ -1159,9 +1172,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         # This happens when none of the tokens from the all2all reach this
         # EP rank. Also, note that this is only relevant for CUDAGraph
         # incompatible all2all kernels like the DeepEP high-throughput
-        # kernels. CUDAGraph compatible all2all kernels like the pplx
-        # kernels and the DeepEP low-latency kernels are always batched
-        # and can never run into the tensor.numel() == 0 case.
+        # kernels. CUDAGraph compatible all2all kernels like the DeepEP
+        # low-latency kernels are always batched and can never run into
+        # the tensor.numel() == 0 case.
         if M_full == 0:
             assert num_chunks == 0
             workspace13 = None
@@ -1226,12 +1239,27 @@ class FusedMoEModularKernel(torch.nn.Module):
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         The _finalize method is a wrapper around self.prepare_finalize.finalize
         that handles DBO, async and shared expert overlap.
+
+        Args:
+            shared_experts_input: Optional separate input for shared experts.
+                When latent MoE is used, hidden_states is the latent-projected
+                tensor (smaller dimension) used by routed experts, while
+                shared_experts_input is the original hidden_states (full
+                dimension) needed by the shared expert MLP.
         """
         shared_output: torch.Tensor | None = None
+
+        # For latent MoE: shared experts need the original hidden_states
+        # (full hidden_size), not the latent-projected version used by
+        # routed experts.
+        se_hidden_states = (
+            shared_experts_input if shared_experts_input is not None else hidden_states
+        )
 
         if not self.prepare_finalize.supports_async():
             assert not dbo_enabled()
@@ -1245,7 +1273,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
             if self.shared_experts is not None:
-                shared_output = self.shared_experts(hidden_states)
+                shared_output = self.shared_experts(se_hidden_states)
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
                 output,
@@ -1256,7 +1284,7 @@ class FusedMoEModularKernel(torch.nn.Module):
                 self.fused_experts.finalize_weight_and_reduce_impl(),
             )
             if self.shared_experts is not None:
-                shared_output = self.shared_experts(hidden_states)
+                shared_output = self.shared_experts(se_hidden_states)
 
             # TODO(lucas): refactor this in the alternative schedules followup
             # currently unpack if we have hook + receiver pair or just
@@ -1292,11 +1320,11 @@ class FusedMoEModularKernel(torch.nn.Module):
         w2: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
-        inplace: bool = False,
-        activation: str = "silu",
+        activation: MoEActivation = MoEActivation.SILU,
         global_num_experts: int = -1,
         expert_map: torch.Tensor | None = None,
         apply_router_weight_on_input: bool = False,
+        shared_experts_input: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """
         This function computes a Mixture of Experts (MoE) layer using two sets
@@ -1309,9 +1337,7 @@ class FusedMoEModularKernel(torch.nn.Module):
         - topk_weights (torch.Tensor): The topk weights applied at the end of
           the layer.
         - topk_ids (torch.Tensor): A map of row to expert id.
-        - inplace (bool): If True, perform the operation in-place.
-          Defaults to False.
-        - activation (str): The activation function to apply after the first
+        - activation (MoEActivation): The activation function to apply after the first
           MoE layer.
         - global_num_experts (int): The total number of experts in the global
           expert space.
@@ -1321,12 +1347,17 @@ class FusedMoEModularKernel(torch.nn.Module):
         - apply_router_weight_on_input (bool): When true, the topk weights are
           applied directly on the inputs. This is only applicable when topk is
           1.
+        - shared_experts_input (Optional[torch.Tensor]): Optional separate
+          input for shared experts. For latent MoE, this is the original
+          hidden_states before latent projection.
 
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
 
-        if inplace and self.shared_experts is None and not disable_inplace():
+        if self.inplace:
+            assert self.shared_experts is None
+            assert not disable_inplace()
             output = hidden_states
         else:
             output = torch.zeros_like(hidden_states)
@@ -1367,4 +1398,5 @@ class FusedMoEModularKernel(torch.nn.Module):
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,
+            shared_experts_input=shared_experts_input,
         )

@@ -4,6 +4,11 @@
 from contextlib import contextmanager
 from typing import Any
 
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    activation_without_mul,
+    apply_moe_activation,
+)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     RoutingMethodType,
@@ -23,11 +28,11 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
 from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
     FusedMoERouter,
 )
+from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
 from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.utils import activation_without_mul
 from vllm.model_executor.layers.fused_moe.zero_expert_fused_moe import (
     ZeroExpertFusedMoE,
 )
@@ -54,15 +59,18 @@ __all__ = [
     "FusedMoERouter",
     "FusedMoEConfig",
     "FusedMoEMethodBase",
+    "MoEActivation",
     "UnquantizedFusedMoEMethod",
     "FusedMoeWeightScaleSupported",
     "FusedMoEPermuteExpertsUnpermute",
     "FusedMoEActivationFormat",
     "FusedMoEPrepareAndFinalize",
+    "GateLinear",
     "RoutingMethodType",
     "SharedFusedMoE",
     "ZeroExpertFusedMoE",
     "activation_without_mul",
+    "apply_moe_activation",
     "override_config",
     "get_config",
 ]
@@ -100,6 +108,10 @@ if HAS_TRITON:
     from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
         TritonOrDeepGemmExperts,
     )
+    from vllm.model_executor.layers.fused_moe.xpu_fused_moe import (
+        XPUExperts,
+        XPUExpertsFp8,
+    )
 
     __all__ += [
         "AiterExperts",
@@ -117,6 +129,8 @@ if HAS_TRITON:
         "DeepGemmExperts",
         "BatchedDeepGemmExperts",
         "TritonOrDeepGemmExperts",
+        "XPUExperts",
+        "XPUExpertsFp8",
     ]
 else:
     # Some model classes directly use the custom ops. Add placeholders

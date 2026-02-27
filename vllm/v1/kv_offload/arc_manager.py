@@ -90,7 +90,8 @@ class ARCOffloadingManager(OffloadingManager):
                 block = self.t1.pop(block_hash)
                 if not block.is_ready:
                     # block was just prepared to be stored, not really touched twice
-                    self.t1.move_to_end(block_hash)
+                    # keep it in T1 and mark as most recently used
+                    self.t1[block_hash] = block
                 else:
                     self.t2[block_hash] = block
 

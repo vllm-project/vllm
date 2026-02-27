@@ -25,7 +25,7 @@ S3_REGION="${AWS_DEFAULT_REGION:-us-west-2}"
 S3_URL="http://${S3_BUCKET}.s3-website-${S3_REGION}.amazonaws.com"
 
 # Format ROCm version for path (e.g., "7.1" -> "rocm710")
-ROCM_VERSION_PATH="rocm$(echo ${ROCM_VERSION} | tr -d '.')"
+ROCM_VERSION_PATH="rocm$(echo "${ROCM_VERSION}" | tr -d '.')"
 ROCM_PATH="rocm/${BUILDKITE_COMMIT}/${ROCM_VERSION_PATH}"
 buildkite-agent annotate --style 'success' --context 'rocm-release-workflow' << EOF
 ## ROCm Wheel and Docker Image Releases

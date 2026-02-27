@@ -34,7 +34,7 @@ if [[ $1 == "prefiller" ]]; then
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=0 \
-        vllm serve $MODEL \
+        vllm serve "$MODEL" \
         --port 8100 \
         --enforce-eager \
         --kv-transfer-config \
@@ -51,7 +51,7 @@ elif [[ $1 == "decoder" ]]; then
         VLLM_ENABLE_V1_MULTIPROCESSING=1 \
         VLLM_WORKER_MULTIPROC_METHOD=spawn \
         CUDA_VISIBLE_DEVICES=1 \
-        vllm serve $MODEL \
+        vllm serve "$MODEL" \
         --port 8200 \
         --enforce-eager \
         --kv-transfer-config \
