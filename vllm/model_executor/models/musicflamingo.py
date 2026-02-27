@@ -21,6 +21,7 @@ from vllm.multimodal.processing import BaseProcessingInfo
 from .audioflamingo3 import (
     AudioFlamingo3DummyInputsBuilder,
     AudioFlamingo3ForConditionalGeneration,
+    AudioFlamingo3MultiModalDataParser,
     AudioFlamingo3MultiModalProcessor,
 )
 
@@ -53,8 +54,16 @@ class MusicFlamingoProcessingInfo(BaseProcessingInfo):
         hf_processor = self.get_hf_processor(**kwargs)
         return hf_processor.feature_extractor
 
+    def get_data_parser(self):
+        feature_extractor = self.get_feature_extractor()
+
+        return AudioFlamingo3MultiModalDataParser(
+            target_sr=feature_extractor.sampling_rate,
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
-        return {"audio": None}
+        return {"audio": 1}
 
 
 class MusicFlamingoDummyInputsBuilder(AudioFlamingo3DummyInputsBuilder):
