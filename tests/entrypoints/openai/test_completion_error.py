@@ -223,18 +223,14 @@ async def test_completion_error_stream():
 
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
-    is not provided, to_sampling_params should raise ValueError instead of
-    AssertionError so the API returns 400 instead of 500."""
-    request = CompletionRequest(
-        model=MODEL_NAME,
-        prompt="Test prompt",
-        max_tokens=10,
-        response_format={"type": "json_schema"},
-    )
-    with pytest.raises(ValueError, match="json_schema.*must be provided"):
-        request.to_sampling_params(
-            default_sampling_params={},
-            default_max_tokens=100,
+    is not provided, request construction should raise a validation error
+    so the API returns 400 instead of 500."""
+    with pytest.raises(Exception, match="json_schema.*must be provided"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            response_format={"type": "json_schema"},
         )
 
 
