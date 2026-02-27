@@ -1458,7 +1458,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 input_ids,
                 self.get_language_model().embed_input_ids,
                 is_multimodal=is_multimodal,
-                handle_oov_mm_token=handle_oov_mm_token,
             )
             return merge_interleaved_embeddings(
                 inputs_embeds,
@@ -1475,7 +1474,6 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             input_ids,
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(
