@@ -555,6 +555,16 @@ class RocmPlatform(Platform):
                     "Overriding cudagraph_mode to PIECEWISE."
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+            # RDNA3/RDNA4 (gfx11xx/gfx12xx) Triton kernels are unstable
+            # inside HIP graph capture/replay, causing GPU memory faults.
+            # Downgrade to PIECEWISE which runs attention eagerly.
+            elif _ON_GFX1X:
+                logger.warning_once(
+                    "RDNA (gfx1x) detected. Full CUDA graph capture of "
+                    "Triton kernels is unsupported on this architecture. "
+                    "Overriding cudagraph_mode to PIECEWISE."
+                )
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
         if cache_config and cache_config.block_size is None:
             if (
