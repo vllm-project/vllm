@@ -577,7 +577,7 @@ class RMSNormGated(CustomOp):
         if z is not None and self.norm_before_gate:
             out = out * F.silu(z)
 
-        return out
+        return out.to(x.dtype)
 
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None
