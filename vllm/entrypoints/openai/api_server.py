@@ -264,12 +264,13 @@ def build_app(
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
 
-    # Add WebSocket metrics middleware
-    from vllm.entrypoints.openai.realtime.metrics import (
-        WebSocketMetricsMiddleware,
-    )
+    if "realtime" in supported_tasks:
+        # Add WebSocket metrics middleware
+        from vllm.entrypoints.openai.realtime.metrics import (
+            WebSocketMetricsMiddleware,
+        )
 
-    app.add_middleware(WebSocketMetricsMiddleware)
+        app.add_middleware(WebSocketMetricsMiddleware)
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning(
