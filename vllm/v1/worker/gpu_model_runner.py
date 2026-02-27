@@ -163,7 +163,11 @@ from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.spec_decode.suffix_decoding import SuffixDecodingProposer
 from vllm.v1.structured_output.utils import apply_grammar_bitmask
-from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
+from vllm.v1.utils import (
+    CpuGpuBuffer,
+    is_uniform_decode,
+    record_function_or_nullcontext,
+)
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.cp_utils import (
     check_attention_cp_compatibility,
@@ -482,6 +486,7 @@ class GPUModelRunner(
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
         self.use_aux_hidden_state_outputs = False
+        self.supports_sd_full_graph = False
         # Set up speculative decoding.
         # NOTE(Jiayi): currently we put the entire draft model on
         # the last PP rank. This is not ideal if there are many
@@ -494,6 +499,12 @@ class GPUModelRunner(
                 | DraftModelProposer
                 | MedusaProposer
             )
+
+            self.supports_sd_full_graph = (
+                self.speculative_config.use_eagle()
+                and not self.speculative_config.disable_padded_drafter_batch
+            )
+
             if self.speculative_config.method == "ngram":
                 from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
@@ -1951,11 +1962,13 @@ class GPUModelRunner(
                 for _metadata in attn_metadata.values():
                     _metadata.mm_prefix_range = req_doc_ranges  # type: ignore[attr-defined]
 
-        if spec_decode_common_attn_metadata is not None and (
-            num_reqs != num_reqs_padded or num_tokens != num_tokens_padded
+        if (
+            spec_decode_common_attn_metadata is not None
+            and (num_reqs != num_reqs_padded or num_tokens != num_tokens_padded)
+            and not self.supports_sd_full_graph
         ):
-            # Currently the drafter still only uses piecewise cudagraphs (and modifies
-            # the attention metadata in directly), and therefore does not want to use
+            # Currently the drafter still only uses piecewise cudagraphs (except for
+            # Eagle, which supports FULL now), and therefore does not want to use
             # padded attention metadata.
             spec_decode_common_attn_metadata = (
                 spec_decode_common_attn_metadata.unpadded(num_tokens, num_reqs)
@@ -3097,27 +3110,6 @@ class GPUModelRunner(
             **model_kwargs,
         )
 
-    @staticmethod
-    def _is_uniform_decode(
-        max_num_scheduled_tokens: int,
-        uniform_decode_query_len: int,
-        num_tokens: int,
-        num_reqs: int,
-        force_uniform_decode: bool | None = None,
-    ) -> bool:
-        """
-        Checks if it's a decode batch with same amount scheduled tokens
-        across all requests.
-        """
-        return (
-            (
-                (max_num_scheduled_tokens == uniform_decode_query_len)
-                and (num_tokens == max_num_scheduled_tokens * num_reqs)
-            )
-            if force_uniform_decode is None
-            else force_uniform_decode
-        )
-
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -3140,7 +3132,7 @@ class GPUModelRunner(
         torch.Tensor | None,
         CUDAGraphStat | None,
     ]:
-        uniform_decode = self._is_uniform_decode(
+        uniform_decode = is_uniform_decode(
             max_num_scheduled_tokens=max_num_scheduled_tokens,
             uniform_decode_query_len=self.uniform_decode_query_len,
             num_tokens=num_tokens,
@@ -4150,6 +4142,7 @@ class GPUModelRunner(
                 target_positions=target_positions,
                 target_hidden_states=target_hidden_states,
                 next_token_ids=next_token_ids,
+                num_scheduled_tokens=scheduler_output.num_scheduled_tokens,
                 token_indices_to_sample=token_indices_to_sample,
                 sampling_metadata=sampling_metadata,
                 common_attn_metadata=common_attn_metadata,
@@ -4816,6 +4809,7 @@ class GPUModelRunner(
         )
 
         attn_metadata: PerLayerAttnMetadata | None = None
+        spec_decode_common_attn_metadata: CommonAttentionMetadata | None = None
 
         slot_mappings_by_group, slot_mappings = self._get_slot_mappings(
             num_tokens_padded=num_tokens,
@@ -4848,15 +4842,19 @@ class GPUModelRunner(
                 self.query_start_loc.copy_to_gpu()
 
                 pad_attn = cudagraph_runtime_mode == CUDAGraphMode.FULL
-                attn_metadata, _ = self._build_attention_metadata(
-                    num_tokens=num_tokens_unpadded,
-                    num_tokens_padded=num_tokens_padded if pad_attn else None,
-                    num_reqs=num_reqs_padded,
-                    max_query_len=max_query_len,
-                    ubatch_slices=(ubatch_slices_padded if pad_attn else ubatch_slices),
-                    for_cudagraph_capture=is_graph_capturing,
-                    slot_mappings=slot_mappings_by_group,
-                    use_spec_decode=self.speculative_config is not None,
+                attn_metadata, spec_decode_common_attn_metadata = (
+                    self._build_attention_metadata(
+                        num_tokens=num_tokens_unpadded,
+                        num_tokens_padded=num_tokens_padded if pad_attn else None,
+                        num_reqs=num_reqs_padded,
+                        max_query_len=max_query_len,
+                        ubatch_slices=(
+                            ubatch_slices_padded if pad_attn else ubatch_slices
+                        ),
+                        for_cudagraph_capture=is_graph_capturing,
+                        slot_mappings=slot_mappings_by_group,
+                        use_spec_decode=self.speculative_config is not None,
+                    )
                 )
 
         with self.maybe_dummy_run_with_lora(
@@ -4947,14 +4945,13 @@ class GPUModelRunner(
             ):
                 assert isinstance(self.drafter, EagleProposer | DraftModelProposer)
                 assert self.speculative_config is not None
-                # Eagle currently only supports PIECEWISE cudagraphs.
-                # Therefore only use cudagraphs if the main model uses PIECEWISE
                 # NOTE(lucas): this is a hack, need to clean up.
                 use_cudagraphs = (
                     (
                         is_graph_capturing
                         and cudagraph_runtime_mode == CUDAGraphMode.PIECEWISE
                     )
+                    or (is_graph_capturing and self.supports_sd_full_graph)
                     or (
                         not is_graph_capturing
                         and cudagraph_runtime_mode != CUDAGraphMode.NONE
@@ -4973,6 +4970,7 @@ class GPUModelRunner(
 
                 self.drafter.dummy_run(
                     num_tokens,
+                    common_attn_metadata=spec_decode_common_attn_metadata,
                     use_cudagraphs=use_cudagraphs,
                     is_graph_capturing=is_graph_capturing,
                     slot_mappings=slot_mappings,
@@ -5342,6 +5340,11 @@ class GPUModelRunner(
 
         # Only rank 0 should print progress bar during capture
         if is_global_first_rank():
+            logger.info(
+                "Capturing CUDA graphs for %d batches (%s)",
+                len(batch_descriptors),
+                ", ".join(str(desc.num_tokens) for desc in batch_descriptors),
+            )
             batch_descriptors = tqdm(
                 batch_descriptors,
                 disable=not self.load_config.use_tqdm_on_load,
@@ -5635,7 +5638,6 @@ class GPUModelRunner(
         # sizes for decode and mixed prefill-decode.
         if (
             cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
-            and cudagraph_mode.separate_routine()
             and self.uniform_decode_query_len > 1
         ):
             self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(

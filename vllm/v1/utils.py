@@ -463,3 +463,24 @@ def compute_iteration_details(scheduler_output: SchedulerOutput) -> IterationDet
         num_generation_requests,
         num_generation_tokens,
     )
+
+
+def is_uniform_decode(
+    max_num_scheduled_tokens: int,
+    uniform_decode_query_len: int,
+    num_tokens: int,
+    num_reqs: int,
+    force_uniform_decode: bool | None = None,
+) -> bool:
+    """
+    Checks if it's a decode batch with same amount scheduled tokens
+    across all requests.
+    """
+    return (
+        (
+            (max_num_scheduled_tokens == uniform_decode_query_len)
+            and (num_tokens == max_num_scheduled_tokens * num_reqs)
+        )
+        if force_uniform_decode is None
+        else force_uniform_decode
+    )
