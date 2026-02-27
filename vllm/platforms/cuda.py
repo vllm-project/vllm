@@ -414,6 +414,7 @@ class CudaPlatformBase(Platform):
             AttentionBackendEnum.FLASH_ATTN,
             AttentionBackendEnum.TRITON_ATTN,
             AttentionBackendEnum.TORCH_SDPA,
+            AttentionBackendEnum.FLASHINFER,
         ]
 
     @classmethod
@@ -537,6 +538,10 @@ class CudaPlatformBase(Platform):
     @classmethod
     def support_static_graph_mode(cls) -> bool:
         return True
+
+    @classmethod
+    def num_compute_units(cls, device_id=0):
+        return torch.cuda.get_device_properties(device_id).multi_processor_count
 
 
 # NVML utils
