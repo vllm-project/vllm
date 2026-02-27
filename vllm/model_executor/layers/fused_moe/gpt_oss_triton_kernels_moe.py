@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
+from functools import lru_cache
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -104,6 +106,46 @@ def pack_bitmatrix(
         tl.store(bitmatrix_ptrs, y, mask=offsets_m[:, None] < n_rows)
 
 
+@triton.jit
+def _xshare_apply_mask_kernel(
+    gating_ptr,  # [M, E] input logits
+    output_ptr,  # [M, E] output masked logits
+    global_experts_ptr,  # [GT] selected expert indices (int64)
+    M,
+    E: tl.constexpr,
+    GT: tl.constexpr,
+    TOPK: tl.constexpr,  # per-row topk guarantee (0 = disabled)
+    mask_val,
+):
+    """Fused mask: global expert selection + per-row topk in one launch."""
+    row = tl.program_id(0)
+    if row >= M:
+        return
+
+    e_idx = tl.arange(0, E)
+    row_off = row * E
+    logits = tl.load(gating_ptr + row_off + e_idx, mask=e_idx < E, other=mask_val)
+
+    # Build keep mask from global expert selection
+    keep = tl.zeros([E], dtype=tl.int1)
+    for g in tl.static_range(GT):
+        sel = tl.load(global_experts_ptr + g)
+        keep = keep | (e_idx == sel)
+
+    # Per-row top-TOPK guarantee via iterative argmax on original logits
+    if TOPK > 0:
+        temp = logits
+        for _k in tl.static_range(TOPK):
+            max_val = tl.max(temp, axis=0)
+            is_max = temp == max_val
+            max_idx = tl.min(tl.where(is_max, e_idx, E), axis=0)
+            keep = keep | (e_idx == max_idx)
+            temp = tl.where(e_idx == max_idx, mask_val, temp)
+
+    output = tl.where(keep, logits, mask_val)
+    tl.store(output_ptr + row_off + e_idx, output, mask=e_idx < E)
+
+
 def legacy_routing_from_bitmatrix(
     bitmatrix: "Bitmatrix",
     expt_scal: torch.Tensor,
@@ -166,6 +208,144 @@ def legacy_routing(
     )
 
 
+_moe_config = None
+
+
+def set_moe_config(config) -> None:
+    """Set the global MoEConfig. Called from set_current_vllm_config."""
+    global _moe_config
+    _moe_config = config
+    _get_moe_pruning_config.cache_clear()
+
+
+@lru_cache(maxsize=1)
+def _get_moe_pruning_config():
+    """Return the active MoEPruningConfig, or None if pruning is disabled."""
+    if (
+        _moe_config is not None
+        and _moe_config.pruning is not None
+        and _moe_config.pruning.enable
+    ):
+        return _moe_config.pruning
+    return None
+
+
+def _prune_experts(gating_output: "torch.Tensor", topk: int = 0) -> "torch.Tensor":
+    """Apply XShare batch-aware expert pruning to router logits."""
+    cfg = _get_moe_pruning_config()
+    if cfg is None:
+        return gating_output
+    M, E = gating_output.shape
+    if cfg.min_batch > 0 and cfg.min_batch > M:
+        return gating_output
+    if cfg.max_batch > 0 and cfg.max_batch < M:
+        return gating_output
+    k0 = max(0, min(cfg.top_per_token, E))
+    mr = max(0, min(cfg.group_budget, E))
+    ml = (
+        max(1, int(cfg.budget_alpha * E))
+        if (cfg.expert_budget or 0) == 0 and cfg.budget_alpha > 0
+        else max(0, min(cfg.expert_budget or 0, E))
+    )
+    if mr > 0 and cfg.group_size == 0:
+        logger.warning_once(
+            "MoEPruningConfig.group_budget=%d but group_size=0; "
+            "per-group pruning disabled",
+            mr,
+        )
+    if k0 == 0 and mr == 0 and ml == 0:
+        return gating_output
+    if ml >= E:
+        return gating_output
+    group_size = cfg.group_size
+    num_groups = M // group_size if group_size > 0 else 0
+    gpr_can_select = mr > 0 and group_size > 0 and group_size <= M
+    if k0 == 0 and not gpr_can_select and ml == 0:
+        return gating_output
+    gpr_has_remainder = (
+        mr > 0 and group_size > 0 and num_groups > 0 and num_groups * group_size < M
+    )
+    global_sums = None
+    if ml > 0 or gpr_has_remainder:
+        global_sums = gating_output.sum(dim=0)
+    keep_mask = torch.zeros(M, E, dtype=torch.bool, device=gating_output.device)
+    if k0 > 0:
+        top_indices = torch.topk(gating_output, k0, dim=-1, sorted=False).indices
+        keep_mask.scatter_(1, top_indices, True)
+    if mr > 0 and group_size > 0 and num_groups > 0:
+        n_tokens = num_groups * group_size
+        grouped = gating_output[:n_tokens].reshape(num_groups, group_size, E)
+        group_sums = grouped.sum(dim=1)
+        group_experts = torch.topk(group_sums, min(mr, E), dim=-1, sorted=False).indices
+        exp_idx = group_experts.unsqueeze(1).expand(-1, group_size, -1)
+        keep_mask[:n_tokens].scatter_(1, exp_idx.reshape(n_tokens, -1), True)
+        if n_tokens < M:
+            assert global_sums is not None
+            remainder_experts = torch.topk(
+                global_sums, min(mr, E), dim=-1, sorted=False
+            ).indices
+            keep_mask[n_tokens:].scatter_(
+                1, remainder_experts.unsqueeze(0).expand(M - n_tokens, -1), True
+            )
+    if ml > 0:
+        assert global_sums is not None
+        global_experts = torch.topk(global_sums, ml, dim=-1, sorted=False).indices
+        keep_mask.scatter_(1, global_experts.unsqueeze(0).expand(M, -1), True)
+    if topk > 0 and ml < topk:
+        topk_indices = torch.topk(
+            gating_output, min(topk, E), dim=-1, sorted=False
+        ).indices
+        keep_mask.scatter_(1, topk_indices, True)
+    return gating_output.masked_fill(~keep_mask, torch.finfo(gating_output.dtype).min)
+
+
+def _fused_prune_experts(
+    gating_output: "torch.Tensor", topk: int = 0
+) -> "torch.Tensor":
+    """Fused XShare pruning; falls back to _prune_experts for k0/GPR."""
+    cfg = _get_moe_pruning_config()
+    if cfg is None:
+        return gating_output
+    M, E = gating_output.shape
+    if cfg.min_batch > 0 and cfg.min_batch > M:
+        return gating_output
+    if cfg.max_batch > 0 and cfg.max_batch < M:
+        return gating_output
+    k0 = max(0, min(cfg.top_per_token, E))
+    mr = max(0, min(cfg.group_budget, E))
+    ml = (
+        max(1, int(cfg.budget_alpha * E))
+        if (cfg.expert_budget or 0) == 0 and cfg.budget_alpha > 0
+        else max(0, min(cfg.expert_budget or 0, E))
+    )
+    if k0 == 0 and mr == 0 and ml == 0:
+        return gating_output
+    if ml >= E:
+        return gating_output
+    group_size = cfg.group_size
+    num_groups = M // group_size if group_size > 0 else 0
+    if k0 > 0 or (mr > 0 and group_size > 0 and num_groups > 0):
+        return _prune_experts(gating_output, topk=topk)
+    global_sums = gating_output.sum(dim=0)
+    global_experts = torch.topk(global_sums, ml, dim=-1, sorted=False).indices.to(
+        torch.int64
+    )
+    output = torch.empty_like(gating_output)
+    mask_val = torch.finfo(gating_output.dtype).min
+    effective_topk = min(topk, E) if topk > 0 and ml < topk else 0
+    _xshare_apply_mask_kernel[(M,)](
+        gating_output,
+        output,
+        global_experts,
+        M,
+        E=E,
+        GT=ml,
+        TOPK=effective_topk,
+        mask_val=mask_val,
+    )
+    return output
+
+
 def triton_kernel_moe_forward(
     hidden_states: torch.Tensor,
     w1,  # Tensor or triton_kernels.Tensor
@@ -179,6 +359,8 @@ def triton_kernel_moe_forward(
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    gating_output = _fused_prune_experts(gating_output, topk=topk)
+
     routing_data, gather_idx, scatter_idx = legacy_routing(
         gating_output, topk, sm_first=not renormalize
     )

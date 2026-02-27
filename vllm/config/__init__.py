@@ -22,6 +22,7 @@ from vllm.config.model import (
     str_dtype_to_torch_dtype,
     try_match_architecture_defaults,
 )
+from vllm.config.moe import MoEConfig, MoEPruningConfig
 from vllm.config.multimodal import MultiModalConfig
 from vllm.config.observability import ObservabilityConfig
 from vllm.config.parallel import EPLBConfig, ParallelConfig
@@ -115,5 +116,8 @@ __all__ = [
     "get_current_vllm_config_or_none",
     "set_current_vllm_config",
     "get_layers_from_vllm_config",
+    # From vllm.config.moe
+    "MoEConfig",
+    "MoEPruningConfig",
     "WeightTransferConfig",
 ]

@@ -323,6 +323,15 @@ class Worker(WorkerBase):
         ):
             self.model_runner.load_model(eep_scale_up=eep_scale_up)
 
+        # Persist MoE config beyond the context manager so pruning
+        # remains active during inference (set_current_vllm_config
+        # resets it to None on exit).
+        if self.vllm_config.moe_config is not None:
+            from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
+                set_moe_config,
+            )
+            set_moe_config(self.vllm_config.moe_config)
+
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
 
