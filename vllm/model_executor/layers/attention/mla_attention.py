@@ -313,11 +313,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         if cache_config is not None:
             kv_cache_dtype = cache_config.cache_dtype
-            block_size = cache_config.block_size
             calculate_kv_scales = cache_config.calculate_kv_scales
         else:
             kv_cache_dtype = "auto"
-            block_size = 16
             calculate_kv_scales = False
         self.quant_config = quant_config
 
@@ -331,7 +329,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.head_size,
             dtype,
             kv_cache_dtype,
-            block_size,
             use_mla=True,
             use_sparse=use_sparse,
             num_heads=self.num_heads,
