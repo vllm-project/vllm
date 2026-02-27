@@ -36,6 +36,14 @@ class ObservabilityConfig:
     otlp_traces_endpoint: str | None = None
     """Target URL to which OpenTelemetry traces will be sent."""
 
+    otlp_metrics_endpoint: str | None = None
+    """Target URL to which OpenTelemetry metrics will be sent via OTLP.
+    When set, an OTelMetricsStatLogger is automatically registered alongside
+    the default Prometheus logger, pushing the same metrics via OTLP protocol.
+    Supports both gRPC and HTTP/protobuf protocols (controlled by the
+    OTEL_EXPORTER_OTLP_METRICS_PROTOCOL environment variable, default: grpc).
+    """
+
     collect_detailed_traces: list[DetailedTraceModules] | None = None
     """It makes sense to set this only if `--otlp-traces-endpoint` is set. If
     set, it will collect detailed traces for the specified modules. This
@@ -129,6 +137,24 @@ class ObservabilityConfig:
                     "OpenTelemetry is not available. Unable to configure "
                     "'otlp_traces_endpoint'. Ensure OpenTelemetry packages are "
                     f"installed. Original error:\n{otel_import_error_traceback}"
+                )
+        return value
+
+    @field_validator("otlp_metrics_endpoint")
+    @classmethod
+    def _validate_otlp_metrics_endpoint(cls, value: str | None) -> str | None:
+        if value is not None:
+            from vllm.v1.metrics.otel import (
+                _otel_metrics_import_error,
+                is_otel_metrics_available,
+            )
+
+            if not is_otel_metrics_available():
+                raise ValueError(
+                    "OpenTelemetry metrics packages are not available. "
+                    "Unable to configure 'otlp_metrics_endpoint'. Ensure "
+                    "opentelemetry-sdk and opentelemetry-exporter-otlp are "
+                    f"installed.\nOriginal error:\n{_otel_metrics_import_error}"
                 )
         return value
 
