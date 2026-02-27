@@ -302,6 +302,10 @@ def test_invalid_backend():
         ("FLEX_ATTENTION", None, False),  # Flex does not support
     ],
 )
+@pytest.mark.skipif(
+    current_platform.is_rocm(),
+    reason="Attention backend FA3 is not supported on ROCm. This test can't succeed.",
+)
 def test_per_head_quant_scales_backend_selection(
     backend_name: str, flash_attn_version: int | None, should_succeed: bool
 ):
