@@ -164,15 +164,13 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
-    def get_preferred_block_size(
-        cls, default_block_size: int = CacheConfig.DEFAULT_BLOCK_SIZE
-    ) -> int:
+    def get_preferred_block_size(cls) -> int:
         supported_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_sizes:
-            return default_block_size
+            return CacheConfig.DEFAULT_BLOCK_SIZE
 
-        if cls.supports_block_size(default_block_size):
-            return default_block_size
+        if cls.supports_block_size(CacheConfig.DEFAULT_BLOCK_SIZE):
+            return CacheConfig.DEFAULT_BLOCK_SIZE
 
         return min(s.base if isinstance(s, MultipleOf) else s for s in supported_sizes)
 

@@ -458,9 +458,7 @@ class Platform:
         first_layer = next(iter(attn_layers.values()))
         backend_cls = first_layer.get_attn_backend()
         with set_current_vllm_config(vllm_config):
-            preferred = backend_cls.get_preferred_block_size(
-                CacheConfig.DEFAULT_BLOCK_SIZE
-            )
+            preferred = backend_cls.get_preferred_block_size()
         if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
             logger.info(
                 "Setting kv cache block size to %d for %s backend.",
