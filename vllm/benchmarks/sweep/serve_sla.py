@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import ClassVar, Literal, get_args
 
 import numpy as np
+from typing_extensions import assert_never
 
 from vllm.benchmarks.datasets import DEFAULT_NUM_PROMPTS
 from vllm.utils.import_utils import PlaceholderModule
@@ -30,8 +31,19 @@ except ImportError:
 SLAVariable = Literal["request_rate", "max_concurrency"]
 
 
-def _estimate_sla_avg(runs: list[dict[str, object]]):
-    return sum(float(run["request_throughput"]) for run in runs) / len(runs)  # type: ignore
+def _estimate_sla_value(run_data: dict[str, object], sla_variable: SLAVariable):
+    request_throughput = float(run_data["request_throughput"])  # type: ignore
+    if sla_variable == "request_rate":
+        return request_throughput
+    if sla_variable == "max_concurrency":
+        mean_latency_ms = float(run_data["mean_e2el_ms"])  # type: ignore
+        return request_throughput * mean_latency_ms / 1000
+
+    assert_never(sla_variable)
+
+
+def _estimate_sla_avg(runs: list[dict[str, object]], sla_variable: SLAVariable):
+    return sum(_estimate_sla_value(run, sla_variable) for run in runs) / len(runs)
 
 
 def run_comb_sla(
@@ -133,10 +145,10 @@ def explore_sla(
 
         return
 
-    serial_sla_value = math.ceil(_estimate_sla_avg(serial_comb_data))
+    serial_sla_value = math.ceil(_estimate_sla_avg(serial_comb_data, sla_variable))
     print(f"Serial inference: {sla_variable}={serial_sla_value}")
 
-    batch_sla_value = math.floor(_estimate_sla_avg(batch_comb_data))
+    batch_sla_value = math.floor(_estimate_sla_avg(batch_comb_data, sla_variable))
     print(f"Batch inference: {sla_variable}={batch_sla_value}")
 
     # Avoid duplicated runs for intermediate values if the range between
