@@ -118,9 +118,17 @@ def test_zero_expert_moe_forward(zero_expert_moe, num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [1, 32])
-def test_zero_expert_moe_output_deterministic(zero_expert_moe, num_tokens):
-    """Validate that two forward calls with the same input produce
-    identical output (determinism)."""
+def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
+    """Validate that the layer output equals real expert output plus zero
+    expert contribution.
+
+    The key invariant is:
+        layer.forward(h, r) == quant_method.apply(routing) + zero_expert_output
+
+    We compute routing and zero expert output via router.select_experts(),
+    then compute real expert output via quant_method.apply() directly, and
+    verify that the layer forward produces their sum.
+    """
     layer, vllm_config = zero_expert_moe
     num_experts = 4
     zero_expert_num = 1
@@ -141,17 +149,38 @@ def test_zero_expert_moe_output_deterministic(zero_expert_moe, num_tokens):
     with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
         get_forward_context().all_moe_layers = None
 
-        output1 = layer.forward(hidden_states, router_logits)
-        output2 = layer.forward(hidden_states, router_logits)
+        # Compute routing and zero expert output directly (without the
+        # runner consuming zero_expert_output).
+        topk_weights, topk_ids = layer.router.select_experts(
+            hidden_states, router_logits
+        )
+        zero_output = layer.router.zero_expert_output
 
-    assert not torch.isnan(output1).any(), "Output contains NaN"
+        # Compute real expert output via quant_method.apply().
+        real_output = layer.quant_method.apply(
+            layer=layer,
+            x=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            shared_experts_input=None,
+        )
 
+        # Get the combined output from layer.forward().
+        full_output = layer.forward(hidden_states, router_logits)
+
+    assert zero_output is not None, "Zero expert output should not be None"
+    assert not torch.isnan(real_output).any(), "Real expert output has NaN"
+    assert not torch.isnan(zero_output).any(), "Zero expert output has NaN"
+    assert not torch.isnan(full_output).any(), "Full output has NaN"
+
+    expected = real_output + zero_output
     torch.testing.assert_close(
-        output1,
-        output2,
+        full_output,
+        expected,
         atol=0,
         rtol=0,
-        msg="Two forward calls with same input should produce identical output",
+        msg="Layer output should equal real expert output "
+        "plus zero expert contribution",
     )
 
 
