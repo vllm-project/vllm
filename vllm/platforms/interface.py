@@ -449,7 +449,7 @@ class Platform:
 
         attn_layers = get_layers_from_vllm_config(
             vllm_config,
-            AttentionLayerBase,
+            AttentionLayerBase,  # type: ignore[type-abstract]
         )
         if not attn_layers:
             cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE

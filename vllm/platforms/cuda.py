@@ -256,7 +256,7 @@ class CudaPlatformBase(Platform):
 
         # No selected backend or the selected backend is invalid,
         # so we try finding a valid backend.
-        valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
+        valid_backends_priorities, all_invalid_reasons = cls.get_valid_backends(
             device_capability=device_capability,
             attn_selector_config=attn_selector_config,
             num_heads=num_heads,
@@ -265,7 +265,7 @@ class CudaPlatformBase(Platform):
             "{"
             + ", ".join(
                 f"{backend.name}: [{', '.join(reasons)}]"
-                for backend, (_, reasons) in invalid_reasons.items()
+                for backend, (_, reasons) in all_invalid_reasons.items()
             )
             + "}"
         )
@@ -295,7 +295,7 @@ class CudaPlatformBase(Platform):
         if attn_selector_config.block_size is not None:
             excluded = [
                 backend
-                for backend, (priority, reasons) in invalid_reasons.items()
+                for backend, (priority, reasons) in all_invalid_reasons.items()
                 if priority < selected_priority
                 and reasons == ["block_size not supported"]
             ]
