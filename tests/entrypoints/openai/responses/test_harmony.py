@@ -712,15 +712,14 @@ async def test_function_calling_required(client: OpenAI, model_name: str):
 async def test_system_message_with_tools(client: OpenAI, model_name: str):
     from vllm.entrypoints.openai.parser.harmony_utils import get_system_message
 
-    # Test with custom tools enabled - commentary channel should be available
-    sys_msg = get_system_message(with_custom_tools=True)
-    valid_channels = sys_msg.content[0].channel_config.valid_channels
-    assert "commentary" in valid_channels
-
-    # Test with custom tools disabled - commentary channel should be removed
-    sys_msg = get_system_message(with_custom_tools=False)
-    valid_channels = sys_msg.content[0].channel_config.valid_channels
-    assert "commentary" not in valid_channels
+    # Commentary channel should always be present (needed for preambles)
+    # regardless of whether custom tools are enabled
+    for with_tools in (True, False):
+        sys_msg = get_system_message(with_custom_tools=with_tools)
+        valid_channels = sys_msg.content[0].channel_config.valid_channels
+        assert "commentary" in valid_channels, (
+            f"commentary channel missing when with_custom_tools={with_tools}"
+        )
 
 
 @pytest.mark.asyncio
@@ -910,21 +909,25 @@ async def test_function_calling_no_code_interpreter_events(
     reason="This test is flaky in CI, needs investigation and "
     "potential fixes in the code interpreter MCP implementation."
 )
-async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, server):
-    tools = [{"type": "mcp", "server_label": "code_interpreter"}]
+async def test_code_interpreter_streaming(
+    client: OpenAI,
+    model_name: str,
+    pairs_of_event_types: dict[str, str],
+):
+    tools = [{"type": "code_interpreter", "container": {"type": "auto"}}]
     input_text = (
         "Calculate 123 * 456 using python. "
         "The python interpreter is not stateful and you must "
         "print to see the output."
     )
 
-    def _has_mcp_call(evts: list) -> bool:
-        return events_contain_type(evts, "mcp_call")
+    def _has_code_interpreter(evts: list) -> bool:
+        return events_contain_type(evts, "code_interpreter")
 
     events = await retry_streaming_for(
         client,
         model=model_name,
-        validate_events=_has_mcp_call,
+        validate_events=_has_code_interpreter,
         input=input_text,
         tools=tools,
         temperature=0.0,
@@ -936,59 +939,36 @@ async def test_mcp_code_interpreter_streaming(client: OpenAI, model_name: str, s
     event_types = [e.type for e in events]
     event_types_set = set(event_types)
     logger.info(
-        "\n====== MCP Streaming Diagnostics ======\n"
+        "\n====== Code Interpreter Streaming Diagnostics ======\n"
         "Event count: %d\n"
         "Event types (in order): %s\n"
         "Unique event types: %s\n"
-        "=======================================",
+        "====================================================",
         len(events),
         event_types,
         sorted(event_types_set),
     )
 
-    # Verify the full MCP streaming lifecycle
-    assert "response.output_item.added" in event_types_set, (
-        f"MCP call was not added. Events: {sorted(event_types_set)}"
-    )
-    assert "response.mcp_call.in_progress" in event_types_set, (
-        f"MCP call in_progress not seen. Events: {sorted(event_types_set)}"
-    )
-    assert "response.mcp_call_arguments.delta" in event_types_set, (
-        f"MCP arguments delta not seen. Events: {sorted(event_types_set)}"
-    )
-    assert "response.mcp_call_arguments.done" in event_types_set, (
-        f"MCP arguments done not seen. Events: {sorted(event_types_set)}"
-    )
-    assert "response.mcp_call.completed" in event_types_set, (
-        f"MCP call completed not seen. Events: {sorted(event_types_set)}"
-    )
-    assert "response.output_item.done" in event_types_set, (
-        f"MCP item done not seen. Events: {sorted(event_types_set)}"
-    )
+    # Structural validation (pairing, ordering, field consistency)
+    validate_streaming_event_stack(events, pairs_of_event_types)
 
-    # Validate specific MCP event details
+    # Validate code interpreter item fields
     for event in events:
-        if event.type == "response.output_item.added":
-            if hasattr(event.item, "type") and event.item.type == "mcp_call":
-                assert event.item.name == "python"
-                assert event.item.server_label == "code_interpreter"
-        elif event.type == "response.mcp_call_arguments.done":
-            assert event.name == "python"
-            assert event.arguments is not None
+        if (
+            event.type == "response.output_item.added"
+            and hasattr(event.item, "type")
+            and event.item.type == "code_interpreter_call"
+        ):
+            assert event.item.status == "in_progress"
+        elif event.type == "response.code_interpreter_call_code.done":
+            assert event.code is not None
         elif (
             event.type == "response.output_item.done"
             and hasattr(event.item, "type")
-            and event.item.type == "mcp_call"
+            and event.item.type == "code_interpreter_call"
         ):
-            assert event.item.name == "python"
             assert event.item.status == "completed"
-
-    # code_interpreter events should NOT appear when using MCP type
-    code_interp_events = [e.type for e in events if "code_interpreter" in e.type]
-    assert not code_interp_events, (
-        "Should not see code_interpreter events when using MCP type, "
-        f"but got: {code_interp_events}"
-    )
+            assert event.item.code is not None
 
 
 @pytest.mark.asyncio
