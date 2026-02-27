@@ -36,6 +36,12 @@ class ChunkingMoERunner(MoERunnerBase):
     """
 
     def __init__(self, inner: MoERunnerBase):
+        # Assert that _maybe_dispatch/_maybe_combine will be nops.
+        assert inner.moe_config.pcp_size == 1
+        assert not (
+            inner.moe_config.dp_size > 1 and not inner.quant_method.supports_internal_mk
+        )
+
         # Skip MoERunnerBase.__init__ — all state is delegated to inner
         # via __getattr__. Only chunking-specific state lives here.
         self._inner = inner
