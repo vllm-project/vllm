@@ -308,14 +308,16 @@ class Base(
                     self._target_class = type(child_module)
                     layer_name = qual_name.removeprefix("model.")
                     self._layer_names[int(child_name)] = layer_name
-                    # Ignore MTP weights when num_nextn_predict_layers=0
-                    num_nextn = getattr(
-                        self.text_config,
-                        "num_nextn_predict_layers",
-                        None,
+                    # MTP weights should not be loaded into the base model
+                    num_hidden_layers = self.text_config.num_hidden_layers
+                    names = (
+                        "n_predict",  # Override from SpeculativeConfig
+                        "num_nextn_predict_layers",  # Most models
+                        "mtp_num_hidden_layers",  # Qwen 3.5
                     )
-                    if num_nextn == 0:
-                        mtp_prefix = f"{prefix}.{self.text_config.num_hidden_layers}."
+                    n_predict = getattr_iter(self.text_config, names, 0)
+                    for i in range(num_hidden_layers, num_hidden_layers + n_predict):
+                        mtp_prefix = f"{prefix}.{i}."
                         if mtp_prefix not in self.ignore_unexpected_prefixes:
                             self.ignore_unexpected_prefixes.append(mtp_prefix)
                 # Replace modules as needed
