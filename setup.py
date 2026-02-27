@@ -991,7 +991,7 @@ if _is_cpu():
     import platform
 
     if platform.machine() in ("x86_64", "AMD64"):
-        ext_modules.append(CMakeExtension(name="vllm._C_AVX512"))
+        ext_modules.append(CMakeExtension(name="vllm._C"))
         ext_modules.append(CMakeExtension(name="vllm._C_AVX2"))
     else:
         ext_modules.append(CMakeExtension(name="vllm._C"))

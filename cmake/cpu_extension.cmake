@@ -267,9 +267,10 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
 
     # TODO: Refactor this
     if (ENABLE_X86_ISA)
+        # Note: only enable oneDNN for AVX512
         list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512})
     else()
-        list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX2})
+        list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS})
     endif()
 
     set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
@@ -294,7 +295,7 @@ endif()
 # TODO: Refactor this
 if (ENABLE_X86_ISA)
     message(STATUS "CPU extension (AVX512) compile flags: ${CXX_COMPILE_FLAGS_AVX512}")
-    message(STATUS "CPU extension (AVX2) compile flags: ${CXX_COMPILE_FLAGS}")
+    message(STATUS "CPU extension (AVX2) compile flags: ${CXX_COMPILE_FLAGS_AVX2}")
 else()
     message(STATUS "CPU extension compile flags: ${CXX_COMPILE_FLAGS}")
 endif()
@@ -345,82 +346,82 @@ if(USE_ONEDNN)
 endif()
 
 if (ENABLE_X86_ISA)
-set(VLLM_EXT_SRC_AVX512
-    "csrc/cpu/sgl-kernels/gemm.cpp"
-    "csrc/cpu/sgl-kernels/gemm_int8.cpp"
-    "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
-    "csrc/cpu/sgl-kernels/moe.cpp"
-    "csrc/cpu/sgl-kernels/moe_int8.cpp"
-    "csrc/cpu/sgl-kernels/moe_fp8.cpp"
-    "csrc/cpu/shm.cpp"
-    "csrc/cpu/cpu_wna16.cpp"
-    "csrc/cpu/cpu_fused_moe.cpp"
-    "csrc/cpu/utils.cpp"
-    "csrc/cpu/cpu_attn.cpp"
-    "csrc/cpu/dnnl_kernels.cpp"
-    "csrc/cpu/torch_bindings.cpp"
-    # TODO: Remove these files
-    "csrc/cpu/activation.cpp"
-    "csrc/cpu/layernorm.cpp"
-    "csrc/cpu/mla_decode.cpp"
-    "csrc/cpu/pos_encoding.cpp"
-    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
+    set(VLLM_EXT_SRC_AVX512
+        "csrc/cpu/sgl-kernels/gemm.cpp"
+        "csrc/cpu/sgl-kernels/gemm_int8.cpp"
+        "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
+        "csrc/cpu/sgl-kernels/moe.cpp"
+        "csrc/cpu/sgl-kernels/moe_int8.cpp"
+        "csrc/cpu/sgl-kernels/moe_fp8.cpp"
+        "csrc/cpu/shm.cpp"
+        "csrc/cpu/cpu_wna16.cpp"
+        "csrc/cpu/cpu_fused_moe.cpp"
+        "csrc/cpu/utils.cpp"
+        "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/dnnl_kernels.cpp"
+        "csrc/cpu/torch_bindings.cpp"
+        # TODO: Remove these files
+        "csrc/cpu/activation.cpp"
+        "csrc/cpu/layernorm.cpp"
+        "csrc/cpu/mla_decode.cpp"
+        "csrc/cpu/pos_encoding.cpp"
+        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
-set(VLLM_EXT_SRC_AVX2 
-    "csrc/cpu/utils.cpp"
-    "csrc/cpu/cpu_attn.cpp"
-    "csrc/cpu/torch_bindings.cpp"
-    # TODO: Remove these files
-    "csrc/cpu/activation.cpp"
-    "csrc/cpu/layernorm.cpp"
-    "csrc/cpu/mla_decode.cpp"
-    "csrc/cpu/pos_encoding.cpp"
-    "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
+    set(VLLM_EXT_SRC_AVX2 
+        "csrc/cpu/utils.cpp"
+        "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/torch_bindings.cpp"
+        # TODO: Remove these files
+        "csrc/cpu/activation.cpp"
+        "csrc/cpu/layernorm.cpp"
+        "csrc/cpu/mla_decode.cpp"
+        "csrc/cpu/pos_encoding.cpp"
+        "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
-message(STATUS "CPU extension (AVX512) source files: ${VLLM_EXT_SRC_AVX512}")
-message(STATUS "CPU extension (AVX2) source files: ${VLLM_EXT_SRC_AVX2}")
+    message(STATUS "CPU extension (AVX512) source files: ${VLLM_EXT_SRC_AVX512}")
+    message(STATUS "CPU extension (AVX2) source files: ${VLLM_EXT_SRC_AVX2}")
 
-define_extension_target(
-    _C_AVX512
-    DESTINATION vllm
-    LANGUAGE CXX
-    SOURCES ${VLLM_EXT_SRC_AVX512}
-    LIBRARIES ${LIBS}
-    COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
-    USE_SABI 3
-    WITH_SOABI
-)
+    define_extension_target(
+        _C
+        DESTINATION vllm
+        LANGUAGE CXX
+        SOURCES ${VLLM_EXT_SRC_AVX512}
+        LIBRARIES ${LIBS}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512}
+        USE_SABI 3
+        WITH_SOABI
+    )
 
-# For SGL kernels
-target_compile_definitions(_C_AVX512 PRIVATE "-DCPU_CAPABILITY_AVX512")
+    # For SGL kernels
+    target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AVX512")
+    # For AMX kernels
+    target_compile_definitions(_C PRIVATE "-DCPU_CAPABILITY_AMXBF16")
 
-define_extension_target(
-    _C_AVX2
-    DESTINATION vllm
-    LANGUAGE CXX
-    SOURCES ${VLLM_EXT_SRC_AVX2}
-    LIBRARIES ${LIBS}
-    COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX2}
-    USE_SABI 3
-    WITH_SOABI
-)
+    define_extension_target(
+        _C_AVX2
+        DESTINATION vllm
+        LANGUAGE CXX
+        SOURCES ${VLLM_EXT_SRC_AVX2}
+        LIBRARIES ${LIBS}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX2}
+        USE_SABI 3
+        WITH_SOABI
+    )
 else()
-message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
-
-#
-# Define extension targets
-#
-
-define_extension_target(
-    _C
-    DESTINATION vllm
-    LANGUAGE CXX
-    SOURCES ${VLLM_EXT_SRC}
-    LIBRARIES ${LIBS}
-    COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
-    USE_SABI 3
-    WITH_SOABI
-)
+    message(STATUS "CPU extension source files: ${VLLM_EXT_SRC}")
+    #
+    # Define extension targets
+    #
+    define_extension_target(
+        _C
+        DESTINATION vllm
+        LANGUAGE CXX
+        SOURCES ${VLLM_EXT_SRC}
+        LIBRARIES ${LIBS}
+        COMPILE_FLAGS ${CXX_COMPILE_FLAGS}
+        USE_SABI 3
+        WITH_SOABI
+    )
 endif()
 
 message(STATUS "Enabling C extension.")
