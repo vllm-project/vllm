@@ -1088,7 +1088,7 @@ class Glm4vProcessingInfo(BaseProcessingInfo):
             uniq.append(uniq[-1])
 
         frame_indices = uniq
-        full_second_idxs = [idx / video_fps for idx in frame_indices]
+        full_second_idxs = [int(idx / video_fps) for idx in frame_indices]
         timestamps_list = full_second_idxs[::2]
         selected_timestamps = []
         for idx in range(len(timestamps_list)):
