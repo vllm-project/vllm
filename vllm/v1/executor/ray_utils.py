@@ -15,12 +15,16 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.utils.network_utils import get_ip
-from vllm.v1.outputs import AsyncModelRunnerOutput
+from vllm.v1.outputs import (
+    AsyncModelRunnerOutput,
+    LogprobsLists,
+    LogprobsTensors,
+    ModelRunnerOutput,
+)
 from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 if TYPE_CHECKING:
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.outputs import ModelRunnerOutput
 
 logger = init_logger(__name__)
 PG_WAIT_TIMEOUT = 1800
@@ -120,6 +124,10 @@ try:
                 # pickled.
                 if isinstance(output, AsyncModelRunnerOutput):
                     output = output.get_output()
+            # Ensure tensors backed by CUDA pinned memory are cloned
+            # to regular CPU memory before Ray DAG serialization.
+            if isinstance(output, ModelRunnerOutput):
+                self._depin_model_runner_output(output)
             return output
 
         def override_env_vars(self, vars: dict[str, str]):
@@ -130,6 +138,36 @@ try:
 
         def _is_last_rank(self) -> bool:
             return get_pp_group().is_last_rank
+
+        @staticmethod
+        def _depin_model_runner_output(output: "ModelRunnerOutput") -> None:
+            """Clone pinned-memory tensors to regular CPU memory.
+
+            When async D2H copies are used, logprobs numpy arrays and
+            prompt_logprobs_dict tensors may be backed by CUDA pinned
+            memory. Ray compiled DAG serialization does not handle
+            pinned memory correctly for multi-node transport, so we
+            copy to regular CPU memory.
+            """
+            if output.logprobs is not None:
+                output.logprobs = LogprobsLists(
+                    output.logprobs.logprob_token_ids.copy(),
+                    output.logprobs.logprobs.copy(),
+                    output.logprobs.sampled_token_ranks.copy(),
+                    output.logprobs.cu_num_generated_tokens,
+                )
+            if output.prompt_logprobs_dict:
+                output.prompt_logprobs_dict = {
+                    k: LogprobsTensors(
+                        v.logprob_token_ids.clone(),
+                        v.logprobs.clone(),
+                        v.selected_token_ranks.clone(),
+                        v.cu_num_generated_tokens,
+                    )
+                    if v is not None
+                    else None
+                    for k, v in output.prompt_logprobs_dict.items()
+                }
 
     ray_import_err = None
 
