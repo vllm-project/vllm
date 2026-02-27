@@ -656,6 +656,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLModel": LlamaNemotronVLConfig,
+    "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
     "NomicBertModel": NomicBertModelConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
