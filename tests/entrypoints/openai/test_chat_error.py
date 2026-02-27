@@ -153,6 +153,19 @@ async def test_chat_error_non_stream():
     assert response.error.code == HTTPStatus.INTERNAL_SERVER_ERROR
 
 
+def test_json_schema_response_format_missing_schema():
+    """When response_format type is 'json_schema' but the json_schema field
+    is not provided, request construction should raise a validation error
+    so the API returns 400 instead of 500."""
+    with pytest.raises(Exception, match="json_schema.*must be provided"):
+        ChatCompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            response_format={"type": "json_schema"},
+        )
+
+
 @pytest.mark.asyncio
 async def test_chat_error_stream():
     """test finish_reason='error' returns 500 InternalServerError (streaming)"""
