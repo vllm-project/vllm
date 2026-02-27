@@ -61,7 +61,6 @@ class EmbeddingCompletionRequest(
             task="embed",
             dimensions=self.dimensions,
             use_activation=self.use_activation,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
 
@@ -91,7 +90,6 @@ class EmbeddingChatRequest(
             task="embed",
             dimensions=self.dimensions,
             use_activation=self.use_activation,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
         )
 
 

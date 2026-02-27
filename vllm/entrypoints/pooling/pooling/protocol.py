@@ -44,7 +44,6 @@ class PoolingCompletionRequest(
     def to_pooling_params(self):
         return PoolingParams(
             task=self.task,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
         )
@@ -70,7 +69,6 @@ class PoolingChatRequest(
     def to_pooling_params(self):
         return PoolingParams(
             task=self.task,
-            truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
             dimensions=self.dimensions,
         )

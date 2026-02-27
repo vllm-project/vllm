@@ -1745,13 +1745,7 @@ class LLM:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
-        seq_tok_kwargs = [
-            merge_kwargs(
-                tokenization_kwargs,
-                dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
-            )
-            for param in seq_params
-        ]
+        seq_tok_kwargs = [tokenization_kwargs] * len(seq_params)
         seq_priority = self._priority_to_seq(priority, len(prompts))
 
         return self._render_and_add_requests(
@@ -1815,13 +1809,7 @@ class LLM:
         seq_convs = conversation_to_seq(messages)
         seq_params = self._params_to_seq(params, len(seq_convs))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
-        seq_tok_kwargs = [
-            merge_kwargs(
-                tokenization_kwargs,
-                dict(truncate_prompt_tokens=param.truncate_prompt_tokens),
-            )
-            for param in seq_params
-        ]
+        seq_tok_kwargs = [tokenization_kwargs] * len(seq_params)
 
         return self._render_and_run_requests(
             prompts=(
