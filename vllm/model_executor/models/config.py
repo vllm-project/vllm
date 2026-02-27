@@ -293,6 +293,7 @@ class Qwen3ForSequenceClassificationConfig(VerifyAndUpdateConfig):
         text_config = config.get_text_config()
         text_config.method = "from_2_way_softmax"
         text_config.classifier_from_token = tokens
+        model_config.pooler_config.seq_pooling_type = "LAST"
 
 
 class Qwen3VLForSequenceClassificationConfig(Qwen3ForSequenceClassificationConfig):
