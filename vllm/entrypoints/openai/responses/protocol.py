@@ -378,6 +378,7 @@ class ResponsesRequest(OpenAIBaseModel):
         )
 
     @model_validator(mode="before")
+    @classmethod
     def validate_background(cls, data):
         if not data.get("background"):
             return data
@@ -386,6 +387,7 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def validate_prompt(cls, data):
         if data.get("prompt") is not None:
             raise VLLMValidationError(
@@ -394,6 +396,7 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def check_cache_salt_support(cls, data):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
@@ -404,6 +407,7 @@ class ResponsesRequest(OpenAIBaseModel):
         return data
 
     @model_validator(mode="before")
+    @classmethod
     def function_call_parsing(cls, data):
         """Parse function_call dictionaries into ResponseFunctionToolCall objects.
         This ensures Pydantic can properly resolve union types in the input field.
