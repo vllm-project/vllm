@@ -25,11 +25,7 @@ from vllm.distributed import (
 from vllm.distributed.device_communicators.cuda_communicator import CudaCommunicator
 from vllm.logger import init_logger
 from vllm.utils.collection_utils import ThreadSafeDict
-from vllm.utils.network_utils import (
-    get_open_port,
-    make_zmq_socket,
-    recv_router_dealer_message,
-)
+from vllm.utils.network_utils import close_sockets, get_open_port, make_zmq_socket
 from vllm.v1.engine import (
     EngineCoreRequestType,
     EngineStatusType,
@@ -124,13 +120,11 @@ class BaseSentinel:
         assert self.upstream_cmd_socket is not None
         try:
             # Polls the upstream command socket
-            has_msg, _, ft_request_bytes = recv_router_dealer_message(
-                self.upstream_cmd_socket,
-                use_poller=True,
-                poll_timeout=POLL_TIMEOUT_MS,
-                return_bytes=True,
-            )
-            if has_msg:
+            poller = zmq.Poller()
+            poller.register(self.upstream_cmd_socket, zmq.POLLIN)
+            events = dict(poller.poll(timeout=POLL_TIMEOUT_MS))
+            if self.upstream_cmd_socket in events:
+                _, ft_request_bytes = self.upstream_cmd_socket.recv_multipart()
                 ft_request = msgspec.msgpack.decode(
                     ft_request_bytes, type=FaultToleranceRequest
                 )
@@ -257,63 +251,44 @@ class BaseSentinel:
             Mapping from identity (bytes) to the parsed FaultToleranceResult.
             Partial results are returned on timeout or error.
         """
+        assert self.downstream_cmd_socket is not None
         start = time.monotonic()
         responses: dict[bytes, FaultToleranceResult] = {}
-        target_identities = set(target_identities)
-
-        while target_identities:
+        pending_identities = set(target_identities)
+        poller = zmq.Poller()
+        poller.register(self.downstream_cmd_socket, zmq.POLLIN)
+        while pending_identities:
             remaining = timeout - (time.monotonic() - start)
             if remaining <= 0:
-                logger.debug(
-                    "Timeout while waiting for responses for instruction %s "
-                    "from identities: %s",
-                    ft_request.instruction,
-                    target_identities,
-                )
-                # Return partial results collected so far
-                return responses
+                # Timeout, return partial results collected so far.
+                break
             try:
-                has_msg, identity, response_bytes = recv_router_dealer_message(
-                    self.downstream_cmd_socket,
-                    use_poller=True,
-                    poll_timeout=int(remaining * 1000),
-                    return_bytes=True,
-                )
-
-                # Skip if no message was received during this polling period
-                if not has_msg:
-                    continue
-
-                assert identity is not None
-                assert response_bytes is not None
-                ft_result = msgspec.msgpack.decode(
-                    response_bytes, type=FaultToleranceResult
-                )
-                recv_uuid = ft_result.request_id
-                # Ignore outdated or unrelated messages
-                if recv_uuid != ft_request.request_id:
-                    logger.debug(
-                        "Discarding outdated response: expected request_id=%s, got %s",
-                        ft_request.request_id,
-                        recv_uuid,
+                events = dict(poller.poll(timeout=int(remaining * 1000)))
+                if self.downstream_cmd_socket in events:
+                    identity, _, response_bytes = (
+                        self.downstream_cmd_socket.recv_multipart()
                     )
-                    continue
+                    ft_result = msgspec.msgpack.decode(
+                        response_bytes, type=FaultToleranceResult
+                    )
+                    # Ignore outdated or unrelated messages
+                    if ft_result.request_id != ft_request.request_id:
+                        logger.debug(
+                            "Discarding outdated response: %s",
+                            ft_result,
+                        )
+                        continue
 
-                # Record this endpoint's response
-                responses[identity] = ft_result
-                target_identities.discard(identity)
+                    # Record this endpoint's response
+                    responses[identity] = ft_result
+                    pending_identities.discard(identity)
             except Exception as e:
                 logger.error("Error while processing engine response: %s", e)
-                # Return partial results even on exception to avoid data loss
-                return responses
-
+                break
         return responses
 
     def shutdown(self):
-        if self.upstream_cmd_socket is not None:
-            self.upstream_cmd_socket.close(linger=0)
-        if self.downstream_cmd_socket is not None:
-            self.downstream_cmd_socket.close(linger=0)
+        close_sockets([self.upstream_cmd_socket, self.downstream_cmd_socket])
         self.ctx.term()
         self.sentinel_dead = True
 
@@ -376,12 +351,12 @@ class ClientSentinel(BaseSentinel):
         self.ft_result_queue: queue.Queue[tuple[bytes | None, FaultToleranceResult]] = (
             queue.Queue(maxsize=2)
         )
-        self.inproc_comm_addr = get_engine_client_zmq_addr(local_only=True, host=host)
+        inproc_comm_addr = get_engine_client_zmq_addr(local_only=True, host=host)
         self.inproc_res_recv_socket = make_zmq_socket(
-            ctx=self.ctx, path=self.inproc_comm_addr, socket_type=zmq.PAIR, bind=True
+            ctx=self.ctx, path=inproc_comm_addr, socket_type=zmq.PAIR, bind=True
         )
         self.inproc_res_send_socket = make_zmq_socket(
-            ctx=self.ctx, path=self.inproc_comm_addr, socket_type=zmq.PAIR, bind=False
+            ctx=self.ctx, path=inproc_comm_addr, socket_type=zmq.PAIR, bind=False
         )
 
         self.is_faulted = threading.Event()
@@ -595,11 +570,15 @@ class ClientSentinel(BaseSentinel):
             pass
 
     def shutdown(self):
-        self.fault_receiver_socket.close(linger=0)
-        self.fault_state_pub_socket.close()
-        self.inproc_res_send_socket.close(linger=0)
-        self.inproc_res_recv_socket.close(linger=0)
-        self.fault_tolerance_req_socket.close(linger=0)
+        close_sockets(
+            [
+                self.fault_receiver_socket,
+                self.fault_state_pub_socket,
+                self.inproc_res_send_socket,
+                self.inproc_res_recv_socket,
+                self.fault_tolerance_req_socket,
+            ]
+        )
         super().shutdown()
 
 
@@ -786,8 +765,7 @@ class EngineCoreSentinel(BaseSentinel):
         return identities
 
     def shutdown(self):
-        if self.engine_fault_socket is not None:
-            self.engine_fault_socket.close(linger=0)
+        close_sockets([self.engine_fault_socket])
         super().shutdown()
 
 

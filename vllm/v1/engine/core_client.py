@@ -34,7 +34,6 @@ from vllm.utils.network_utils import (
     get_open_port,
     get_open_zmq_inproc_path,
     make_zmq_socket,
-    recv_router_dealer_message,
 )
 from vllm.v1.engine import (
     EngineCoreOutputs,
@@ -1197,6 +1196,8 @@ class AsyncMPClient(MPClient):
                 timeout_secs = 1 + timeout_secs
                 end_time = time.monotonic() + timeout_secs
 
+                poller = zmq.Poller()
+                poller.register(sock, zmq.POLLIN)
                 while True:
                     remaining = end_time - time.monotonic()
                     if remaining <= 0:
@@ -1207,13 +1208,9 @@ class AsyncMPClient(MPClient):
                             reason="timeout waiting for fault tolerance result",
                         )
                     poll_timeout_ms = max(1, int(remaining * 1000))
-                    has_msg, _, msg_bytes = recv_router_dealer_message(
-                        socket=sock,
-                        use_poller=True,
-                        poll_timeout=poll_timeout_ms,
-                        return_bytes=True,
-                    )
-                    if has_msg:
+                    events = dict(poller.poll(timeout=poll_timeout_ms))
+                    if sock in events:
+                        _, msg_bytes = sock.recv_multipart()
                         res = msgspec.msgpack.decode(
                             msg_bytes, type=FaultToleranceResult
                         )
