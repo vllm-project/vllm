@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
+from vllm.config.cache import CacheConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -425,10 +426,6 @@ class Platform:
         """
         Ensure block_size is compatible with the attention backend.
         """
-        from vllm.config.cache import CacheConfig
-
-        default_block_size = CacheConfig.DEFAULT_BLOCK_SIZE
-
         cache_config = vllm_config.cache_config
         if cache_config.user_specified_block_size:
             # User specified --block-size; keep it.
@@ -439,7 +436,7 @@ class Platform:
         # Skip hybrid models — their block_size is managed by
         # HybridAttentionMambaModelConfig.
         if model_config is None or model_config.is_hybrid:
-            cache_config.block_size = default_block_size
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
         from vllm.config.vllm import (
@@ -455,14 +452,16 @@ class Platform:
             AttentionLayerBase,
         )
         if not attn_layers:
-            cache_config.block_size = default_block_size
+            cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
             return
 
         first_layer = next(iter(attn_layers.values()))
         backend_cls = first_layer.get_attn_backend()
         with set_current_vllm_config(vllm_config):
-            preferred = backend_cls.get_preferred_block_size(default_block_size)
-        if preferred != default_block_size:
+            preferred = backend_cls.get_preferred_block_size(
+                CacheConfig.DEFAULT_BLOCK_SIZE
+            )
+        if preferred != CacheConfig.DEFAULT_BLOCK_SIZE:
             logger.info(
                 "Setting kv cache block size to %d for %s backend.",
                 preferred,
