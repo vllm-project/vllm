@@ -541,7 +541,25 @@ function (define_extension_target MOD_NAME)
   if (ARG_LANGUAGE STREQUAL "CUDA")
     target_link_libraries(${MOD_NAME} PRIVATE torch CUDA::cudart CUDA::cuda_driver ${ARG_LIBRARIES})
   else()
-    target_link_libraries(${MOD_NAME} PRIVATE torch ${TORCH_LIBRARIES} ${ARG_LIBRARIES})
+    # Link against PyTorch's bundled libtorch_hip.so (for DeviceGuard registration)
+    # and libamdhip64.so (to share a single HIP runtime with PyTorch).
+    find_library(TORCH_HIP_LIBRARY torch_hip PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH)
+    find_library(TORCH_AMDHIP64_LIBRARY amdhip64 PATHS "${TORCH_INSTALL_PREFIX}/lib" NO_DEFAULT_PATH)
+
+    set(_hip_libs)
+    if (TORCH_HIP_LIBRARY)
+      list(APPEND _hip_libs ${TORCH_HIP_LIBRARY})
+    endif()
+    if (TORCH_AMDHIP64_LIBRARY)
+      list(APPEND _hip_libs ${TORCH_AMDHIP64_LIBRARY})
+      # Ensure PyTorch's bundled libamdhip64.so is found at runtime, not system ROCm's.
+      set(_torch_lib_dir "${TORCH_INSTALL_PREFIX}/lib")
+      set_target_properties(${MOD_NAME} PROPERTIES
+        BUILD_RPATH "${_torch_lib_dir}"
+        INSTALL_RPATH "${_torch_lib_dir}")
+    endif()
+
+    target_link_libraries(${MOD_NAME} PRIVATE torch ${_hip_libs} ${TORCH_LIBRARIES} ${ARG_LIBRARIES})
   endif()
 
   install(TARGETS ${MOD_NAME} LIBRARY DESTINATION ${ARG_DESTINATION} COMPONENT ${MOD_NAME})
