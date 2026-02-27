@@ -259,7 +259,7 @@ class CompletionRequest(OpenAIBaseModel):
                 structured_outputs_kwargs["json"] = json_schema.json_schema
             elif response_format.type == "structural_tag":
                 structural_tag = response_format
-                assert structural_tag is not None and isinstance(
+                assert isinstance(
                     structural_tag,
                     (
                         LegacyStructuralTagResponseFormat,
@@ -312,6 +312,34 @@ class CompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
         )
+
+    @model_validator(mode="before")
+    @classmethod
+    def validate_response_format(cls, data):
+        response_format = data.get("response_format")
+        if response_format is None:
+            return data
+
+        rf_type = (
+            response_format.get("type")
+            if isinstance(response_format, dict)
+            else getattr(response_format, "type", None)
+        )
+
+        if rf_type == "json_schema":
+            json_schema = (
+                response_format.get("json_schema")
+                if isinstance(response_format, dict)
+                else getattr(response_format, "json_schema", None)
+            )
+            if json_schema is None:
+                raise VLLMValidationError(
+                    "When response_format type is 'json_schema', the "
+                    "'json_schema' field must be provided.",
+                    parameter="response_format",
+                )
+
+        return data
 
     @model_validator(mode="before")
     @classmethod
