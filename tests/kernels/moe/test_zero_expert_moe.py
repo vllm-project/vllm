@@ -13,6 +13,7 @@ import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context, set_forward_context
+from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
@@ -118,15 +119,16 @@ def test_zero_expert_moe_forward(zero_expert_moe, num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [1, 32])
 def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
-    """Validate that the layer output equals real expert output plus zero
-    expert contribution.
+    """Validate that the ZeroExpertFusedMoE output equals a plain FusedMoE
+    output (real experts only) plus the zero expert contribution.
 
     The key invariant is:
-        layer.forward(h, r) == quant_method.apply(routing) + zero_expert_output
+        zero_layer.forward(h, r_full) == plain_layer.forward(h, r_real)
+                                         + zero_expert_output
 
-    We compute routing and zero expert output via router.select_experts(),
-    then compute real expert output via quant_method.apply() directly, and
-    verify that the layer forward produces their sum.
+    We create a plain FusedMoE layer with the same weights and real-expert-only
+    router logits, compute the zero expert output via the ZeroExpertRouter, and
+    verify the sum matches the ZeroExpertFusedMoE output.
     """
     layer, vllm_config = zero_expert_moe
     num_experts = 4
@@ -148,23 +150,44 @@ def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
     with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
         get_forward_context().all_moe_layers = None
 
-        # Compute routing and zero expert output directly (without the
-        # runner consuming zero_expert_output).
+        # Create a plain FusedMoE layer with the same config but no zero
+        # experts. Use a separate prefix to avoid collision.
+        plain_layer = FusedMoE(
+            num_experts=num_experts,
+            top_k=layer.top_k,
+            hidden_size=layer.hidden_size,
+            intermediate_size=layer.intermediate_size_per_partition,
+            params_dtype=torch.bfloat16,
+            prefix="test_zero_expert_moe_plain",
+            renormalize=False,
+            scoring_func="softmax",
+            e_score_correction_bias=layer.e_score_correction_bias,
+        ).cuda()
+
+        # Share weights from the zero expert layer.
+        plain_layer.w13_weight.data.copy_(layer.w13_weight.data)
+        plain_layer.w2_weight.data.copy_(layer.w2_weight.data)
+        plain_layer.quant_method.process_weights_after_loading(plain_layer)
+
+        # Compute routing via the ZeroExpertRouter. This produces masked
+        # topk_weights/topk_ids (zero expert entries have weight=0, id=0)
+        # and stores zero_expert_output as a side effect.
         topk_weights, topk_ids = layer.router.select_experts(
             hidden_states, router_logits
         )
         zero_output = layer.router.zero_expert_output
 
-        # Compute real expert output via quant_method.apply().
-        real_output = layer.quant_method.apply(
-            layer=layer,
+        # Compute real expert output using the plain layer with the masked
+        # routing from the ZeroExpertRouter.
+        real_output = plain_layer.quant_method.apply(
+            layer=plain_layer,
             x=hidden_states,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
             shared_experts_input=None,
         )
 
-        # Get the combined output from layer.forward().
+        # Get the combined output from the zero expert layer.
         full_output = layer.forward(hidden_states, router_logits)
 
     assert zero_output is not None, "Zero expert output should not be None"
@@ -178,7 +201,7 @@ def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
         expected,
         atol=0,
         rtol=0,
-        msg="Layer output should equal real expert output "
+        msg="ZeroExpertFusedMoE output should equal plain FusedMoE output "
         "plus zero expert contribution",
     )
 
