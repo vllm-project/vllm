@@ -126,9 +126,6 @@ class CoreEngineProcManager:
         }
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             zmq_ctx = zmq.Context()
-            identity = generate_identity_group(
-                "core_engine_proc_manager", "client_sentinel", "report", 1
-            )[0]
             zmq_addr = get_engine_client_zmq_addr(
                 local_only=False,
                 host=vllm_config.parallel_config.data_parallel_master_ip,
@@ -139,7 +136,7 @@ class CoreEngineProcManager:
                 path=zmq_addr,
                 socket_type=zmq.DEALER,
                 bind=False,
-                identity=identity,
+                identity=str(uuid.uuid4()).encode("utf8"),
             )
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
@@ -192,19 +189,6 @@ class CoreEngineProcManager:
             if self.finished_procs():
                 self.close()
 
-    def _report_engine_dead(self, dead_message):
-        """Send engine dead message to ClientSentinel"""
-        try:
-            self.engine_down_socket.send_multipart(
-                [
-                    b"",  # Empty frame separator
-                    dead_message.encode("utf-8"),
-                ]
-            )
-            logger.info("Sent message to ClientSentinel: %s", dead_message)
-        except Exception as e:
-            logger.error("Failed to send message: %s", e)
-
     def close(self):
         """Shutdown all procs."""
         self._finalizer()
@@ -222,7 +206,7 @@ class CoreEngineProcManager:
         )
 
         self.engine_down_socket.send_multipart(
-            [b"", fault_info.serialize().encode("utf-8")]
+            [b"", msgspec.msgpack.encode(fault_info)]
         )
         logger.error("Engine core proc %s died unexpectedly", died_proc.name)
 
@@ -364,15 +348,12 @@ class CoreEngineActorManager:
                 host=vllm_config.parallel_config.data_parallel_master_ip,
                 port=vllm_config.fault_tolerance_config.internal_fault_report_port,
             )
-            identity = generate_identity_group(
-                "core_engine_actor_manager", "client_sentinel", "report", 1
-            )[0]
             self.engine_down_socket = make_zmq_socket(
                 ctx=zmq_ctx,
                 path=zmq_addr,
                 socket_type=zmq.DEALER,
                 bind=False,
-                identity=identity,
+                identity=str(uuid.uuid4()).encode("utf8"),
             )
 
         if ray.is_initialized():
@@ -878,7 +859,7 @@ class CoreEngineActorManager:
         )
 
         self.engine_down_socket.send_multipart(
-            [b"", fault_info.serialize().encode("utf-8")]
+            [b"", msgspec.msgpack.encode(fault_info)]
         )
         logger.error("Engine actor %s died unexpectedly", engine_rank)
 
@@ -974,12 +955,7 @@ def launch_core_engines(
         addresses.engine_core_sentinel_cmd_addr = get_engine_client_zmq_addr(
             local_only=local_engines_only, host=host
         )
-        identity_group = generate_identity_group(
-            peer1="client",
-            peer2="engine_core_sentinel",
-            use="report and cmd",
-            n=dp_size,
-        )
+        identity_group = [str(uuid.uuid4()).encode("utf8") for _ in range(dp_size)]
         addresses.engine_core_sentinel_identities = {
             rank: identity for rank, identity in enumerate(identity_group)
         }
@@ -1258,18 +1234,3 @@ def wait_for_engine_startup(
             "local" if local else "remote",
             eng_index,
         )
-
-
-def generate_identity_group(peer1, peer2, use, n):
-    """
-    Generate n unique identities for ZMQ ROUTER nodes
-
-    Format: peer1_peer2_use_random number
-    Return: list with identities in byte type as elements
-    """
-    identities = list()
-    uuids = [uuid.uuid4() for _ in range(n)]
-    for identity_uuid in uuids:
-        identity_str = f"{peer1}_{peer2}_{use}_{identity_uuid}".encode()
-        identities.append(identity_str)
-    return identities

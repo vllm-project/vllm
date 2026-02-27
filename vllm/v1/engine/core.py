@@ -101,16 +101,16 @@ class EngineCoreSentinel(BaseSentinel):
         cmd_q: queue.Queue,
         busy_loop_active: threading.Event,
         engine_input_q: queue.Queue,
-        client_cmd_addr: str,
-        worker_cmd_addr: str,
+        upstream_cmd_addr: str,
+        downstream_cmd_addr: str,
         engine_fault_socket_addr: str,
         sentinel_identity: bytes,
         vllm_config: VllmConfig,
     ):
         self.engine_index = engine_index
         super().__init__(
-            upstream_cmd_addr=client_cmd_addr,
-            downstream_cmd_addr=worker_cmd_addr,
+            upstream_cmd_addr=upstream_cmd_addr,
+            downstream_cmd_addr=downstream_cmd_addr,
             sentinel_identity=sentinel_identity,
             sentinel_tag=f"DP_{engine_index}",
             vllm_config=vllm_config,
@@ -172,8 +172,8 @@ class EngineCoreSentinel(BaseSentinel):
             pass
 
     def _report_exception_to_client_sentinel(self, exception: Exception) -> None:
-        msg = FaultInfo.from_exception(exception, self.engine_index).serialize()
-        msg_bytes = msg.encode("utf-8")
+        msg = FaultInfo.from_exception(exception, self.engine_index)
+        msg_bytes = msgspec.msgpack.encode(msg)
         self.engine_fault_socket.send_multipart([b"", msg_bytes])
 
     def pause(self, timeout: int = 1, **kwargs) -> bool:
@@ -1095,8 +1095,8 @@ class EngineCoreProc(EngineCore):
                     busy_loop_active=self.busy_loop_active,
                     engine_input_q=self.input_queue,
                     engine_fault_socket_addr=addresses.engine_fault_socket_addr,
-                    client_cmd_addr=addresses.engine_core_sentinel_cmd_addr,
-                    worker_cmd_addr=worker_cmd_addr,
+                    upstream_cmd_addr=addresses.engine_core_sentinel_cmd_addr,
+                    downstream_cmd_addr=worker_cmd_addr,
                     sentinel_identity=engine_core_sentinel_ids[self.engine_index],
                     vllm_config=vllm_config,
                 )

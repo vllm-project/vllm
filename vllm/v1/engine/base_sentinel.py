@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
+import uuid
 from abc import abstractmethod
 
 import msgspec.msgpack
@@ -19,17 +20,11 @@ POLL_TIMEOUT_MS = 100
 
 class BaseSentinel:
     """
-    Abstract and constrain the core functionalities of the Sentinel.
-
-    Core functionalities covered:
+    Core functionalities of the sentinel covered:
     - Fault listening
     - Fault tolerance instruction reception
     - Fault tolerance instruction execution
     - Upstream and downstream communication
-
-    This class serves as the base abstraction for all LLM-related Sentinel
-    implementations, enforcing standardized fault tolerance behavior across
-    the system.
     """
 
     def __init__(
@@ -46,6 +41,8 @@ class BaseSentinel:
         self.logger = self._make_logger()
         self.vllm_config = vllm_config
         self.ft_config = vllm_config.fault_tolerance_config
+        self.upstream_cmd_socket = None
+        self.downstream_cmd_socket = None
         if upstream_cmd_addr is not None:
             assert sentinel_identity is not None
             self.upstream_cmd_socket = make_zmq_socket(
@@ -92,57 +89,36 @@ class BaseSentinel:
         """
         raise NotImplementedError
 
-    def poll_upstream_cmd(self) -> tuple[bool, FaultToleranceRequest | None]:
+    def poll_and_execute_upstream_cmd(self):
         """
-        This method polls the upstream command socket and attempts to receive
-        a fault tolerance request.
+        Receive and execute a command from upstream sentinel and send back
+        the execution result.
         """
+        assert self.upstream_cmd_socket is not None
         try:
+            # Polls the upstream command socket
             has_msg, _, ft_request_bytes = recv_router_dealer_message(
                 self.upstream_cmd_socket,
                 use_poller=True,
                 poll_timeout=POLL_TIMEOUT_MS,
                 return_bytes=True,
             )
+            if has_msg:
+                ft_request = msgspec.msgpack.decode(
+                    ft_request_bytes, type=FaultToleranceRequest
+                )
+                ft_result = self._execute_cmd(ft_request)
+                msg_bytes = msgspec.msgpack.encode(ft_result)
+                self.upstream_cmd_socket.send_multipart([b"", msg_bytes])
         except zmq.ZMQError:
             self.logger(
                 "Socket closed, terminating %s", self.sentinel_name, level="info"
             )
             self.sentinel_dead = True
-            return False, None
-        if has_msg:
-            ft_request = msgspec.msgpack.decode(
-                ft_request_bytes, type=FaultToleranceRequest
-            )
-        else:
-            ft_request = None
-        return has_msg, ft_request
-
-    def poll_and_execute_upstream_cmd(self):
-        """
-        Receive and execute a command from upstream sentinel and send back
-        the execution result.
-        """
-        has_msg, ft_request = self.poll_upstream_cmd()
-        if has_msg:
-            assert ft_request is not None
-            ft_result = self._execute_cmd(ft_request)
-            self._send_execution_result(ft_result)
 
     def _execute_cmd(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         """
-        Execute a fault tolerance command on the current object.
-
-        Args:
-            ft_request (FaultToleranceRequest): The fault tolerance request containing
-                the instruction (method name), request_id (unique ID), and params
-                (method parameters).
-
-        Returns:
-            FaultToleranceResult: The result of the command execution containing:
-                - success (bool): True if the method ran without error; False otherwise.
-                - request_id (str): Unique ID of the command.
-                - reason (str | None): Error message if execution failed.
+        Execute a fault tolerance command.
         """
         method, method_uuid, method_params = (
             ft_request.instruction,
@@ -186,14 +162,6 @@ class BaseSentinel:
         """
         raise NotImplementedError
 
-    def _send_execution_result(self, ft_result: FaultToleranceResult):
-        """
-        Send the result of executing a command back to the upstream.
-        """
-        assert hasattr(self, "upstream_cmd_socket"), "upstream_cmd_socket is required"
-        msg_bytes = msgspec.msgpack.encode(ft_result)
-        self.upstream_cmd_socket.send_multipart([b"", msg_bytes])
-
     def _broadcast_command_to_downstream(
         self,
         method_name: str,
@@ -204,10 +172,7 @@ class BaseSentinel:
         """
         Broadcast a command to downstream sentinels and collect responses.
         """
-        import uuid
-
-        from vllm.v1.engine import FaultToleranceRequest
-
+        assert self.downstream_cmd_socket is not None
         # Create fault tolerance request
         request_id = str(uuid.uuid4())
         kwargs["timeout"] = timeout
@@ -259,13 +224,7 @@ class BaseSentinel:
         timeout: int,
         ft_request: "FaultToleranceRequest",
     ) -> dict[bytes, "FaultToleranceResult"]:
-        """Wait for responses to a previously broadcast instruction and return
-        collected responses.
-
-        Args:
-            target_identities: Identities expected to respond (bytes).
-            timeout: Maximum wait time in seconds.
-            ft_request: FaultToleranceRequest object to match responses.
+        """Get responses to the given request.
 
         Returns:
             Mapping from identity (bytes) to the parsed FaultToleranceResult.
@@ -273,7 +232,6 @@ class BaseSentinel:
         """
         start = time.monotonic()
         responses: dict[bytes, FaultToleranceResult] = {}
-
         target_identities = set(target_identities)
 
         while target_identities:
@@ -287,7 +245,6 @@ class BaseSentinel:
                 )
                 # Return partial results collected so far
                 return responses
-
             try:
                 has_msg, identity, response_bytes = recv_router_dealer_message(
                     self.downstream_cmd_socket,
@@ -306,7 +263,6 @@ class BaseSentinel:
                     response_bytes, type=FaultToleranceResult
                 )
                 recv_uuid = ft_result.request_id
-
                 # Ignore outdated or unrelated messages
                 if recv_uuid != ft_request.request_id:
                     logger.debug(
@@ -319,7 +275,6 @@ class BaseSentinel:
                 # Record this endpoint's response
                 responses[identity] = ft_result
                 target_identities.discard(identity)
-
             except Exception as e:
                 logger.error("Error while processing engine response: %s", e)
                 # Return partial results even on exception to avoid data loss
@@ -328,16 +283,9 @@ class BaseSentinel:
         return responses
 
     def shutdown(self):
-        if (
-            hasattr(self, "upstream_cmd_socket")
-            and self.upstream_cmd_socket is not None
-        ):
+        if self.upstream_cmd_socket is not None:
             self.upstream_cmd_socket.close(linger=0)
-        if (
-            hasattr(self, "downstream_cmd_socket")
-            and self.downstream_cmd_socket is not None
-        ):
+        if self.downstream_cmd_socket is not None:
             self.downstream_cmd_socket.close(linger=0)
-        if self.ctx is not None:
-            self.ctx.term()
+        self.ctx.term()
         self.sentinel_dead = True

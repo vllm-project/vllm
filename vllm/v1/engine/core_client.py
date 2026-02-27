@@ -55,7 +55,6 @@ from vllm.v1.engine.exceptions import EngineDeadError, FaultInfo
 from vllm.v1.engine.utils import (
     CoreEngineActorManager,
     CoreEngineProcManager,
-    generate_identity_group,
     launch_core_engines,
 )
 from vllm.v1.executor import Executor
@@ -562,7 +561,7 @@ class ClientSentinel(BaseSentinel):
         """Receive fault info from engine and pause engines if first fault."""
         try:
             identity, _, message = self.fault_receiver_socket.recv_multipart()
-            fault_info = FaultInfo.from_json(message.decode("utf-8"))
+            fault_info = msgspec.msgpack.decode(message, type=FaultInfo)
             engine_status = (
                 EngineStatusType.DEAD
                 if "dead" in fault_info.type
@@ -1204,9 +1203,7 @@ class AsyncMPClient(MPClient):
         self.client_index = client_index
         self.outputs_queue = asyncio.Queue[EngineCoreOutputs | Exception]()
 
-        self.identity = generate_identity_group("client", "client_sentinel", "cmd", 1)[
-            0
-        ]
+        self.identity = str(uuid.uuid4()).encode("utf8")
         if vllm_config.fault_tolerance_config.enable_fault_tolerance:
             self.is_faulted = threading.Event()
             assert self.engine_fault_socket_addr is not None
@@ -1525,37 +1522,24 @@ class AsyncMPClient(MPClient):
                 payload = frames[-1]
                 status_dict = msgspec.msgpack.decode(payload)
                 self.engine_status_dict.set_from_dict(status_dict)
-                healthy = True
-                for k, v in self.engine_status_dict.items():
-                    if v.get("status") != EngineStatusType.HEALTHY:
-                        healthy = False
-                        self.is_faulted.set()
-                        break
+                status_set = {v["status"] for v in status_dict.values()}
+                healthy = (
+                    len(status_set) == 1 and EngineStatusType.HEALTHY in status_set
+                )
                 if healthy:
                     self.is_faulted.clear()
+                else:
+                    self.is_faulted.set()
             except zmq.ZMQError:
                 break
 
     async def fault_reporter(self):
-        # Convert internal enums to external human-readable strings when
-        # returning to callers.
         raw = self.engine_status_dict.to_dict()
-
-        def _enum_to_str(s):
-            if s == EngineStatusType.HEALTHY:
-                return "Healthy"
-            if s == EngineStatusType.DEAD:
-                return "Dead"
-            if s == EngineStatusType.UNHEALTHY:
-                return "Unhealthy"
-            if s == EngineStatusType.PAUSED:
-                return "Paused"
-            return str(s)
-
         result = {}
         for k, v in raw.items():
-            status_val = v.get("status")
-            result[k] = {"status": _enum_to_str(status_val)}
+            status_val = v["status"]
+            status_enum = EngineStatusType(status_val)
+            result[k] = {"status": status_enum.name.title()}
         return result
 
 

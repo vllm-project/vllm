@@ -55,7 +55,7 @@ def send_error_message(
         test_fault = FaultInfo(
             engine_id=str(engine_id), type=fault_type, message="test error"
         )
-        socket.send_multipart([b"", test_fault.serialize().encode("utf-8")])
+        socket.send_multipart([b"", msgspec.msgpack.encode(test_fault)])
         socket.close()
         ctx.term()
     except Exception:

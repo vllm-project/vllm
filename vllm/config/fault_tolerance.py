@@ -40,7 +40,7 @@ class FaultToleranceConfig:
 
     gloo_comm_timeout: int = 30
     """
-    The timeout for gloo communication.
+    The timeout (in seconds) for gloo communication.
     """
 
     worker_cmd_addr: str | None = None

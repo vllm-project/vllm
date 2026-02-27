@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import json
 import time
-from dataclasses import dataclass
+
+import msgspec
 
 
 class EngineGenerateError(Exception):
@@ -32,8 +32,7 @@ class EngineLoopPausedError(Exception):
     pass
 
 
-@dataclass
-class FaultInfo:
+class FaultInfo(msgspec.Struct):
     type: str
     message: str
     engine_id: str
@@ -60,30 +59,4 @@ class FaultInfo:
             message=str(exception),
             engine_id=str(engine_id),
             additional_info=additional_info or {},
-        )
-
-    def to_dict(self) -> dict:
-        """Convert to dictionary for serialization."""
-        return {
-            "type": self.type,
-            "message": self.message,
-            "timestamp": self.timestamp,
-            "engine_id": self.engine_id,
-            "additional_info": self.additional_info,
-        }
-
-    def serialize(self) -> str:
-        """Serialize to JSON string."""
-        return json.dumps(self.to_dict())
-
-    @classmethod
-    def from_json(cls, json_str: str) -> "FaultInfo":
-        """Create FaultInfo from JSON string."""
-        data = json.loads(json_str)
-        return cls(
-            type=data["type"],
-            message=data["message"],
-            timestamp=data["timestamp"],
-            engine_id=data["engine_id"],
-            additional_info=data["additional_info"],
         )
