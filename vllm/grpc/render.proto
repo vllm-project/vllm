@@ -28,7 +28,7 @@ message ChatParams {
   optional string chat_template = 1;
 
   // "auto" | "string" | "openai" (default: "auto")
-  string chat_template_content_format = 2;
+  optional string chat_template_content_format = 2;
 
   // dict[str, Any] — e.g. {"add_generation_prompt": true, "tools": [...]}
   google.protobuf.Struct chat_template_kwargs = 3;

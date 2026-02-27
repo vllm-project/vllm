@@ -18,6 +18,11 @@ from grpc_reflection.v1alpha import reflection
 
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.grpc import render_pb2, render_pb2_grpc
+from vllm.grpc.utils import (
+    conversation_to_proto,
+    messages_from_proto,
+    params_from_proto,
+)
 from vllm.logger import init_logger
 from vllm.renderers.params import ChatParams, TokenizeParams
 from vllm.renderers.registry import renderer_from_config
@@ -25,154 +30,6 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
-
-
-# =====================
-# Proto → Python conversion helpers
-# =====================
-
-
-def _chat_params_from_proto(proto: render_pb2.ChatParams) -> ChatParams:
-    """Convert a ChatParams proto message to the Python dataclass."""
-    kwargs: dict = {}
-    if proto.HasField("chat_template_kwargs"):
-        # google.protobuf.Struct → dict
-        kwargs = dict(proto.chat_template_kwargs)
-
-    return ChatParams(
-        chat_template=proto.chat_template if proto.HasField("chat_template") else None,
-        chat_template_content_format=proto.chat_template_content_format or "auto",
-        chat_template_kwargs=kwargs,
-    )
-
-
-def _tok_params_from_proto(
-    proto: render_pb2.TokenizeParams,
-    defaults: TokenizeParams,
-) -> TokenizeParams:
-    """Convert a TokenizeParams proto message to the Python dataclass.
-
-    Uses HasField() to detect which fields were explicitly set by the client.
-    Unset fields fall back to the provided defaults.
-    """
-    return TokenizeParams(
-        max_total_tokens=proto.max_total_tokens
-        if proto.HasField("max_total_tokens")
-        else defaults.max_total_tokens,
-        max_output_tokens=proto.max_output_tokens
-        if proto.HasField("max_output_tokens")
-        else defaults.max_output_tokens,
-        pad_prompt_tokens=proto.pad_prompt_tokens
-        if proto.HasField("pad_prompt_tokens")
-        else defaults.pad_prompt_tokens,
-        truncate_prompt_tokens=proto.truncate_prompt_tokens
-        if proto.HasField("truncate_prompt_tokens")
-        else defaults.truncate_prompt_tokens,
-        do_lower_case=proto.do_lower_case
-        if proto.HasField("do_lower_case")
-        else defaults.do_lower_case,
-        add_special_tokens=proto.add_special_tokens
-        if proto.HasField("add_special_tokens")
-        else defaults.add_special_tokens,
-        needs_detokenization=proto.needs_detokenization
-        if proto.HasField("needs_detokenization")
-        else defaults.needs_detokenization,
-    )
-
-
-def _messages_from_proto(
-    messages: list[render_pb2.ChatMessage],
-) -> list[dict]:
-    """Convert ChatMessage protos to the ChatCompletionMessageParam dicts."""
-    result = []
-    for msg in messages:
-        d: dict = {"role": msg.role}
-
-        content_type = msg.WhichOneof("content_type")
-        if content_type == "text_content":
-            d["content"] = msg.text_content
-        elif content_type == "parts":
-            parts = []
-            for part in msg.parts.parts:
-                p: dict = {"type": part.type}
-                if part.HasField("text"):
-                    p["text"] = part.text
-                if part.HasField("image_url"):
-                    p["image_url"] = {"url": part.image_url}
-                parts.append(p)
-            d["content"] = parts
-
-        if msg.HasField("name"):
-            d["name"] = msg.name
-        if msg.HasField("tool_call_id"):
-            d["tool_call_id"] = msg.tool_call_id
-        if msg.tool_calls:
-            d["tool_calls"] = [
-                {
-                    "id": tc.id,
-                    "type": tc.type,
-                    "function": {
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    },
-                }
-                for tc in msg.tool_calls
-            ]
-        if msg.HasField("reasoning"):
-            d["reasoning"] = msg.reasoning
-
-        result.append(d)
-    return result
-
-
-def _conversation_to_proto(
-    conversation: list[dict],
-) -> list[render_pb2.ConversationMessage]:
-    """Convert ConversationMessage dicts to proto messages."""
-    result = []
-    for conv in conversation:
-        proto_msg = render_pb2.ConversationMessage(role=conv["role"])
-
-        content = conv.get("content")
-        if isinstance(content, str):
-            proto_msg.text_content = content
-        elif isinstance(content, list):
-            parts = []
-            for part in content:
-                p = render_pb2.ContentPart(type=part.get("type", "text"))
-                if "text" in part:
-                    p.text = part["text"]
-                if "image_url" in part:
-                    url = part["image_url"]
-                    if isinstance(url, dict):
-                        p.image_url = url.get("url", "")
-                    else:
-                        p.image_url = str(url)
-                parts.append(p)
-            proto_msg.parts.CopyFrom(render_pb2.ContentPartList(parts=parts))
-
-        if "name" in conv:
-            proto_msg.name = conv["name"]
-        if "tool_call_id" in conv:
-            proto_msg.tool_call_id = conv["tool_call_id"]
-        if "tool_calls" in conv:
-            for tc in conv["tool_calls"]:
-                func = tc.get("function", {})
-                proto_msg.tool_calls.append(
-                    render_pb2.ToolCall(
-                        id=tc.get("id", ""),
-                        type=tc.get("type", "function"),
-                        function=render_pb2.ToolCallFunction(
-                            name=func.get("name", ""),
-                            arguments=func.get("arguments", ""),
-                        ),
-                    )
-                )
-        if "reasoning" in conv:
-            proto_msg.reasoning = conv["reasoning"]
-
-        result.append(proto_msg)
-    return result
 
 
 # =====================
@@ -190,19 +47,22 @@ class RenderServicer(render_pb2_grpc.RenderServiceServicer):
     async def RenderChat(self, request, context):
         """Render chat messages and tokenize."""
         try:
-            messages = _messages_from_proto(request.messages)
+            messages = messages_from_proto(request.messages)
 
             # Build ChatParams
             if request.HasField("chat_params"):
-                chat_params = _chat_params_from_proto(request.chat_params)
+                chat_params = params_from_proto(
+                    request.chat_params, ChatParams(), ChatParams
+                )
             else:
                 chat_params = ChatParams()
 
             # Build TokenizeParams (with renderer defaults)
             if request.HasField("tok_params"):
-                tok_params = _tok_params_from_proto(
+                tok_params = params_from_proto(
                     request.tok_params,
                     self.renderer.default_chat_tok_params,
+                    TokenizeParams,
                 )
             else:
                 tok_params = self.renderer.default_chat_tok_params
@@ -224,7 +84,7 @@ class RenderServicer(render_pb2_grpc.RenderServiceServicer):
                 prompt_token_ids=prompt_token_ids,
                 prompt_text=prompt_text,
                 num_tokens=len(prompt_token_ids),
-                conversation=_conversation_to_proto(conversation),
+                conversation=conversation_to_proto(conversation),
             )
 
         except Exception as e:
@@ -238,9 +98,10 @@ class RenderServicer(render_pb2_grpc.RenderServiceServicer):
         try:
             # Build TokenizeParams (with renderer defaults)
             if request.HasField("tok_params"):
-                tok_params = _tok_params_from_proto(
+                tok_params = params_from_proto(
                     request.tok_params,
                     self.renderer.default_cmpl_tok_params,
+                    TokenizeParams,
                 )
             else:
                 tok_params = self.renderer.default_cmpl_tok_params
