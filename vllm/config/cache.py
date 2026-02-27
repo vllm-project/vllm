@@ -75,6 +75,10 @@ class CacheConfig:
     `ModelConfig` and that value should be manually duplicated here."""
     enable_prefix_caching: bool = True
     """Whether to enable prefix caching."""
+    enable_attention_instrumentation: bool = False
+    """Whether to enable attention instrumentation."""
+    attention_instrumentation_layers: str | None = None
+    """Attention instrumentation layer indices (e.g., '0,5,11' or 'all')."""
     prefix_caching_hash_algo: PrefixCachingHashAlgo = "sha256"
     """Set the hash algorithm for prefix caching:\n
     - "sha256" uses Pickle for object serialization before hashing. This is the

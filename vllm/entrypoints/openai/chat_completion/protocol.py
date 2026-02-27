@@ -109,6 +109,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    attn_capture_data: list[dict[str, Any]] | None = Field(
+        default=None, description="Captured attention scores (one per layer)"
+    )
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -328,6 +331,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
         description="KVTransfer parameters used for disaggregated serving.",
     )
 
+    attn_capture: int | None = Field(
+        default=None, description="Enable attention capture (1=enable, 0=disable)"
+    )
+    attn_capture_layers: str | None = Field(
+        default=None,
+        description="Comma-separated layer indices to capture (e.g., '0,5,11')",
+    )
+
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
         description=(
@@ -470,6 +481,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.attn_capture is not None:
+            extra_args["attn_capture"] = str(self.attn_capture)
+        if self.attn_capture_layers is not None:
+            extra_args["attn_capture_layers"] = self.attn_capture_layers
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,

@@ -184,6 +184,7 @@ class RequestState:
         self.input_chunk_queue: deque[StreamingUpdate] | None = (
             deque() if stream_input else None
         )
+        self.attn_capture_enabled: bool = False
 
     def apply_streaming_update(self, update: StreamingUpdate) -> None:
         # Apply the update to the request state.
@@ -360,6 +361,19 @@ class RequestState:
         else:
             prompt_logprobs = self.logprobs_processor.prompt_logprobs
 
+        # If prompt embeds were used, put placeholder prompt token ids
+        prompt_token_ids = self.prompt_token_ids
+        if prompt_token_ids is None and self.prompt_embeds is not None:
+            prompt_token_ids = [0] * len(self.prompt_embeds)
+
+        # Load attention capture data if capture was requested
+        attn_capture_data = None
+        if finished and getattr(self, "attn_capture_enabled", False):
+            from vllm.model_executor.layers.attention.attn_capture import (
+                load_attn_snapshot,
+            )
+
+            attn_capture_data = load_attn_snapshot(self.request_id)
         return RequestOutput(
             request_id=external_req_id,  # request_id is what was provided externally
             lora_request=self.lora_request,
@@ -369,6 +383,7 @@ class RequestState:
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,
             kv_transfer_params=kv_transfer_params,
+            attn_capture_data=attn_capture_data,
             num_cached_tokens=self.num_cached_tokens,
             metrics=self.stats,
         )
@@ -532,6 +547,11 @@ class OutputProcessor:
         self.request_states[request_id] = req_state
         if parent_req:
             self.parent_requests[parent_req.request_id] = parent_req
+
+        # Track attention capture requests
+        sp = request.sampling_params
+        if sp and sp.extra_args and str(sp.extra_args.get("attn_capture", "0")) == "1":
+            req_state.attn_capture_enabled = True
 
         # Track the external_req_id -> [internal_req_id, ...] mapping
         self.external_req_ids[req_state.external_req_id].append(request_id)

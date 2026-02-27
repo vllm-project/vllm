@@ -478,6 +478,9 @@ class GPUModelRunner(
         self.attn_groups: list[list[AttentionGroup]] = []
         # self.kv_cache_config: KVCacheConfig
 
+        # NOTE(jehyun): Per-worker attention capture instance
+        self.attn_capture = None
+
         # mm_hash ->  encoder_output
         self.encoder_cache: dict[str, torch.Tensor] = {}
 
@@ -757,6 +760,27 @@ class GPUModelRunner(
         self.mamba_state_idx: dict[str, int] = {}
         self.layerwise_nvtx_hooks_registered = False
 
+        # NOTE(jehyun): Init attention capture with global setter
+        if self.vllm_config.cache_config.enable_attention_instrumentation:
+            from vllm.model_executor.layers.attention.attn_capture import CaptureConfig
+
+            layers_str = self.vllm_config.cache_config.attention_instrumentation_layers
+
+            hf_config = self.vllm_config.model_config.hf_config
+            num_layers = getattr(
+                hf_config,
+                "num_hidden_layers",
+                getattr(hf_config, "text_config", hf_config).num_hidden_layers,
+            )
+
+            if layers_str and layers_str.lower() != "all":
+                layers = set(int(x.strip()) for x in layers_str.split(","))
+            else:
+                layers = set(range(num_layers))
+
+            config = CaptureConfig(enabled=True, layers=layers)
+            self.init_attn_capture(config)
+
     def update_max_model_len(self, max_model_len: int) -> None:
         self.max_model_len = max_model_len
         if self.speculative_config:
@@ -930,6 +954,9 @@ class GPUModelRunner(
         """
         # Remove finished requests from the cached states.
         for req_id in scheduler_output.finished_req_ids:
+            # NOTE(jehyun): Capture attention before removing request
+            if self.attn_capture and self.attn_capture.config.enabled:
+                self._capture_finished_request(req_id)
             self.requests.pop(req_id, None)
             self.num_prompt_logprobs.pop(req_id, None)
         # Remove the finished requests from the persistent batch.
@@ -3162,8 +3189,8 @@ class GPUModelRunner(
         has_lora = num_active_loras > 0 if force_has_lora is None else force_has_lora
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
-        dispatch_cudagraph = (
-            lambda num_tokens, disable_full: self.cudagraph_dispatcher.dispatch(
+        dispatch_cudagraph = lambda num_tokens, disable_full: (
+            self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
                 has_lora=has_lora,
                 uniform_decode=uniform_decode,
@@ -3384,6 +3411,10 @@ class GPUModelRunner(
         ):
             # Update persistent batch states.
             self._update_states(scheduler_output)
+
+            # NOTE(jehyun): Capturing attentions for requested queries
+            if self.attn_capture:
+                self._update_attn_capture_slots()
 
             if has_ec_transfer() and get_ec_transfer().is_producer:
                 with self.maybe_get_ec_connector_output(
@@ -6205,6 +6236,62 @@ class GPUModelRunner(
                     stats = self.encoder_timing_registry[req_id]
                     stats.encoder_forward_secs += per_request_time
                     stats.num_encoder_calls += 1
+
+    def init_attn_capture(self, config) -> None:
+        """Initialize attention capture for instrumentation."""
+        from vllm.model_executor.layers.attention.attn_capture import (
+            AttentionCapture,
+            set_attn_capture,
+        )
+
+        self.attn_capture = AttentionCapture(config)
+        set_attn_capture(self.attn_capture)
+
+    def _update_attn_capture_slots(self) -> None:
+        """Update capture_slots to the union of slots for all capture-enabled
+        requests in the current batch. Called once per execute step."""
+        from vllm.model_executor.layers.attention.attn_capture import slots_from_blocks
+
+        block_size = self.cache_config.block_size
+        capture_slots: set[int] | None = None
+        for req_id in self.input_batch.req_ids:
+            req_state = self.requests.get(req_id)
+            if not req_state:
+                continue
+            extra_args = getattr(req_state.sampling_params, "extra_args", None) or {}
+            if str(extra_args.get("attn_capture", "0")) != "1":
+                continue
+            if capture_slots is None:
+                capture_slots = set()
+            for block_list in req_state.block_ids:
+                capture_slots.update(slots_from_blocks(block_list, block_size))
+
+        assert self.attn_capture is not None
+        self.attn_capture.runtime_enabled_this_step = capture_slots is not None
+        self.attn_capture.capture_slots = capture_slots
+
+    def _capture_finished_request(self, req_id: str) -> None:
+        """Capture attention and clean up buffers for a finished request."""
+        req_state = self.requests.get(req_id)
+        if not req_state:
+            return
+        extra_args = getattr(req_state.sampling_params, "extra_args", None) or {}
+        assert self.attn_capture is not None
+        if str(extra_args.get("attn_capture", "0")) == "1":
+            try:
+                self.attn_capture.capture(
+                    req_state=req_state,
+                    block_size=self.cache_config.block_size,
+                    kv_caches=self.kv_caches,
+                    prefix=extra_args.get("attn_capture_prefix"),
+                )
+            except Exception:
+                logger.warning(
+                    "Capturing attention failed for %s", req_id, exc_info=True
+                )
+        self.attn_capture.cleanup_request_buffers(
+            req_state.block_ids, self.cache_config.block_size
+        )
 
 
 @dataclass

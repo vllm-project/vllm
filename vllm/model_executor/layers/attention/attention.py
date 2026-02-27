@@ -263,6 +263,9 @@ class Attention(nn.Module, AttentionLayerBase):
         self.sliding_window = sliding_window
         self.has_sink = extra_impl_args.get("sinks") is not None
 
+        # NOTE(jehyun): Passing on capture instance for each layer
+        self.attn_capture = None
+
         # NOTE: model_config may be None during certain tests
         model_config = vllm_config.model_config
         self.use_mm_prefix = model_config is not None and model_config.is_mm_prefix_lm
@@ -698,6 +701,19 @@ def unified_attention_with_output(
     # attention forward.
     del kv_cache_dummy_dep
     attn_metadata, self, kv_cache, _ = get_attention_context(layer_name)
+
+    # NOTE(jehyun): Buffer Q for post-hoc attention capture
+    from vllm.model_executor.layers.attention.attn_capture import get_attn_capture
+
+    capture = get_attn_capture()
+
+    if capture and capture.config.enabled and capture.runtime_enabled_this_step:
+        capture.buffer_query(
+            query=query,
+            key=key,
+            attn_metadata=attn_metadata,
+            layer_name=layer_name,
+        )
 
     self.impl.forward(
         self,
