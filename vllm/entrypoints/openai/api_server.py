@@ -378,6 +378,16 @@ async def init_app_state(
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
 
+    # WebSocket Responses mode connection tracking
+    if "generate" in supported_tasks:
+        import asyncio
+
+        state.ws_responses_active_connections = 0
+        state.ws_responses_max_connections = getattr(
+            args, "max_websocket_connections", 100
+        )
+        state.ws_responses_lock = asyncio.Lock()
+
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
     family = socket.AF_INET
