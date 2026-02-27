@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 import torch
 
-from vllm.config.cache import CacheConfig
 from vllm.logger import init_logger
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
@@ -426,6 +425,8 @@ class Platform:
         """
         Ensure block_size is compatible with the attention backend.
         """
+        from vllm.config.cache import CacheConfig
+
         cache_config = vllm_config.cache_config
         if cache_config.user_specified_block_size:
             # User specified --block-size; keep it.
