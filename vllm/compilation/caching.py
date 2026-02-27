@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import hashlib
 import inspect
 import os
@@ -144,6 +145,18 @@ class StandaloneCompiledArtifacts:
         self.loaded_submodule_store = {}
 
 
+@contextlib.contextmanager
+def patch_pytree_map_over_slice():
+    pytree._private_register_pytree_node(
+        slice, lambda x: ([x.start, x.stop, x.step], None), lambda x, c: slice(*x)
+    )
+
+    try:
+        yield
+    finally:
+        pytree._deregister_pytree_node(slice)
+
+
 class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
     """
     A wrapper around a compiled function by vllm. It will forward the tensor
@@ -235,7 +248,10 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
                 lambda inp: torch.empty_like(inp, device="meta"),
                 state["example_inputs"],
             )
-        with patch.object(GraphPickler, "reducer_override", _graph_reducer_override):
+        with (
+            patch.object(GraphPickler, "reducer_override", _graph_reducer_override),
+            patch_pytree_map_over_slice(),
+        ):
             state["graph_module"] = GraphPickler.dumps(
                 state["graph_module"], Options(ops_filter=None)
             )
@@ -261,7 +277,8 @@ class VllmSerializableFunction(SerializableCallable):  # type: ignore[misc]
 
         state = pickle.loads(data)
         fake_mode = FakeTensorMode(shape_env=ShapeEnv())
-        state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
+        with patch_pytree_map_over_slice():
+            state["graph_module"] = GraphPickler.loads(state["graph_module"], fake_mode)
         state["graph_module"].recompile()
         state["example_inputs"] = GraphPickler.loads(state["example_inputs"], fake_mode)
 
