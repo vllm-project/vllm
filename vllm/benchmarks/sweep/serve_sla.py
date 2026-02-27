@@ -90,8 +90,14 @@ def explore_sla(
     dataset_size = DEFAULT_NUM_PROMPTS
     if "num_prompts" in bench_comb:
         dataset_size = int(bench_comb["num_prompts"])  # type: ignore
-    elif "--num-prompts" in bench_cmd:
-        dataset_size = int(bench_cmd[bench_cmd.index("--num-prompts") + 1])
+    else:
+        for i, arg in enumerate(bench_cmd):
+            if arg == "--num-prompts" and i + 1 < len(bench_cmd):
+                dataset_size = int(bench_cmd[i + 1])
+                break
+            elif arg.startswith("--num-prompts="):
+                dataset_size = int(arg.split("=", 1)[1])
+                break
 
     print(f"Dataset size: {dataset_size}")
 
