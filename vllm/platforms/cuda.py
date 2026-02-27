@@ -554,7 +554,14 @@ class NvmlCudaPlatform(CudaPlatformBase):
     def get_device_capability(cls, device_id: int = 0) -> DeviceCapability | None:
         try:
             physical_device_id = cls.device_id_to_physical_device_id(device_id)
-            handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+
+            if isinstance(physical_device_id, str) and physical_device_id.startswith("MIG-"):
+                # MIG UUIDs must be resolved via parent GPU UUID
+                parent_uuid = physical_device_id.split("/")[0].replace("MIG-", "")
+                handle = pynvml.nvmlDeviceGetHandleByUUID(parent_uuid)
+            else:
+                handle = pynvml.nvmlDeviceGetHandleByIndex(physical_device_id)
+
             major, minor = pynvml.nvmlDeviceGetCudaComputeCapability(handle)
             return DeviceCapability(major=major, minor=minor)
         except RuntimeError:
