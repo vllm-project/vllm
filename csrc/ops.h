@@ -165,8 +165,6 @@ void persistent_masked_m_silu_mul_quant(
     at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
     bool use_ue8m0);
 
-void mul_and_silu(torch::Tensor& out, torch::Tensor& input);
-
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
@@ -201,7 +199,6 @@ torch::Tensor awq_dequantize(torch::Tensor _kernel,
                              torch::Tensor _zeros, int64_t split_k_iters,
                              int64_t thx, int64_t thy);
 
-torch::Tensor permute_cols(torch::Tensor const& A, torch::Tensor const& perm);
 #endif
 
 torch::Tensor ggml_dequantize(torch::Tensor W, int64_t type, int64_t m,
