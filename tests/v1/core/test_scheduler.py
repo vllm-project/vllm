@@ -3435,8 +3435,14 @@ def test_priority_scheduling_ec_connector_preemption_and_resumption(
         _assert_right_ec_connector_metadata(
             output, mm_features_list=request_low.mm_features
         )
+    elif cache_exist == "local":
+        scheduler.ec_connector.update_state_after_alloc.assert_not_called()
+        _assert_right_ec_connector_metadata(output, mm_features_list=[])
     else:
-        # ECConnector should carry no metadata
+        assert cache_exist == "no_where"
+        scheduler.ec_connector.update_state_after_alloc.assert_called_with(
+            request_low, 0
+        )
         _assert_right_ec_connector_metadata(output, mm_features_list=[])
 
     scheduler.ec_connector.update_state_after_alloc.reset_mock()
