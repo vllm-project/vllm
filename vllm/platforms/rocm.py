@@ -28,6 +28,7 @@ try:
         amdsmi_init,
         amdsmi_shut_down,
         amdsmi_topo_get_link_type,
+        amdsmi_get_gpu_device_uuid,
     )
 except ImportError as e:
     logger.warning("Failed to import from amdsmi with %r", e)
@@ -500,6 +501,13 @@ class RocmPlatform(Platform):
         if device_name in _ROCM_DEVICE_ID_NAME_MAP:
             return _ROCM_DEVICE_ID_NAME_MAP[device_name]
         return asic_info["market_name"]
+
+    @classmethod
+    @with_amdsmi_context
+    def get_device_uuid(cls, device_id: int = 0) -> str:
+            device0 = amdsmi_get_processor_handles()[0]
+            return amdsmi_get_gpu_device_uuid(device0)
+        
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
