@@ -10,6 +10,7 @@ from typing import Any
 import numpy as np
 
 from vllm import envs
+from vllm.utils.math_utils import cdiv
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -167,6 +168,11 @@ class Scheduler(SchedulerInterface):
         # requests so that they can free the cached states for those requests.
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
+
+        # Requests aborted during scheduling because they can never fit
+        # in the block pool. Processed in update_from_output to produce
+        # EngineCoreOutput for the client.
+        self._aborted_unschedulable_reqs: list[Request] = []
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -735,13 +741,49 @@ class Scheduler(SchedulerInterface):
                 )
 
                 if new_blocks is None:
-                    # The request cannot be scheduled.
+                    # Try to reclaim cached blocks by resetting the
+                    # prefix cache and retrying without prefix hits.
+                    if self.kv_cache_manager.reset_prefix_cache():
+                        new_blocks = self.kv_cache_manager.allocate_slots(
+                            request,
+                            num_new_tokens,
+                            num_new_computed_tokens=0,
+                            new_computed_blocks=self.kv_cache_manager.empty_kv_cache_blocks,
+                            num_lookahead_tokens=effective_lookahead_tokens,
+                            num_external_computed_tokens=0,
+                            delay_cache_blocks=load_kv_async,
+                            num_encoder_tokens=num_encoder_tokens,
+                        )
+                    if new_blocks is None:
+                        # Check if this request can EVER fit in the
+                        # available block pool (minus 1 for null block).
+                        total_blocks = (
+                            self.kv_cache_manager.block_pool.num_gpu_blocks
+                            - 1
+                        )
+                        num_required = cdiv(
+                            request.num_tokens, self.block_size
+                        )
+                        if num_required > total_blocks:
+                            logger.error(
+                                "Request %s requires %d blocks "
+                                "(%d tokens) but only %d blocks "
+                                "are available. Aborting request.",
+                                request.request_id,
+                                num_required,
+                                request.num_tokens,
+                                total_blocks,
+                            )
+                            self.waiting.pop_request()
+                            self._aborted_unschedulable_reqs.append(
+                                request)
+                            continue
 
-                    # NOTE: we need to untouch the request from the encode cache
-                    # manager
-                    if request.has_encoder_inputs:
-                        self.encoder_cache_manager.free(request)
-                    break
+                        # The request might fit later when running
+                        # requests finish and free blocks.
+                        if request.has_encoder_inputs:
+                            self.encoder_cache_manager.free(request)
+                        break
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
@@ -1443,6 +1485,24 @@ class Scheduler(SchedulerInterface):
             requests = [self.requests[req_id] for req_id in failed_kv_load_req_ids]
             self.finish_requests(failed_kv_load_req_ids, RequestStatus.FINISHED_ERROR)
             for request in requests:
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=request.request_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                        num_cached_tokens=request.num_cached_tokens,
+                    )
+                )
+
+        # Handle requests aborted during scheduling (can never fit).
+        if self._aborted_unschedulable_reqs:
+            aborted = self._aborted_unschedulable_reqs
+            self._aborted_unschedulable_reqs = []
+            req_ids = [r.request_id for r in aborted]
+            self.finish_requests(req_ids, RequestStatus.FINISHED_ABORTED)
+            for request in aborted:
                 outputs[request.client_index].append(
                     EngineCoreOutput(
                         request_id=request.request_id,
