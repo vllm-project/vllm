@@ -17,7 +17,7 @@ import grpc
 from grpc_reflection.v1alpha import reflection
 
 from vllm.engine.arg_utils import AsyncEngineArgs
-from vllm.grpc import render_pb2, render_pb2_grpc
+from vllm.grpc import render_pb2, render_pb2_grpc  # type: ignore[attr-defined]
 from vllm.grpc.utils import (
     conversation_to_proto,
     messages_from_proto,
@@ -164,7 +164,7 @@ async def serve_render(args: argparse.Namespace):
         tokenizer_mode=getattr(args, "tokenizer_mode", "auto"),
         trust_remote_code=getattr(args, "trust_remote_code", False),
         revision=getattr(args, "revision", None),
-        max_model_len=getattr(args, "max_model_len", None),
+        max_model_len=getattr(args, "max_model_len", None),  # type: ignore[arg-type]
         enforce_eager=True,
         load_format="dummy",
     )

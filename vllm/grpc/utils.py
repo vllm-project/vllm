@@ -13,7 +13,7 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ConversationMessage,
 )
-from vllm.grpc import render_pb2
+from vllm.grpc import render_pb2  # type: ignore[attr-defined]
 
 T = TypeVar("T")
 
@@ -71,7 +71,7 @@ def messages_from_proto(
     added to both render.proto and ChatCompletionMessageParam work without
     changing this function.
     """
-    result = []
+    result: list[ChatCompletionMessageParam] = []
     for msg in messages:
         d: dict = {"role": msg.role}
 
@@ -147,8 +147,9 @@ def conversation_to_proto(
             proto_msg.parts.CopyFrom(render_pb2.ContentPartList(parts=parts))
 
         # tool_calls (repeated nested)
-        if "tool_calls" in conv:
-            for tc in conv["tool_calls"]:
+        tool_calls = conv.get("tool_calls")
+        if tool_calls:
+            for tc in tool_calls:
                 func = tc.get("function", {})
                 proto_msg.tool_calls.append(
                     render_pb2.ToolCall(
@@ -166,7 +167,7 @@ def conversation_to_proto(
             if field.name in _MSG_SPECIAL_FIELDS:
                 continue
             if field.has_presence and field.name in conv:
-                setattr(proto_msg, field.name, conv[field.name])
+                setattr(proto_msg, field.name, conv[field.name])  # type: ignore[literal-required]
 
         result.append(proto_msg)
     return result
