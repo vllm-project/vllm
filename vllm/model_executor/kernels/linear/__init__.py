@@ -77,6 +77,9 @@ from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
     CutlassFP8ScaledMMLinearKernel,
     CutlassInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+    DeepGemmFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
     FlashInferFP8ScaledMMLinearKernel,
 )
@@ -445,4 +448,5 @@ __all__ = [
     "MarlinLinearKernel",
     "XPUwNa16LinearKernel",
     "_KernelT",
+    "DeepGemmFp8BlockScaledMMKernel",
 ]

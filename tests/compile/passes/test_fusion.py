@@ -32,6 +32,7 @@ from vllm.model_executor.kernels.linear import (
     CudaFp8BlockScaledMMKernel,
     CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
+    DeepGemmFp8BlockScaledMMKernel,
     FlashInferFP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
     ROCmFP8ScaledMMLinearKernel,
@@ -73,8 +74,9 @@ CUDA_KERNEL_GROUPSHAPE_COMBINATIONS = [
     (CudaFp8BlockScaledMMKernel, GroupShape(1, 128)),
     (CudaFp8BlockScaledMMKernel, GroupShape(1, 64)),
     (CutlassFp8BlockScaledMMKernel, GroupShape(1, 128)),
-    (CutlassFp8BlockScaledMMKernel, GroupShape(1, 64)),
+    (DeepGemmFp8BlockScaledMMKernel, GroupShape(1, 128)),
     (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
+    (TritonFp8BlockScaledMMKernel, GroupShape(1, 64)),
 ]
 
 # ROCm kernels
@@ -87,6 +89,7 @@ ROCM_KERNEL_GROUPSHAPE_COMBINATIONS = [
     (ChannelWiseTorchFP8ScaledMMLinearKernel, GroupShape.PER_TOKEN),
     # Blockwise group shapes (no kernel abstraction)
     (TritonFp8BlockScaledMMKernel, GroupShape(1, 128)),
+    (TritonFp8BlockScaledMMKernel, GroupShape(1, 64)),
 ]
 
 KERNEL_GROUPSHAPE_COMBINATIONS = (

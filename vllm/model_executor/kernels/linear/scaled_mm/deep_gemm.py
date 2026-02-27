@@ -8,6 +8,9 @@ from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     deepgemm_post_process_fp8_weight_block,
 )
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
+)
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
@@ -60,6 +63,15 @@ class DeepGemmFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             return can_implement_base, reason
         if config.out_dtype != torch.bfloat16:
             return (False, "Supports only output dtype of bfloat16")
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
+            )
+
         return True, None
 
     def process_weights_after_loading(self, layer):
