@@ -840,6 +840,24 @@ class SamplingParams(
             f"extra_args={self.extra_args})"
         )
 
+    @staticmethod
+    def for_sampler_warmup() -> "SamplingParams":
+        """Set parameters to exercise all sampler logic."""
+        return SamplingParams(
+            temperature=0.9,
+            top_p=0.9,
+            top_k=50,
+            min_p=0.1,
+            frequency_penalty=0.5,
+            presence_penalty=0.5,
+            repetition_penalty=1.2,
+            min_tokens=2,
+            logit_bias={0: -1.0, 1: 0.5},
+            _bad_words_token_ids=[[0], [1, 2]],
+            logprobs=5,
+            prompt_logprobs=1,
+        )
+
 
 class BeamSearchParams(
     msgspec.Struct,
