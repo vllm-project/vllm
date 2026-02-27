@@ -22,6 +22,7 @@ from .ScaledMMLinearKernel import (
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
+    Int8ScaledMMLinearLayerConfig,
 )
 
 
@@ -35,18 +36,7 @@ class CutlassInt8ScaledMMLinearKernel(Int8ScaledMMLinearKernel):
         return True, None
 
     @classmethod
-    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
-        can_implement_base, reason = super().can_implement(config)
-        if not can_implement_base:
-            return can_implement_base, reason
-
-        act_quant_desc = config.activation_quant_key.scale
-        if act_quant_desc.group_shape != GroupShape(1, 128):
-            return (
-                False,
-                "Supports only dynamic per token group activation "
-                "quantization with group_shape=(1,128).",
-            )
+    def can_implement(cls, c: Int8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -212,6 +202,21 @@ class CutlassFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
                 False,
                 "The device compute capability of"
                 f"{compute_capability} is not supported.",
+            )
+        return True, None
+
+    @classmethod
+    def can_implement(cls, config: FP8ScaledMMLinearLayerConfig):
+        can_implement_base, reason = super().can_implement(config)
+        if not can_implement_base:
+            return can_implement_base, reason
+
+        act_quant_desc = config.activation_quant_key.scale
+        if act_quant_desc.group_shape != GroupShape(1, 128):
+            return (
+                False,
+                "Supports only dynamic per token group activation "
+                "quantization with group_shape=(1,128).",
             )
         return True, None
 
