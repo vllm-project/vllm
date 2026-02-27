@@ -35,6 +35,33 @@ def async_copy_to_gpu(
     return out.copy_(tmp, non_blocking=True)
 
 
+class PrepareInputsBuffers:
+    def __init__(self, max_num_reqs: int, device: torch.device):
+        self.device = device
+        self.idx_mapping_cpu = torch.empty(
+            max_num_reqs, dtype=torch.int32, pin_memory=True
+        )
+        self.query_start_loc_cpu = torch.empty(
+            max_num_reqs + 1, dtype=torch.int32, pin_memory=True
+        )
+        self.cu_num_logits_cpu = torch.empty(
+            max_num_reqs + 1, dtype=torch.int32, pin_memory=True
+        )
+        self.idx_mapping_gpu = torch.empty(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self.cu_num_logits_gpu = torch.empty(
+            max_num_reqs + 1, dtype=torch.int32, device=device
+        )
+        self.arange_reqs_np = np.arange(max_num_reqs + 1, dtype=np.int32)
+        self.arange_reqs_gpu = torch.arange(
+            max_num_reqs + 1, dtype=torch.int32, device=device
+        )
+        self.zero_local_pos_gpu = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+
+
 class UvaBuffer:
     def __init__(self, size: int | Sequence[int], dtype: torch.dtype):
         if not is_uva_available():
