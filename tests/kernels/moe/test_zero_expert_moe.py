@@ -46,7 +46,6 @@ def zero_expert_moe(dist_init, default_vllm_config):
         init_workspace_manager(torch.cuda.current_device())
 
         layer = ZeroExpertFusedMoE(
-            zero_expert_num=zero_expert_num,
             zero_expert_type="identity",
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_experts,
