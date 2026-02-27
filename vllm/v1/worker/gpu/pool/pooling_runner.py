@@ -31,6 +31,8 @@ class PoolingRunner:
         hidden_states: torch.Tensor,
         input_batch: InputBatch,
     ) -> list[torch.Tensor | None]:
+        # TODO(woosuk): Support different types of pooling tasks.
+        # TODO(woosuk): Make normalization optional.
         last_hidden_states = hidden_states[input_batch.logits_indices]
         last_hidden_states = F.normalize(last_hidden_states, p=2, dim=-1)
         return list(last_hidden_states.unbind(dim=0))
