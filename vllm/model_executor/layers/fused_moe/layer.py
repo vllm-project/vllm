@@ -525,16 +525,18 @@ class FusedMoE(CustomOp):
 
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
+        unpadded_hidden_size = hidden_size
+        self.model_type = (
+            self.vllm_config.model_config.hf_config.model_type
+            if self.vllm_config.model_config is not None
+            else None
+        )
         hidden_size = maybe_roundup_hidden_size(
             hidden_size=hidden_size,
             act_dtype=moe_in_dtype,
             moe_parallel_config=self.moe_parallel_config,
             is_lora_enabled=vllm_config.lora_config is not None,
-            model_type=(
-                self.vllm_config.model_config.hf_config.model_type
-                if self.vllm_config.model_config is not None
-                else None
-            ),
+            model_type=self.model_type,
             is_mxfp4_quant=(
                 quant_config is not None and quant_config.is_mxfp4_quant(prefix, self)
             ),
@@ -610,6 +612,7 @@ class FusedMoE(CustomOp):
         moe_quant_params = {
             "num_experts": self.local_num_experts,
             "hidden_size": hidden_size,
+            "unpadded_hidden_size": unpadded_hidden_size,
             "intermediate_size_per_partition": self.intermediate_size_per_partition,
             "params_dtype": params_dtype,
             "weight_loader": self.weight_loader,
