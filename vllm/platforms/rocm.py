@@ -556,7 +556,7 @@ class RocmPlatform(Platform):
                 )
                 compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
-        if cache_config and not cache_config.user_specified_block_size:
+        if cache_config and cache_config.block_size is None:
             if (
                 envs.VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION and envs.VLLM_ROCM_USE_AITER
                 # NOTE: This block has been deprecated

@@ -528,9 +528,10 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
                 mamba_page_size, kernel_block_alignment_size * attn_page_size_1_token
             )
 
-        # override attention block size if it is too small,
-        # even if the user has explicitly set it
-        if cache_config.block_size < attn_block_size:
+        # override attention block size if either (a) the
+        # user has not set it or (b) the user has set it
+        # too small.
+        if cache_config.block_size is None or cache_config.block_size < attn_block_size:
             cache_config.block_size = attn_block_size
             logger.info(
                 "Setting attention block size to %d tokens "

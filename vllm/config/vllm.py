@@ -1591,9 +1591,13 @@ class VllmConfig:
         """Validate block_size against DCP and mamba constraints.
 
         Called after Platform.update_block_size_for_backend() has
-        finalised block_size.
+        finalised block_size, so that the checks see the real value
+        rather than the initial None sentinel.
         """
         block_size = self.cache_config.block_size
+        assert block_size is not None, (
+            "validate_block_size called before block_size was set"
+        )
 
         # DCP interleave-size compatibility
         if self.parallel_config.decode_context_parallel_size > 1:
