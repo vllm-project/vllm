@@ -155,7 +155,7 @@ The built-in modalities are defined by
 [`MultiModalDataBuiltins`][vllm.multimodal.inputs.MultiModalDataBuiltins].
 """
 
-MultiModalUUIDDict: TypeAlias = Mapping[str, list[str | None] | str]
+MultiModalUUIDDict: TypeAlias = Mapping[str, Sequence[str | None] | str]
 """
 A dictionary containing user-provided UUIDs for items in each modality.
 If a UUID for an item is not provided, its entry will be `None` and

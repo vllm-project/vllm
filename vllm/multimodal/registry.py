@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import dataclass
 from multiprocessing.synchronize import Lock as LockType
 from typing import TYPE_CHECKING, Generic, Literal, Protocol, TypeVar, cast
 
-from vllm.config.multimodal import BaseDummyOptions
-from vllm.config.observability import ObservabilityConfig
 from vllm.logger import init_logger
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 
@@ -25,6 +25,7 @@ from .processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
+    TimingContext,
 )
 
 if TYPE_CHECKING:
@@ -98,27 +99,6 @@ class MultiModalRegistry:
     """
     A registry that dispatches data processing according to the model.
     """
-
-    def _extract_mm_options(
-        self,
-        model_config: "ModelConfig",
-    ) -> Mapping[str, BaseDummyOptions] | None:
-        """
-        Extract multimodal dummy options from model config.
-
-        Returns None if no configurable options are found, otherwise returns
-        a mapping of modality names to their dummy options.
-        """
-        if not model_config.multimodal_config:
-            return None
-
-        mm_options = {
-            m: opt
-            for m in model_config.multimodal_config.limit_per_prompt
-            if (opt := model_config.multimodal_config.get_dummy_options(m)) is not None
-        }
-
-        return mm_options if len(mm_options) > 0 else None
 
     def supports_multimodal_inputs(self, model_config: "ModelConfig") -> bool:
         """
@@ -196,32 +176,26 @@ class MultiModalRegistry:
     def _create_processing_ctx(
         self,
         model_config: "ModelConfig",
-        observability_config: "ObservabilityConfig | None" = None,
         tokenizer: TokenizerLike | None = None,
     ) -> InputProcessingContext:
         if tokenizer is None:
             tokenizer = cached_tokenizer_from_config(model_config)
 
-        return InputProcessingContext(
-            model_config, tokenizer, observability_config=observability_config
-        )
+        return InputProcessingContext(model_config, tokenizer)
 
     def _create_processing_info(
         self,
         model_config: "ModelConfig",
-        observability_config: "ObservabilityConfig | None" = None,
-        *,
         tokenizer: TokenizerLike | None = None,
     ) -> BaseProcessingInfo:
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory
-        ctx = self._create_processing_ctx(model_config, observability_config, tokenizer)
+        ctx = self._create_processing_ctx(model_config, tokenizer)
         return factories.info(ctx)
 
     def create_processor(
         self,
         model_config: "ModelConfig",
-        observability_config: "ObservabilityConfig | None" = None,
         *,
         tokenizer: TokenizerLike | None = None,
         cache: BaseMultiModalProcessorCache | None = None,
@@ -235,7 +209,7 @@ class MultiModalRegistry:
         model_cls = self._get_model_cls(model_config)
         factories = model_cls._processor_factory
 
-        ctx = self._create_processing_ctx(model_config, observability_config, tokenizer)
+        ctx = self._create_processing_ctx(model_config, tokenizer)
 
         return factories.build_processor(ctx, cache=cache)
 
@@ -261,14 +235,11 @@ class MultiModalRegistry:
         processor_inputs = processor.dummy_inputs.get_dummy_processor_inputs(
             seq_len=seq_len,
             mm_counts=mm_counts,
-            mm_options=self._extract_mm_options(model_config),
-            mm_processor_kwargs=mm_config.mm_processor_kwargs,
+            mm_options=mm_config.limit_per_prompt,
         )
         mm_inputs = processor.apply(
-            prompt=processor_inputs.prompt,
-            mm_items=processor_inputs.mm_items,
-            hf_processor_mm_kwargs=processor_inputs.hf_processor_mm_kwargs,
-            tokenization_kwargs=processor_inputs.tokenization_kwargs,
+            processor_inputs,
+            timing_ctx=TimingContext(enabled=False),
         )
 
         prompt_token_ids = mm_inputs["prompt_token_ids"]
@@ -358,3 +329,34 @@ class MultiModalRegistry:
             return ShmObjectStoreReceiverCache(vllm_config, shared_worker_lock)
         else:
             raise ValueError(f"Unknown cache type: {cache_type!r}")
+
+
+class MultiModalTimingRegistry:
+    def __init__(self, observability_config: "ObservabilityConfig | None") -> None:
+        super().__init__()
+
+        if observability_config and observability_config.enable_mm_processor_stats:
+            self._lock = threading.Lock()
+            self._ctx_by_request_id = defaultdict[str, TimingContext](TimingContext)
+            self._enabled = True
+        else:
+            self._enabled = False
+
+    def get(self, request_id: str) -> TimingContext:
+        if not self._enabled:
+            return TimingContext(enabled=False)
+
+        with self._lock:
+            return self._ctx_by_request_id[request_id]
+
+    def stat(self) -> dict[str, dict[str, float]]:
+        if not self._enabled:
+            return {}
+
+        with self._lock:
+            stats = {
+                req_id: ctx.get_stats_dict()
+                for req_id, ctx in self._ctx_by_request_id.items()
+            }
+            self._ctx_by_request_id.clear()
+            return stats

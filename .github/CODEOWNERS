@@ -5,14 +5,14 @@
 /vllm/compilation @zou3519 @youkaichao @ProExpertProg
 /vllm/distributed/kv_transfer @NickLucche @ApostaC @orozery
 /vllm/lora @jeejeelee
-/vllm/model_executor/layers/attention @LucasWilkinson
+/vllm/model_executor/layers/attention @LucasWilkinson @MatthewBonanni
 /vllm/model_executor/layers/fused_moe @mgoin @pavanimajety
 /vllm/model_executor/layers/quantization @mgoin @robertgshaw2-redhat @tlrmchlsmth @yewentao256 @pavanimajety
 /vllm/model_executor/layers/mamba @tdoublep
 /vllm/model_executor/model_loader @22quinn
 /vllm/model_executor/layers/batch_invariant.py @yewentao256 
 /vllm/multimodal @DarkLight1337 @ywang96 @NickLucche @tjtanaa
-/vllm/vllm_flash_attn @LucasWilkinson
+/vllm/vllm_flash_attn @LucasWilkinson @MatthewBonanni
 CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 
 # Any change to the VllmConfig changes can have a large user-facing impact,
@@ -43,19 +43,19 @@ CMakeLists.txt @tlrmchlsmth @LucasWilkinson
 /vllm/tool_parsers @aarnphm @chaunceyjiang
 
 # vLLM V1
-/vllm/v1/attention @LucasWilkinson
+/vllm/v1/attention @LucasWilkinson @MatthewBonanni
 /vllm/v1/attention/backend.py @WoosukKwon @zhuohan123 @youkaichao @alexm-redhat @njhill
 /vllm/v1/attention/backends/mla @pavanimajety
 /vllm/v1/attention/backends/flashinfer.py @mgoin @pavanimajety
 /vllm/v1/attention/backends/triton_attn.py @tdoublep
 /vllm/v1/core @WoosukKwon @robertgshaw2-redhat @njhill @ywang96 @alexm-redhat @heheda12345 @ApostaC @orozery
 /vllm/v1/sample @22quinn @houseroad @njhill
-/vllm/v1/spec_decode @benchislett @luccafong
+/vllm/v1/spec_decode @benchislett @luccafong @MatthewBonanni
 /vllm/v1/structured_output @mgoin @russellb @aarnphm @benchislett
 /vllm/v1/kv_cache_interface.py @heheda12345
 /vllm/v1/kv_offload @ApostaC @orozery
 /vllm/v1/worker/gpu/kv_connector.py @orozery
-/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery
+/vllm/v1/worker/kv_connector_model_runner_mixin.py @orozery @NickLucche
 
 # Model runner V2
 /vllm/v1/worker/gpu @WoosukKwon

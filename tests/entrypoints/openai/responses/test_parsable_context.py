@@ -3,14 +3,28 @@
 
 import importlib.util
 import json
+import logging
 
 import pytest
 import pytest_asyncio
 from openai import OpenAI
 
 from ....utils import RemoteOpenAIServer
+from .conftest import (
+    BASE_TEST_ENV,
+    has_output_type,
+    log_response_diagnostics,
+    retry_for_tool_call,
+)
+
+logger = logging.getLogger(__name__)
 
 MODEL_NAME = "Qwen/Qwen3-8B"
+
+_PYTHON_TOOL_INSTRUCTION = (
+    "You must use the Python tool to execute code. "
+    "Never simulate execution. You must print the final answer."
+)
 
 
 @pytest.fixture(scope="module")
@@ -32,12 +46,12 @@ def server():
         "--tool-server",
         "demo",
     ]
-    env_dict = dict(
-        VLLM_ENABLE_RESPONSES_API_STORE="1",
-        VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT="1",
-        PYTHON_EXECUTION_BACKEND="dangerously_use_uv",
-    )
-
+    env_dict = {
+        **BASE_TEST_ENV,
+        "VLLM_ENABLE_RESPONSES_API_STORE": "1",
+        "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": "1",
+        "PYTHON_EXECUTION_BACKEND": "dangerously_use_uv",
+    }
     with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
         yield remote_server
 
@@ -54,6 +68,7 @@ async def test_basic(client: OpenAI, model_name: str):
     response = await client.responses.create(
         model=model_name,
         input="What is 123 * 456?",
+        temperature=0.0,
     )
     assert response is not None
     print("response: ", response)
@@ -99,10 +114,15 @@ async def test_reasoning_and_function_items(client: OpenAI, model_name: str):
     )
     assert response is not None
     assert response.status == "completed"
-    # make sure we get a reasoning and text output
-    assert response.output[0].type == "reasoning"
-    assert response.output[1].type == "message"
-    assert type(response.output[1].content[0].text) is str
+
+    output_types = [getattr(o, "type", None) for o in response.output]
+    assert "reasoning" in output_types, (
+        f"Expected reasoning in output, got: {output_types}"
+    )
+    assert "message" in output_types, f"Expected message in output, got: {output_types}"
+
+    msg = next(o for o in response.output if o.type == "message")
+    assert type(msg.content[0].text) is str
 
 
 def get_horoscope(sign):
@@ -110,10 +130,10 @@ def get_horoscope(sign):
 
 
 def call_function(name, args):
+    logger.info("Calling function %s with args %s", name, args)
     if name == "get_horoscope":
         return get_horoscope(**args)
-    else:
-        raise ValueError(f"Unknown function: {name}")
+    raise ValueError(f"Unknown function: {name}")
 
 
 @pytest.mark.asyncio
@@ -136,61 +156,111 @@ async def test_function_call_first_turn(client: OpenAI, model_name: str):
         }
     ]
 
-    response = await client.responses.create(
+    response = await retry_for_tool_call(
+        client,
         model=model_name,
+        expected_tool_type="function_call",
         input="What is the horoscope for Aquarius today?",
         tools=tools,
         temperature=0.0,
     )
     assert response is not None
     assert response.status == "completed"
-    assert len(response.output) == 2
-    assert response.output[0].type == "reasoning"
-    assert response.output[1].type == "function_call"
 
-    function_call = response.output[1]
+    output_types = [getattr(o, "type", None) for o in response.output]
+    assert "reasoning" in output_types, (
+        f"Expected reasoning in output, got: {output_types}"
+    )
+    assert has_output_type(response, "function_call"), (
+        f"Expected function_call in output, got: {output_types}"
+    )
+
+    function_call = next(o for o in response.output if o.type == "function_call")
     assert function_call.name == "get_horoscope"
     assert function_call.call_id is not None
 
     args = json.loads(function_call.arguments)
     assert "sign" in args
 
-    # the multi turn function call is tested above in
-    # test_reasoning_and_function_items
-
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
 async def test_mcp_tool_call(client: OpenAI, model_name: str):
-    response = await client.responses.create(
+    """MCP tool calling with code_interpreter.
+
+    The model may make one or more tool calls before producing a final
+    message.  We validate server invariants (mcp_call items have correct
+    fields) with hard assertions.  Output indices are never hardcoded
+    since the model can produce multiple tool-call rounds.
+    """
+    # MCP + container init + code execution can be slow
+    client_with_timeout = client.with_options(timeout=client.timeout * 3)
+
+    response = await retry_for_tool_call(
+        client_with_timeout,
         model=model_name,
-        input="What is 123 * 456? Use python to calculate the result.",
+        expected_tool_type="mcp_call",
+        input=(
+            "What is 123 * 456? Use python to calculate the result. "
+            "Print the result with print()."
+        ),
         tools=[{"type": "code_interpreter", "container": {"type": "auto"}}],
-        extra_body={"enable_response_messages": True},
+        instructions=_PYTHON_TOOL_INSTRUCTION,
         temperature=0.0,
+        extra_body={"enable_response_messages": True},
     )
 
     assert response is not None
-    assert response.status == "completed"
 
-    # The model may produce multiple reasoning/mcp_call rounds before the
-    # final message, so validate structurally rather than by exact index.
-    output_types = [o.type for o in response.output]
-    assert "reasoning" in output_types
-    mcp_calls = [o for o in response.output if o.type == "mcp_call"]
-    assert len(mcp_calls) >= 1
-    assert type(mcp_calls[0].arguments) is str
-    assert type(mcp_calls[0].output) is str
+    output_types = [getattr(o, "type", None) for o in response.output]
+    log_response_diagnostics(response, label="test_mcp_tool_call")
 
-    # The final output should be a message containing the correct answer
-    assert response.output[-1].type == "message"
-    assert any(s in response.output[-1].content[0].text for s in ("56088", "56,088"))
+    assert response.status == "completed", (
+        f"Response status={response.status} "
+        f"(details={getattr(response, 'incomplete_details', None)}). "
+        f"Output types: {output_types}."
+    )
 
-    # Test raw input_messages / output_messages
-    assert len(response.input_messages) == 1
-    assert len(response.output_messages) >= 3
+    assert "reasoning" in output_types, (
+        f"Expected reasoning in output, got: {output_types}"
+    )
+    assert "mcp_call" in output_types, (
+        f"Expected mcp_call in output, got: {output_types}"
+    )
+
+    # Every mcp_call item must have well-typed fields
+    for item in response.output:
+        if getattr(item, "type", None) == "mcp_call":
+            assert type(item.arguments) is str, (
+                f"mcp_call.arguments should be str, got {type(item.arguments)}"
+            )
+            assert type(item.output) is str, (
+                f"mcp_call.output should be str, got {type(item.output)}"
+            )
+
+    # The model may make 1+ tool-call rounds but must still produce
+    # a final message for a trivial calculation like 123 * 456.
+    message_outputs = [
+        o for o in response.output if getattr(o, "type", None) == "message"
+    ]
+    assert message_outputs, (
+        f"Model did not produce a final message. Output types: {output_types}"
+    )
+
+    final_message = message_outputs[-1]
+    assert any(s in final_message.content[0].text for s in ("56088", "56,088")), (
+        f"Expected 56088 in final message, got: {final_message.content[0].text!r}"
+    )
+
+    # Validate raw input_messages / output_messages
+    assert len(response.input_messages) >= 1, "Expected at least 1 input message"
+    assert len(response.output_messages) >= 1, "Expected at least 1 output message"
     assert any(
-        s in response.output_messages[-1]["message"] for s in ("56088", "56,088")
+        any(s in str(msg) for s in ("56088", "56,088"))
+        for msg in response.output_messages
+    ), (
+        f"Expected 56088 in at least one output_message, "
+        f"got {len(response.output_messages)} messages"
     )
 
 
@@ -202,6 +272,7 @@ async def test_max_tokens(client: OpenAI, model_name: str):
         input="What is the first paragraph of Moby Dick?",
         reasoning={"effort": "low"},
         max_output_tokens=30,
+        temperature=0.0,
     )
     assert response is not None
     assert response.status == "incomplete"

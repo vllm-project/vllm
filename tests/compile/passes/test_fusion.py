@@ -26,24 +26,16 @@ from vllm.config import (
     PassConfig,
     VllmConfig,
 )
-from vllm.model_executor.layers.layernorm import RMSNorm
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.cutlass import (
-    CutlassFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.flashinfer import (
-    FlashInferFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.pytorch import (
+from vllm.model_executor.kernels.linear import (
     ChannelWiseTorchFP8ScaledMMLinearKernel,
+    CutlassFP8ScaledMMLinearKernel,
+    FlashInferFP8ScaledMMLinearKernel,
+    FP8ScaledMMLinearKernel,
     PerTensorTorchFP8ScaledMMLinearKernel,
+    ROCmFP8ScaledMMLinearKernel,
     RowWiseTorchFP8ScaledMMLinearKernel,
 )
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.rocm import (
-    ROCmFP8ScaledMMLinearKernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-)
+from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,

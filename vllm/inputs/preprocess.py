@@ -91,7 +91,7 @@ class InputPreprocessor:
         self,
         prompt: str | list[int],
         mm_data: MultiModalDataDict,
-        mm_processor_kwargs: Mapping[str, object] | None,
+        mm_processor_kwargs: Mapping[str, object] | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
         *,
         mm_uuids: MultiModalUUIDDict | None = None,
@@ -103,9 +103,9 @@ class InputPreprocessor:
         return self.renderer._process_multimodal(
             prompt,
             mm_data,
+            mm_uuids=mm_uuids,
             mm_processor_kwargs=mm_processor_kwargs,
             tokenization_kwargs=tokenization_kwargs,
-            mm_uuids=mm_uuids,
         )
 
     def _process_embeds(
@@ -144,7 +144,7 @@ class InputPreprocessor:
             inputs = self._process_multimodal(
                 prompt_token_ids,
                 multi_modal_data,
-                parsed_content.get("mm_processor_kwargs") or {},
+                parsed_content.get("mm_processor_kwargs"),
                 tokenization_kwargs=tokenization_kwargs,
                 mm_uuids=parsed_content.get("multi_modal_uuids"),
             )
