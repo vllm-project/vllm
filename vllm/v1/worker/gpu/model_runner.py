@@ -119,6 +119,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[
                 self.cache_config.cache_dtype
             ]
+        else:
+            # For "auto", resolve from quantization config if available
+            from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+            resolved_dtype_str = resolve_kv_cache_dtype_string(
+                self.cache_config.cache_dtype, self.model_config
+            )
+            if resolved_dtype_str != "auto":
+                # Found quantization config, use it
+                self.kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[resolved_dtype_str]
+            # If still "auto", kv_cache_dtype remains as self.dtype (default)
         self.is_pooling_model = False
 
         self.vocab_size = self.model_config.get_vocab_size()

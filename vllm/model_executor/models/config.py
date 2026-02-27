@@ -436,7 +436,17 @@ class HybridAttentionMambaModelConfig(VerifyAndUpdateConfig):
         parallel_config = vllm_config.parallel_config
 
         if cache_config.cache_dtype == "auto":
-            kv_cache_dtype = model_config.dtype
+            # For "auto", resolve from quantization config if available
+            from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
+            resolved_dtype_str = resolve_kv_cache_dtype_string(
+                cache_config.cache_dtype, model_config
+            )
+            if resolved_dtype_str != "auto":
+                # Found quantization config, use it
+                kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[resolved_dtype_str]
+            else:
+                # Fall back to model dtype
+                kv_cache_dtype = model_config.dtype
         else:
             kv_cache_dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
