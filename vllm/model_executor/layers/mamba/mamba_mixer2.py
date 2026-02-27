@@ -485,6 +485,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
         # The tuple is (conv_state, ssm_state)
         self.kv_cache = (torch.tensor([]), torch.tensor([]))
 
+        overrides = getattr(model_config, "hf_overrides", {}) or {}
+        self.use_fast_kernel = bool(overrides.get("mamba2_fast_kernel", False))
+
         self.model_config = model_config
         self.cache_config = cache_config
         self.prefix = prefix
@@ -732,6 +735,7 @@ class MambaMixer2(MambaBase, PluggableLayer):
                 dt_limit=(0.0, float("inf")),
                 out=preallocated_ssm_out_p.view(num_prefill_tokens, -1, self.head_dim),
                 state_dtype=ssm_state.dtype,
+                use_fused_kernel=self.use_fast_kernel,
             )
 
             if is_mamba_cache_all:
