@@ -14,7 +14,9 @@ model_config = {
     "model_name": "BAAI/bge-m3",
     "plugin": "bge_m3_sparse_plugin",
     "test_input": "What is the capital of France?",
-    "hf_overrides": {"architectures": ["BgeM3EmbeddingModel"], "head_dtype": "float16"},
+    "hf_overrides": json.dumps(
+        {"architectures": ["BgeM3EmbeddingModel"], "head_dtype": "float16"}
+    ),
 }
 
 
@@ -61,7 +63,7 @@ def server():
         "--max-num-seqs",
         "32",
         "--hf_overrides",
-        json.dumps(model_config["hf_overrides"]),
+        model_config["hf_overrides"],
         "--io-processor-plugin",
         model_config["plugin"],
     ]
@@ -136,7 +138,7 @@ def test_bge_m3_sparse_plugin_offline(vllm_runner, return_tokens: bool):
         enforce_eager=True,
         max_num_seqs=32,
         io_processor_plugin=model_config["plugin"],
-        hf_overrides=model_config["hf_overrides"],
+        hf_overrides=json.loads(model_config["hf_overrides"]),
         default_torch_num_threads=1,
     ) as llm_runner:
         llm = llm_runner.get_llm()
@@ -180,7 +182,7 @@ def test_bge_m3_sparse_plugin_offline_multiple_inputs(vllm_runner):
         enforce_eager=True,
         max_num_seqs=32,
         io_processor_plugin=model_config["plugin"],
-        hf_overrides=model_config["hf_overrides"],
+        hf_overrides=json.loads(model_config["hf_overrides"]),
         default_torch_num_threads=1,
     ) as llm_runner:
         llm = llm_runner.get_llm()
