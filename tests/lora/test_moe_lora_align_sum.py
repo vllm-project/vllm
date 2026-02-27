@@ -59,8 +59,13 @@ def test_moe_lora_align_block_size(
     expert_ids = torch.empty((max_num_m_blocks,), dtype=torch.int32, device="cuda")
     num_tokens_post_pad = torch.empty((1,), dtype=torch.int32, device="cuda")
     adapter_enabled = torch.ones((max_loras + 1,), dtype=torch.int32, device="cuda")
-    # Build lora_id_to_slot inverse map (identity since lora_ids = [0,1,2,...])
-    lora_id_to_slot = torch.arange(max_loras + 1, dtype=torch.int32, device="cuda")
+    # Generate random permutation for lora_ids (slot -> lora_id mapping)
+    # Only permute valid lora_ids [0, max_loras), not [0, max_loras]
+    lora_ids = torch.randperm(max_loras, dtype=torch.int32, device="cuda")
+    # Build inverse mapping: lora_id_to_slot[lora_id] = slot
+    lora_id_to_slot = torch.full((max_loras,), -1, dtype=torch.int32, device="cuda")
+    for slot, lora_id in enumerate(lora_ids):
+        lora_id_to_slot[lora_id] = slot
 
     # call kernel
     ops.moe_lora_align_block_size(
@@ -99,8 +104,9 @@ def test_moe_lora_align_block_size(
         if virtual_expert < 0:
             continue
 
-        # Decode virtual expert -> (lora_id, expert_id)
-        lora_id = virtual_expert // num_experts
+        # Decode virtual expert -> (slot, expert_id) -> lora_id
+        slot = virtual_expert // num_experts
+        lora_id = lora_ids[slot].item()
         expert_id = virtual_expert % num_experts
 
         block_start = block_idx * block_size

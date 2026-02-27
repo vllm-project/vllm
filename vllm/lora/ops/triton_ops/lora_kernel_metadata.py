@@ -30,8 +30,8 @@ class LoRAKernelMeta:
     no_lora_flag_cpu: torch.Tensor
 
     # Inverse mapping from lora_id to lora_slot.
-    # When specialize_active_lora is enabled, virtual_expert_id uses lora_slot
-    # instead of lora_id, so we need this inverse map to convert lora_id to slot.
+    # virtual_expert_id uses lora_slot instead of lora_id, so we need this
+    # inverse map to convert lora_id to slot.
     # lora_id_to_slot[lora_id] = slot_index, or -1 if lora_id is not active.
     lora_id_to_slot: torch.Tensor
 
@@ -166,8 +166,7 @@ class LoRAKernelMeta:
 
         # Build inverse mapping: lora_id -> lora_slot
         # For each active lora_id, store its slot index in the inverse map
-        for slot_idx in range(lora_ids.size(0)):
-            lora_id = lora_ids[slot_idx]
+        for slot_idx, lora_id in enumerate(lora_ids):
             if lora_id >= 0 and lora_id < self.lora_id_to_slot.size(0):
                 self.lora_id_to_slot[lora_id] = slot_idx
 

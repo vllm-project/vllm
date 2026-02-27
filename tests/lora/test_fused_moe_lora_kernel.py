@@ -167,8 +167,7 @@ def use_fused_moe_lora_kernel(
     lora_id_to_slot = torch.full(
         (max_loras,), -1, dtype=torch.int32, device=topk_ids.device
     )
-    for slot in range(max_loras):
-        lora_id = lora_ids[slot].item()
+    for slot, lora_id in enumerate(lora_ids):
         lora_id_to_slot[lora_id] = slot
 
     ops.moe_lora_align_block_size(

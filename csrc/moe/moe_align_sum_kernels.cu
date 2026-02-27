@@ -93,7 +93,7 @@ __global__ void moe_align_block_size_kernel(
 
   // Use separate threadblocks to fill sorted_token_ids.
   // This is safe since the current kernel does not use sorted_token_ids.
-  if (blockIdx.x % 2) {
+  if (blockIdx.x == 1) {
     // Initialize sorted_token_ids with numel
     for (size_t it = threadIdx.x; it < max_num_tokens_padded;
          it += blockDim.x) {
@@ -158,10 +158,10 @@ __global__ void moe_align_block_size_kernel(
 
   __syncthreads();
 
-  if (threadIdx.x < num_experts) {
-    for (int i = cumsum[threadIdx.x]; i < cumsum[threadIdx.x + 1];
+  if (expert_id < num_experts) {
+    for (int i = cumsum[expert_id]; i < cumsum[expert_id + 1];
          i += block_size) {
-      expert_ids[i / block_size] = threadIdx.x;
+      expert_ids[i / block_size] = expert_id;
     }
   }
 
@@ -333,7 +333,7 @@ __global__ void moe_lora_align_block_size_kernel(
       shared_counts[];  // size = padded_num_virtual_experts
 
   // block 1: init sorted_token_ids
-  if (blockIdx.x & 1) {
+  if (blockIdx.x == 1) {
     for (size_t it = threadIdx.x; it < (size_t)max_num_tokens_padded;
          it += blockDim.x) {
       sorted_token_ids[it] = (int32_t)numel;  // sentinel
@@ -396,20 +396,17 @@ __global__ void moe_lora_align_block_size_kernel(
   // =========================================================================
   using BlockScan = cub::BlockScan<int32_t, 1024>;
   __shared__ typename BlockScan::TempStorage temp_storage;
-  __shared__ int32_t running_total;
 
-  constexpr int32_t TILE_SIZE = 1024;
-  const int32_t num_iterations = CEILDIV(num_virtual_experts, TILE_SIZE);
+  const int32_t num_iterations =
+      CEILDIV(num_virtual_experts, (int32_t)blockDim.x);
 
-  // Initialize running total
-  if (tid == 0) {
-    running_total = 0;
-  }
-  __syncthreads();
+  // Thread-local running total: block_aggregate from ExclusiveSum is
+  // returned to all threads, so each thread can track this independently.
+  int32_t running_total = 0;
 
-  // Iterate over tiles of 1024 experts
+  // Iterate over tiles of blockDim.x experts
   for (int32_t iter = 0; iter < num_iterations; ++iter) {
-    const int32_t ve_start = iter * TILE_SIZE;
+    const int32_t ve_start = iter * (int32_t)blockDim.x;
     const int32_t ve_idx = ve_start + (int32_t)tid;
 
     // Load expert count for this thread's expert (using linear indexing)
@@ -425,7 +422,7 @@ __global__ void moe_lora_align_block_size_kernel(
     BlockScan(temp_storage)
         .ExclusiveSum(expert_count, local_cumsum, block_aggregate);
 
-    // Sync to ensure temp_storage is done before we read running_total
+    // Sync needed for temp_storage reuse across iterations
     __syncthreads();
 
     // Write cumsum with offset from previous iterations
@@ -433,13 +430,7 @@ __global__ void moe_lora_align_block_size_kernel(
       cumsum[ve_idx] = running_total + local_cumsum;
     }
 
-    // Update running total for next iteration (only thread 0)
-    if (tid == 0) {
-      running_total = running_total + block_aggregate;
-    }
-
-    // Sync before next iteration
-    __syncthreads();
+    running_total += block_aggregate;
   }
 
   // Write the final cumsum[num_virtual_experts] and num_tokens_post_pad
@@ -461,8 +452,6 @@ __global__ void moe_lora_align_block_size_kernel(
       expert_ids[i / block_size] = virtual_expert;
     }
   }
-
-  __syncthreads();
 
   // fill remaining expert_ids with num_virtual_experts (sentinel/inactive)
   const size_t fill_start_idx =
@@ -856,6 +845,11 @@ void moe_lora_align_block_size(
   // num_virtual_experts = num_experts * max_loras
   // Limited by device shared memory: shared_counts needs
   // padded_num_virtual_experts * sizeof(int32_t) bytes
+  // Upper bounds on max virtual experts per GPU:
+  //   A100: 164 KB → 164 * 1024 / 4 = 41,984
+  //   H100: 228 KB → 228 * 1024 / 4 = 58,368
+  //   H200: 228 KB → 228 * 1024 / 4 = 58,368 (same SM as H100)
+  //   B200: ~256 KB → ~65,536
   int device_max_shared_mem;
   cudaDeviceGetAttribute(&device_max_shared_mem,
                          cudaDevAttrMaxSharedMemoryPerBlockOptin,
