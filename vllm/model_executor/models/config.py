@@ -213,7 +213,7 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
                     "Nomic context extension is disabled. "
                     "Changing max_model_len from %s to %s. "
                     "To enable context extension, see: "
-                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.html",
+                    "https://github.com/vllm-project/vllm/tree/main/examples/offline_inference/context_extension.py",
                     max_model_len_before,
                     model_config.max_model_len,
                 )
