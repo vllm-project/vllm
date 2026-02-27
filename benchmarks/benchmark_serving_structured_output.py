@@ -18,6 +18,11 @@ On the client side, run:
     when using tgi backend, add
         --endpoint /generate_stream
     to the end of the command above.
+
+    when using an OpenAI-compatible server, use
+        --endpoint /v1/chat/completions   # or /v1/completions
+    and optionally:
+        --validate-schema                 # validate JSON outputs (requires jsonschema)
 """
 
 import argparse
@@ -446,8 +451,56 @@ async def benchmark(
         raise ValueError(f"Unknown backend: {backend}")
 
     def prepare_extra_body(request) -> dict:
+        """Build backend-specific structured output config for a request.
+
+        For OpenAI-compatible backends, map the internal structure type to the
+        OpenAI-compatible `response_format` field (e.g., JSON schema, regex, or
+        EBNF grammar). For the vLLM backend, use the native `structured_outputs`
+        shape to preserve existing behavior.
+        """
+        if backend == "tensorrt-llm":
+            structure_type = request.structure_type
+            schema = request.schema
+
+            # Map internal structure types to OpenAI `response_format`.
+            if structure_type == "json":
+                return {
+                    "response_format": {
+                        "type": "json",
+                        "schema": schema,
+                    }
+                }
+            if structure_type == "choice":
+                # Convert list of choices to a JSON Schema enum.
+                # Example: {"type": "string", "enum": ["Positive", "Negative"]}
+                return {
+                    "response_format": {
+                        "type": "json",
+                        "schema": {
+                            "type": "string",
+                            "enum": list(schema),
+                        },
+                    }
+                }
+            if structure_type == "regex":
+                return {
+                    "response_format": {
+                        "type": "regex",
+                        "regex": schema,
+                    }
+                }
+            if structure_type == "grammar":
+                return {
+                    "response_format": {
+                        "type": "ebnf",
+                        "ebnf": schema,
+                    }
+                }
+            # Fallback: no extra body
+            return {}
+
+        # Default behavior for other backends (vLLM native structured outputs).
         extra_body = {}
-        # Add the schema to the extra_body
         extra_body["structured_outputs"] = {}
         extra_body["structured_outputs"][request.structure_type] = request.schema
         return extra_body
@@ -667,7 +720,7 @@ async def benchmark(
     return result, ret
 
 
-def evaluate(ret, args):
+def evaluate(ret, args, input_requests=None):
     def _eval_correctness_json(expected, actual):
         # extract json string from string using regex
         import regex as re
@@ -679,6 +732,21 @@ def evaluate(ret, args):
         except Exception:
             return False
 
+        # Optional: strict schema validation when enabled and schema available
+        if getattr(args, "validate_schema", False) and expected is not None:
+            try:
+                # Lazy import to avoid hard dependency
+                import jsonschema  # type: ignore
+
+                jsonschema.validate(instance=actual, schema=expected)
+            except ImportError:
+                warnings.warn(
+                    "jsonschema not installed; skipping strict schema validation.",
+                    stacklevel=2,
+                )
+                return True
+            except Exception:
+                return False
         return True
 
     def _eval_correctness_choice(expected, actual):
@@ -700,8 +768,19 @@ def evaluate(ret, args):
             return None
 
     scores = []
-    for res in ret:
-        score = _eval_correctness(res["expected"], res["generated"])
+    for idx, res in enumerate(ret):
+        expected = res["expected"]
+        # JSON datasets omit reference completions; reuse request schema so the
+        # JSON validator can still run.
+        is_json = getattr(args, "structure_type", "") == "json"
+        if (
+            expected is None
+            and is_json
+            and input_requests is not None
+            and idx < len(input_requests)
+        ):
+            expected = input_requests[idx].schema
+        score = _eval_correctness(expected, res["generated"])
         res["correctness"] = score
         scores.append(score)
 
@@ -822,7 +901,7 @@ def main(args: argparse.Namespace):
     )
 
     # Save config and results to json
-    score = evaluate(ret, args)
+    score = evaluate(ret, args, input_requests)
     print("correct_rate(%)", score, "\n")
     if args.save_results:
         results = {
@@ -1029,6 +1108,15 @@ def create_argument_parser():
         type=float,
         default=1.0,
         help="Ratio of Structured Outputs requests",
+    )
+
+    parser.add_argument(
+        "--validate-schema",
+        action="store_true",
+        help=(
+            "Validate JSON outputs against the provided JSON schema "
+            "(requires jsonschema)."
+        ),
     )
 
     return parser
