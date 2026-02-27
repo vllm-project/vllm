@@ -233,7 +233,7 @@ class InductorStandaloneAdaptor(CompilerInterface):
 
         from torch._inductor import standalone_compile
 
-        supports_aot = is_torch_equal_or_newer("2.10.0.dev")
+        supports_aot = is_torch_equal_or_newer("2.10.0")
 
         if not supports_aot and envs.VLLM_USE_MEGA_AOT_ARTIFACT:
             logger.error(
@@ -257,7 +257,20 @@ class InductorStandaloneAdaptor(CompilerInterface):
         if use_aot:
             compile_kwargs["aot"] = True  # type: ignore[assignment]
 
-        compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
+        # Inductor's pre-grad passes don't do anything for vLLM.
+        # The pre-grad passes get run even on cache-hit and negatively impact
+        # vllm cold compile times by O(1s)
+        # Can remove this after the following issue gets fixed
+        # https://github.com/pytorch/pytorch/issues/174502
+        if envs.VLLM_ENABLE_PREGRAD_PASSES:
+            ctx: Any = contextlib.nullcontext()
+        else:
+            ctx = patch(
+                "torch._inductor.compile_fx._recursive_pre_grad_passes",
+                lambda gm, _: gm,
+            )
+        with ctx:
+            compiled_graph = standalone_compile(graph, example_inputs, **compile_kwargs)
 
         if use_aot:
             from torch._inductor.standalone_compile import AOTCompiledArtifact
@@ -273,7 +286,26 @@ class InductorStandaloneAdaptor(CompilerInterface):
         assert key is not None
         path = os.path.join(self.cache_dir, key)
 
+        def is_saveable_2_10(compiled_artifact):
+            # can just use compiled_artifact.is_saveable in 2.11
+            if compiled_artifact._artifacts is None:
+                return False
+            _, cache_info = compiled_artifact._artifacts
+            return len(cache_info.aot_autograd_artifacts) == 1
+
         if is_compile_cache_enabled(compiler_config):
+            if not is_saveable_2_10(compiled_graph):
+                raise RuntimeError(
+                    "The compiled artifact is not serializable. This usually means "
+                    "that the model code has something that is not serializable "
+                    "by torch.compile in it. You can fix this by either "
+                    "figuring out what is not serializable and rewriting it, "
+                    "filing a bug report, "
+                    "or suppressing this error by "
+                    "disabling vLLM's compilation cache via "
+                    "VLLM_DISABLE_COMPILE_CACHE=1 "
+                    "(this will greatly increase vLLM server warm start times)."
+                )
             compiled_graph.save(path=path, format=self.save_format)
             compilation_counter.num_compiled_artifacts_saved += 1
         return compiled_graph, (key, path)

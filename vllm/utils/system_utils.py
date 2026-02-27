@@ -179,7 +179,12 @@ def set_process_title(
 
 def _add_prefix(file: TextIO, worker_name: str, pid: int) -> None:
     """Add colored prefix to file output for log decoration."""
-    if envs.NO_COLOR:
+    is_tty = hasattr(file, "isatty") and file.isatty()
+    if (
+        envs.NO_COLOR
+        or envs.VLLM_LOGGING_COLOR == "0"
+        or (envs.VLLM_LOGGING_COLOR != "1" and not is_tty)
+    ):
         prefix = f"({worker_name} pid={pid}) "
     else:
         prefix = f"{CYAN}({worker_name} pid={pid}){RESET} "

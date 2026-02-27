@@ -5,8 +5,11 @@
 Benchmark for FlashInfer fused collective operations vs standard operations.
 
 This benchmark compares:
-1. FlashInfer's trtllm_allreduce_fusion (fused allreduce + rmsnorm + optional quant)
-2. Standard tensor_model_parallel_all_reduce + separate rmsnorm/quant operations
+1. FlashInfer's allreduce_fusion with trtllm backend
+   (fused allreduce + rmsnorm + optional FP8/FP4 quant)
+2. FlashInfer's allreduce_fusion with mnnvl backend
+   (fused allreduce + rmsnorm only, no quantization support)
+3. Standard tensor_model_parallel_all_reduce + separate rmsnorm/quant operations
 
 Usage with torchrun:
     torchrun --nproc_per_node=2 benchmark_fused_collective.py
@@ -24,7 +27,6 @@ import torch.distributed as dist  # type: ignore
 
 from vllm.config.vllm import CompilationConfig, VllmConfig, set_current_vllm_config
 from vllm.distributed import (
-    get_tp_group,
     tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.parallel_state import (
@@ -49,14 +51,19 @@ SCALED_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant
 logger = init_logger(__name__)
 
 # Try to import FlashInfer
+TorchDistBackend = None
 try:
     import flashinfer.comm as flashinfer_comm  # type: ignore
+    from flashinfer.comm.mnnvl import (  # type: ignore
+        TorchDistBackend,
+    )
 
-    if not hasattr(flashinfer_comm, "trtllm_allreduce_fusion"):
+    if not (
+        hasattr(flashinfer_comm, "allreduce_fusion")
+        and hasattr(flashinfer_comm, "create_allreduce_fusion_workspace")
+    ):
         flashinfer_comm = None
-        logger.warning(
-            "FlashInfer comm module found but missing trtllm_allreduce_fusion"
-        )
+        logger.warning("FlashInfer comm module found but missing allreduce_fusion API")
 except ImportError:
     flashinfer_comm = None
     logger.warning("FlashInfer not found, only benchmarking standard operations")
@@ -74,57 +81,70 @@ _FI_MAX_SIZES = {
     8: 64 * MiB,  # 64MB
 }
 
-# Global workspace tensor for FlashInfer
-_FI_WORKSPACE_TENSOR = None
+# Global workspace tensors for FlashInfer (keyed by backend name)
+_FI_WORKSPACES: dict = {}
+
+# Backends to benchmark
+FLASHINFER_BACKENDS = ["trtllm", "mnnvl"]
 
 
 def setup_flashinfer_workspace(
+    backend: str,
     world_size: int,
     rank: int,
     hidden_dim: int,
     max_token_num: int,
-    use_fp32_lamport: bool = False,
+    dtype: torch.dtype,
 ):
     """Setup FlashInfer workspace for fused allreduce operations."""
-    global _FI_WORKSPACE_TENSOR
+    global FI_WORKSPACES
 
     if flashinfer_comm is None:
-        return None, None
+        return None
 
     if world_size not in _FI_MAX_SIZES:
         logger.warning("FlashInfer not supported for world size %s", world_size)
-        return None, None
+        return None
 
     try:
-        # Create IPC workspace
-        ipc_handles, workspace_tensor = (
-            flashinfer_comm.trtllm_create_ipc_workspace_for_all_reduce_fusion(
-                tp_rank=rank,
-                tp_size=world_size,
-                max_token_num=max_token_num,
-                hidden_dim=hidden_dim,
-                group=get_tp_group().device_group,
-                use_fp32_lamport=use_fp32_lamport,
-            )
+        kwargs = {}
+        if TorchDistBackend is not None:
+            kwargs["comm_backend"] = TorchDistBackend(group=dist.group.WORLD)
+
+        workspace = flashinfer_comm.create_allreduce_fusion_workspace(
+            backend=backend,
+            world_size=world_size,
+            rank=rank,
+            max_token_num=max_token_num,
+            hidden_dim=hidden_dim,
+            dtype=dtype,
+            **kwargs,
         )
 
-        _FI_WORKSPACE_TENSOR = workspace_tensor
-        return ipc_handles, workspace_tensor
+        _FI_WORKSPACES[backend] = workspace
+        return workspace
     except Exception as e:
-        logger.error("Failed to setup FlashInfer workspace: %s", e)
-        return None, None
+        logger.error(
+            "Failed to setup FlashInfer workspace (backend=%s): %s", backend, e
+        )
+        return None
 
 
-def cleanup_flashinfer_workspace(ipc_handles):
-    """Cleanup FlashInfer workspace."""
-    if flashinfer_comm is None or ipc_handles is None:
+def cleanup_flashinfer_workspaces():
+    """Cleanup all FlashInfer workspaces."""
+    if flashinfer_comm is None:
         return
 
-    try:
-        group = get_tp_group().device_group
-        flashinfer_comm.trtllm_destroy_ipc_workspace_for_all_reduce(ipc_handles, group)
-    except Exception as e:
-        logger.error("Failed to cleanup FlashInfer workspace: %s", e)
+    for backend, workspace in _FI_WORKSPACES.items():
+        try:
+            workspace.destroy()
+        except Exception as e:
+            logger.error(
+                "Failed to cleanup FlashInfer workspace (backend=%s): %s",
+                backend,
+                e,
+            )
+    _FI_WORKSPACES.clear()
 
 
 class FlashInferFusedAllReduceParams:
@@ -132,25 +152,15 @@ class FlashInferFusedAllReduceParams:
 
     def __init__(
         self,
-        rank: int,
-        world_size: int,
-        use_fp32_lamport: bool = False,
         max_token_num: int = 1024,
     ):
-        self.rank = rank
-        self.world_size = world_size
-        self.use_fp32_lamport = use_fp32_lamport
-        self.trigger_completion_at_end = True
         self.launch_with_pdl = True
         self.fp32_acc = True
         self.max_token_num = max_token_num
 
-    def get_trtllm_fused_allreduce_kwargs(self):
+    def get_flashinfer_fused_allreduce_kwargs(self):
         return {
-            "world_rank": self.rank,
-            "world_size": self.world_size,
             "launch_with_pdl": self.launch_with_pdl,
-            "trigger_completion_at_end": self.trigger_completion_at_end,
             "fp32_acc": self.fp32_acc,
         }
 
@@ -161,11 +171,12 @@ def flashinfer_fused_allreduce_rmsnorm(
     rms_gamma: torch.Tensor,
     rms_eps: float,
     allreduce_params: "FlashInferFusedAllReduceParams",
+    workspace: object,
     use_oneshot: bool,
     norm_out: torch.Tensor | None = None,
 ):
     """FlashInfer fused allreduce + rmsnorm operation."""
-    if flashinfer_comm is None or _FI_WORKSPACE_TENSOR is None:
+    if flashinfer_comm is None or workspace is None:
         raise RuntimeError("FlashInfer not available or workspace not initialized")
 
     if norm_out is None:
@@ -174,24 +185,25 @@ def flashinfer_fused_allreduce_rmsnorm(
     else:
         residual_out = input_tensor
 
-    flashinfer_comm.trtllm_allreduce_fusion(
-        allreduce_in=input_tensor,
-        token_num=input_tensor.shape[0],
+    layout_code = None
+    if workspace.backend == "trtllm":
+        layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
+
+    flashinfer_comm.allreduce_fusion(
+        input=input_tensor,
+        workspace=workspace,
+        pattern=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
         residual_in=residual,
         residual_out=residual_out,
         norm_out=norm_out,
         rms_gamma=rms_gamma,
         rms_eps=rms_eps,
-        hidden_dim=input_tensor.shape[-1],
-        workspace_ptrs=_FI_WORKSPACE_TENSOR,
-        pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNorm,
-        allreduce_out=None,
         quant_out=None,
         scale_out=None,
-        layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
+        layout_code=layout_code,
         scale_factor=None,
         use_oneshot=use_oneshot,
-        **allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+        **allreduce_params.get_flashinfer_fused_allreduce_kwargs(),
     )
 
 
@@ -202,12 +214,16 @@ def flashinfer_fused_allreduce_rmsnorm_fp8_quant(
     rms_eps: float,
     scale_factor: torch.Tensor,
     allreduce_params: FlashInferFusedAllReduceParams,
+    workspace: object,
     use_oneshot: bool = True,
     norm_out: torch.Tensor | None = None,
     quant_out: torch.Tensor | None = None,
 ):
-    """FlashInfer fused allreduce + rmsnorm + FP8 quantization."""
-    if flashinfer_comm is None or _FI_WORKSPACE_TENSOR is None:
+    """FlashInfer fused allreduce + rmsnorm + FP8 quantization.
+
+    Note: Only supported by the trtllm backend.
+    """
+    if flashinfer_comm is None or workspace is None:
         raise RuntimeError("FlashInfer not available or workspace not initialized")
 
     if norm_out is None:
@@ -216,24 +232,21 @@ def flashinfer_fused_allreduce_rmsnorm_fp8_quant(
     else:
         residual_out = input_tensor
 
-    flashinfer_comm.trtllm_allreduce_fusion(
-        allreduce_in=input_tensor,
-        token_num=input_tensor.shape[0],
+    flashinfer_comm.allreduce_fusion(
+        input=input_tensor,
+        workspace=workspace,
+        pattern=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant,
         residual_in=residual,
         residual_out=residual_out,
         norm_out=norm_out,
         rms_gamma=rms_gamma,
         rms_eps=rms_eps,
-        hidden_dim=input_tensor.shape[-1],
-        workspace_ptrs=_FI_WORKSPACE_TENSOR,
-        pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP8Quant,
-        allreduce_out=None,
         quant_out=quant_out,
         scale_out=None,
         layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
         scale_factor=scale_factor,
         use_oneshot=use_oneshot,
-        **allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+        **allreduce_params.get_flashinfer_fused_allreduce_kwargs(),
     )
 
 
@@ -244,13 +257,17 @@ def flashinfer_fused_allreduce_rmsnorm_fp4_quant(
     rms_eps: float,
     input_global_scale: torch.Tensor,
     allreduce_params: FlashInferFusedAllReduceParams,
+    workspace: object,
     quant_out: torch.Tensor,
     use_oneshot: bool,
     output_scale: torch.Tensor,
     norm_out: torch.Tensor | None = None,
 ):
-    """FlashInfer fused allreduce + rmsnorm + FP4 quantization."""
-    if flashinfer_comm is None or _FI_WORKSPACE_TENSOR is None:
+    """FlashInfer fused allreduce + rmsnorm + FP4 quantization.
+
+    Note: Only supported by the trtllm backend.
+    """
+    if flashinfer_comm is None or workspace is None:
         raise RuntimeError("FlashInfer not available or workspace not initialized")
 
     if norm_out is None:
@@ -259,24 +276,21 @@ def flashinfer_fused_allreduce_rmsnorm_fp4_quant(
     else:
         residual_out = input_tensor
 
-    flashinfer_comm.trtllm_allreduce_fusion(
-        allreduce_in=input_tensor,
-        token_num=input_tensor.shape[0],
+    flashinfer_comm.allreduce_fusion(
+        input=input_tensor,
+        workspace=workspace,
+        pattern=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant,
         residual_in=residual,
         residual_out=residual_out,
         norm_out=norm_out,
         rms_gamma=rms_gamma,
         rms_eps=rms_eps,
-        hidden_dim=input_tensor.shape[-1],
-        workspace_ptrs=_FI_WORKSPACE_TENSOR,
-        pattern_code=flashinfer_comm.AllReduceFusionPattern.kARResidualRMSNormFP4Quant,
-        allreduce_out=None,
         quant_out=quant_out,
         scale_out=output_scale,
         layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
         scale_factor=input_global_scale,
         use_oneshot=use_oneshot,
-        **allreduce_params.get_trtllm_fused_allreduce_kwargs(),
+        **allreduce_params.get_flashinfer_fused_allreduce_kwargs(),
     )
 
 
@@ -409,13 +423,16 @@ def run_benchmarks(
     dtype: torch.dtype,
     use_residual: bool,
     allreduce_params: FlashInferFusedAllReduceParams | None,
+    workspaces: dict,
     quant_modes: set[str],
     no_oneshot: bool,
 ):
     """Run all benchmarks for given configuration.
 
     Args:
-        quant_mode: "none", "fp8_only", "fp4_only", or "all"
+        allreduce_params: Shared parameters for FlashInfer fused allreduce.
+        workspaces: Dict mapping backend name ("trtllm", "mnnvl") to workspace.
+        quant_modes: Set of quantization modes: "none", "fp8", "fp4".
     """
     (
         input_tensor,
@@ -431,18 +448,18 @@ def run_benchmarks(
 
     rms_eps = 1e-6
     results = {}
-    vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
     use_oneshot_options = [False] if no_oneshot else [True, False]
-
-    # Create RMSNorm and QuantFP8 layers once for native benchmarks
 
     if "none" in quant_modes:
         # Standard AllReduce + RMSNorm
+        # Re-create VllmFusedAllreduce per config so CustomOp binds the
+        # correct forward method (native vs custom kernel).
         for custom_op in ["-rms_norm", "+rms_norm"]:
             with set_current_vllm_config(
                 VllmConfig(compilation_config=CompilationConfig(custom_ops=[custom_op]))
             ):
                 try:
+                    vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                     suffix = (
                         "_custom_rms_norm" if "+" in custom_op else "_native_rms_norm"
                     )
@@ -461,6 +478,7 @@ def run_benchmarks(
             VllmConfig(compilation_config=CompilationConfig(custom_ops=["-rms_norm"]))
         ):
             try:
+                vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                 standard_allreduce_rmsnorm_native_compiled = torch.compile(
                     vllm_fused_allreduce.allreduce_rmsnorm,
                     fullgraph=True,
@@ -476,10 +494,11 @@ def run_benchmarks(
                 logger.error("Standard AllReduce+RMSNorm Native Compiled failed: %s", e)
                 results["standard_allreduce_rmsnorm_native_compiled"] = float("inf")
 
-        # FlashInfer Fused AllReduce + RMSNorm Oneshot/Twoshot
-        if flashinfer_comm is not None and allreduce_params is not None:
+        # FlashInfer Fused AllReduce + RMSNorm (all backends)
+        for backend, workspace in workspaces.items():
             for use_oneshot in use_oneshot_options:
                 suffix = "_oneshot" if use_oneshot else "_twoshot"
+                key = f"flashinfer_{backend}_fused_allreduce_rmsnorm{suffix}"
                 try:
                     time_ms = benchmark_operation(
                         flashinfer_fused_allreduce_rmsnorm,
@@ -489,14 +508,17 @@ def run_benchmarks(
                         rms_gamma=rms_gamma,
                         rms_eps=rms_eps,
                         allreduce_params=allreduce_params,
+                        workspace=workspace,
                         use_oneshot=use_oneshot,
                     )
-                    results[f"flashinfer_fused_allreduce_rmsnorm{suffix}"] = time_ms
+                    results[key] = time_ms
                 except Exception as e:
-                    logger.error("FlashInfer Fused AllReduce+RMSNorm failed: %s", e)
-                    results[f"flashinfer_fused_allreduce_rmsnorm{suffix}"] = float(
-                        "inf"
+                    logger.error(
+                        "FlashInfer (%s) Fused AllReduce+RMSNorm failed: %s",
+                        backend,
+                        e,
                     )
+                    results[key] = float("inf")
 
     if "fp8" in quant_modes:
         # Standard AllReduce + RMSNorm + FP8 Quant
@@ -505,7 +527,7 @@ def run_benchmarks(
                 "_custom_rms_norm" if "+" in rms_norm_custom_op else "_native_rms_norm"
             )
             for quant_fp8_custom_op in ["-quant_fp8", "+quant_fp8"]:
-                suffix += (
+                op_suffix = suffix + (
                     "_custom_quant_fp8"
                     if "+" in quant_fp8_custom_op
                     else "_native_quant_fp8"
@@ -518,16 +540,17 @@ def run_benchmarks(
                     )
                 ):
                     try:
+                        vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                         time_ms = benchmark_operation(
                             vllm_fused_allreduce.allreduce_rmsnorm_fp8_quant,
                             input_tensor,
                             residual=residual,
                             scale_factor=scale_fp8,
                         )
-                        results[f"standard_allreduce{suffix}"] = time_ms
+                        results[f"standard_allreduce{op_suffix}"] = time_ms
                     except Exception as e:
                         logger.error("Standard AllReduce+RMSNorm+FP8 failed: %s", e)
-                        results[f"standard_allreduce{suffix}"] = float("inf")
+                        results[f"standard_allreduce{op_suffix}"] = float("inf")
 
         # Standard AllReduce + RMSNorm + FP8 Quant Native Compiled
         with set_current_vllm_config(
@@ -538,6 +561,7 @@ def run_benchmarks(
             )
         ):
             try:
+                vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                 standard_allreduce_rmsnorm_fp8_quant_native_compiled = torch.compile(
                     vllm_fused_allreduce.allreduce_rmsnorm_fp8_quant,
                     fullgraph=True,
@@ -560,10 +584,12 @@ def run_benchmarks(
                     "inf"
                 )
 
-        # FlashInfer Fused AllReduce + RMSNorm + FP8 Quant Oneshot
-        if flashinfer_comm is not None and allreduce_params is not None:
+        # FlashInfer Fused AllReduce + RMSNorm + FP8 Quant (trtllm only)
+        if "trtllm" in workspaces:
+            trtllm_ws = workspaces["trtllm"]
             for use_oneshot in use_oneshot_options:
                 suffix = "_oneshot" if use_oneshot else "_twoshot"
+                key = f"flashinfer_trtllm_fused_allreduce_rmsnorm_fp8_quant{suffix}"
                 try:
                     time_ms = benchmark_operation(
                         flashinfer_fused_allreduce_rmsnorm_fp8_quant,
@@ -575,19 +601,16 @@ def run_benchmarks(
                         scale_factor=scale_fp8,
                         quant_out=quant_out_fp8,
                         allreduce_params=allreduce_params,
+                        workspace=trtllm_ws,
                         use_oneshot=use_oneshot,
                     )
-                    results[f"flashinfer_fused_allreduce_rmsnorm_fp8_quant{suffix}"] = (
-                        time_ms
-                    )
+                    results[key] = time_ms
                 except Exception as e:
                     logger.error(
-                        "FlashInfer Fused AllReduce+RMSNorm+FP8 Oneshot failed: %s",
+                        "FlashInfer (trtllm) Fused AllReduce+RMSNorm+FP8 failed: %s",
                         e,
                     )
-                    results[f"flashinfer_fused_allreduce_rmsnorm_fp8_quant{suffix}"] = (
-                        float("inf")
-                    )
+                    results[key] = float("inf")
 
     if "fp4" in quant_modes and current_platform.has_device_capability(100):
         # Standard AllReduce + RMSNorm + FP4 Quant
@@ -603,6 +626,7 @@ def run_benchmarks(
                 )
             ):
                 try:
+                    vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                     time_ms = benchmark_operation(
                         vllm_fused_allreduce.allreduce_rmsnorm_fp4_quant,
                         input_tensor,
@@ -621,6 +645,7 @@ def run_benchmarks(
             VllmConfig(compilation_config=CompilationConfig(custom_ops=["-rms_norm"]))
         ):
             try:
+                vllm_fused_allreduce = VllmFusedAllreduce(hidden_dim, dtype)
                 standard_allreduce_rmsnorm_fp4_quant_native_compiled = torch.compile(
                     vllm_fused_allreduce.allreduce_rmsnorm_fp4_quant,
                     fullgraph=True,
@@ -645,10 +670,12 @@ def run_benchmarks(
                     "inf"
                 )
 
-        # FlashInfer Fused AllReduce + RMSNorm + FP4 Quant Oneshot
-        if flashinfer_comm is not None and allreduce_params is not None:
+        # FlashInfer Fused AllReduce + RMSNorm + FP4 Quant (trtllm only)
+        if "trtllm" in workspaces:
+            trtllm_ws = workspaces["trtllm"]
             for use_oneshot in use_oneshot_options:
                 suffix = "_oneshot" if use_oneshot else "_twoshot"
+                key = f"flashinfer_trtllm_fused_allreduce_rmsnorm_fp4_quant{suffix}"
                 try:
                     time_ms = benchmark_operation(
                         flashinfer_fused_allreduce_rmsnorm_fp4_quant,
@@ -659,49 +686,18 @@ def run_benchmarks(
                         rms_eps=rms_eps,
                         input_global_scale=scale_fp4,
                         allreduce_params=allreduce_params,
+                        workspace=trtllm_ws,
                         quant_out=fp4_quant_out,
                         output_scale=fp4_output_scale,
                         use_oneshot=use_oneshot,
                     )
-                    results[f"flashinfer_fused_allreduce_rmsnorm_fp4_quant{suffix}"] = (
-                        time_ms
-                    )
+                    results[key] = time_ms
                 except Exception as e:
                     logger.error(
-                        "FlashInfer Fused AllReduce+RMSNorm+FP4 Oneshot failed: %s",
+                        "FlashInfer (trtllm) Fused AllReduce+RMSNorm+FP4 failed: %s",
                         e,
                     )
-                    results[f"flashinfer_fused_allreduce_rmsnorm_fp4_quant{suffix}"] = (
-                        float("inf")
-                    )
-
-        # FlashInfer Fused AllReduce + RMSNorm + FP4 Quant Two-shot
-        if flashinfer_comm is not None and allreduce_params is not None:
-            try:
-                time_ms = benchmark_operation(
-                    flashinfer_fused_allreduce_rmsnorm_fp4_quant,
-                    input_tensor,
-                    residual=residual,
-                    norm_out=norm_out,
-                    rms_gamma=rms_gamma,
-                    rms_eps=rms_eps,
-                    input_global_scale=scale_fp4,
-                    allreduce_params=allreduce_params,
-                    quant_out=fp4_quant_out,
-                    output_scale=fp4_output_scale,
-                    use_oneshot=False,
-                )
-                results["flashinfer_fused_allreduce_rmsnorm_fp4_quant_twoshot"] = (
-                    time_ms
-                )
-            except Exception as e:
-                logger.error(
-                    "FlashInfer Fused AllReduce+RMSNorm+FP4 Two-shot failed: %s",
-                    e,
-                )
-                results["flashinfer_fused_allreduce_rmsnorm_fp4_quant_twoshot"] = float(
-                    "inf"
-                )
+                    results[key] = float("inf")
 
     return results
 
@@ -1039,24 +1035,33 @@ def main():
 
     configs = list(itertools.product(args.num_tokens, dtypes, residual_options))
 
-    # Setup FlashInfer workspace if available
-    ipc_handles = None
+    # Setup FlashInfer workspaces for all backends
     allreduce_params = None
 
     if flashinfer_comm is not None:
         # Use the largest hidden dimension for workspace setup
+        max_element_size = max(torch.finfo(dt).bits // 8 for dt in dtypes)
+        workspace_dtype = (
+            torch.float32
+            if max_element_size == 4
+            else (torch.bfloat16 if torch.bfloat16 in dtypes else torch.float16)
+        )
         max_num_token = _FI_MAX_SIZES.get(world_size) // (
-            args.hidden_dim * world_size * 2
+            args.hidden_dim * max_element_size
         )
 
-        ipc_handles, workspace_tensor = setup_flashinfer_workspace(
-            world_size, rank, args.hidden_dim, max_num_token
-        )
-
-        if workspace_tensor is not None:
-            allreduce_params = FlashInferFusedAllReduceParams(
-                rank=rank,
+        for backend in FLASHINFER_BACKENDS:
+            setup_flashinfer_workspace(
+                backend=backend,
                 world_size=world_size,
+                rank=rank,
+                hidden_dim=args.hidden_dim,
+                max_token_num=max_num_token,
+                dtype=workspace_dtype,
+            )
+
+        if _FI_WORKSPACES:
+            allreduce_params = FlashInferFusedAllReduceParams(
                 max_token_num=max_num_token,
             )
 
@@ -1081,6 +1086,7 @@ def main():
                 dtype,
                 use_residual,
                 allreduce_params,
+                workspaces=_FI_WORKSPACES,
                 quant_modes=quant_modes,
                 no_oneshot=args.no_oneshot,
             )
@@ -1119,11 +1125,13 @@ def main():
 
     finally:
         # Cleanup
-        if ipc_handles is not None:
-            cleanup_flashinfer_workspace(ipc_handles)
+        cleanup_flashinfer_workspaces()
 
         dist.barrier()
 
 
 if __name__ == "__main__":
-    main()
+    from vllm.config import VllmConfig, set_current_vllm_config
+
+    with set_current_vllm_config(VllmConfig()):
+        main()

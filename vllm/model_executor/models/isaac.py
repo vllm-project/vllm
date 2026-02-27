@@ -13,11 +13,12 @@ import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange
 from transformers.image_processing_utils import BatchFeature
-from transformers.tokenization_utils import TensorType
+from transformers.utils import TensorType
 from typing_extensions import TypedDict, Unpack
 
 from vllm.config import VllmConfig
 from vllm.config.model import ModelConfig
+from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -849,12 +850,12 @@ class IsaacDummyInputsBuilder(BaseDummyInputsBuilder[IsaacProcessingInfo]):
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_images = mm_counts.get("image", 0)
 
         target_width, target_height = self.info.get_image_size_with_most_features()
-        image_overrides = mm_options.get("image") if mm_options else None
+        image_overrides = mm_options.get("image")
 
         return {
             "image": self._get_dummy_images(

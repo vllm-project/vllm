@@ -40,7 +40,7 @@ def _run_test(
         vllm_model.llm.encode(prompt, pooling_task="plugin")
 
 
-MODELS = ["mgazz/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
+MODELS = ["ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"]
 
 
 @pytest.mark.core_model

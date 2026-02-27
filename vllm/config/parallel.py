@@ -3,12 +3,10 @@
 
 import os
 from collections.abc import Callable
-from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Literal
 
 import torch
 from pydantic import Field, field_validator, model_validator
-from pydantic.dataclasses import dataclass
 from torch.distributed import ProcessGroup, ReduceOp
 from typing_extensions import Self
 
@@ -50,7 +48,6 @@ All2AllBackend = Literal[
 
 
 @config
-@dataclass
 class EPLBConfig:
     """Configuration for Expert Parallel Load Balancing (EP)."""
 
@@ -94,7 +91,6 @@ class EPLBConfig:
 
 
 @config
-@dataclass
 class ParallelConfig:
     """Configuration for the distributed execution."""
 
@@ -156,7 +152,6 @@ class ParallelConfig:
 
     - "naive": Naive all2all implementation using broadcasts\n
     - "allgather_reducescatter": All2all based on allgather and reducescatter\n
-    - "pplx": Use pplx kernels\n
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
@@ -186,7 +181,7 @@ class ParallelConfig:
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
 
-    disable_nccl_for_dp_synchronization: bool = Field(default=None)
+    disable_nccl_for_dp_synchronization: bool | None = Field(default=None)
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
     to use Gloo instead of NCCL for its all reduce.
 
@@ -313,6 +308,13 @@ class ParallelConfig:
                 f"Expected to be `-1` or `[0, {self._api_process_count})`, "
                 f"but found: {self._api_process_rank}"
             )
+
+        if self.all2all_backend == "pplx":
+            logger.warning(
+                "The 'pplx' all2all backend has been removed. "
+                "Falling back to 'allgather_reducescatter'."
+            )
+            self.all2all_backend = "allgather_reducescatter"
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
@@ -446,7 +448,6 @@ class ParallelConfig:
     # In this case, ensure the input to the experts is sequence parallel
     # to avoid the excess work.
     #
-    # Not needed for pplx-kernels as it can handle duplicate input tokens.
     @property
     def use_sequence_parallel_moe(self) -> bool:
         return (
@@ -549,15 +550,6 @@ class ParallelConfig:
         return hash_factors(factors)
 
     def __post_init__(self) -> None:
-        # Set all2all_backend from env var if not specified, with deprecation warning
-        if envs.is_set("VLLM_ALL2ALL_BACKEND"):
-            logger.warning_once(
-                "VLLM_ALL2ALL_BACKEND environment variable is deprecated and "
-                "will be removed in v0.15.0. Please use the "
-                "--all2all-backend command-line argument instead."
-            )
-            self.all2all_backend = envs.VLLM_ALL2ALL_BACKEND
-
         # Continue with the rest of the initialization
         self.world_size = (
             self.pipeline_parallel_size
@@ -724,6 +716,3 @@ class ParallelConfig:
             )
 
         return self
-
-    def replace(self, **kwargs) -> Self:
-        return replace(self, **kwargs)

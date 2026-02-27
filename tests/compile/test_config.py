@@ -8,7 +8,9 @@ import pytest
 from pydantic import ValidationError
 
 from vllm.compilation.counter import compilation_counter
-from vllm.compilation.fix_functionalization import FixFunctionalizationPass
+from vllm.compilation.passes.utility.fix_functionalization import (
+    FixFunctionalizationPass,
+)
 from vllm.config import (
     CompilationConfig,
     CUDAGraphMode,
@@ -419,6 +421,7 @@ def test_cudagraph_sizes_post_init(
                 fuse_norm_quant=True,
                 fuse_act_quant=True,
                 eliminate_noops=True,
+                sp_min_token_num=512 if enable_sp else None,
             ),
             cudagraph_mode=cudagraph_mode,
         )
