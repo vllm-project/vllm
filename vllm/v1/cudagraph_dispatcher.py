@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Set as AbstractSet
 from dataclasses import replace
 from itertools import product
 
@@ -232,8 +233,9 @@ class CudagraphDispatcher:
         num_tokens: int,
         uniform_decode: bool = False,
         has_lora: bool = False,
-        disable_full: bool = False,
         num_active_loras: int = 0,
+        valid_modes: AbstractSet[CUDAGraphMode] | None = None,
+        invalid_modes: AbstractSet[CUDAGraphMode] | None = None,
     ) -> tuple[CUDAGraphMode, BatchDescriptor]:
         """
         Given conditions(e.g.,batch descriptor and if using piecewise only),
@@ -246,15 +248,29 @@ class CudagraphDispatcher:
             uniform_decode: Whether the batch is uniform decode (i.e. uniform and query
                 length is uniform_decode_query_len).
             has_lora: Whether LoRA is active.
-            disable_full: If True, skip FULL cudagraph checks and
-                return PIECEWISE or NONE only. (can be used for features like
-                cascade attention that are not supported by full cudagraphs)
             num_active_loras: Number of distinct active LoRA adapters.
+            valid_modes: Set of cudagraph modes that are allowed. None means
+                all modes are allowed.
+            invalid_modes: Set of cudagraph modes to exclude. Subtracted from
+                valid_modes to compute allowed modes. (e.g., {FULL} for
+                features like cascade attention not supported by full
+                cudagraphs). None means no modes are excluded.
         """
+        allowed_modes = valid_modes or CUDAGraphMode.valid_runtime_modes()
+
+        if invalid_modes:
+            allowed_modes -= invalid_modes
+
+        assert len(allowed_modes) >= 1, (
+            f"No allowed cudagraph modes: valid_modes={valid_modes}, "
+            f"invalid_modes={invalid_modes}"
+        )
+
         if (
             not self.keys_initialized
             or self.cudagraph_mode == CUDAGraphMode.NONE
             or num_tokens > self.compilation_config.max_cudagraph_capture_size
+            or allowed_modes <= {CUDAGraphMode.NONE}
         ):
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
@@ -281,24 +297,26 @@ class CudagraphDispatcher:
             num_tokens, uniform_decode, has_lora, effective_num_active_loras
         )
 
-        # check if key exists for full cudagraph
-        # For pure FULL mode, keys are registered with uniform=False.
-        batch_desc_to_check = batch_desc
-        if self.cudagraph_mode == CUDAGraphMode.FULL:
-            batch_desc_to_check = replace(batch_desc, uniform=False)
-        if (
-            not disable_full
-            and batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.FULL]
-        ):
-            return CUDAGraphMode.FULL, batch_desc_to_check
+        if CUDAGraphMode.FULL in allowed_modes:
+            # check if key exists for full cudagraph
+            # For pure FULL mode, keys are registered with uniform=False.
+            batch_desc_to_check = batch_desc
+            if self.cudagraph_mode == CUDAGraphMode.FULL:
+                batch_desc_to_check = replace(batch_desc, uniform=False)
+            if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.FULL]:
+                return CUDAGraphMode.FULL, batch_desc_to_check
 
-        # also check if the relaxed key exists for more "general"
-        # piecewise cudagraph
-        batch_desc_to_check = replace(batch_desc, num_reqs=None, uniform=False)
-        if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
-            return CUDAGraphMode.PIECEWISE, batch_desc_to_check
+        if CUDAGraphMode.PIECEWISE in allowed_modes:
+            # also check if the relaxed key exists for more "general"
+            # piecewise cudagraph
+            batch_desc_to_check = replace(batch_desc, num_reqs=None, uniform=False)
+            if batch_desc_to_check in self.cudagraph_keys[CUDAGraphMode.PIECEWISE]:
+                return CUDAGraphMode.PIECEWISE, batch_desc_to_check
 
-        # finally, just return no cudagraphs and a trivial batch descriptor
+        assert CUDAGraphMode.NONE in allowed_modes, (
+            f"No matching cudagraph found and NONE is not in "
+            f"allowed_modes={allowed_modes}"
+        )
         return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)
 
     def get_capture_descs(self) -> list[tuple[CUDAGraphMode, list[BatchDescriptor]]]:
