@@ -10,6 +10,7 @@ from typing import ClassVar, Literal, get_args
 import numpy as np
 from typing_extensions import assert_never
 
+from vllm.benchmarks.datasets import DEFAULT_NUM_PROMPTS
 from vllm.utils.import_utils import PlaceholderModule
 
 from .param_sweep import ParameterSweep, ParameterSweepItem
@@ -36,7 +37,7 @@ def _estimate_sla_value(run_data: dict[str, object], sla_variable: SLAVariable):
         return request_throughput
     if sla_variable == "max_concurrency":
         mean_latency_ms = float(run_data["mean_e2el_ms"])  # type: ignore
-        return request_throughput * mean_latency_ms / 1000
+        return request_throughput / (mean_latency_ms / 1000)
 
     assert_never(sla_variable)
 
@@ -65,7 +66,12 @@ def run_comb_sla(
         bench_cmd,
         serve_comb=serve_comb,
         bench_comb=bench_comb_sla,
-        base_path=_get_comb_base_path(output_dir, serve_comb, bench_comb_sla),
+        base_path=_get_comb_base_path(
+            output_dir,
+            serve_comb,
+            bench_comb,
+            extra_parts=("SLA-", f"{sla_variable}={sla_value}"),
+        ),
         num_runs=num_runs,
         dry_run=dry_run,
         link_vars=link_vars,
@@ -93,11 +99,19 @@ def explore_sla(
     if sla_iters < 2:
         raise ValueError("`sla_iters` should be at least 2")
 
+    dataset_size = DEFAULT_NUM_PROMPTS
+    if "num_prompts" in bench_comb:
+        dataset_size = int(bench_comb["num_prompts"])  # type: ignore
+    elif "--num-prompts" in bench_cmd:
+        dataset_size = int(bench_cmd[bench_cmd.index("--num-prompts") + 1])
+
+    print(f"Dataset size: {dataset_size}")
+
     serial_comb_data = run_comb_sla(
         server,
         bench_cmd,
         serve_comb=serve_comb,
-        bench_comb=bench_comb,
+        bench_comb=bench_comb | {"max_concurrency": 1},
         output_dir=output_dir,
         num_runs=num_runs,
         dry_run=dry_run,
@@ -109,13 +123,13 @@ def explore_sla(
         server,
         bench_cmd,
         serve_comb=serve_comb,
-        bench_comb=bench_comb,
+        bench_comb=bench_comb | {"max_concurrency": dataset_size},
         output_dir=output_dir,
         num_runs=num_runs,
         dry_run=dry_run,
         link_vars=link_vars,
         sla_variable=sla_variable,
-        sla_value=int(bench_comb.get("num_prompts", 1000)),  # type: ignore
+        sla_value=dataset_size,
     )
 
     if serial_comb_data is None or batch_comb_data is None:
