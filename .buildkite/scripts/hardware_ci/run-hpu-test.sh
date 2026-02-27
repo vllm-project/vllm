@@ -1,8 +1,26 @@
 #!/bin/bash
 
-# This script build the CPU docker image and run the offline inference inside the container.
+# This script builds the HPU docker image and runs the offline inference inside the container.
 # It serves a sanity check for compilation and basic model usage.
+#
+# vllm-gaudi compatibility pinning:
+#   The vllm-gaudi plugin is installed on top of the vllm upstream checkout used by this CI job.
+#   When upstream vllm changes its API, the plugin may break before it has been updated.
+#   To handle this, the vllm-gaudi repository maintains a file:
+#     vllm/last-good-commit-for-vllm-gaudi/VLLM_COMMUNITY_COMMIT
+#   The first line of that file controls what version of vllm is used inside the Docker image:
+#     - "latest"        : no checkout override; the current Buildkite CI commit is used as-is.
+#     - "<commit SHA>"  : vllm is checked out to that specific commit before building, pinning
+#                         the test to a known-compatible baseline.
+#   To unpin (resume testing against the live vllm tip), set the file content back to "latest".
 set -exuo pipefail
+
+# Fetch the vllm community commit reference from vllm-gaudi (first line only).
+VLLM_COMMUNITY_COMMIT=$(curl -s \
+  https://raw.githubusercontent.com/vllm-project/vllm-gaudi/vllm/last-good-commit-for-vllm-gaudi/VLLM_COMMUNITY_COMMIT \
+  | head -1 | tr -d '\n')
+
+echo "Using vllm community commit: ${VLLM_COMMUNITY_COMMIT}"
 
 # Try building the docker image
 image_name="hpu/upstream-vllm-ci:${BUILDKITE_COMMIT}"
@@ -11,6 +29,13 @@ cat <<EOF | docker build -t "${image_name}" -f - .
 FROM gaudi-base-image:latest
 
 COPY ./ /workspace/vllm
+
+# If VLLM_COMMUNITY_COMMIT is a specific commit (not "latest"), check it out to pin vllm
+# to the version known to be compatible with vllm-gaudi. When the value is "latest",
+# the current checkout (the Buildkite CI commit) is used unchanged.
+RUN if [ "${VLLM_COMMUNITY_COMMIT}" != "latest" ]; then \
+      cd /workspace/vllm && git fetch --unshallow 2>/dev/null || true && git checkout ${VLLM_COMMUNITY_COMMIT}; \
+    fi
 
 WORKDIR /workspace/vllm
 
