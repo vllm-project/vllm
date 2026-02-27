@@ -65,6 +65,10 @@ class TokenizerLike(Protocol):
     def truncation_side(self) -> str:
         raise NotImplementedError
 
+    @property
+    def padding_side(self) -> str:
+        raise NotImplementedError
+
     def __hash__(self) -> int:
         return hash(id(self))
 
