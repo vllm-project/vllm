@@ -21,8 +21,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
-    PromMetric,
-    PromMetricT,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
@@ -34,6 +32,7 @@ if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.metrics.backends import MetricBackend
     from vllm.v1.request import Request
 
 logger = init_logger(__name__)
@@ -85,12 +84,12 @@ class MultiKVConnectorPromMetrics(KVConnectorPromMetrics):
     def __init__(
         self,
         vllm_config: "VllmConfig",
-        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        backend: "MetricBackend",
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
         prom_metrics: dict[str, KVConnectorPromMetrics],
     ):
-        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
+        super().__init__(vllm_config, backend, labelnames, per_engine_labelvalues)
         self._prom_metrics = prom_metrics
 
     def observe(self, transfer_stats_data: dict[str, Any], engine_idx: int = 0):
@@ -489,22 +488,22 @@ class MultiConnector(KVConnectorBase_V1):
     def build_prom_metrics(
         cls,
         vllm_config: "VllmConfig",
-        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        backend: "MetricBackend",
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
     ) -> KVConnectorPromMetrics:
         prom_metrics: dict[str, KVConnectorPromMetrics] = {}
         for connector_cls, temp_config in cls._get_connector_classes_and_configs(
             vllm_config
         ):
             connector_prom = connector_cls.build_prom_metrics(
-                temp_config, metric_types, labelnames, per_engine_labelvalues
+                temp_config, backend, labelnames, per_engine_labelvalues
             )
             if connector_prom is not None:
                 prom_metrics[connector_cls.__name__] = connector_prom
         return MultiKVConnectorPromMetrics(
             vllm_config,
-            metric_types,
+            backend,
             labelnames,
             per_engine_labelvalues,
             prom_metrics,

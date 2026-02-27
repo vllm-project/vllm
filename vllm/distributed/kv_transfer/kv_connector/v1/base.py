@@ -56,12 +56,11 @@ if TYPE_CHECKING:
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
         KVConnectorPromMetrics,
         KVConnectorStats,
-        PromMetric,
-        PromMetricT,
     )
     from vllm.forward_context import ForwardContext
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.metrics.backends import MetricBackend
     from vllm.v1.request import Request
 
 # s_tensor_list, d_tensor_list, s_indices, d_indices, direction
@@ -581,9 +580,9 @@ class KVConnectorBase_V1(ABC):
     def build_prom_metrics(
         cls,
         vllm_config: "VllmConfig",
-        metric_types: dict[type["PromMetric"], type["PromMetricT"]],
+        backend: "MetricBackend",
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
     ) -> "KVConnectorPromMetrics | None":
         """
         Create a KVConnectorPromMetrics subclass which should register

@@ -19,8 +19,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadat
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
     KVConnectorPromMetrics,
     KVConnectorStats,
-    PromMetric,
-    PromMetricT,
 )
 from vllm.forward_context import ForwardContext
 from vllm.logger import init_logger
@@ -39,6 +37,7 @@ from vllm.v1.kv_offload.worker.worker import (
     TransferSpec,
     TransferType,
 )
+from vllm.v1.metrics.backends import AbstractCounter, AbstractHistogram, MetricBackend
 from vllm.v1.outputs import KVConnectorOutput
 from vllm.v1.request import Request
 
@@ -232,12 +231,12 @@ class OffloadingConnector(KVConnectorBase_V1):
     def build_prom_metrics(
         cls,
         vllm_config: VllmConfig,
-        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        backend: MetricBackend,
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
     ) -> KVConnectorPromMetrics:
         return OffloadPromMetrics(
-            vllm_config, metric_types, labelnames, per_engine_labelvalues
+            vllm_config, backend, labelnames, per_engine_labelvalues
         )
 
 
@@ -715,15 +714,15 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        metric_types: dict[type[PromMetric], type[PromMetricT]],
+        backend: MetricBackend,
         labelnames: list[str],
-        per_engine_labelvalues: dict[int, list[object]],
+        per_engine_labelvalues: dict[int, list[str]],
     ):
-        super().__init__(vllm_config, metric_types, labelnames, per_engine_labelvalues)
-        # (engine_idx, transfer_tupe) -> (metric with bounded labels)
-        self.histogram_transfer_size: dict[tuple[int, str], PromMetricT] = {}
-        self.counter_kv_bytes: dict[tuple[int, str], PromMetricT] = {}
-        self.counter_kv_transfer_time: dict[tuple[int, str], PromMetricT] = {}
+        super().__init__(vllm_config, backend, labelnames, per_engine_labelvalues)
+        # (engine_idx, transfer_type) -> (metric with bounded labels)
+        self.histogram_transfer_size: dict[tuple[int, str], AbstractHistogram] = {}
+        self.counter_kv_bytes: dict[tuple[int, str], AbstractCounter] = {}
+        self.counter_kv_transfer_time: dict[tuple[int, str], AbstractCounter] = {}
         buckets = [  # In bytes
             1e6,
             5e6,
@@ -737,19 +736,19 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             200e6,
         ]
 
-        self._counter_kv_bytes = self._counter_cls(
+        self._counter_kv_bytes = self._backend.create_counter(
             name="vllm:kv_offload_total_bytes",
             documentation="Number of bytes offloaded by KV connector",
             labelnames=labelnames + ["transfer_type"],
         )
 
-        self._counter_kv_transfer_time = self._counter_cls(
+        self._counter_kv_transfer_time = self._backend.create_counter(
             name="vllm:kv_offload_total_time",
             documentation="Total time measured by all KV offloading operations",
             labelnames=labelnames + ["transfer_type"],
         )
 
-        self._histogram_transfer_size = self._histogram_cls(
+        self._histogram_transfer_size = self._backend.create_histogram(
             name="vllm:kv_offload_size",
             documentation="Histogram of KV offload transfer size, in bytes.",
             buckets=buckets[:],
@@ -768,17 +767,17 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             # Cache:
             if (engine_idx, transfer_type) not in self.histogram_transfer_size:
                 self.histogram_transfer_size[(engine_idx, transfer_type)] = (
-                    self._histogram_transfer_size.labels(
+                    self._histogram_transfer_size.labels(  # type: ignore[assignment,misc]
                         *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
                     )
                 )
                 self.counter_kv_bytes[(engine_idx, transfer_type)] = (
-                    self._counter_kv_bytes.labels(
+                    self._counter_kv_bytes.labels(  # type: ignore[assignment,misc]
                         *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
                     )
                 )
                 self.counter_kv_transfer_time[(engine_idx, transfer_type)] = (
-                    self._counter_kv_transfer_time.labels(
+                    self._counter_kv_transfer_time.labels(  # type: ignore[assignment,misc]
                         *(self.per_engine_labelvalues[engine_idx] + [transfer_type])
                     )
                 )
