@@ -277,22 +277,22 @@ class CudaPlatformBase(Platform):
         selected_backend: "AttentionBackendEnum | None",
         attn_selector_config: "AttentionSelectorConfig",
         device_capability: "DeviceCapability",
-        raise_on_invalid: bool = True,
         num_heads: int | None = None,
-    ) -> "AttentionBackendEnum | None":
+    ) -> "AttentionBackendEnum":
         """Select the best attention backend for the given configuration.
 
         Args:
             selected_backend: User-specified backend, or None for auto-selection
             attn_selector_config: Configuration for attention selection
             device_capability: Device capability info
-            raise_on_invalid: If True, raise ValueError when no valid backend
             num_heads: Number of attention heads per GPU, used for backend
                 priority ordering on Blackwell GPUs
 
         Returns:
-            The selected backend enum, or None if no valid backend found
-            and raise_on_invalid is False
+            The selected backend enum.
+
+        Raises:
+            ValueError: If no valid backend is found.
         """
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
@@ -305,12 +305,10 @@ class CudaPlatformBase(Platform):
             except ImportError:
                 validation_errors = ["ImportError"]
             if validation_errors:
-                if raise_on_invalid:
-                    raise ValueError(
-                        f"Selected backend {selected_backend} is not valid for "
-                        f"this configuration. Reason: {validation_errors}"
-                    )
-                return None
+                raise ValueError(
+                    f"Selected backend {selected_backend} is not valid for "
+                    f"this configuration. Reason: {validation_errors}"
+                )
             return selected_backend
 
         # No selected backend, so find the best valid one.
@@ -321,21 +319,19 @@ class CudaPlatformBase(Platform):
         )
 
         if len(valid_backends_priorities) == 0:
-            if raise_on_invalid:
-                reasons_str = (
-                    "{"
-                    + ", ".join(
-                        f"{backend.name}: [{', '.join(reasons)}]"
-                        for backend, (_, reasons) in invalid_reasons.items()
-                    )
-                    + "}"
+            reasons_str = (
+                "{"
+                + ", ".join(
+                    f"{backend.name}: [{', '.join(reasons)}]"
+                    for backend, (_, reasons) in invalid_reasons.items()
                 )
-                config_str = attn_selector_config.__repr__()
-                raise ValueError(
-                    f"No valid attention backend found for {cls.device_name} "
-                    f"with {config_str}. Reasons: {reasons_str}."
-                )
-            return None
+                + "}"
+            )
+            config_str = attn_selector_config.__repr__()
+            raise ValueError(
+                f"No valid attention backend found for {cls.device_name} "
+                f"with {config_str}. Reasons: {reasons_str}."
+            )
 
         # Select the one with the highest priority (lowest index).
         sorted_backends = sorted(valid_backends_priorities, key=lambda x: x[1])
@@ -379,9 +375,7 @@ class CudaPlatformBase(Platform):
             attn_selector_config=attn_selector_config,
             num_heads=num_heads,
             device_capability=device_capability,
-            raise_on_invalid=True,
         )
-        assert chosen_backend is not None  # raise_on_invalid=True guarantees this
 
         # Log the selection
         if selected_backend is not None:
