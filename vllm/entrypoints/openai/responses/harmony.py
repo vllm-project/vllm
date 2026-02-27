@@ -146,7 +146,10 @@ def response_input_to_harmony(
     """
     if not isinstance(response_msg, dict):
         response_msg = response_msg.model_dump()
-    if "type" not in response_msg or response_msg["type"] == "message":
+
+    item_type = response_msg.get("type")
+
+    if item_type == "message" or (item_type is None and "role" in response_msg):
         role = response_msg["role"]
         content = response_msg["content"]
         # Add prefix for developer messages.
@@ -159,7 +162,7 @@ def response_input_to_harmony(
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":
             msg = msg.with_channel("final")
-    elif response_msg["type"] == "function_call_output":
+    elif item_type == "function_call_output":
         call_id = response_msg["call_id"]
         call_response: ResponseFunctionToolCall | None = None
         for prev_response in reversed(prev_responses):
@@ -175,21 +178,24 @@ def response_input_to_harmony(
             Author.new(Role.TOOL, f"functions.{call_response.name}"),
             response_msg["output"],
         )
-    elif response_msg["type"] == "reasoning":
+    elif item_type == "reasoning" or (item_type is None and "summary" in response_msg):
         content = response_msg.get("content")
         if content and len(content) >= 1:
             reasoning_text = "\n".join(item["text"] for item in content)
             msg = Message.from_role_and_content(Role.ASSISTANT, reasoning_text)
             msg = msg.with_channel("analysis")
         else:
-            return None
-    elif response_msg["type"] == "function_call":
+            # Reasoning item without content (e.g. placeholder from history
+            # replay) — emit an empty assistant message so the conversation
+            # structure is preserved.
+            msg = Message.from_role_and_content(Role.ASSISTANT, "")
+    elif item_type == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
         msg = msg.with_recipient(f"functions.{response_msg['name']}")
         msg = msg.with_content_type("json")
     else:
-        raise ValueError(f"Unknown input type: {response_msg['type']}")
+        raise ValueError(f"Unknown input type: {item_type}")
     return msg
 
 
