@@ -425,7 +425,50 @@ class Platform:
         """
         Ensure block_size is compatible with the attention backend.
         """
-        pass
+        from vllm.config.cache import CacheConfig
+
+        default_block_size = CacheConfig.DEFAULT_BLOCK_SIZE
+
+        cache_config = vllm_config.cache_config
+        if cache_config.block_size is not None:
+            # User specified --block-size; keep it.
+            return
+
+        model_config = vllm_config.model_config
+        # model_config may be None during testing.
+        # Skip hybrid models — their block_size is managed by
+        # HybridAttentionMambaModelConfig.
+        if model_config is None or model_config.is_hybrid:
+            cache_config.block_size = default_block_size
+            return
+
+        from vllm.config.vllm import (
+            get_layers_from_vllm_config,
+            set_current_vllm_config,
+        )
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+
+        attn_layers = get_layers_from_vllm_config(
+            vllm_config,
+            AttentionLayerBase,
+        )
+        if not attn_layers:
+            cache_config.block_size = default_block_size
+            return
+
+        first_layer = next(iter(attn_layers.values()))
+        backend_cls = first_layer.get_attn_backend()
+        with set_current_vllm_config(vllm_config):
+            preferred = backend_cls.get_preferred_block_size(default_block_size)
+        if preferred != default_block_size:
+            logger.info(
+                "Setting kv cache block size to %d for %s backend.",
+                preferred,
+                backend_cls.get_name(),
+            )
+        cache_config.block_size = preferred
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:

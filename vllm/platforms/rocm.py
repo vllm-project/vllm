@@ -577,6 +577,12 @@ class RocmPlatform(Platform):
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
     @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: ROCm still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
+
+    @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
         if model_arch in _ROCM_UNSUPPORTED_MODELS:
             raise ValueError(

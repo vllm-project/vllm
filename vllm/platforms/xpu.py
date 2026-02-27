@@ -222,6 +222,12 @@ class XPUPlatform(Platform):
             )
 
     @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: XPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
+
+    @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
         return True
 

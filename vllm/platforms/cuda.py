@@ -14,7 +14,6 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
-from vllm.config.cache import CacheConfig
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -185,51 +184,6 @@ class CudaPlatformBase(Platform):
             scheduler_config.disable_chunked_mm_input = True
 
     @classmethod
-    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        default_block_size = CacheConfig.DEFAULT_BLOCK_SIZE
-
-        cache_config = vllm_config.cache_config
-        if cache_config.block_size is not None:
-            # User specified --block-size; keep it.
-            return
-
-        model_config = vllm_config.model_config
-        # model_config may be None during testing.
-        # Skip hybrid models — their block_size is managed by
-        # HybridAttentionMambaModelConfig.
-        if model_config is None or model_config.is_hybrid:
-            cache_config.block_size = default_block_size
-            return
-
-        from vllm.config.vllm import (
-            get_layers_from_vllm_config,
-            set_current_vllm_config,
-        )
-        from vllm.model_executor.layers.attention_layer_base import (
-            AttentionLayerBase,
-        )
-
-        attn_layers = get_layers_from_vllm_config(
-            vllm_config,
-            AttentionLayerBase,
-        )
-        if not attn_layers:
-            cache_config.block_size = default_block_size
-            return
-
-        first_layer = next(iter(attn_layers.values()))
-        backend_cls = first_layer.get_attn_backend()
-        with set_current_vllm_config(vllm_config):
-            preferred = backend_cls.get_preferred_block_size(default_block_size)
-        if preferred != default_block_size:
-            logger.info(
-                "Setting kv cache block size to %d for %s backend.",
-                preferred,
-                backend_cls.get_name(),
-            )
-        cache_config.block_size = preferred
-
-    @classmethod
     def get_current_memory_usage(
         cls, device: torch.types.Device | None = None
     ) -> float:
@@ -272,70 +226,69 @@ class CudaPlatformBase(Platform):
         return valid_backends_priorities, invalid_reasons
 
     @classmethod
-    def select_attention_backend(
+    def get_attn_backend_cls(
         cls,
         selected_backend: "AttentionBackendEnum | None",
         attn_selector_config: "AttentionSelectorConfig",
-        device_capability: "DeviceCapability",
         num_heads: int | None = None,
-    ) -> "AttentionBackendEnum":
-        """Select the best attention backend for the given configuration.
+    ) -> str:
+        device_capability = cls.get_device_capability()
+        assert device_capability is not None
 
-        Args:
-            selected_backend: User-specified backend, or None for auto-selection
-            attn_selector_config: Configuration for attention selection
-            device_capability: Device capability info
-            num_heads: Number of attention heads per GPU, used for backend
-                priority ordering on Blackwell GPUs
-
-        Returns:
-            The selected backend enum.
-
-        Raises:
-            ValueError: If no valid backend is found.
-        """
         # First try checking just the selected backend, if there is one.
         if selected_backend is not None:
             try:
                 backend_class = selected_backend.get_class()
-                validation_errors = backend_class.validate_configuration(
+                invalid_reasons = backend_class.validate_configuration(
                     device_capability=device_capability,
                     **attn_selector_config._asdict(),
                 )
             except ImportError:
-                validation_errors = ["ImportError"]
-            if validation_errors:
+                invalid_reasons = ["ImportError"]
+            if invalid_reasons:
                 raise ValueError(
                     f"Selected backend {selected_backend} is not valid for "
-                    f"this configuration. Reason: {validation_errors}"
+                    f"this configuration. Reason: {invalid_reasons}"
                 )
-            return selected_backend
+            else:
+                logger.info("Using %s backend.", selected_backend)
+                return selected_backend.get_path()
 
-        # No selected backend, so find the best valid one.
+        # No selected backend or the selected backend is invalid,
+        # so we try finding a valid backend.
         valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
             device_capability=device_capability,
             attn_selector_config=attn_selector_config,
             num_heads=num_heads,
         )
-
-        if len(valid_backends_priorities) == 0:
-            reasons_str = (
-                "{"
-                + ", ".join(
-                    f"{backend.name}: [{', '.join(reasons)}]"
-                    for backend, (_, reasons) in invalid_reasons.items()
-                )
-                + "}"
+        reasons_str = (
+            "{"
+            + ", ".join(
+                f"{backend.name}: [{', '.join(reasons)}]"
+                for backend, (_, reasons) in invalid_reasons.items()
             )
-            config_str = attn_selector_config.__repr__()
+            + "}"
+        )
+        config_str = attn_selector_config.__repr__()
+        logger.debug_once(
+            f"Some attention backends are not valid for {cls.device_name} with "
+            f"{config_str}. Reasons: {reasons_str}."
+        )
+        if len(valid_backends_priorities) == 0:
             raise ValueError(
                 f"No valid attention backend found for {cls.device_name} "
                 f"with {config_str}. Reasons: {reasons_str}."
             )
 
-        # Select the one with the highest priority (lowest index).
-        sorted_backends = sorted(valid_backends_priorities, key=lambda x: x[1])
-        chosen_backend, chosen_priority = sorted_backends[0]
+        # We have found some valid backends. Select the one with the
+        # highest priority.
+        sorted_indices = sorted(
+            range(len(valid_backends_priorities)),
+            key=lambda i: valid_backends_priorities[i][1],
+        )
+        selected_index = sorted_indices[0]
+        selected_backend = valid_backends_priorities[selected_index][0]
+        selected_priority = valid_backends_priorities[selected_index][1]
 
         # If the user specified --block-size (but not --attention-backend),
         # check whether that constraint precluded any higher-priority backends.
@@ -343,7 +296,7 @@ class CudaPlatformBase(Platform):
             excluded = [
                 backend
                 for backend, (priority, reasons) in invalid_reasons.items()
-                if priority < chosen_priority
+                if priority < selected_priority
                 and reasons == ["block_size not supported"]
             ]
             if excluded:
@@ -355,59 +308,17 @@ class CudaPlatformBase(Platform):
                     "auto-select the optimal block size.",
                     attn_selector_config.block_size,
                     names,
-                    chosen_backend.name,
+                    selected_backend.name,
                 )
 
-        return chosen_backend
-
-    @classmethod
-    def get_attn_backend_cls(
-        cls,
-        selected_backend: "AttentionBackendEnum | None",
-        attn_selector_config: "AttentionSelectorConfig",
-        num_heads: int | None = None,
-    ) -> str:
-        device_capability = cls.get_device_capability()
-        assert device_capability is not None
-
-        chosen_backend = cls.select_attention_backend(
-            selected_backend=selected_backend,
-            attn_selector_config=attn_selector_config,
-            num_heads=num_heads,
-            device_capability=device_capability,
+        logger.info_once(
+            "Using %s attention backend out of potential backends: %s.",
+            selected_backend.name,
+            "[" + ", ".join(f"'{b[0].name}'" for b in valid_backends_priorities) + "]",
+            scope="local",
         )
 
-        # Log the selection
-        if selected_backend is not None:
-            logger.info("Using %s backend.", chosen_backend)
-        else:
-            # Get all valid backends for logging
-            valid_backends_priorities, invalid_reasons = cls.get_valid_backends(
-                device_capability=device_capability,
-                attn_selector_config=attn_selector_config,
-                num_heads=num_heads,
-            )
-            reasons_str = (
-                "{"
-                + ", ".join(
-                    f"{backend.name}: [{', '.join(reasons)}]"
-                    for backend, (_, reasons) in invalid_reasons.items()
-                )
-                + "}"
-            )
-            config_str = attn_selector_config.__repr__()
-            logger.debug_once(
-                f"Some attention backends are not valid for {cls.device_name} with "
-                f"{config_str}. Reasons: {reasons_str}."
-            )
-            logger.info_once(
-                "Using %s attention backend out of potential backends: %s",
-                chosen_backend.name,
-                tuple(backend.name for backend, _ in valid_backends_priorities),
-                scope="local",
-            )
-
-        return chosen_backend.get_path()
+        return selected_backend.get_path()
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:

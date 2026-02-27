@@ -362,6 +362,12 @@ class CpuPlatform(Platform):
             )
 
     @classmethod
+    def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
+        # TODO: CPU still sets block_size in check_and_update_config.
+        # Move that logic here so block_size is chosen by the backend.
+        pass
+
+    @classmethod
     def get_allowed_cpu_core_node_list(cls) -> tuple[list[int], list[LogicalCPUInfo]]:
         assert platform.system() == "Linux"
 
