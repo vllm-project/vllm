@@ -86,7 +86,6 @@ class BaseSentinel:
     def _make_logger(self):
         def log(msg, *args, level="info", **kwargs):
             """
-            level: "info", "warning", "error", "debug"
             msg: log message
             """
             prefix = self.sentinel_name
@@ -117,13 +116,14 @@ class BaseSentinel:
         Receive and execute a command from upstream sentinel and send back
         the execution result.
         """
+        poll_timeout_ms = 100
         assert self.upstream_cmd_socket is not None
         try:
             # Polls the upstream command socket
             poller = zmq.Poller()
             poller.register(self.upstream_cmd_socket, zmq.POLLIN)
-            events = dict(poller.poll(timeout=POLL_TIMEOUT_MS))
-            if self.upstream_cmd_socket in events:
+            events = poller.poll(timeout=poll_timeout_ms)
+            if events:
                 _, ft_request_bytes = self.upstream_cmd_socket.recv_multipart()
                 ft_request = msgspec.msgpack.decode(
                     ft_request_bytes, type=FaultToleranceRequest
@@ -138,32 +138,22 @@ class BaseSentinel:
             self.sentinel_dead = True
 
     def _execute_cmd(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
-        """
-        Execute a fault tolerance command.
-        """
-        method, method_uuid, method_params = (
-            ft_request.instruction,
-            ft_request.request_id,
-            ft_request.params,
-        )
+        method = ft_request.instruction
         self.logger("Executing command: %s", ft_request, level="info")
         try:
-            method_kwargs = method_params or {}
-            success: bool = run_method(self, method, args=(), kwargs=method_kwargs)
+            success: bool = run_method(self, method, args=(), kwargs=ft_request.params)
             self.logger("Command (%s) succeeded: %s", method, success, level="info")
             reason = None
         except Exception as e:
             self.logger(
-                "Error executing method %s: %s, %s",
-                method,
-                type(e).__name__,
-                e,
+                "Error executing ft request: %s",
+                ft_request,
                 level="error",
             )
             success = False
             reason = f"{type(e).__name__}: {e}"
         return FaultToleranceResult(
-            success=success, request_id=method_uuid, reason=reason
+            success=success, request_id=ft_request.request_id, reason=reason
         )
 
     @abstractmethod
@@ -183,7 +173,7 @@ class BaseSentinel:
         """
         raise NotImplementedError
 
-    def _broadcast_command_to_downstream(
+    def _execute_command_on_downstreams(
         self,
         method_name: str,
         target_downstream_sentinels: set[bytes],
@@ -195,27 +185,23 @@ class BaseSentinel:
         """
         assert self.downstream_cmd_socket is not None
         # Create fault tolerance request
-        request_id = str(uuid.uuid4())
         kwargs["timeout"] = timeout
         ft_request = FaultToleranceRequest(
-            request_id=request_id,
+            request_id=str(uuid.uuid4()),
             instruction=method_name,
             params=kwargs,
         )
-
         # Broadcast the instruction
         msg_bytes = msgspec.msgpack.encode(ft_request)
         for identity in target_downstream_sentinels:
             self.downstream_cmd_socket.send_multipart([identity, b"", msg_bytes])
-
         # Wait for responses
-        responses = self.wait_for_execution_result(
+        responses = self._wait_for_execution_result(
             target_downstream_sentinels,
             timeout,
             ft_request,
         )
         # check the execution results
-        all_success = True
         for sentinel_identity in target_downstream_sentinels:
             response = responses.get(sentinel_identity)
             if response is None:
@@ -224,8 +210,7 @@ class BaseSentinel:
                     method_name,
                     level="error",
                 )
-                all_success = False
-                break
+                return False, responses
             elif not response.success:
                 self.logger(
                     'Downstream sentinels failed to "%s" (reason: %s)',
@@ -233,58 +218,46 @@ class BaseSentinel:
                     response.reason or "unknown",
                     level="error",
                 )
+                return False, responses
 
-                all_success = False
-                break
+        return True, responses
 
-        return all_success, responses
-
-    def wait_for_execution_result(
+    def _wait_for_execution_result(
         self,
         target_identities: set[bytes] | list[bytes],
         timeout: int,
         ft_request: "FaultToleranceRequest",
     ) -> dict[bytes, "FaultToleranceResult"]:
-        """Get responses to the given request.
-
-        Returns:
-            Mapping from identity (bytes) to the parsed FaultToleranceResult.
-            Partial results are returned on timeout or error.
+        """Collect responses for the given request.
+        Returns partial results on timeout or error.
         """
         assert self.downstream_cmd_socket is not None
-        start = time.monotonic()
+        deadline = time.monotonic() + timeout
         responses: dict[bytes, FaultToleranceResult] = {}
-        pending_identities = set(target_identities)
+        pending = set(target_identities)
         poller = zmq.Poller()
         poller.register(self.downstream_cmd_socket, zmq.POLLIN)
-        while pending_identities:
-            remaining = timeout - (time.monotonic() - start)
+        while pending:
+            remaining = deadline - time.monotonic()
             if remaining <= 0:
-                # Timeout, return partial results collected so far.
                 break
             try:
-                events = dict(poller.poll(timeout=int(remaining * 1000)))
-                if self.downstream_cmd_socket in events:
-                    identity, _, response_bytes = (
-                        self.downstream_cmd_socket.recv_multipart()
-                    )
-                    ft_result = msgspec.msgpack.decode(
-                        response_bytes, type=FaultToleranceResult
-                    )
-                    # Ignore outdated or unrelated messages
-                    if ft_result.request_id != ft_request.request_id:
-                        logger.debug(
-                            "Discarding outdated response: %s",
-                            ft_result,
-                        )
-                        continue
+                events = poller.poll(int(remaining * 1000))
+                if not events:
+                    break
+                identity, _, payload = self.downstream_cmd_socket.recv_multipart()
+                result = msgspec.msgpack.decode(payload, type=FaultToleranceResult)
+                # Ignore unrelated responses
+                if result.request_id != ft_request.request_id:
+                    logger.debug("Discarding outdated response: %s", result)
+                    continue
 
-                    # Record this endpoint's response
-                    responses[identity] = ft_result
-                    pending_identities.discard(identity)
+                responses[identity] = result
+                pending.discard(identity)
             except Exception as e:
                 logger.error("Error while processing engine response: %s", e)
                 break
+
         return responses
 
     def shutdown(self):
@@ -411,7 +384,7 @@ class ClientSentinel(BaseSentinel):
 
         target_engines = set(self.engine_core_sentinel_identities.values())
         new_stateless_dp_group_port = get_open_port()
-        success, _ = self._broadcast_command_to_downstream(
+        success, _ = self._execute_command_on_downstreams(
             "retry",
             target_engines,
             new_stateless_dp_group_port=new_stateless_dp_group_port,
@@ -445,7 +418,7 @@ class ClientSentinel(BaseSentinel):
             if self.engine_status_dict[index]["status"] != EngineStatusType.DEAD
             and (exclude_engine_index is None or index not in exclude_engine_index)
         }
-        success, responses = self._broadcast_command_to_downstream(
+        success, responses = self._execute_command_on_downstreams(
             "pause",
             alive_engines,
             timeout=timeout,
@@ -651,8 +624,6 @@ class EngineCoreSentinel(BaseSentinel):
         try:
             engine_exception = self.fault_signal_q.get_nowait()
             if isinstance(engine_exception, EngineLoopPausedError):
-                # The busy loop stopped due to another critical exception,
-                # put it back
                 self.logger("Engine paused", level="info")
             else:
                 self.logger(
@@ -674,25 +645,23 @@ class EngineCoreSentinel(BaseSentinel):
 
     def pause(self, timeout: int = 1, **kwargs) -> bool:
         """
-        Pause the busy loop safely.
-        Args:
-            timeout:wait for the busy loop to acknowledge the pause signal
+        Pause the busy loop of engine core safely.
         """
         self.logger("Start pausing EngineCore", level="info")
         soft_pause = kwargs.get("soft_pause", False)
         start_time = time.monotonic()
+        # Clear the flag to signal busy loop should pause
+        self.busy_loop_active.clear()
+        success, _ = self._execute_command_on_downstreams(
+            "pause",
+            self._get_target_worker_identity(),
+            timeout=timeout,
+            soft_pause=soft_pause,
+        )
         if self.engine_running:
-            # Clear the flag to signal busy loop should pause
-            self.busy_loop_active.clear()
             # Put a sentinel (empty request) to unblock the busy loop
             # if it's blocked on input_queue.get()
             self.engine_input_q.put((EngineCoreRequestType.PAUSE, None))
-            success, _ = self._broadcast_command_to_downstream(
-                "pause",
-                self._get_target_worker_identity(),
-                timeout=timeout,
-                soft_pause=soft_pause,
-            )
             elapsed = time.monotonic() - start_time
             if success:
                 remaining_timeout = max(0, timeout - elapsed)
@@ -708,14 +677,6 @@ class EngineCoreSentinel(BaseSentinel):
         else:
             # already paused
             success = True
-            if not soft_pause:
-                # abort the communicators
-                success, _ = self._broadcast_command_to_downstream(
-                    "pause",
-                    self._get_target_worker_identity(),
-                    timeout=timeout,
-                    soft_pause=False,
-                )
         return success
 
     def retry(self, timeout: int = 1, **kwargs) -> bool:
@@ -729,7 +690,7 @@ class EngineCoreSentinel(BaseSentinel):
         new_stateless_dp_group_port = kwargs.get("new_stateless_dp_group_port")
         start_time = time.monotonic()
         identities = self._get_target_worker_identity()
-        success, _ = self._broadcast_command_to_downstream(
+        success, _ = self._execute_command_on_downstreams(
             "retry", identities, timeout=timeout
         )
         if not success:
@@ -753,7 +714,6 @@ class EngineCoreSentinel(BaseSentinel):
         remaining_timeout = max(0, timeout - elapsed)
         success = self.busy_loop_active.wait(timeout=remaining_timeout)
         self.engine_running = success
-        assert self.cmd_q.empty(), "cmd_q must be empty after execution"
         return success
 
     def _get_target_worker_identity(self):
@@ -778,15 +738,15 @@ class WorkerSentinel(BaseSentinel):
         clear_input_batch_callback: Callable,
         device: torch.cuda.device,
     ):
-        self.dp_rank = vllm_config.parallel_config.data_parallel_rank
-        self.tp_rank = get_tp_group().rank_in_group
-        self.pp_rank = get_pp_group().rank_in_group
-        identity = f"PP{self.pp_rank}_TP{self.tp_rank}"
+        dp_rank = vllm_config.parallel_config.data_parallel_rank
+        tp_rank = get_tp_group().rank_in_group
+        pp_rank = get_pp_group().rank_in_group
+        identity = f"PP{pp_rank}_TP{tp_rank}"
         super().__init__(
             upstream_cmd_addr=vllm_config.fault_tolerance_config.worker_cmd_addr,
             downstream_cmd_addr=None,
             sentinel_identity=identity.encode(),
-            sentinel_tag=f"{self.dp_rank}_{identity}",
+            sentinel_tag=f"{dp_rank}_{identity}",
             vllm_config=vllm_config,
         )
         self.init_distributed_env_callback = init_distributed_env_callback

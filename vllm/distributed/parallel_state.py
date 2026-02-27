@@ -1251,32 +1251,7 @@ def get_pcp_group() -> GroupCoordinator:
 
 
 def get_all_model_groups() -> list[GroupCoordinator]:
-    group_list = []
-    global _TP
-    if _TP:
-        group_list.append(_TP)
-
-    global _PP
-    if _PP:
-        group_list.append(_PP)
-
-    global _DCP
-    if _DCP:
-        group_list.append(_DCP)
-
-    global _DP
-    if _DP:
-        group_list.append(_DP)
-
-    global _EP
-    if _EP:
-        group_list.append(_EP)
-
-    global _PCP
-    if _PCP:
-        group_list.append(_PCP)
-
-    return group_list
+    return [g for g in (_TP, _PP, _DCP, _DP, _EP, _PCP) if g is not None]
 
 
 @contextmanager
