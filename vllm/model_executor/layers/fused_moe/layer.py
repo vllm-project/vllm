@@ -533,6 +533,14 @@ class FusedMoE(CustomOp):
         )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
+        # When using zero experts, slice e_score_correction_bias to cover
+        # only real experts, for compatibility with monolithic kernels that
+        # read it directly.
+        if zero_expert_type is not None and e_score_correction_bias is not None:
+            self.e_score_correction_bias = e_score_correction_bias[
+                : self.logical_num_experts
+            ]
+
         # Round up hidden size before creating moe_config.
         # This way moe_config is created with the correct hidden_size from the start.
         hidden_size = maybe_roundup_hidden_size(

@@ -32,9 +32,6 @@ from vllm.model_executor.layers.fused_moe.shared_fused_moe import SharedFusedMoE
 from vllm.model_executor.layers.fused_moe.unquantized_fused_moe_method import (
     UnquantizedFusedMoEMethod,
 )
-from vllm.model_executor.layers.fused_moe.zero_expert_fused_moe import (
-    ZeroExpertFusedMoE,
-)
 from vllm.triton_utils import HAS_TRITON
 
 _config: dict[str, Any] | None = None
@@ -66,7 +63,6 @@ __all__ = [
     "FusedMoEPrepareAndFinalize",
     "RoutingMethodType",
     "SharedFusedMoE",
-    "ZeroExpertFusedMoE",
     "activation_without_mul",
     "apply_moe_activation",
     "override_config",
