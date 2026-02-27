@@ -997,8 +997,98 @@ def _read_vllm_batch_invariant() -> bool:
 VLLM_BATCH_INVARIANT: bool = _read_vllm_batch_invariant()
 
 
+def _read_determinism_warmup_iterations() -> int:
+    """
+    Read the number of warmup iterations for determinism mode.
+
+    When VLLM_BATCH_INVARIANT=1, the first few requests may produce different
+    results due to CUDA graph compilation, JIT optimization, and cache warming.
+    Running warmup iterations before real inference ensures deterministic
+    behavior from the first real request.
+
+    Environment variable:
+        VLLM_DETERMINISM_WARMUP_ITERATIONS: Number of warmup forward passes.
+            - Default: 3 when VLLM_BATCH_INVARIANT=1, 0 otherwise
+            - Set to 0 to disable warmup
+    """
+    val = os.getenv("VLLM_DETERMINISM_WARMUP_ITERATIONS")
+    if val is not None:
+        try:
+            return max(0, int(val))
+        except ValueError:
+            return 0
+    # Default: 3 iterations when batch invariance is enabled, 0 otherwise
+    return 3 if _read_vllm_batch_invariant() else 0
+
+
+VLLM_DETERMINISM_WARMUP_ITERATIONS: int = _read_determinism_warmup_iterations()
+
+
 def vllm_is_batch_invariant() -> bool:
     return VLLM_BATCH_INVARIANT
+
+
+def get_determinism_warmup_iterations() -> int:
+    """Get the number of warmup iterations for determinism mode."""
+    return VLLM_DETERMINISM_WARMUP_ITERATIONS
+
+
+def run_determinism_warmup(
+    dummy_run_fn: Callable[[], None],
+    num_iterations: int | None = None,
+) -> bool:
+    """
+    Run warmup iterations to ensure deterministic behavior from first request.
+
+    The first few inference requests after server startup may produce different
+    results due to CUDA graph compilation, JIT kernel compilation, and cache
+    warming effects. Running warmup iterations before real inference ensures
+    that all CUDA graphs are compiled and caches are warm.
+
+    Args:
+        dummy_run_fn: A callable that performs a dummy forward pass.
+        num_iterations: Number of warmup iterations. If None, uses
+            VLLM_DETERMINISM_WARMUP_ITERATIONS environment variable.
+
+    Returns:
+        True if warmup was performed, False if skipped.
+    """
+    if num_iterations is None:
+        num_iterations = get_determinism_warmup_iterations()
+
+    if num_iterations <= 0:
+        return False
+
+    if not vllm_is_batch_invariant():
+        logger.debug("Skipping determinism warmup: VLLM_BATCH_INVARIANT is not enabled")
+        return False
+
+    logger.info(
+        "Running %d determinism warmup iteration(s) to ensure reproducible "
+        "output from the first request...",
+        num_iterations,
+    )
+
+    for i in range(num_iterations):
+        try:
+            dummy_run_fn()
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            logger.debug(
+                "Determinism warmup iteration %d/%d complete",
+                i + 1,
+                num_iterations,
+            )
+        except Exception as e:
+            logger.warning(
+                "Determinism warmup iteration %d failed: %s. "
+                "Continuing with remaining iterations.",
+                i + 1,
+                e,
+            )
+
+    logger.info("Determinism warmup complete")
+    return True
 
 
 def override_envs_for_invariance(
