@@ -7,9 +7,13 @@ We can launch multiple vllm instances (2 for prefill and 2 for decode), and
 launch this proxy demo through:
   python3 examples/online_serving/disaggregated_serving/disagg_proxy_demo.py  \
        --model $model_name  \
-       --prefill localhost:8100 localhost:8101   \
-       --decode localhost:8200 localhost:8201   \
+       --prefill localhost:8100 prefill-server.example.com:8101   \
+       --decode decode1.example.com:8200 decode2.example.com:8201   \
+       --host 0.0.0.0  \
        --port 8000
+
+Note: Prefill and decode nodes support domain names, IP addresses, or localhost.
+The proxy server can be bound to any IP address (default: 0.0.0.0).
 
 Note: This demo will be removed once the PDController implemented in PR 15343
 (https://github.com/vllm-project/vllm/pull/15343) supports XpYd.
@@ -152,10 +156,19 @@ class Proxy:
             host, port_str = instance.split(":")
             try:
                 if host != "localhost":
-                    ipaddress.ip_address(host)
+                    try:
+                        ipaddress.ip_address(host)
+                    except ValueError:
+                        # It's not an IP，not empty and contains valid characters
+                        if not host or not all(c.isalnum() or c in "-._" for c in host):
+                            raise HTTPException(
+                                status_code=400, detail=f"Invalid hostname: {host}"
+                            ) from None
                 port = int(port_str)
                 if not (0 < port < 65536):
                     raise HTTPException(status_code=400, detail="Invalid port number.")
+            except HTTPException:
+                raise
             except Exception as e:
                 raise HTTPException(
                     status_code=400, detail="Invalid instance address."
@@ -235,7 +248,17 @@ class Proxy:
                 logger.error("Unexpected error: %s", str(e))
                 raise HTTPException(status_code=500, detail=str(e)) from e
 
-    def schedule(self, cycler: itertools.cycle) -> str:
+    def schedule(self, cycler: itertools.cycle, instance_type: str) -> str:
+        instances = (
+            self.prefill_instances
+            if instance_type == "prefill"
+            else self.decode_instances
+        )
+        if not instances:
+            raise HTTPException(
+                status_code=503,
+                detail=f"Service Unavailable: No {instance_type} instances available.",
+            )
         return self.scheduling_policy.schedule(cycler)
 
     async def get_status(self):
@@ -254,7 +277,7 @@ class Proxy:
             kv_prepare_request = request.copy()
             kv_prepare_request["max_tokens"] = 1
 
-            prefill_instance = self.schedule(self.prefill_cycler)
+            prefill_instance = self.schedule(self.prefill_cycler, "prefill")
             try:
                 async for _ in self.forward_request(
                     f"http://{prefill_instance}/v1/completions", kv_prepare_request
@@ -265,7 +288,7 @@ class Proxy:
                 raise http_exc
 
             # Perform kv recv and decoding stage
-            decode_instance = self.schedule(self.decode_cycler)
+            decode_instance = self.schedule(self.decode_cycler, "decode")
 
             try:
                 generator = self.forward_request(
@@ -277,8 +300,6 @@ class Proxy:
             response = StreamingResponse(generator)
             return response
         except Exception:
-            import sys
-
             exc_info = sys.exc_info()
             print("Error occurred in disagg proxy server")
             print(exc_info)
@@ -294,7 +315,7 @@ class Proxy:
                 kv_prepare_request["max_completion_tokens"] = 1
 
             # prefill stage
-            prefill_instance = self.schedule(self.prefill_cycler)
+            prefill_instance = self.schedule(self.prefill_cycler, "prefill")
             try:
                 async for _ in self.forward_request(
                     f"http://{prefill_instance}/v1/chat/completions", kv_prepare_request
@@ -304,11 +325,11 @@ class Proxy:
                 self.remove_instance_endpoint("prefill", prefill_instance)
                 raise http_exc
             # Perform kv recv and decoding stage
-            decode_instance = self.schedule(self.decode_cycler)
+            decode_instance = self.schedule(self.decode_cycler, "decode")
 
             try:
                 generator = self.forward_request(
-                    "http://" + decode_instance + "/v1/chat/completions", request
+                    f"http://{decode_instance}/v1/chat/completions", request
                 )
             except HTTPException as http_exc:
                 self.remove_instance_endpoint("decode", decode_instance)
@@ -350,6 +371,7 @@ class ProxyServer:
         create_chat_completion: Callable[[Request], StreamingResponse] | None = None,
     ):
         self.validate_parsed_serve_args(args)
+        self.host = args.host
         self.port = args.port
         self.proxy_instance = Proxy(
             prefill_instances=[] if args.prefill is None else args.prefill,
@@ -381,10 +403,16 @@ class ProxyServer:
             host, port = instance.split(":")
             try:
                 if host != "localhost":
-                    ipaddress.ip_address(host)
+                    try:
+                        ipaddress.ip_address(host)
+                    except ValueError:
+                        if not host or not all(c.isalnum() or c in "-._" for c in host):
+                            raise ValueError(f"Invalid hostname: {host}") from None
                 port = int(port)
                 if not (0 < port < 65536):
                     raise ValueError(f"Invalid port number in instance: {instance}")
+            except ValueError:
+                raise
             except Exception as e:
                 raise ValueError(f"Invalid instance {instance}: {str(e)}") from e
 
@@ -411,7 +439,7 @@ class ProxyServer:
     def run_server(self):
         app = FastAPI()
         app.include_router(self.proxy_instance.router)
-        config = uvicorn.Config(app, port=self.port, loop="uvloop")
+        config = uvicorn.Config(app, host=self.host, port=self.port, loop="uvloop")
         server = uvicorn.Server(config)
         server.run()
 
@@ -426,7 +454,7 @@ def parse_args():
         "-p",
         type=str,
         nargs="+",
-        help="List of prefill node URLs (host:port)",
+        help="List of prefill node URLs (host:port or domain:port)",
     )
 
     parser.add_argument(
@@ -434,14 +462,21 @@ def parse_args():
         "-d",
         type=str,
         nargs="+",
-        help="List of decode node URLs (host:port)",
+        help="List of decode node URLs (host:port or domain:port)",
+    )
+
+    parser.add_argument(
+        "--host",
+        type=str,
+        default="0.0.0.0",
+        help="Server host IP address (default: 0.0.0.0)",
     )
 
     parser.add_argument(
         "--port",
         type=int,
         default=8000,
-        help="Server port number",
+        help="Server port number (default: 8000)",
     )
     return parser.parse_args()
 
