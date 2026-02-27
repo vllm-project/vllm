@@ -1062,15 +1062,35 @@ class FusedMoE(CustomOp):
         return_success: bool = False,
     ) -> bool | None:
         if self.quant_config and self.quant_config.get_name() == "mxfp4":
-            # (FIXME) for gpt-oss all experts are combined
-            if "bias" in weight_name:
-                dim1 = loaded_weight.shape[1]
-                param.data[:, :dim1].copy_(loaded_weight)
-            else:
-                dim1 = loaded_weight.shape[1]
-                dim2 = loaded_weight.shape[2]
-                param.data[:, :dim1, :dim2].copy_(loaded_weight)
-            return True if return_success else None
+            # This early-return path handles the gpt-oss combined checkpoint
+            # format where ALL experts are fused into a single 3-D tensor and
+            # weight_loader is called once with shard_id=None, expert_id=None.
+            #
+            # Standard HuggingFace MoE checkpoints (Qwen3-30B-A3B, Mixtral,
+            # etc.) call weight_loader once PER EXPERT with a 2-D tensor and
+            # explicit shard_id/expert_id.  Those must fall through to the
+            # normal per-expert loading path below so that:
+            #   1. expert_id is respected (no cross-expert data corruption)
+            #   2. shard_id is respected (w1/w3 gate/up split is correct)
+            #   3. weight_scale params are loaded via the GROUP scale path
+            #
+            # We detect the gpt-oss combined format by checking that:
+            #   - loaded_weight is 3-D (all experts fused on dim-0)
+            #   - shard_id is None  (no per-shard splitting needed)
+            #   - expert_id is None (no per-expert indexing needed)
+            is_gptoss_combined = (
+                loaded_weight.ndim == 3 and shard_id is None and expert_id is None
+            )
+            if is_gptoss_combined:
+                if "bias" in weight_name:
+                    dim1 = loaded_weight.shape[1]
+                    param.data[:, :dim1].copy_(loaded_weight)
+                else:
+                    dim1 = loaded_weight.shape[1]
+                    dim2 = loaded_weight.shape[2]
+                    param.data[:, :dim1, :dim2].copy_(loaded_weight)
+                return True if return_success else None
+            # Fall through to the standard per-expert loading path below.
 
         quant_method_name = self.quant_method.__class__.__name__
         global_expert_id = expert_id
@@ -1301,6 +1321,38 @@ class FusedMoE(CustomOp):
 
         # Case model weights
         if "weight" in weight_name:
+            # Online-quantization path: when the checkpoint stores raw
+            # floating-point weights (BF16/FP16) but the quantized param
+            # buffer is uint8 (packed MXFP4), we must redirect the load to
+            # the BF16 staging buffer (w13_weight_staging / w2_weight_staging)
+            # that was allocated in create_weights.  The actual MXFP4
+            # quantization happens later in process_weights_after_loading.
+            if loaded_weight.is_floating_point() and not param.data.is_floating_point():
+                # Try to get the staging parameter from the layer.
+                staging_param_name = None
+                for candidate in ("w13_weight_staging", "w2_weight_staging"):
+                    if (
+                        candidate in weight_name
+                        or ("w13" in weight_name and candidate == "w13_weight_staging")
+                        or (
+                            "w2" in weight_name
+                            and "w13" not in weight_name
+                            and candidate == "w2_weight_staging"
+                        )
+                    ) and hasattr(self, candidate):
+                        staging_param_name = candidate
+                        break
+                if staging_param_name is not None:
+                    staging_param = getattr(self, staging_param_name)
+                    staging_expert_data = staging_param.data[expert_id]
+                    self._load_model_weight_or_group_weight_scale(
+                        shard_id=shard_id,
+                        shard_dim=shard_dim,
+                        loaded_weight=loaded_weight,
+                        expert_data=staging_expert_data,
+                        tp_rank=self.tp_rank,
+                    )
+                    return True if return_success else None
             self._load_model_weight_or_group_weight_scale(
                 shard_id=shard_id,
                 shard_dim=shard_dim,
@@ -1309,7 +1361,6 @@ class FusedMoE(CustomOp):
                 tp_rank=self.tp_rank,
             )
             return True if return_success else None
-
         return False if return_success else None
 
     def load_weights(

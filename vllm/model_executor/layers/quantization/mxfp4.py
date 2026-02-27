@@ -13,6 +13,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     FusedMoEConfig,
     FusedMoEMethodBase,
+    FusedMoeWeightScaleSupported,
     MoEActivation,
 )
 from vllm.model_executor.layers.fused_moe import modular_kernel as mk
@@ -338,6 +339,18 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         self.intermediate_size = intermediate_size_per_partition_after_pad
         self.hidden_size = hidden_size
+        self.params_dtype = params_dtype
+
+        # Detect online-quantization mode: the caller passes a floating-point
+        # params_dtype (e.g. bfloat16) when loading a non-pre-quantized
+        # checkpoint.  In that case we allocate BF16 *staging* buffers so the
+        # standard per-expert weight_loader path can copy the raw BF16 weights
+        # into them; process_weights_after_loading then quantizes them to
+        # MXFP4.  For pre-quantized checkpoints (gpt-oss / HF MXFP4 format)
+        # params_dtype is uint8 and we skip the staging buffers entirely.
+        # torch.dtype.is_floating_point is a bool property (not callable).
+        self._online_quant = params_dtype.is_floating_point
+
         # Fused gate_up_proj (column parallel)
         w13_weight = torch.nn.Parameter(
             torch.zeros(
@@ -351,6 +364,23 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
+        if self._online_quant:
+            # BF16 staging buffer: shape matches the *unpadded* logical weight
+            # [E, 2*intermediate_padded, hidden_padded] stored as BF16.
+            # The weight_loader will fill this; process_weights_after_loading
+            # will quantize it to MXFP4 and populate w13_weight / w13_weight_scale.
+            w13_weight_staging = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    2 * intermediate_size_per_partition_after_pad,
+                    hidden_size,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_weight_staging", w13_weight_staging)
+            set_weight_attrs(w13_weight_staging, extra_weight_attrs)
+
         w13_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
@@ -361,6 +391,16 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
+        # Mark as a GROUP-quantization scale so the standard per-expert
+        # weight_loader path (FusedMoE.weight_loader) correctly routes
+        # per-expert 2-D scale tensors from standard HuggingFace checkpoints
+        # through _load_model_weight_or_group_weight_scale → _load_w13/_load_w2.
+        # Without this attribute the loader raises ValueError for unknown
+        # quant_method when it encounters a weight_name containing "scale".
+        set_weight_attrs(
+            w13_weight_scale,
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value},
+        )
         set_weight_attrs(w13_weight_scale, extra_weight_attrs)
 
         w13_bias = torch.nn.Parameter(
@@ -387,6 +427,20 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
+        if self._online_quant:
+            # BF16 staging buffer for down_proj (w2).
+            w2_weight_staging = torch.nn.Parameter(
+                torch.zeros(
+                    num_experts,
+                    hidden_size,
+                    intermediate_size_per_partition_after_pad,
+                    dtype=params_dtype,
+                ),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_weight_staging", w2_weight_staging)
+            set_weight_attrs(w2_weight_staging, extra_weight_attrs)
+
         w2_weight_scale = torch.nn.Parameter(
             torch.zeros(
                 num_experts,
@@ -397,6 +451,11 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
             requires_grad=False,
         )
         layer.register_parameter("w2_weight_scale", w2_weight_scale)
+        # Same GROUP-scale annotation as w13_weight_scale (see comment above).
+        set_weight_attrs(
+            w2_weight_scale,
+            {"quant_method": FusedMoeWeightScaleSupported.GROUP.value},
+        )
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
 
         w2_bias = torch.nn.Parameter(
@@ -411,6 +470,51 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_bias, extra_weight_attrs)
 
     def process_weights_after_loading(self, layer):
+        # ------------------------------------------------------------------
+        # Online-quantization: if BF16 staging buffers were populated by the
+        # weight_loader (standard HuggingFace checkpoint + quantization=mxfp4),
+        # quantize them to MXFP4 now and store the results in the uint8
+        # w13_weight / w2_weight and w13_weight_scale / w2_weight_scale buffers.
+        # ------------------------------------------------------------------
+        if self._online_quant and hasattr(layer, "w13_weight_staging"):
+            try:
+                from aiter.ops.triton.quant import dynamic_mxfp4_quant
+            except ImportError as exc:
+                raise RuntimeError(
+                    "Online MXFP4 quantization of MoE weights requires the "
+                    "'aiter' package (ROCm) or an equivalent dynamic_mxfp4_quant "
+                    "implementation.  Install it with: pip install aiter"
+                ) from exc
+
+            num_experts = self.num_experts
+            mxfp4_block = 32
+
+            # Quantize w13 (gate_proj + up_proj fused)
+            w13_staging = layer.w13_weight_staging.data  # [E, 2*I, H] BF16
+            for e in range(num_experts):
+                # dynamic_mxfp4_quant expects 2-D input [rows, cols]
+                # Output: packed uint8 [rows, cols//2], scales uint8 [rows, cols//32]
+                w_q, w_s = dynamic_mxfp4_quant(
+                    w13_staging[e].reshape(-1, w13_staging.shape[-1])
+                )
+                rows = w13_staging.shape[1]  # 2 * intermediate
+                cols = w13_staging.shape[2]  # hidden
+                layer.w13_weight.data[e] = w_q.reshape(rows, cols // 2)
+                layer.w13_weight_scale.data[e] = w_s.reshape(rows, cols // mxfp4_block)
+            del layer.w13_weight_staging
+
+            # Quantize w2 (down_proj)
+            w2_staging = layer.w2_weight_staging.data  # [E, H, I] BF16
+            for e in range(num_experts):
+                w_q, w_s = dynamic_mxfp4_quant(
+                    w2_staging[e].reshape(-1, w2_staging.shape[-1])
+                )
+                rows = w2_staging.shape[1]  # hidden
+                cols = w2_staging.shape[2]  # intermediate
+                layer.w2_weight.data[e] = w_q.reshape(rows, cols // 2)
+                layer.w2_weight_scale.data[e] = w_s.reshape(rows, cols // mxfp4_block)
+            del layer.w2_weight_staging
+
         if self.mxfp4_backend == Mxfp4Backend.MARLIN:
             prepare_moe_fp4_layer_for_marlin(
                 layer, input_dtype=get_marlin_input_dtype()
