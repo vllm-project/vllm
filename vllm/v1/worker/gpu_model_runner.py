@@ -1964,9 +1964,7 @@ class GPUModelRunner(
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
                     for start, end in img_doc_range:
-                        padded_start = max(
-                            0, start - self.mm_prefix_lm_left_padding
-                        )
+                        padded_start = max(0, start - self.mm_prefix_lm_left_padding)
                         image_doc_ranges.append((padded_start, end))
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 req_doc_ranges[req_idx] = image_doc_ranges
