@@ -86,6 +86,28 @@ class AnthropicServingMessages(OpenAIServingChat):
             "tool_calls": "tool_use",
         }
 
+    @staticmethod
+    def _convert_image_source_to_url(source: dict[str, Any]) -> str:
+        """Convert an Anthropic image source to an OpenAI-compatible URL.
+
+        Anthropic supports two image source types:
+        - base64: {"type": "base64", "media_type": "image/jpeg", "data": "..."}
+        - url: {"type": "url", "url": "https://..."}
+
+        For base64 sources, this constructs a proper data URI that
+        downstream processors (e.g. vLLM's media connector) can handle.
+        """
+        source_type = source.get("type")
+        if source_type == "url":
+            return source.get("url", "")
+        else:
+            # Default to base64 processing if type is "base64"
+            # or missing, ensuring a proper data URI is always
+            # constructed for non-URL sources.
+            media_type = source.get("media_type", "image/jpeg")
+            data = source.get("data", "")
+            return f"data:{media_type};base64,{data}"
+
     def _convert_anthropic_to_openai_request(
         self, anthropic_request: AnthropicMessagesRequest
     ) -> ChatCompletionRequest:
@@ -119,10 +141,11 @@ class AnthropicServingMessages(OpenAIServingChat):
                     if block.type == "text" and block.text:
                         content_parts.append({"type": "text", "text": block.text})
                     elif block.type == "image" and block.source:
+                        image_url = self._convert_image_source_to_url(block.source)
                         content_parts.append(
                             {
                                 "type": "image_url",
-                                "image_url": {"url": block.source.get("data", "")},
+                                "image_url": {"url": image_url},
                             }
                         )
                     elif block.type == "thinking" and block.thinking is not None:
@@ -140,15 +163,50 @@ class AnthropicServingMessages(OpenAIServingChat):
                         tool_calls.append(tool_call)
                     elif block.type == "tool_result":
                         if msg.role == "user":
+                            # Parse tool_result content which can be
+                            # a string or a list of content blocks
+                            # (text, image, etc.)
+                            tool_text = ""
+                            tool_image_urls: list[str] = []
+                            if isinstance(block.content, str):
+                                tool_text = block.content
+                            elif isinstance(block.content, list):
+                                text_parts: list[str] = []
+                                for item in block.content:
+                                    if not isinstance(item, dict):
+                                        continue
+                                    item_type = item.get("type")
+                                    if item_type == "text":
+                                        text_parts.append(item.get("text", ""))
+                                    elif item_type == "image":
+                                        source = item.get("source", {})
+                                        url = self._convert_image_source_to_url(source)
+                                        if url:
+                                            tool_image_urls.append(url)
+                                tool_text = "\n".join(text_parts)
                             openai_messages.append(
                                 {
                                     "role": "tool",
                                     "tool_call_id": block.tool_use_id or "",
-                                    "content": str(block.content)
-                                    if block.content
-                                    else "",
+                                    "content": tool_text or "",
                                 }
                             )
+                            # OpenAI tool messages only support string
+                            # content, so inject images from tool
+                            # results as a follow-up user message
+                            if tool_image_urls:
+                                openai_messages.append(
+                                    {
+                                        "role": "user",
+                                        "content": [  # type: ignore[dict-item]
+                                            {
+                                                "type": "image_url",
+                                                "image_url": {"url": img},
+                                            }
+                                            for img in tool_image_urls
+                                        ],
+                                    }
+                                )
                         else:
                             # Assistant tool result becomes regular text
                             tool_result_text = (
