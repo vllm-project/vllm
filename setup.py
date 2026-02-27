@@ -212,6 +212,12 @@ class cmake_build_ext(build_ext):
     # Perform cmake configuration for a single extension.
     #
     def configure(self, ext: CMakeExtension) -> None:
+        if self.editable_mode:
+            build_dir = Path.cwd() / "build"
+            build_dir.mkdir(exist_ok=True)
+            self.build_temp = build_dir.as_posix()
+            print(f"WARNING: editable mode, set {self.build_temp=} ")
+
         # If we've already configured using the CMakeLists.txt for
         # this extension, exit early.
         if ext.cmake_lists_dir in cmake_build_ext.did_config:
