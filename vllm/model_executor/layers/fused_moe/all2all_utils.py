@@ -204,7 +204,7 @@ def maybe_make_prepare_finalize(
             num_dispatchers=all2all_manager.world_size,
         )
 
-    elif moe.use_fi_moe_all2all_kernels:
+    elif moe.use_fi_moe_a2a_kernels:
         assert quant_config is not None
         max_num_tokens = (
             get_current_vllm_config().scheduler_config.max_num_batched_tokens

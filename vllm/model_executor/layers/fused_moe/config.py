@@ -1244,7 +1244,7 @@ class FusedMoEConfig:
         return self.moe_parallel_config.use_fi_all2allv_kernels
 
     @property
-    def use_fi_moe_all2all_kernels(self):
+    def use_fi_moe_a2a_kernels(self):
         return self.moe_parallel_config.use_fi_moe_a2a_kernels
 
     @property
