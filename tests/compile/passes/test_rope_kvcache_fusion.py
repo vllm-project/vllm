@@ -17,6 +17,7 @@ from vllm.compilation.passes.utility.scatter_split_replace import (
 )
 from vllm.compilation.passes.utility.split_coalescing import SplitCoalescingPass
 from vllm.config import (
+    AttentionConfig,
     CacheConfig,
     CompilationConfig,
     CompilationMode,
@@ -44,7 +45,6 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
     def __init__(
         self,
         vllm_config: VllmConfig,
-        attn_backend: AttentionBackendEnum,
         num_heads: int,
         num_kv_heads: int,
         head_size: int,
@@ -86,7 +86,6 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             cache_config=vllm_config.cache_config,
             quant_config=vllm_config.quant_config,
             prefix=prefix,
-            attn_backend=attn_backend.get_class(),
         )
         self.attn_backend: type[AttentionBackend] = self.attn.get_attn_backend()
         assert not self.attn_backend.forward_includes_kv_cache_update, (
@@ -246,6 +245,9 @@ def test_rope_kvcache_fusion(
                 eliminate_noops=True,
             ),
         ),
+        attention_config=AttentionConfig(
+            backend=attn_backend,
+        ),
     )
 
     with vllm.config.set_current_vllm_config(vllm_config), monkeypatch.context() as m:
@@ -257,7 +259,6 @@ def test_rope_kvcache_fusion(
 
         model = QKRoPEKVCacheTestModel(
             vllm_config=vllm_config,
-            attn_backend=attn_backend,
             num_heads=num_heads,
             num_kv_heads=num_kv_heads,
             head_size=head_size,
