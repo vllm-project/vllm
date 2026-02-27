@@ -260,6 +260,10 @@ _EMBEDDING_MODELS = {
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
     "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
+    "LlamaNemotronVLModel": (
+        "nemotron_vl",
+        "LlamaNemotronVLForEmbedding",
+    ),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
