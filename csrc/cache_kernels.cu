@@ -8,6 +8,7 @@
 #include "cuda_compat.h"
 #include "dispatch_utils.h"
 #include "quantization/vectorization_utils.cuh"
+#include "concat_mla_q.cuh"
 
 #ifdef USE_ROCM
   #include "quantization/w8a8/fp8/amd/quant_utils.cuh"
@@ -1364,4 +1365,44 @@ void cp_gather_indexer_k_quant_cache(
   } else {
     CALL_CP_GATHER_INDEXER_K_QUANT_CACHE(32);
   }
+}
+
+// Concatenate ql_nope and q_pe into a contiguous q_out tensor for MLA/DSA.
+// Replaces torch.cat((ql_nope, q_pe), dim=-1).
+void concat_mla_q(torch::Tensor& ql_nope,  // [num_tokens, num_heads, nope_dim]
+                  torch::Tensor& q_pe,     // [num_tokens, num_heads, rope_dim]
+                  torch::Tensor& q_out     // [num_tokens, num_heads, nope_dim +
+                                           // rope_dim]
+) {
+  const int num_tokens = ql_nope.size(0);
+  const int num_heads = ql_nope.size(1);
+  const int nope_dim = ql_nope.size(2);
+  const int rope_dim = q_pe.size(2);
+
+  TORCH_CHECK(nope_dim % 512 == 0, "nope_dim must be a multiple of 512, got ",
+              nope_dim);
+  TORCH_CHECK(rope_dim == 64, "rope_dim must be 64, got ", rope_dim);
+  TORCH_CHECK(q_out.size(2) == nope_dim + rope_dim);
+
+  TORCH_CHECK(ql_nope.stride(2) == 1, "ql_nope must have stride 1 in dim 2");
+  TORCH_CHECK(q_pe.stride(2) == 1, "q_pe must have stride 1 in dim 2");
+  TORCH_CHECK(q_out.stride(2) == 1, "q_out must have stride 1 in dim 2");
+
+  if (num_tokens == 0) return;
+
+  constexpr int warps_per_block = 8;
+  const int total_warps = num_tokens * num_heads;
+  const int grid_size = (total_warps + warps_per_block - 1) / warps_per_block;
+  const int block_size = warps_per_block * 32;
+
+  const at::cuda::OptionalCUDAGuard device_guard(device_of(ql_nope));
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  VLLM_DISPATCH_FLOATING_TYPES(ql_nope.scalar_type(), "concat_mla_q", [&] {
+    vllm::ConcatMLAQKernel<scalar_t, 512><<<grid_size, block_size, 0, stream>>>(
+        q_out.data_ptr<scalar_t>(), ql_nope.data_ptr<scalar_t>(),
+        q_pe.data_ptr<scalar_t>(), num_tokens, num_heads, q_out.stride(0),
+        q_out.stride(1), ql_nope.stride(0), ql_nope.stride(1), q_pe.stride(0),
+        q_pe.stride(1));
+  });
 }
