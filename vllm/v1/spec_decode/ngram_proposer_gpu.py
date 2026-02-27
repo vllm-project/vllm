@@ -476,7 +476,7 @@ def update_scheduler_for_empty_drafts(
     for req_id in req_data.req_ids:
         req_index = req_id_to_index.get(req_id)
 
-        if is_empty_draft_tokens_cpu[req_index].item():
+        if req_index is None or is_empty_draft_tokens_cpu[req_index].item():
             spec_token_ids = scheduler_output.scheduled_spec_decode_tokens.get(
                 req_id, []
             )
