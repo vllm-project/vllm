@@ -8,7 +8,6 @@ steps:
   # conflicts with Ray's lock file (ray_test_py311_cu128.lock).
   # See https://github.com/vllm-project/vllm/issues/33599
   soft_fail: true
-  device: a100
   timeout_in_minutes: 10
   source_file_dependencies:
   - requirements/
