@@ -30,9 +30,15 @@ from vllm.entrypoints.serve.disagg.protocol import (
     GenerateResponse,
     GenerateResponseChoice,
 )
+from vllm.inputs.data import ProcessorInputs
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
-from vllm.multimodal.inputs import MultiModalKwargsItem, PlaceholderRange, mm_inputs
+from vllm.multimodal.inputs import (
+    MultiModalKwargsItem,
+    MultiModalKwargsItems,
+    PlaceholderRange,
+    mm_inputs,
+)
 from vllm.outputs import RequestOutput
 from vllm.sampling_params import SamplingParams
 from vllm.utils.collection_utils import as_list
@@ -100,6 +106,7 @@ class ServingTokens(OpenAIServing):
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
+        engine_prompt: ProcessorInputs
         if request.features is not None and len(request.features) > 0:
             # Multimodal: build MultiModalInputs directly from metadata.
             # When kwargs_data is present, tensors are deserialized directly.
@@ -121,7 +128,7 @@ class ServingTokens(OpenAIServing):
 
             engine_prompt = mm_inputs(
                 prompt_token_ids=request.token_ids,
-                mm_kwargs=mm_kwargs,
+                mm_kwargs=MultiModalKwargsItems(mm_kwargs),
                 mm_hashes=mm_hashes,
                 mm_placeholders=mm_placeholders,
                 cache_salt=request.cache_salt,
