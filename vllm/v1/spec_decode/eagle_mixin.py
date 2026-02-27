@@ -6,6 +6,8 @@ import torch
 
 
 class EagleMixin:
+    lm_head: Any
+    logits_processor: Any
     compute_logits: Any
 
     def sample_chain(
@@ -13,7 +15,7 @@ class EagleMixin:
     ) -> torch.Tensor:
         """Greedy-sample draft tokens from hidden states."""
         if use_local_argmax_reduction:
-            return self.get_top_tokens(hidden_states)
+            return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
         return self.compute_logits(hidden_states).argmax(dim=-1)
 
 
