@@ -67,6 +67,7 @@ from vllm.v1.worker.gpu.input_batch import (
     expand_idx_mapping,
     get_num_sampled_and_rejected,
     post_update,
+    post_update_pool,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
@@ -514,8 +515,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.encoder_runner.remove_request(req_id)
             self.prompt_logprobs_worker.remove_request(req_id)
             self.lora_state.remove_request(req_id)
-            if self.pooling_runner is not None:
-                self.pooling_runner.finish_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
         if self.supports_mm_inputs:
@@ -1118,11 +1117,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
-            # TODO: Update num_computed_tokens and num_computed_prefill_tokens.
+            self.postprocess_pool(input_batch)
             return None
 
         assert self.pooling_runner is not None
-        pooler_output = self.pooling_runner.pool(hidden_states, input_batch)
+        pooler_output, is_valid = self.pooling_runner.pool(
+            hidden_states, input_batch, self.req_states
+        )
+        self.postprocess_pool(input_batch)
 
         # Build the model runner output.
         model_runner_output = ModelRunnerOutput(
@@ -1134,6 +1136,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,
             pooler_output=pooler_output,
+            is_valid=is_valid,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
             copy_event=self.output_copy_event,
@@ -1141,3 +1144,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.use_async_scheduling:
             return async_output
         return async_output.get_output()
+
+    def postprocess_pool(self, input_batch: InputBatch) -> None:
+        # Update the number of computed tokens.
+        post_update_pool(
+            input_batch.idx_mapping,
+            self.req_states.num_computed_tokens.gpu,
+            input_batch.query_start_loc,
+        )
+
+        # Update the number of computed prefill tokens.
+        idx_mapping_np = input_batch.idx_mapping_np
+        computed_prefill = self.req_states.num_computed_prefill_tokens
+        computed_prefill[idx_mapping_np] += input_batch.num_scheduled_tokens
+        np.minimum(
+            computed_prefill, self.req_states.prefill_len.np, out=computed_prefill
+        )
