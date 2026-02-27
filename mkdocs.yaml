@@ -36,7 +36,6 @@ theme:
     - content.tabs.link
     - navigation.instant
     - navigation.instant.progress
-    - navigation.tracking
     - navigation.tabs
     - navigation.tabs.sticky
     - navigation.sections
@@ -151,3 +150,4 @@ extra_javascript:
   - https://unpkg.com/mathjax@3.2.2/es5/tex-mml-chtml.js
   - mkdocs/javascript/edit_and_feedback.js
   - mkdocs/javascript/slack_and_forum.js
+  - mkdocs/javascript/query_select_tabs.js
