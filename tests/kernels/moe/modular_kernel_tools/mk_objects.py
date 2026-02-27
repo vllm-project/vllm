@@ -39,7 +39,6 @@ from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_gemm,
     has_mori,
-    has_pplx,
 )
 
 
@@ -230,19 +229,6 @@ if has_mori():
         blocked_quantization_support=True,
         backend="mori",
         supports_apply_weight_on_input=False,
-    )
-
-if has_pplx():
-    from vllm.model_executor.layers.fused_moe.pplx_prepare_finalize import (
-        PplxPrepareAndFinalize,
-    )
-
-    register_prepare_and_finalize(
-        PplxPrepareAndFinalize,
-        batched_format,
-        common_float_and_int_types,
-        blocked_quantization_support=True,
-        backend="pplx",
     )
 
 if has_flashinfer_cutlass_fused_moe() and current_platform.has_device_capability(100):

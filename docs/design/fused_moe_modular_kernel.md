@@ -15,7 +15,7 @@ Based on the format of the input activations, FusedMoE implementations are broad
 The input activation format completely depends on the All2All Dispatch being used.
 
 * In the Contiguous variant, the All2All Dispatch returns the activations as a contiguous tensor of shape (M, K) along with TopK Ids and TopK weights of shape (M, num_topk). Look at `DeepEPHTPrepareAndFinalize` for an example.
-* In the Batched variant, the All2All Dispatch returns the activations as a tensor of shape (num_experts, max_tokens, K). Here, the activations/tokens that subscribe to the same expert are batched together. Note that not all entries of the tensor are valid. The activations tensor is typically accompanied by an `expert_num_tokens` tensor of size `num_experts`, where `expert_num_tokens[i]` indicates the number of valid tokens that subscribe to the ith expert. Look at `PplxPrepareAndFinalize` or `DeepEPLLPrepareAndFinalize` for an example.
+* In the Batched variant, the All2All Dispatch returns the activations as a tensor of shape (num_experts, max_tokens, K). Here, the activations/tokens that subscribe to the same expert are batched together. Note that not all entries of the tensor are valid. The activations tensor is typically accompanied by an `expert_num_tokens` tensor of size `num_experts`, where `expert_num_tokens[i]` indicates the number of valid tokens that subscribe to the ith expert. Look at `DeepEPLLPrepareAndFinalize` for an example.
 
 The FusedMoE operation is generally made of multiple operations, in both the Contiguous and Batched variants, as described in the diagrams below
 
@@ -132,7 +132,6 @@ class FusedMoEModularKernel:
 
 Typically a FusedMoEPrepareAndFinalize type is backed by an All2All Dispatch & Combine implementation / kernel. For example,
 
-* PplxPrepareAndFinalize type is backed by Pplx All2All kernels,
 * DeepEPHTPrepareAndFinalize type is backed by DeepEP High-Throughput All2All kernels, and
 * DeepEPLLPrepareAndFinalize type is backed by DeepEP Low-Latency All2All kernels.
 
@@ -226,7 +225,7 @@ Doing this will add the new implementation to the test suite.
 ### How To Check `FusedMoEPrepareAndFinalize` & `FusedMoEPermuteExpertsUnpermute` Compatibility
 
 The unit test file [test_modular_kernel_combinations.py](../../tests/kernels/moe/test_modular_kernel_combinations.py) can also be executed as a standalone script.
-Example: `python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts`
+Example: `python3 -m tests.kernels.moe.test_modular_kernel_combinations --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
 As a side effect, this script can be used to test `FusedMoEPrepareAndFinalize` & `FusedMoEPermuteExpertsUnpermute` compatibility. When invoked
 with incompatible types, the script will error.
 
@@ -235,7 +234,7 @@ with incompatible types, the script will error.
 Please take a look at [profile_modular_kernel.py](../../tests/kernels/moe/modular_kernel_tools/profile_modular_kernel.py)
 The script can be used to generate Torch traces for a single `FusedMoEModularKernel::forward()` call for any compatible
 `FusedMoEPrepareAndFinalize` and `FusedMoEPermuteExpertsUnpermute` types.
-Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type PplxPrepareAndFinalize --experts-type BatchedTritonExperts`
+Example: `python3 -m tests.kernels.moe.modular_kernel_tools.profile_modular_kernel --pf-type DeepEPLLPrepareAndFinalize --experts-type BatchedTritonExperts`
 
 ## FusedMoEPrepareAndFinalize Implementations
 

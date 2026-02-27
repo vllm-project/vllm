@@ -493,7 +493,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
     """
     A reference prepare/finalize class that reorganizes the tokens into
     expert batched format, i.e. E x max_num_tokens x K.  This is the format
-    that the PPLX dispatch/combine kernels use.
+    that the batched dispatch/combine kernels use.
     """
 
     def __init__(
@@ -648,7 +648,7 @@ class BatchedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalize):
 class NaiveBatchedExperts(mk.FusedMoEPermuteExpertsUnpermute):
     """
     A reference MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
 
@@ -877,7 +877,7 @@ def batched_moe_kernel_quantize_input(
 class BatchedTritonExperts(mk.FusedMoEPermuteExpertsUnpermute):
     """
     A Triton based MoE expert class that operates on expert batched format,
-    i.e. E x max_num_tokens x K.  This is the format that the pplx
+    i.e. E x max_num_tokens x K.  This is the format that the batched
     dispatch/combine kernels use.
     """
 

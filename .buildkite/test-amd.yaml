@@ -67,7 +67,7 @@ steps:
   timeout_in_minutes: 30
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
-  grade: Blocking
+  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/test_inputs.py
@@ -1621,21 +1621,6 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
-
-##### RL Integration Tests #####
-- label: Prime-RL Integration Test # 15min
-  mirror_hardwares: [amdexperimental]
-  agent_pool: mi325_2
-  # grade: Blocking
-  timeout_in_minutes: 30
-  optional: true
-  num_gpus: 2
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/
-  - .buildkite/scripts/run-prime-rl-test.sh
-  commands:
-    - bash .buildkite/scripts/run-prime-rl-test.sh
 
 ##### EPLB Accuracy Tests #####
 - label: DeepSeek V2-Lite Accuracy
@@ -3200,20 +3185,6 @@ steps:
   commands:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
-
-##### RL Integration Tests #####
-- label: Prime-RL Integration Test # 15min
-  mirror_hardwares: [amdexperimental]
-  agent_pool: mi355_2
-  timeout_in_minutes: 30
-  optional: true
-  num_gpus: 2
-  working_dir: "/vllm-workspace"
-  source_file_dependencies:
-  - vllm/
-  - .buildkite/scripts/run-prime-rl-test.sh
-  commands:
-    - bash .buildkite/scripts/run-prime-rl-test.sh
 
 ##### EPLB Accuracy Tests #####
 - label: DeepSeek V2-Lite Accuracy

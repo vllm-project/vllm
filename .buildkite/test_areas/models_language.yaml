@@ -55,6 +55,15 @@ steps:
     - uv pip install --system --no-build-isolation 'git+https://github.com/state-spaces/mamba@v2.3.0'
     - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
     - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
+      commands:
+      - uv pip install --system --no-build-isolation 'git+https://github.com/AndreasKaratzas/mamba@fix-rocm-7.0-warp-size-constexpr'
+      - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
+      - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
 - label: Language Models Test (PPL)
   timeout_in_minutes: 110
@@ -73,6 +82,11 @@ steps:
   - tests/models/language/pooling
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Language Models Test (MTEB)
   timeout_in_minutes: 110

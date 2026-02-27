@@ -6,6 +6,7 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import _custom_ops as ops
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -178,12 +179,74 @@ def triton_kernel_moe_forward(
     apply_router_weight_on_input: bool = False,
     global_num_experts: int = -1,
     expert_map: torch.Tensor | None = None,
+    unpadded_N_w1=None,
+    unpadded_K_w1=None,
+    unpadded_N_w2=None,
+    unpadded_K_w2=None,
 ) -> torch.Tensor:
-    routing_data, gather_idx, scatter_idx = legacy_routing(
-        gating_output, topk, sm_first=not renormalize
-    )
+    if (
+        quant_config is not None
+        and quant_config.use_mxfp4_w4a8
+        and rocm_aiter_ops.is_enabled()
+    ):
+        from aiter.ops.triton.moe_routing.routing import routing as aiter_routing
+
+        routing_data, gather_idx, scatter_idx = aiter_routing(
+            gating_output, topk, sm_first=not renormalize
+        )
+        return triton_kernel_fused_mxfp4_w4a8_experts(
+            None,
+            hidden_states,
+            w1,
+            w2,
+            routing_data,
+            gather_idx,
+            scatter_idx,
+            activation=activation.value,
+            quant_config=quant_config,
+            apply_router_weight_on_input=apply_router_weight_on_input,
+            global_num_experts=global_num_experts,
+            expert_map=expert_map,
+            unpadded_N_w1=unpadded_N_w1,
+            unpadded_K_w1=unpadded_K_w1,
+            unpadded_N_w2=unpadded_N_w2,
+            unpadded_K_w2=unpadded_K_w2,
+        )
+
+    if expert_map is not None:
+        # With expert parallelism, legacy_routing produces routing data
+        # using global expert IDs which don't correspond to local weight
+        # indices.  Split the routing into topk selection + expert_map
+        # remapping + local routing data construction (matching the
+        # approach used by OAITritonExperts.apply).
+        from triton_kernels.topk import topk as topk_fn
+
+        sm_first = not renormalize
+        logits = gating_output
+        if sm_first:
+            logits = torch.softmax(logits, dim=-1)
+        sparse_logits = topk_fn(logits, topk, apply_softmax=not sm_first)
+        # sparse_logits.indx contains global expert IDs – remap to local.
+        topk_ids = expert_map[sparse_logits.indx.to(torch.long)]
+        topk_weights = sparse_logits.vals
+        local_num_experts = w1.size(0)
+        routing_data, gather_idx, scatter_idx = make_routing_data(
+            topk_ids, topk_weights, local_num_experts
+        )
+        # expert_map already applied; pass None downstream.
+        effective_expert_map = None
+        effective_global_num_experts = local_num_experts
+    else:
+        routing_data, gather_idx, scatter_idx = legacy_routing(
+            gating_output, topk, sm_first=not renormalize
+        )
+        effective_expert_map = expert_map
+        effective_global_num_experts = global_num_experts
 
     output = torch.empty_like(hidden_states)
+    effective_quant_config = (
+        quant_config if quant_config is not None else FUSED_MOE_UNQUANTIZED_CONFIG
+    )
 
     return triton_kernel_fused_experts(
         output,
@@ -195,10 +258,10 @@ def triton_kernel_moe_forward(
         scatter_idx,
         topk=topk,
         activation=activation,
-        quant_config=quant_config,
+        quant_config=effective_quant_config,
         apply_router_weight_on_input=apply_router_weight_on_input,
-        global_num_experts=global_num_experts,
-        expert_map=expert_map,
+        global_num_experts=effective_global_num_experts,
+        expert_map=effective_expert_map,
     )
 
 
@@ -226,8 +289,7 @@ def triton_kernel_fused_experts(
     assert activation == MoEActivation.SWIGLUOAI, (
         "Only SWIGLUOAI activation is supported"
     )
-    if quant_config is None:
-        quant_config = FUSED_MOE_UNQUANTIZED_CONFIG
+    assert quant_config is not None
 
     # type check, uint8 means mxfp4
     assert hidden_states.dtype == torch.bfloat16
@@ -302,6 +364,98 @@ def triton_kernel_fused_experts(
     )
     output_tensor = output_tensor.view(M, K)
     return output_tensor
+
+
+# This is a triton implementation of the fused_experts function
+def triton_kernel_fused_mxfp4_w4a8_experts(
+    output_tensor: torch.Tensor,
+    hidden_states: torch.Tensor,
+    w1,  # Tensor or triton_kernels.Tensor
+    w2,  # Tensor or triton_kernels.Tensor
+    routing_data,  # RoutingData
+    gather_indx,  # GatherIndx
+    scatter_indx,  # ScatterIndx
+    activation: str = "silu",
+    quant_config: FusedMoEQuantConfig | None = None,
+    swiglu_alpha: float = 1.702,
+    swiglu_limit: float = 7.0,
+    apply_router_weight_on_input: bool = False,
+    global_num_experts: int = -1,
+    expert_map: torch.Tensor | None = None,
+    a1q_scale: torch.Tensor | None = None,
+    unpadded_N_w1=None,
+    unpadded_K_w1=None,
+    unpadded_N_w2=None,
+    unpadded_K_w2=None,
+) -> torch.Tensor:
+    assert quant_config is not None
+    # type check, uint8 means mxfp4
+    assert hidden_states.dtype == torch.bfloat16
+    assert quant_config.w1_bias is None or quant_config.w1_bias.dtype == torch.float32
+    assert quant_config.w2_bias is None or quant_config.w2_bias.dtype == torch.float32
+
+    # Shape check, only check non-mxfp4
+    assert hidden_states.shape[-1] == w1.shape[-2]
+    assert w2.shape[-1] == w1.shape[1]
+
+    E, _, N = w1.shape
+
+    if global_num_experts == -1:
+        global_num_experts = E
+
+    gammas = routing_data.gate_scal if routing_data else None
+
+    from aiter.ops.triton.moe_op_gemm_a8w4 import moe_gemm_a8w4
+    from aiter.ops.triton.quant_moe import downcast_to_static_fp8
+
+    assert quant_config.w1_precision is not None, (
+        "w1_precision in quant config can't be None"
+    )
+    assert quant_config.w2_precision is not None, (
+        "w2_precision in quant config can't be None"
+    )
+
+    hidden_states = downcast_to_static_fp8(
+        hidden_states, quant_config.w1_precision.flex_ctx.lhs_data.scale
+    )
+
+    intermediate_cache1 = moe_gemm_a8w4(
+        hidden_states,
+        w1.storage.data,
+        None,
+        quant_config.w1_precision.weight_scale.storage.data,
+        quant_config.w1_precision.flex_ctx.lhs_data.scale,
+        quant_config.w2_precision.flex_ctx.lhs_data.scale,
+        quant_config.w1_bias,
+        routing_data,
+        gather_indx=gather_indx,
+        gammas=gammas if apply_router_weight_on_input else None,
+        swizzle_mx_scale="CDNA4_SCALE",
+        out_dtype=torch.float8_e4m3fn,
+        apply_swiglu=True,
+        alpha=swiglu_alpha,
+        limit=swiglu_limit,
+        unpadded_N=unpadded_N_w1,
+        unpadded_K=unpadded_K_w1,
+    )
+
+    intermediate_cache3 = moe_gemm_a8w4(
+        intermediate_cache1,
+        w2.storage.data,
+        None,
+        quant_config.w2_precision.weight_scale.storage.data,
+        quant_config.w2_precision.flex_ctx.lhs_data.scale,
+        None,
+        quant_config.w2_bias,
+        routing_data,
+        scatter_indx=scatter_indx,
+        gammas=None if apply_router_weight_on_input else gammas,
+        swizzle_mx_scale="CDNA4_SCALE",
+        unpadded_N=unpadded_N_w2,
+        unpadded_K=unpadded_K_w2,
+    )
+
+    return intermediate_cache3
 
 
 def make_routing_data(
@@ -491,6 +645,9 @@ class OAITritonExperts(BaseOAITritonExperts):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         apply_router_weight_on_input: bool,
     ):
+        if self.quant_config is None:
+            self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
+
         if expert_map is not None:
             topk_ids = expert_map[topk_ids]
 
