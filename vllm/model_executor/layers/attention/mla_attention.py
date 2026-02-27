@@ -463,14 +463,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     q, kv_c_normed, k_pe, self_kv_cache, attn_metadata
                 )
         else:
+            kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
+                kv_c_normed,
+                k_pe,
+                self.layer_name,
+                self.kv_cache_dtype,
+                self._k_scale,
+            )
             if self.attn_backend.accept_output_buffer:
-                kv_cache_dummy_dep = torch.ops.vllm.unified_mla_kv_cache_update(
-                    kv_c_normed,
-                    k_pe,
-                    self.layer_name,
-                    self.kv_cache_dtype,
-                    self._k_scale,
-                )
                 output = torch.empty(output_shape, dtype=q.dtype, device=q.device)
                 torch.ops.vllm.unified_mla_attention_with_output(
                     q,
@@ -487,6 +487,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     kv_c_normed,
                     k_pe,
                     self.layer_name,
+                    kv_cache_dummy_dep=kv_cache_dummy_dep,
                 )
 
     def forward_impl(
@@ -836,7 +837,12 @@ def unified_mla_attention(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> torch.Tensor:
+    # kv_cache_dummy_dep is not used but accepting it creates a data dependency
+    # that ensures torch.compile preserves ordering between KV cache update and
+    # attention forward.
+    del kv_cache_dummy_dep
     attn_metadata, layer, kv_cache, _ = get_attention_context(layer_name)
     output = layer.forward_impl(q, kv_c_normed, k_pe, kv_cache, attn_metadata)
 
@@ -848,6 +854,7 @@ def unified_mla_attention_fake(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
     layer_name: str,
+    kv_cache_dummy_dep: torch.Tensor | None = None,
 ) -> torch.Tensor:
     return torch.empty_like(q).contiguous()
 
