@@ -140,11 +140,6 @@ def xpu_platform_plugin() -> str | None:
 
             XPUPlatform.dist_backend = dist_backend
             logger.debug("Confirmed %s backend is available.", XPUPlatform.dist_backend)
-        else:
-            logger.warning(
-                "xccl is not enabled in this torch build, "
-                "communication is not available."
-            )
 
         if hasattr(torch, "xpu") and torch.xpu.is_available():
             is_xpu = True

@@ -528,7 +528,17 @@ class BaseMultiModalItemTracker(ABC, Generic[_T]):
         else:
             num_items = len(self._items_by_modality[original_modality]) + 1
 
-        self.mm_processor.info.validate_num_items(input_modality, num_items)
+        mm_config = self.model_config.multimodal_config
+        if (
+            mm_config is not None
+            and mm_config.enable_mm_embeds
+            and mm_config.get_limit_per_prompt(input_modality) == 0
+            and original_modality.endswith("_embeds")
+        ):
+            # Skip validation: embeddings bypass limit when enable_mm_embeds=True
+            pass
+        else:
+            self.mm_processor.info.validate_num_items(input_modality, num_items)
 
         # Track original modality for vision_chunk items
         if use_vision_chunk:
@@ -1164,7 +1174,10 @@ def _get_full_multimodal_text_prompt(
 
     # NOTE: Default behaviour: we always add missing placeholders
     # at the front of the prompt, if interleave_strings=False
-    return "\n".join(missing_placeholders + [text_prompt])
+    if text_prompt:
+        return "\n".join(missing_placeholders + [text_prompt])
+    else:
+        return "\n".join(missing_placeholders)
 
 
 # No need to validate using Pydantic again

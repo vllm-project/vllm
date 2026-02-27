@@ -23,6 +23,7 @@ class TestGptOssStructuralTagsIntegration:
         """Create a mock tokenizer."""
         tokenizer = Mock()
         tokenizer.encode = Mock(return_value=[1, 2, 3, 4, 5])
+        tokenizer.vocab = {"<|end|>": 6}
         return tokenizer
 
     @pytest.fixture

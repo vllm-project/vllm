@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from typing import Any, TypeAlias
+from typing import TypeAlias
 
 from pydantic import BaseModel, Field
 
@@ -14,20 +14,15 @@ from vllm.entrypoints.pooling.base.protocol import (
 )
 from vllm.entrypoints.pooling.score.utils import (
     ScoreContentPartParam,
-    ScoreMultiModalParam,
+    ScoreInput,
+    ScoreInputs,
 )
 from vllm.renderers import TokenizeParams
+from vllm.tasks import PoolingTask
 from vllm.utils import random_uuid
 
 
 class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    # --8<-- [start:score-extra-params]
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-    # --8<-- [end:score-extra-params]
-
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
 
@@ -39,21 +34,22 @@ class ScoreRequestMixin(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens_param="max_model_len",
         )
 
-    def to_pooling_params(self):
+    def to_pooling_params(self, task: PoolingTask = "score"):
         return PoolingParams(
+            task=task,
             truncate_prompt_tokens=self.truncate_prompt_tokens,
             use_activation=self.use_activation,
         )
 
 
 class ScoreDataRequest(ScoreRequestMixin):
-    data_1: list[str] | str | ScoreMultiModalParam
-    data_2: list[str] | str | ScoreMultiModalParam
+    data_1: ScoreInputs
+    data_2: ScoreInputs
 
 
 class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
-    queries: list[str] | str | ScoreMultiModalParam
-    documents: list[str] | str | ScoreMultiModalParam
+    queries: ScoreInputs
+    documents: ScoreInputs
 
     @property
     def data_1(self):
@@ -64,9 +60,22 @@ class ScoreQueriesDocumentsRequest(ScoreRequestMixin):
         return self.documents
 
 
+class ScoreQueriesItemsRequest(ScoreRequestMixin):
+    queries: ScoreInputs
+    items: ScoreInputs
+
+    @property
+    def data_1(self):
+        return self.queries
+
+    @property
+    def data_2(self):
+        return self.items
+
+
 class ScoreTextRequest(ScoreRequestMixin):
-    text_1: list[str] | str | ScoreMultiModalParam
-    text_2: list[str] | str | ScoreMultiModalParam
+    text_1: ScoreInputs
+    text_2: ScoreInputs
 
     @property
     def data_1(self):
@@ -78,21 +87,17 @@ class ScoreTextRequest(ScoreRequestMixin):
 
 
 ScoreRequest: TypeAlias = (
-    ScoreQueriesDocumentsRequest | ScoreDataRequest | ScoreTextRequest
+    ScoreQueriesDocumentsRequest
+    | ScoreQueriesItemsRequest
+    | ScoreDataRequest
+    | ScoreTextRequest
 )
 
 
 class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
-    query: str | ScoreMultiModalParam
-    documents: list[str] | ScoreMultiModalParam
+    query: ScoreInput
+    documents: ScoreInputs
     top_n: int = Field(default_factory=lambda: 0)
-
-    # --8<-- [start:rerank-extra-params]
-    mm_processor_kwargs: dict[str, Any] | None = Field(
-        default=None,
-        description=("Additional kwargs to pass to the HF processor."),
-    )
-    # --8<-- [end:rerank-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
         encoder_config = model_config.encoder_config or {}
@@ -105,10 +110,17 @@ class RerankRequest(PoolingBasicRequestMixin, ClassifyRequestMixin):
             max_total_tokens_param="max_model_len",
         )
 
+    def to_pooling_params(self, task: PoolingTask = "score"):
+        return PoolingParams(
+            task=task,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            use_activation=self.use_activation,
+        )
+
 
 class RerankDocument(BaseModel):
     text: str | None = None
-    multi_modal: ScoreContentPartParam | None = None
+    multi_modal: list[ScoreContentPartParam] | None = None
 
 
 class RerankResult(BaseModel):

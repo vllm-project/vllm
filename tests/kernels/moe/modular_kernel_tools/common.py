@@ -22,6 +22,7 @@ from vllm.distributed import (
 )
 from vllm.forward_context import set_forward_context
 from vllm.model_executor.layers.fused_moe import fused_topk
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -36,7 +37,6 @@ from vllm.utils.import_utils import (
     has_deep_ep,
     has_deep_gemm,
     has_mori,
-    has_pplx,
 )
 
 from .mk_objects import (
@@ -205,10 +205,6 @@ class Config:
         info = expert_info(self.fused_experts_type)
         return info.needs_deep_gemm
 
-    def needs_pplx(self):
-        info = prepare_finalize_info(self.prepare_finalize_type)
-        return info.backend == "pplx"
-
     def needs_deep_ep(self):
         info = prepare_finalize_info(self.prepare_finalize_type)
         return (
@@ -289,8 +285,6 @@ class Config:
             return False, "Needs DeepEP, but DeepEP not available."
         if self.needs_deep_gemm() and not has_deep_gemm():
             return False, "Needs DeepGEMM, but DeepGEMM not available."
-        if self.needs_pplx() and not has_pplx():  # noqa: SIM103
-            return False, "Needs PPLX, but PPLX not available."
         if self.needs_aiter() and not has_aiter():  # noqa: SIM103
             return False, "Needs Aiter, but Aiter not available."
         if self.needs_mori() and not has_mori():  # noqa: SIM103
@@ -585,6 +579,7 @@ def make_modular_kernel(
         tp_size_=get_tensor_model_parallel_world_size(),
         pcp_size_=get_pcp_group().world_size,
         dp_size_=get_dp_group().world_size,
+        sp_size_=1,
         vllm_parallel_config=vllm_config.parallel_config,
     )
 
@@ -594,10 +589,11 @@ def make_modular_kernel(
         hidden_dim=config.K,
         intermediate_size_per_partition=config.N,
         num_local_experts=config.num_local_experts,
+        num_logical_experts=config.E,
         moe_parallel_config=moe_parallel_config,
         in_dtype=config.dtype,
         max_num_tokens=next_power_of_2(config.M),
-        activation="silu",
+        activation=MoEActivation.SILU,
         device=vllm_config.device_config.device,
         routing_method=RoutingMethodType.DeepSeekV3,
     )
@@ -620,6 +616,7 @@ def make_modular_kernel(
     modular_kernel = mk.FusedMoEModularKernel(
         prepare_finalize=prepare_finalize,
         fused_experts=fused_experts,
+        inplace=False,
     )
 
     return modular_kernel
