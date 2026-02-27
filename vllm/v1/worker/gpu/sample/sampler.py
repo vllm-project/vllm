@@ -59,7 +59,7 @@ class Sampler:
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         cu_num_logits_np: np.ndarray,
-        pos: torch.Tensor,
+        expanded_pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> SamplerOutput:
@@ -70,7 +70,7 @@ class Sampler:
             logits,
             expanded_idx_mapping,
             idx_mapping_np,
-            pos,
+            expanded_pos,
             input_ids,
             expanded_local_pos,
         )
@@ -103,7 +103,7 @@ class Sampler:
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
-        pos: torch.Tensor,
+        expanded_pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -112,7 +112,7 @@ class Sampler:
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
         self.logit_bias_state.apply_logit_bias(
-            logits, expanded_idx_mapping, idx_mapping_np, pos
+            logits, expanded_idx_mapping, idx_mapping_np, expanded_pos
         )
 
         # Apply penalties in place.
@@ -153,7 +153,7 @@ class Sampler:
             expanded_idx_mapping,
             self.sampling_states.temperature.gpu,
             self.sampling_states.seeds.gpu,
-            pos,
+            expanded_pos,
             apply_temperature=False,
         )
         return sampled, logits

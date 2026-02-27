@@ -59,7 +59,7 @@ def _gumbel_sample_kernel(
     logits_stride,
     expanded_idx_mapping_ptr,
     seeds_ptr,
-    pos_ptr,
+    expanded_pos_ptr,
     temp_ptr,
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
@@ -82,7 +82,7 @@ def _gumbel_sample_kernel(
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
         seed = tl.load(seeds_ptr + req_state_idx)
-        pos = tl.load(pos_ptr + token_idx)
+        pos = tl.load(expanded_pos_ptr + token_idx)
         gumbel_seed = tl.randint(seed, pos)
 
         # Generate gumbel noise in FP32.
@@ -110,7 +110,7 @@ def gumbel_sample(
     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
     temperature: torch.Tensor,  # [max_num_reqs]
     seed: torch.Tensor,  # [max_num_reqs]
-    pos: torch.Tensor,  # [num_tokens]
+    expanded_pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
 ) -> torch.Tensor:
     num_tokens, vocab_size = logits.shape
@@ -137,7 +137,7 @@ def gumbel_sample(
         logits.stride(0),
         expanded_idx_mapping,
         seed,
-        pos,
+        expanded_pos,
         temperature,
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
