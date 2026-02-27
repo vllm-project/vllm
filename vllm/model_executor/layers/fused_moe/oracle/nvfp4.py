@@ -45,6 +45,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_CUTEDSL_BATCHED = "FLASHINFER_CUTEDSL_BATCHED"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
+    TRITON_BATCH_INVARIANT = "TRITON_BATCH_INVARIANT"
 
 
 FLASHINFER_NVFP4_MOE_BACKENDS = [
@@ -118,6 +119,13 @@ def backend_to_kernel_cls(
         )
 
         return [MarlinExperts]
+
+    elif backend == NvFp4MoeBackend.TRITON_BATCH_INVARIANT:
+        from vllm.model_executor.layers.fused_moe.batch_invariant_fp4_moe import (
+            BatchInvariantNvfp4Experts,
+        )
+
+        return [BatchInvariantNvfp4Experts]
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -130,6 +138,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_cutlass": NvFp4MoeBackend.FLASHINFER_CUTLASS,
         "flashinfer_cutedsl": NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         "marlin": NvFp4MoeBackend.MARLIN,
+        "batch_invariant": NvFp4MoeBackend.TRITON_BATCH_INVARIANT,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -157,6 +166,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.TRITON_BATCH_INVARIANT,
     ]
 
     # NOTE(rob): this is kind of a hack. We need to peak into
@@ -329,6 +339,7 @@ def convert_to_nvfp4_moe_kernel_format(
     elif (
         nvfp4_backend in FLASHINFER_NVFP4_MOE_BACKENDS
         or nvfp4_backend == NvFp4MoeBackend.VLLM_CUTLASS
+        or nvfp4_backend == NvFp4MoeBackend.TRITON_BATCH_INVARIANT
     ):
         (
             w13,
