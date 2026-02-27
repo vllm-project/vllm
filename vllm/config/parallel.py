@@ -36,7 +36,9 @@ ExpertPlacementStrategy = Literal["linear", "round_robin"]
 DistributedExecutorBackend = Literal["ray", "mp", "uni", "external_launcher"]
 DataParallelBackend = Literal["ray", "mp"]
 EPLBPolicyOption = Literal["default"]
-EPLBCommunicatorBackend = Literal["torch_nccl", "torch_gloo", "pynccl", "symm_mem"]
+EPLBCommunicatorBackend = Literal[
+    "torch_nccl", "torch_gloo", "nixl", "pynccl", "symm_mem"
+]
 All2AllBackend = Literal[
     "naive",
     "pplx",
@@ -87,6 +89,7 @@ class EPLBConfig:
     Backend for EPLB expert weight communication:
     - "torch_nccl": Use torch.distributed on the device process group
     - "torch_gloo": Use torch.distributed gloo with CPU staging
+    - "nixl": Use NIXL/ RIXL with staged send/recv buffers
     - "pynccl": Use PyNccl send/recv
     - "symm_mem": Use torch symmetric-memory all_to_all_vdev
     """

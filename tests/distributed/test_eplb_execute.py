@@ -502,7 +502,7 @@ def _test_rearrange_expert_weights_with_redundancy(
     ],
 )
 @pytest.mark.parametrize(
-    "eplb_communicator", ["symm_mem", "torch_nccl", "torch_gloo", "pynccl"]
+    "eplb_communicator", ["symm_mem", "torch_nccl", "torch_gloo", "nixl", "pynccl"]
 )
 def test_rearrange_expert_weights_with_redundancy(
     world_size,
@@ -604,7 +604,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
     ],
 )
 @pytest.mark.parametrize(
-    "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "symm_mem"]
+    "eplb_communicator", ["torch_nccl", "torch_gloo", "nixl", "pynccl", "symm_mem"]
 )
 def test_async_transfer_layer_without_mtp(
     world_size: int,
