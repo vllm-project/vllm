@@ -305,6 +305,59 @@ def use_fused_moe_lora_fp8_kernel(
     )
 
 
+def _dequant_fp8_weights(
+    weight_stacked: list[torch.Tensor],
+    scale_stacked: list[torch.Tensor] | None,
+    per_channel_quant: bool,
+    block_shape: list[int] | None,
+) -> list[torch.Tensor]:
+    """Dequantize a list of FP8 weight tensors using the matching scales."""
+    result = []
+    for idx, w in enumerate(weight_stacked):
+        w_float = w.float()
+        if scale_stacked is not None:
+            scale = scale_stacked[idx]
+            if block_shape is not None:
+                block_n, block_k = block_shape
+                orig_shape = w_float.shape
+                dim0, dim1 = orig_shape[-2], orig_shape[-1]
+                n_blocks = CEILDIV(dim0, block_n)
+                k_blocks = CEILDIV(dim1, block_k)
+                padded_dim0 = n_blocks * block_n
+                padded_dim1 = k_blocks * block_k
+                padded = torch.zeros(
+                    *orig_shape[:-2],
+                    padded_dim0,
+                    padded_dim1,
+                    dtype=w_float.dtype,
+                    device=w_float.device,
+                )
+                padded[..., :dim0, :dim1] = w_float
+                reshaped = padded.reshape(
+                    *orig_shape[:-2], n_blocks, block_n, k_blocks, block_k
+                )
+                reshaped = reshaped.permute(*range(len(orig_shape) - 2), -4, -2, -3, -1)
+                scale_expanded = scale.unsqueeze(-1).unsqueeze(-1)
+                dequantized = reshaped * scale_expanded
+                dequantized = dequantized.permute(
+                    *range(len(orig_shape) - 2), -4, -2, -3, -1
+                )
+                dequantized = dequantized.reshape(
+                    *orig_shape[:-2], padded_dim0, padded_dim1
+                )
+                w_float = dequantized[..., :dim0, :dim1]
+            elif per_channel_quant:
+                # Per-channel: scale shape (..., dim0, 1) from unsqueeze(3)
+                if scale.ndim == w_float.ndim:
+                    scale = scale.squeeze(-1)
+                w_float = w_float * scale.unsqueeze(-1)
+            else:
+                # Tensor-wise: scale shape (max_loras, num_experts)
+                w_float = w_float * scale.unsqueeze(-1).unsqueeze(-1)
+        result.append(w_float)
+    return result
+
+
 def use_torch_fp8(
     hidden_states,
     token_lora_mapping,
@@ -325,99 +378,18 @@ def use_torch_fp8(
     """
     # Dequantize lora_a and lora_b if FP8
     if use_fp8_w8a8:
-        lora_a_list = []
-        for idx, la in enumerate(lora_a_stacked):
-            la_float = la.float()
-            if lora_a_scale_stacked is not None:
-                la_scale = lora_a_scale_stacked[idx]
-                if block_shape is not None:
-                    # Block-wise dequant for lora_a
-                    block_n, block_k = block_shape
-                    orig_shape = la_float.shape
-                    dim0, dim1 = orig_shape[-2], orig_shape[-1]
-                    n_blocks = CEILDIV(dim0, block_n)
-                    k_blocks = CEILDIV(dim1, block_k)
-                    padded_dim0 = n_blocks * block_n
-                    padded_dim1 = k_blocks * block_k
-                    padded = torch.zeros(
-                        *orig_shape[:-2],
-                        padded_dim0,
-                        padded_dim1,
-                        dtype=la_float.dtype,
-                        device=la_float.device,
-                    )
-                    padded[..., :dim0, :dim1] = la_float
-                    reshaped = padded.reshape(
-                        *orig_shape[:-2], n_blocks, block_n, k_blocks, block_k
-                    )
-                    reshaped = reshaped.permute(
-                        *range(len(orig_shape) - 2), -4, -2, -3, -1
-                    )
-                    scale_expanded = la_scale.unsqueeze(-1).unsqueeze(-1)
-                    dequantized = reshaped * scale_expanded
-                    dequantized = dequantized.permute(
-                        *range(len(orig_shape) - 2), -4, -2, -3, -1
-                    )
-                    dequantized = dequantized.reshape(
-                        *orig_shape[:-2], padded_dim0, padded_dim1
-                    )
-                    la_float = dequantized[..., :dim0, :dim1]
-                elif per_channel_quant:
-                    # Per-channel: scale shape (..., dim0, 1) from unsqueeze(3)
-                    if la_scale.ndim == la_float.ndim:
-                        la_scale = la_scale.squeeze(-1)
-                    la_float = la_float * la_scale.unsqueeze(-1)
-                else:
-                    # Tensor-wise: scale shape (max_loras, num_experts)
-                    # needs to broadcast to (max_loras, num_experts, rank, K)
-                    la_float = la_float * la_scale.unsqueeze(-1).unsqueeze(-1)
-            lora_a_list.append(la_float)
-
-        lora_b_list = []
-        for idx, lb in enumerate(lora_b_stacked):
-            lb_float = lb.float()
-            if lora_b_scale_stacked is not None:
-                lb_scale = lora_b_scale_stacked[idx]
-                if block_shape is not None:
-                    block_n, block_k = block_shape
-                    orig_shape = lb_float.shape
-                    dim0, dim1 = orig_shape[-2], orig_shape[-1]
-                    n_blocks = CEILDIV(dim0, block_n)
-                    k_blocks = CEILDIV(dim1, block_k)
-                    padded_dim0 = n_blocks * block_n
-                    padded_dim1 = k_blocks * block_k
-                    padded = torch.zeros(
-                        *orig_shape[:-2],
-                        padded_dim0,
-                        padded_dim1,
-                        dtype=lb_float.dtype,
-                        device=lb_float.device,
-                    )
-                    padded[..., :dim0, :dim1] = lb_float
-                    reshaped = padded.reshape(
-                        *orig_shape[:-2], n_blocks, block_n, k_blocks, block_k
-                    )
-                    reshaped = reshaped.permute(
-                        *range(len(orig_shape) - 2), -4, -2, -3, -1
-                    )
-                    scale_expanded = lb_scale.unsqueeze(-1).unsqueeze(-1)
-                    dequantized = reshaped * scale_expanded
-                    dequantized = dequantized.permute(
-                        *range(len(orig_shape) - 2), -4, -2, -3, -1
-                    )
-                    dequantized = dequantized.reshape(
-                        *orig_shape[:-2], padded_dim0, padded_dim1
-                    )
-                    lb_float = dequantized[..., :dim0, :dim1]
-                elif per_channel_quant:
-                    # Per-channel: scale shape (..., dim0, 1) from unsqueeze(3)
-                    if lb_scale.ndim == lb_float.ndim:
-                        lb_scale = lb_scale.squeeze(-1)
-                    lb_float = lb_float * lb_scale.unsqueeze(-1)
-                else:
-                    # Tensor-wise: scale shape (max_loras, num_experts)
-                    lb_float = lb_float * lb_scale.unsqueeze(-1).unsqueeze(-1)
-            lora_b_list.append(lb_float)
+        lora_a_list = _dequant_fp8_weights(
+            lora_a_stacked,
+            lora_a_scale_stacked,
+            per_channel_quant,
+            block_shape,
+        )
+        lora_b_list = _dequant_fp8_weights(
+            lora_b_stacked,
+            lora_b_scale_stacked,
+            per_channel_quant,
+            block_shape,
+        )
     else:
         lora_a_list = [la.float() for la in lora_a_stacked]
         lora_b_list = [lb.float() for lb in lora_b_stacked]
