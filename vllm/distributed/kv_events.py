@@ -209,6 +209,10 @@ class KVConnectorKVEvents(ABC):
     def clear_events(self) -> None:
         raise NotImplementedError
 
+    def merge(self, other: "KVConnectorKVEvents") -> "KVConnectorKVEvents":
+        self.add_events(other.get_all_events())
+        return self
+
 
 class EventPublisher(ABC):
     """Lightweight publisher for EventBatch batches with data parallelism
