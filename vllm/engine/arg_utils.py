@@ -586,6 +586,8 @@ class EngineArgs:
 
     additional_config: dict[str, Any] = get_field(VllmConfig, "additional_config")
 
+    moe_config: dict[str, Any] | None = None
+
     use_tqdm_on_load: bool = LoadConfig.use_tqdm_on_load
     pt_load_map_location: str | dict[str, str] = LoadConfig.pt_load_map_location
 
@@ -1276,6 +1278,16 @@ class EngineArgs:
             "--additional-config", **vllm_kwargs["additional_config"]
         )
         vllm_group.add_argument(
+            "--moe-config",
+            type=json.loads,
+            default=None,
+            help=(
+                "JSON dict for MoE configuration. "
+                'Example: \'{"pruning": {"enable": true, '
+                '"expert_budget": 24}}\''
+            ),
+        )
+        vllm_group.add_argument(
             "--structured-outputs-config", **vllm_kwargs["structured_outputs_config"]
         )
         vllm_group.add_argument("--profiler-config", **vllm_kwargs["profiler_config"])
@@ -1916,9 +1928,24 @@ class EngineArgs:
             optimization_level=self.optimization_level,
             performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
+            moe_config=self._create_moe_config(),
         )
 
         return config
+
+    def _create_moe_config(self):
+        if self.moe_config is None:
+            return None
+        from vllm.config import MoEConfig, MoEPruningConfig
+
+        raw = self.moe_config
+        if not isinstance(raw, dict):
+            raise TypeError(
+                f"--moe-config must be a JSON object, got {type(raw).__name__}"
+            )
+        pruning_dict = raw.get("pruning", {})
+        pruning = MoEPruningConfig(**pruning_dict) if pruning_dict else None
+        return MoEConfig(pruning=pruning)
 
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
