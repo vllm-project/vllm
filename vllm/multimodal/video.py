@@ -110,6 +110,8 @@ class OpenCVVideoBackendMixin:
 
     @staticmethod
     def get_video_metadata(cap: "cv2.VideoCapture") -> VideoSourceMetadata:
+        import cv2
+
         total_frames_num = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
         original_fps = cap.get(cv2.CAP_PROP_FPS)
         duration = total_frames_num / original_fps if original_fps > 0 else 0
