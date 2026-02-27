@@ -4,6 +4,7 @@
 
 import asyncio
 import time
+from collections import defaultdict
 from collections.abc import AsyncGenerator
 from collections.abc import Sequence as GenericSequence
 
@@ -111,18 +112,18 @@ class ServingTokens(OpenAIServing):
             # Multimodal: build MultiModalInputs directly from metadata.
             # When kwargs_data is present, tensors are deserialized directly.
             # When kwargs_data is None, data is looked up from cache.
-            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = {}
-            mm_hashes: dict[str, list[str]] = {}
-            mm_placeholders: dict[str, list[PlaceholderRange]] = {}
+            mm_kwargs: dict[str, list[MultiModalKwargsItem | None]] = defaultdict(list)
+            mm_hashes: dict[str, list[str]] = defaultdict(list)
+            mm_placeholders: dict[str, list[PlaceholderRange]] = defaultdict(list)
 
             for feat in request.features:
                 if feat.kwargs_data is not None:
                     item = decode_mm_kwargs_item(feat.kwargs_data)
-                    mm_kwargs.setdefault(feat.modality, []).append(item)
+                    mm_kwargs[feat.modality].append(item)
                 else:
-                    mm_kwargs.setdefault(feat.modality, []).append(None)
-                mm_hashes.setdefault(feat.modality, []).append(feat.mm_hash)
-                mm_placeholders.setdefault(feat.modality, []).append(
+                    mm_kwargs[feat.modality].append(None)
+                mm_hashes[feat.modality].append(feat.mm_hash)
+                mm_placeholders[feat.modality].append(
                     PlaceholderRange(offset=feat.offset, length=feat.length)
                 )
 
