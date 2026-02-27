@@ -988,7 +988,7 @@ def shuffle_rows(input_tensor: torch.Tensor, dst2src_map: torch.Tensor):
     return output_tensor
 
 
-def get_cutlass_pplx_moe_mm_data(
+def get_cutlass_batched_moe_mm_data(
     expert_offsets: torch.Tensor,
     problem_sizes1: torch.Tensor,
     problem_sizes2: torch.Tensor,
@@ -1011,7 +1011,7 @@ def get_cutlass_pplx_moe_mm_data(
                                       multiplication in two grouped MMs used in
                                       the fused MoE operation.
     """
-    return torch.ops._C.get_cutlass_pplx_moe_mm_data(
+    return torch.ops._C.get_cutlass_batched_moe_mm_data(
         expert_offsets,
         problem_sizes1,
         problem_sizes2,
@@ -2190,6 +2190,38 @@ def moe_wna16_gemm(
     )
 
 
+def router_gemm_bf16_fp32(input: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+    """bf16 x bf16 -> fp32 GEMM via cuBLAS. weight shape: (N, K)."""
+    return torch.ops._moe_C.router_gemm_bf16_fp32(input, weight)
+
+
+if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "router_gemm_bf16_fp32"):
+
+    @register_fake("_moe_C::router_gemm_bf16_fp32")
+    def router_gemm_bf16_fp32_fake(
+        input: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.empty(
+            input.shape[0], weight.shape[0], dtype=torch.float32, device=input.device
+        )
+
+
+def dsv3_router_gemm(
+    hidden_states: torch.Tensor,
+    router_weight: torch.Tensor,
+    output_dtype: torch.dtype,
+) -> torch.Tensor:
+    output = torch.empty(
+        hidden_states.shape[0],
+        router_weight.shape[0],
+        device=hidden_states.device,
+        dtype=output_dtype,
+    )
+    torch.ops._moe_C.dsv3_router_gemm(output, hidden_states, router_weight)
+    return output
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2802,6 +2834,24 @@ def sm100_cutlass_mla_get_workspace_size(
     return torch.ops._C.sm100_cutlass_mla_get_workspace_size(
         max_seq_len, num_batches, sm_count, num_kv_splits
     )
+
+
+def dsv3_fused_a_gemm(
+    output: torch.Tensor,
+    mat_a: torch.Tensor,
+    mat_b: torch.Tensor,
+) -> None:
+    """DeepSeek V3 fused A GEMM (SM 9.0+, bf16 only, 1-16 tokens).
+
+    Computes output = mat_a @ mat_b.T where:
+      mat_a: [num_tokens, 7168] row-major bf16 (hidden states)
+      mat_b: [7168, 2112] column-major bf16 (weight transposed)
+      output: [num_tokens, 2112] row-major bf16
+
+    Optimized for the DeepSeek V2/V3 QKV A-projection at small batch sizes.
+    Requires SM 9.0+ (Hopper).
+    """
+    torch.ops._C.dsv3_fused_a_gemm(output, mat_a, mat_b)
 
 
 if hasattr(torch.ops._C, "weight_packed_linear"):

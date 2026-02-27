@@ -269,13 +269,13 @@ void get_cutlass_moe_mm_problem_sizes_from_expert_offsets(
     torch::Tensor& problem_sizes1, torch::Tensor& problem_sizes2,
     const int64_t n, const int64_t k, const bool swap_ab);
 
-void get_cutlass_pplx_moe_mm_data(torch::Tensor& expert_offsets,
-                                  torch::Tensor& problem_sizes1,
-                                  torch::Tensor& problem_sizes2,
-                                  const torch::Tensor& expert_num_tokens,
-                                  const int64_t num_local_experts,
-                                  const int64_t padded_m, const int64_t n,
-                                  const int64_t k);
+void get_cutlass_batched_moe_mm_data(torch::Tensor& expert_offsets,
+                                     torch::Tensor& problem_sizes1,
+                                     torch::Tensor& problem_sizes2,
+                                     const torch::Tensor& expert_num_tokens,
+                                     const int64_t num_local_experts,
+                                     const int64_t padded_m, const int64_t n,
+                                     const int64_t k);
 
 void cutlass_scaled_mm_azp(torch::Tensor& out, torch::Tensor const& a,
                            torch::Tensor const& b,
@@ -409,4 +409,9 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
+#endif
+
+#ifndef USE_ROCM
+void dsv3_fused_a_gemm(torch::Tensor& output, torch::Tensor const& mat_a,
+                       torch::Tensor const& mat_b);
 #endif
