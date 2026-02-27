@@ -119,7 +119,9 @@ class ModelState:
                 query_start_loc_gpu=input_batch.query_start_loc,
                 query_start_loc_cpu=query_start_loc_cpu,
                 seq_lens=input_batch.seq_lens,
-                block_tables=block_tables,
+                block_tables=tuple(
+                    block_table[:num_reqs] for block_table in block_tables
+                ),
                 slot_mappings=slot_mappings[:, :num_tokens],
                 dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             )
@@ -168,19 +170,10 @@ class ModelState:
         attn_seq_lens[:num_reqs] = input_batch.seq_lens
 
         attn_block_tables = tuple(
-            torch.cat(
-                [
-                    block_table,
-                    torch.zeros(
-                        (attn_num_reqs - num_reqs, block_table.shape[1]),
-                        dtype=block_table.dtype,
-                        device=block_table.device,
-                    ),
-                ],
-                dim=0,
-            )
-            for block_table in block_tables
+            block_table[:attn_num_reqs] for block_table in block_tables
         )
+        for block_table in attn_block_tables:
+            block_table[num_reqs:attn_num_reqs].zero_()
 
         attn_slot_mappings = torch.full(
             (slot_mappings.shape[0], attn_num_tokens),
