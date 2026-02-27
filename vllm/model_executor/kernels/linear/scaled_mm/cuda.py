@@ -54,7 +54,7 @@ class CudaFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             self.flashinfer_deepgemm_kernel = (
                 FlashInferFp8DeepGEMMDynamicBlockScaledKernel(config)
             )
-            self.quant_fp8 = self.flashinfer_deepgemm_kernel.base.quant_fp8
+            self.quant_fp8 = self.flashinfer_deepgemm_kernel.quant_fp8
         self.deepgemm_kernel: DeepGemmFp8BlockScaledMMKernel | None = None
         if DeepGemmFp8BlockScaledMMKernel.is_supported()[0]:
             self.deepgemm_kernel = DeepGemmFp8BlockScaledMMKernel(config)

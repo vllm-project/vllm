@@ -217,6 +217,11 @@ class FlashInferFp8DeepGEMMDynamicBlockScaledKernel(
     base_type: type[FlashInferFp8BlockScaledMMKernel] = FlashInferFp8BlockScaledMMKernel
     fallback_type: type[DeepGemmFp8BlockScaledMMKernel] = DeepGemmFp8BlockScaledMMKernel
 
+    def __init__(self, config: FP8ScaledMMLinearLayerConfig):
+        super().__init__(config)
+        # Only DeepGemmFp8BlockScaledMMKernel has separate input quant op.
+        self.quant_fp8 = self.fallback.quant_fp8
+
     def process_weights_after_loading(self, layer: torch.nn.Module):
         # deepgemm might require post processing.
         # both flashinfer and deepgemm kernels
