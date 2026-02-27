@@ -508,6 +508,7 @@ class RMSNormGated(CustomOp):
         eps: float = 1e-5,
         group_size: int | None = None,
         norm_before_gate: bool = False,
+        activation: str = "silu",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -522,6 +523,7 @@ class RMSNormGated(CustomOp):
                         (i.e. there's only 1 group).
             norm_before_gate: If True and z is provided: out = norm(x) * silu(z)
                               If False and z is provided: out = norm(x * silu(z))
+            activation: Activation function to use for the gate.
             device: Device to create parameters on
             dtype: Data type for parameters
         """
@@ -532,6 +534,7 @@ class RMSNormGated(CustomOp):
         self.register_parameter("bias", None)
         self.group_size = group_size
         self.norm_before_gate = norm_before_gate
+        self.activation = activation
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -551,12 +554,18 @@ class RMSNormGated(CustomOp):
             Normalized (and optionally gated) tensor
 
         If z is not None:
-            - norm_before_gate=True: out = norm(x) * silu(z)
-            - norm_before_gate=False: out = norm(x * silu(z))
+            - norm_before_gate=True: out = norm(x) * activation(z)
+            - norm_before_gate=False: out = norm(x * activation(z))
         """
         # Apply gating before normalization if needed
         if z is not None and not self.norm_before_gate:
-            x = x * F.silu(z)
+            if self.activation == "silu":
+                x = x * F.silu(z)
+            elif self.activation == "sigmoid":
+                x = x * torch.sigmoid(z)
+            else:
+                raise NotImplementedError(
+                    f"Unsupported activation: {self.activation}")
 
         # RMS Normalization
         if self.group_size is None:
@@ -575,7 +584,13 @@ class RMSNormGated(CustomOp):
 
         # Apply gating after normalization if needed
         if z is not None and self.norm_before_gate:
-            out = out * F.silu(z)
+            if self.activation == "silu":
+                out = out * F.silu(z)
+            elif self.activation == "sigmoid":
+                out = out * torch.sigmoid(z)
+            else:
+                raise NotImplementedError(
+                    f"Unsupported activation: {self.activation}")
 
         return out
 
@@ -592,6 +607,7 @@ class RMSNormGated(CustomOp):
             eps=self.eps,
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
         )
 
 

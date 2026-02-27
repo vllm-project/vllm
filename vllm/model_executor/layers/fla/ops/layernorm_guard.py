@@ -34,6 +34,7 @@ def rms_norm_ref(
     group_size=None,
     norm_before_gate=True,
     upcast=True,
+    activation="silu",
 ):
     dtype = x.dtype
     weight = weight.float()
@@ -41,8 +42,16 @@ def rms_norm_ref(
     if upcast:
         x = x.float()
         z = z.float() if z is not None else z
+
+    if activation == "silu":
+        act_fn = F.silu
+    elif activation == "sigmoid":
+        act_fn = torch.sigmoid
+    else:
+        raise NotImplementedError(f"Unsupported activation: {activation}")
+
     if z is not None and not norm_before_gate:
-        x = x * F.silu(z)
+        x = x * act_fn(z)
     if group_size is None:
         rstd = 1 / torch.sqrt((x.square()).mean(dim=-1, keepdim=True) + eps)
         out = (x * rstd * weight) + bias if bias is not None else (x * rstd * weight)
@@ -53,7 +62,7 @@ def rms_norm_ref(
         if bias is not None:
             out = out + bias
     if z is not None and norm_before_gate:
-        out *= F.silu(z)
+        out *= act_fn(z)
     return out.to(dtype)
 
 
@@ -178,7 +187,13 @@ def layer_norm_fwd(
     group_size: int = None,
     norm_before_gate: bool = True,
     is_rms_norm: bool = False,
+    activation: str = "silu",
 ):
+    if activation not in ["silu", "swish"]:
+        raise NotImplementedError(
+            "Currently only 'silu' activation is supported in Triton kernel."
+        )
+
     M, N = x.shape
     if group_size is None:
         group_size = N
@@ -252,6 +267,7 @@ class LayerNormFn(torch.autograd.Function):
         group_size=None,
         norm_before_gate=True,
         is_rms_norm=False,
+        activation="silu",
     ):
         """If z is not None, we do norm(x) * silu(z) if norm_before_gate, else norm(x * silu(z))"""
 
@@ -277,6 +293,7 @@ class LayerNormFn(torch.autograd.Function):
             group_size=group_size,
             norm_before_gate=norm_before_gate,
             is_rms_norm=is_rms_norm,
+            activation=activation,
         )
         ctx.save_for_backward(x, weight, bias, mean, rstd, z)
         ctx.x_shape_og = x_shape_og
@@ -284,6 +301,7 @@ class LayerNormFn(torch.autograd.Function):
         ctx.group_size = group_size
         ctx.norm_before_gate = norm_before_gate
         ctx.is_rms_norm = is_rms_norm
+        ctx.activation = activation
         return y.reshape(x_shape_og)
 
 
@@ -296,17 +314,25 @@ def layernorm_fn(
     group_size=None,
     norm_before_gate=True,
     is_rms_norm=False,
+    activation="silu",
 ):
     return LayerNormFn.apply(
-        x, weight, bias, z, eps, group_size, norm_before_gate, is_rms_norm
+        x, weight, bias, z, eps, group_size, norm_before_gate, is_rms_norm, activation
     )
 
 
 def rmsnorm_fn(
-    x, weight, bias, z=None, eps=1e-6, group_size=None, norm_before_gate=True
+    x,
+    weight,
+    bias,
+    z=None,
+    eps=1e-6,
+    group_size=None,
+    norm_before_gate=True,
+    activation="silu",
 ):
     return LayerNormFn.apply(
-        x, weight, bias, z, eps, group_size, norm_before_gate, True
+        x, weight, bias, z, eps, group_size, norm_before_gate, True, activation
     )
 
 
@@ -317,6 +343,7 @@ class LayerNormGated(nn.Module):
         eps: float = 1e-5,
         group_size: int | None = None,
         norm_before_gate: bool = True,
+        activation: str = "silu",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -331,6 +358,7 @@ class LayerNormGated(nn.Module):
         self.bias = nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
         self.group_size = group_size
         self.norm_before_gate = norm_before_gate
+        self.activation = activation
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -347,6 +375,7 @@ class LayerNormGated(nn.Module):
             group_size=self.group_size,
             eps=self.eps,
             norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
         )
 
 
@@ -357,6 +386,7 @@ class RMSNormGated(nn.Module):
         eps: float = 1e-5,
         group_size: int | None = None,
         norm_before_gate: bool = False,
+        activation: str = "silu",
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -370,6 +400,7 @@ class RMSNormGated(nn.Module):
         self.register_parameter("bias", None)
         self.group_size = group_size
         self.norm_before_gate = norm_before_gate
+        self.activation = activation
         self.reset_parameters()
 
     def reset_parameters(self):
@@ -385,4 +416,5 @@ class RMSNormGated(nn.Module):
             eps=self.eps,
             group_size=self.group_size,
             norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
         )

@@ -62,6 +62,7 @@ class Mixer2RMSNormGated(CustomOp):
         full_n_groups: int,
         use_rms_norm: bool = True,
         eps: float = 1e-6,
+        activation: str = "silu",
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -73,6 +74,7 @@ class Mixer2RMSNormGated(CustomOp):
 
         self.variance_epsilon = eps
         self.use_rms_norm = use_rms_norm
+        self.activation = activation
         if self.use_rms_norm:
             # Register norm weight only if we're actually applying RMSNorm
             self.weight = nn.Parameter(torch.ones(self.per_rank_hidden_size))
@@ -99,7 +101,14 @@ class Mixer2RMSNormGated(CustomOp):
         #   3. The general case can be pretty complicated so we AllGather
         #      the input and then redundantly compute the RMSNorm.
         input_dtype = x.dtype
-        x = x * nn.functional.silu(gate.to(torch.float32))
+        if self.activation == "silu":
+            x = x * nn.functional.silu(gate.to(torch.float32))
+        elif self.activation == "sigmoid":
+            x = x * torch.sigmoid(gate.to(torch.float32))
+        else:
+            raise NotImplementedError(
+                f"Unsupported activation: {self.activation}")
+
         if not self.use_rms_norm:
             return x.to(input_dtype)
 
@@ -142,10 +151,21 @@ class Mixer2RMSNormGated(CustomOp):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         input_dtype = x.dtype
         if not self.use_rms_norm:
-            # Keep gate in float32 for numerical stability during silu
-            return x * nn.functional.silu(gate.to(torch.float32)).to(input_dtype)
+            # Keep gate in float32 for numerical stability during activation
+            if self.activation == "silu":
+                gate_act = nn.functional.silu(gate.to(torch.float32))
+            elif self.activation == "sigmoid":
+                gate_act = torch.sigmoid(gate.to(torch.float32))
+            else:
+                raise NotImplementedError(
+                    f"Unsupported activation: {self.activation}")
+            return x * gate_act.to(input_dtype)
 
         if ((self.n_groups % self.tp_size) != 0) or self.n_groups != 1:
+            return self.forward_native(x, gate)
+
+        if self.activation != "silu":
+            # Currently Triton kernel only supports silu
             return self.forward_native(x, gate)
 
         return rms_norm_gated(
@@ -463,7 +483,11 @@ class MambaMixer2(MambaBase, PluggableLayer):
         )
 
         self.norm = Mixer2RMSNormGated(
-            intermediate_size, n_groups, self.use_rms_norm, eps=rms_norm_eps
+            intermediate_size,
+            n_groups,
+            self.use_rms_norm,
+            eps=rms_norm_eps,
+            activation=self.activation,
         )
 
         # - get hidden_states, B and C after depthwise convolution.

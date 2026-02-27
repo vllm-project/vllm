@@ -460,6 +460,7 @@ class Qwen3NextGatedDeltaNet(nn.Module, MambaBase):
             eps=self.layer_norm_epsilon,
             group_size=None,
             norm_before_gate=True,
+            activation=self.activation,
             device=current_platform.current_device(),
             dtype=config.dtype,
         )
