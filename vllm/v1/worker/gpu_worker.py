@@ -760,7 +760,9 @@ class Worker(WorkerBase):
                     logger.debug("Starting CUDA profiler")
                 else:
                     # Config validation should prevent this code being reached
-                    raise ValueError(f"Invalid value of {self.profiler_config.profiler=}")
+                    raise ValueError(
+                        f"Invalid profiler value of {self.profiler_config.profiler}"
+                    )
 
             # If profiler already initialized, restart profiling but keep
             # the original trace name from the first initialization.
