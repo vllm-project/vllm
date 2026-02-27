@@ -497,11 +497,7 @@ class SpecDecodeBaseProposer:
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-<<<<<<< HEAD
             draft_token_ids = self.model.sample_chain(sample_hidden_states)
-=======
-            draft_token_ids = self._greedy_sample(sample_hidden_states)
->>>>>>> 2decec9856033347f3129f1d1b2ec015e1ad88ea
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.uses_mrope:
@@ -519,11 +515,7 @@ class SpecDecodeBaseProposer:
             hidden_states = hidden_states[token_indices_to_sample]
 
         if isinstance(attn_metadata, TreeAttentionMetadata):
-<<<<<<< HEAD
-            # Draft using tree attention.
-=======
             # Draft using tree attention - requires full logits for top-k
->>>>>>> 2decec9856033347f3129f1d1b2ec015e1ad88ea
             logits = self.model.compute_logits(sample_hidden_states)
             draft_token_ids_list = self.propose_tree(
                 batch_size=batch_size,
@@ -536,11 +528,7 @@ class SpecDecodeBaseProposer:
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
-<<<<<<< HEAD
-        draft_token_ids = self.model.sample_chain(sample_hidden_states)
-=======
         draft_token_ids = self._greedy_sample(sample_hidden_states)
->>>>>>> 2decec9856033347f3129f1d1b2ec015e1ad88ea
 
         if self.allowed_attn_types is not None and not isinstance(
             attn_metadata, self.allowed_attn_types
@@ -705,11 +693,7 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-<<<<<<< HEAD
-            draft_token_ids = self.model.sample_chain(last_hidden_states[:batch_size])
-=======
             draft_token_ids = self._greedy_sample(last_hidden_states[:batch_size])
->>>>>>> 2decec9856033347f3129f1d1b2ec015e1ad88ea
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
