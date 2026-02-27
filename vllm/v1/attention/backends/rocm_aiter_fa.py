@@ -769,7 +769,10 @@ class AiterFlashAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major == 9
+        return capability in [
+            DeviceCapability(major=9, minor=4),  # gfx942
+            DeviceCapability(major=9, minor=5),  # gfx950
+        ]
 
 
 class AiterFlashAttentionImpl(AttentionImpl):
