@@ -761,11 +761,9 @@ class Worker(WorkerBase):
                 # This should not be none but just in case
                 assert self.profiler is not None
 
-                self.profiler.start()
-            else:
-                # Profiler already initialized. Restart profiling but keep
-                # the original trace name from the first initialization.
-                self.profiler.start()
+            # If profiler already initialized, restart profiling but keep
+            # the original trace name from the first initialization.
+            self.profiler.start()
         else:
             if self.profiler is None:
                 logger.warning("Profiler was not started, nothing to stop.")
