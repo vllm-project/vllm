@@ -10,6 +10,8 @@ import numpy as np
 import torch
 from typing_extensions import deprecated
 
+from vllm.config.cache import CacheConfig
+
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.config.cache import CacheDType
@@ -162,7 +164,9 @@ class AttentionBackend(ABC):
         return False
 
     @classmethod
-    def get_preferred_block_size(cls, default_block_size: int = 16) -> int:
+    def get_preferred_block_size(
+        cls, default_block_size: int = CacheConfig.DEFAULT_BLOCK_SIZE
+    ) -> int:
         supported_sizes = cls.get_supported_kernel_block_sizes()
         if not supported_sizes:
             return default_block_size

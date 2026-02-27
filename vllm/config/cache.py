@@ -3,7 +3,7 @@
 
 import math
 from dataclasses import field
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
 from pydantic import Field, SkipValidation, field_validator
 
@@ -37,6 +37,8 @@ KVOffloadingBackend = Literal["native", "lmcache"]
 @config
 class CacheConfig:
     """Configuration for the KV cache."""
+
+    DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
     block_size: SkipValidation[int] = None  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.

@@ -31,6 +31,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     update_config,
 )
+from vllm.config.cache import CacheConfig
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -552,7 +553,9 @@ class GPUModelRunner(
         custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (
             tuple(logits_processors) if logits_processors is not None else ()
         )
-        placeholder_block_size = self.cache_config.block_size or 16
+        placeholder_block_size = (
+            self.cache_config.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
+        )
         self._init_block_sizes = [placeholder_block_size]
         self._init_kernel_block_sizes = [placeholder_block_size]
         self.input_batch = InputBatch(

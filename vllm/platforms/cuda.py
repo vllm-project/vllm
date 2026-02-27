@@ -14,6 +14,7 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C  # noqa
+from vllm.config.cache import CacheConfig
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
 from vllm.utils.torch_utils import cuda_device_count_stateless
@@ -185,7 +186,7 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
-        default_block_size = 16
+        default_block_size = CacheConfig.DEFAULT_BLOCK_SIZE
 
         cache_config = vllm_config.cache_config
         if cache_config.block_size is not None:
