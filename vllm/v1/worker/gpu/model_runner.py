@@ -38,6 +38,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -153,6 +154,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         else:
             self.is_first_pp_rank = True
             self.is_last_pp_rank = True
+        if self.use_pp and self.compilation_config.pass_config.enable_sp:
+            # TODO(yewentao256): support SP with PP
+            raise AssertionError(
+                "Sequence parallelism with pipeline parallelism is not "
+                "supported in V2 model runner yet."
+            )
 
         # Decode context parallelism.
         self.dcp_size = self.parallel_config.decode_context_parallel_size
@@ -423,7 +430,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.encoder_runner.reset_encoder_cache()
 
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
-        # SP is not supported yet.
+        # pad tokens to a multiple of TP size when SP is enabled
+        tp_size = self.parallel_config.tensor_parallel_size
+        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
+            return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
     @torch.inference_mode()
@@ -836,11 +846,44 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_query_len=max(scheduler_output.num_scheduled_tokens.values()),
             )
         )
+        if (
+            self.compilation_config.pass_config.enable_sp
+            and local_cudagraph_mode == CUDAGraphMode.FULL
+        ):
+            # TODO(yewentao256): fix me
+            logger.warning_once(
+                "Downgrading CUDA graph runtime from FULL to PIECEWISE in "
+                "V2 model runner when sequence parallelism is enabled.",
+                scope="local",
+            )
+            local_cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+        # apply SP padding before DP synchronization so all ranks coordinate
+        # on token counts that match runtime SP expectations.
+        num_input_tokens = self._get_num_input_tokens(
+            scheduler_output.total_num_scheduled_tokens
+        )
+        if local_cudagraph_size is not None:
+            local_cudagraph_size = self._get_num_input_tokens(local_cudagraph_size)
+        if self.compilation_config.pass_config.enable_sp:
+            # validate SP/TP alignment before DP sync.
+            tp_size = self.parallel_config.tensor_parallel_size
+            if tp_size > 1:
+                assert num_input_tokens % tp_size == 0, (
+                    f"num_input_tokens ({num_input_tokens}) must be a multiple "
+                    f"of tensor parallel size ({tp_size}) when SP is enabled."
+                )
+                if local_cudagraph_size is not None:
+                    assert local_cudagraph_size % tp_size == 0, (
+                        f"local_cudagraph_size ({local_cudagraph_size}) must be "
+                        f"a multiple of tensor parallel size ({tp_size}) when SP "
+                        "is enabled."
+                    )
 
         # DP sync: num_tokens + cudagraph_size + cudagraph_mode
         num_tokens_after_padding, num_tokens_across_dp, synced_cudagraph_mode = (
             get_cudagraph_and_dp_padding(
-                scheduler_output.total_num_scheduled_tokens,
+                num_input_tokens,
                 local_cudagraph_size,
                 local_cudagraph_mode.value,
                 self.parallel_config.data_parallel_size,
