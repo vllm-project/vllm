@@ -1,4 +1,6 @@
 model_name: "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8"
+env_vars:
+  VLLM_USE_NCCL_SYMM_MEM: "1"
 tasks:
   - name: "mmlu_pro"
     metrics:

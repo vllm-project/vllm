@@ -95,6 +95,7 @@ steps:
   - pytest -v -s distributed/test_pynccl.py
   - pytest -v -s distributed/test_events.py
   - pytest -v -s distributed/test_symm_mem_allreduce.py
+  - pytest -v -s distributed/test_allreduce_thresholds.py
   # TODO: create a dedicated test section for multi-GPU example tests
   # when we have multiple distributed example tests
   # OLD rlhf examples
@@ -145,6 +146,8 @@ steps:
   num_devices: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/distributed/test_symm_mem_allreduce.py
+    - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - VLLM_ALLOW_INSECURE_SERIALIZATION=1 python3 examples/offline_inference/new_weight_syncing/rlhf_async_new_apis.py
     - VLLM_USE_DEEP_GEMM=1 VLLM_LOGGING_LEVEL=DEBUG python3 examples/offline_inference/data_parallel.py --model=Qwen/Qwen1.5-MoE-A2.7B -tp=1 -dp=2 --max-model-len=2048 --all2all-backend=deepep_high_throughput
     - pytest -v -s tests/v1/distributed/test_dbo.py
@@ -156,6 +159,7 @@ steps:
   num_devices: 2
   commands:
     - pytest -v -s tests/distributed/test_context_parallel.py
+    - pytest -v -s tests/distributed/test_symm_mem_allreduce.py
     - pytest -v -s tests/distributed/test_nccl_symm_mem_allreduce.py
     - pytest -v -s tests/v1/distributed/test_dbo.py
 
