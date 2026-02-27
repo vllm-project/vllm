@@ -809,13 +809,16 @@ class EngineCoreProc(EngineCore):
 
             self._init_data_parallel(vllm_config)
 
-            super().__init__(
-                vllm_config,
-                executor_class,
-                log_stats,
-                executor_fail_callback,
-                internal_dp_balancing,
-            )
+            from vllm.config import set_current_vllm_config
+
+            with set_current_vllm_config(vllm_config):
+                super().__init__(
+                    vllm_config,
+                    executor_class,
+                    log_stats,
+                    executor_fail_callback,
+                    internal_dp_balancing,
+                )
 
             # Background Threads and Queues for IO. These enable us to
             # overlap ZMQ socket IO with GPU since they release the GIL,
