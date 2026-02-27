@@ -73,6 +73,9 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_start: int
     token_end: int
     num_reqs: int
+    # CPU tensors for per-request boundaries (avoids GPU sync in inner loop)
+    cu_seq_lens_cpu: torch.Tensor  # [num_reqs+1] cumulative KV lengths
+    cu_query_lens_cpu: torch.Tensor  # [num_reqs+1] cumulative query lengths
 
 
 @dataclass
@@ -250,16 +253,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             seq_idx, seq_lens_cpu[reqs_start:reqs_end]
         ).to(self.device)
         assert total_seq_lens <= self.max_prefill_buffer_size
-        cu_seq_lens = (
-            torch.cat(
-                [
-                    torch.zeros(1, dtype=torch.int32),
-                    seq_lens_cpu[reqs_start:reqs_end].cumsum(dim=0),
-                ]
-            )
-            .to(torch.int32)
-            .to(self.device)
-        )
+        cu_seq_lens_cpu = torch.cat(
+            [
+                torch.zeros(1, dtype=torch.int32),
+                seq_lens_cpu[reqs_start:reqs_end].cumsum(dim=0),
+            ]
+        ).to(torch.int32)
+        cu_seq_lens = cu_seq_lens_cpu.to(self.device)
+        cu_query_lens_cpu = prefill_query_start_loc.to(torch.int32)
         return DeepseekV32IndexerPrefillChunkMetadata(
             cu_seqlen_ks=cu_seqlen_ks,
             cu_seqlen_ke=cu_seqlen_ke,
@@ -270,6 +271,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             token_start=token_start,
             token_end=token_end,
             num_reqs=reqs_end - reqs_start,
+            cu_seq_lens_cpu=cu_seq_lens_cpu,
+            cu_query_lens_cpu=cu_query_lens_cpu,
         )
 
     def build(
