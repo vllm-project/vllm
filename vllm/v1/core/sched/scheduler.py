@@ -541,7 +541,12 @@ class Scheduler(SchedulerInterface):
             while self.waiting and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
                     break
-
+                if len(scheduled_resumed_reqs) + len(scheduled_new_reqs) >= max(
+                    1,
+                    self.max_num_running_reqs
+                    // self.parallel_config.pipeline_parallel_size,
+                ):
+                    break
                 request = self.waiting.peek_request()
                 request_id = request.request_id
 
