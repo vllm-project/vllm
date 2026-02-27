@@ -18,6 +18,7 @@ from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.lora.ops.triton_ops import fused_moe_lora
+from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.torch_utils import set_random_seed
 
@@ -244,8 +245,9 @@ def use_torch(
     return torch.stack(outputs, dim=0)
 
 
+DEVICE_TYPE = current_platform.device_type
 DTYPES = [torch.float16, torch.bfloat16]
-DEVICES = [f"cuda:{0}"]
+DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [42]
 
 
