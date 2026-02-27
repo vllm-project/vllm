@@ -69,8 +69,6 @@ class Executor(ABC):
 
             executor_class = UniProcExecutor
         elif distributed_executor_backend == "external_launcher":
-            # TODO: make v1 scheduling deterministic
-            # to support external launcher
             executor_class = ExecutorWithExternalLauncher
         elif isinstance(distributed_executor_backend, str):
             executor_class = resolve_obj_by_qualname(distributed_executor_backend)

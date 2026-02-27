@@ -200,14 +200,11 @@ class ParallelConfig:
     distributed_executor_backend: (
         str | DistributedExecutorBackend | type[Executor] | None
     ) = None
-    """Backend to use for distributed model workers, either "ray" or "mp"
-    (multiprocessing). If the product of pipeline_parallel_size and tensor_parallel_size
-    is less than or equal to the number of GPUs available, "mp" will be used to
-    keep processing on a single host. Otherwise, an error will be raised. To use "mp"
-    you must also set nnodes, and to use "ray" you must manually set
-    distributed_executor_backend to "ray".
+    """Backend to use for distributed model workers, either "uni", "ray" or "mp"
+    (multiprocessing), defaults to "mp". "uni" may be used for single-GPU deployment,
+    i.e. when the world size (pipeline parallel size * tensor parallel size) is 1.
 
-    Note that tpu only support Ray for distributed inference."""
+    Note that tpu only supports Ray for distributed inference."""
 
     worker_cls: str = "auto"
     """The full name of the worker class to use. If "auto", the worker class
@@ -602,63 +599,59 @@ class ParallelConfig:
             os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
             logger.info("Disabling V1 multiprocessing for external launcher.")
 
-        if self.distributed_executor_backend is None and self.world_size > 1:
-            # We use multiprocessing by default if world_size fits on the
-            # current node and we aren't in a ray placement group.
-
-            from vllm.v1.executor import ray_utils
-
+        if self.distributed_executor_backend is None:
             backend: DistributedExecutorBackend = "mp"
-            ray_found = ray_utils.ray_is_available()
-            if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
-                backend = "uni"
-            elif current_platform.is_cuda() and self.nnodes > 1:
-                backend = "mp"
-            elif (
-                current_platform.is_cuda()
-                and cuda_device_count_stateless() < self.world_size
-            ):
-                gpu_count = cuda_device_count_stateless()
-                raise ValueError(
-                    f"World size ({self.world_size}) is larger than the number of "
-                    f"available GPUs ({gpu_count}) in this node. If this is "
-                    "intentional and you are using:\n"
-                    "- ray, set '--distributed-executor-backend ray'.\n"
-                    "- multiprocessing, set '--nnodes' appropriately."
-                )
-            elif self.data_parallel_backend == "ray":
-                logger.info(
-                    "Using ray distributed inference because "
-                    "data_parallel_backend is ray"
-                )
-                backend = "ray"
-            elif ray_found:
-                if self.placement_group:
+            if self.world_size > 1:
+                # We use multiprocessing by default if world_size fits on the
+                # current node and we aren't in a ray placement group.
+                if current_platform.is_tpu() and envs.VLLM_XLA_USE_SPMD:
+                    backend = "uni"
+                elif current_platform.is_cuda_alike() and self.nnodes > 1:
+                    backend = "mp"
+                elif (
+                    current_platform.is_cuda_alike()
+                    and cuda_device_count_stateless() < self.world_size
+                ):
+                    gpu_count = cuda_device_count_stateless()
+                    raise ValueError(
+                        f"World size ({self.world_size}) is larger than the number of "
+                        f"available GPUs ({gpu_count}) in this node. If this is "
+                        "intentional and you are using:\n"
+                        "- ray, set '--distributed-executor-backend ray'.\n"
+                        "- multiprocessing, set '--nnodes' appropriately."
+                    )
+                elif self.data_parallel_backend == "ray":
+                    logger.info(
+                        "Using ray distributed inference because "
+                        "data_parallel_backend is ray"
+                    )
                     backend = "ray"
                 else:
-                    from ray import is_initialized as ray_is_initialized
+                    from vllm.v1.executor import ray_utils
 
-                    if ray_is_initialized():
-                        from ray.util import get_current_placement_group
-
-                        if get_current_placement_group():
+                    if ray_utils.ray_is_available():
+                        if self.placement_group:
                             backend = "ray"
-            self.distributed_executor_backend = backend
-            logger.debug("Defaulting to use %s for distributed inference", backend)
+                        else:
+                            from ray import is_initialized as ray_is_initialized
 
-        if self.distributed_executor_backend is None and self.world_size == 1:
-            self.distributed_executor_backend = "uni"
+                            if ray_is_initialized():
+                                from ray.util import get_current_placement_group
+
+                                if get_current_placement_group():
+                                    backend = "ray"
+            self.distributed_executor_backend = backend
+            logger.debug(
+                "Defaulting to use %s for distributed executor backend", backend
+            )
 
         if self.max_parallel_loading_workers is not None:
             logger.warning(
                 "max_parallel_loading_workers is currently "
                 "not supported and will be ignored."
             )
-        allowed_backends = ("mp", "uni", "external_launcher")
-        if (
-            self.distributed_executor_backend not in allowed_backends
-            and self.nnodes > 1
-        ):
+        backend = self.distributed_executor_backend
+        if self.nnodes > 1 and backend not in ("mp", "uni", "external_launcher"):
             raise ValueError(
                 "nnodes > 1 can only be set when distributed executor "
                 "backend is mp, uni or external_launcher."
