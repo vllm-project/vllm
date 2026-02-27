@@ -33,3 +33,52 @@ different tokens being sampled. Once a different token is sampled, further diver
 - For improved stability and reduced variance, use `float32`. Note that this will require more memory.
 - If using `bfloat16`, switching to `float16` can also help.
 - Using request seeds can aid in achieving more stable generation for temperature > 0, but discrepancies due to precision differences may still occur.
+
+---
+
+> Q: How do you load weights from CPU?
+
+A: vLLM supports loading model weights from CPU using the `pt_load_map_location` parameter. This parameter controls where PyTorch checkpoints are loaded to and is especially useful when:
+
+- You have model weights stored on CPU and want to load them directly
+- You need to manage memory usage by loading weights to CPU first
+- You want to load from specific device mappings
+
+## Usage Examples
+
+### Command Line Interface
+
+```bash
+# Load weights from CPU
+vllm serve meta-llama/Llama-2-7b-hf --pt-load-map-location cpu
+
+# Load from specific device mapping (e.g., CUDA device 1 to device 0)
+vllm serve meta-llama/Llama-2-7b-hf --pt-load-map-location '{"cuda:1": "cuda:0"}'
+```
+
+### Python API
+
+```python
+from vllm import LLM
+
+# Load weights from CPU
+llm = LLM(
+    model="meta-llama/Llama-2-7b-hf",
+    pt_load_map_location="cpu"
+)
+
+# Load with device mapping
+llm = LLM(
+    model="meta-llama/Llama-2-7b-hf", 
+    pt_load_map_location={"cuda:1": "cuda:0"}
+)
+```
+
+The `pt_load_map_location` parameter accepts the same values as PyTorch's [`torch.load(map_location=...)`](https://pytorch.org/docs/stable/generated/torch.load.html) parameter:
+
+- `"cpu"` - Load all weights to CPU
+- `"cuda"` - Load all weights to CUDA (equivalent to `{"": "cuda"}`)
+- `{"cuda:1": "cuda:0"}` - Map weights from CUDA device 1 to device 0
+- Custom device mappings as needed
+
+Note: This parameter defaults to `"cpu"` and primarily affects PyTorch `.pt`/`.bin` checkpoint files. For optimal performance on GPU inference, weights will be moved to the target device after loading.
