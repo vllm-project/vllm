@@ -20,20 +20,7 @@
 //
 // However, it may be possible to fix these kernels to handle both issues.
 
-#if defined(__HIPCC__) && \
-    (defined(__gfx90a__) || defined(__gfx942__) || defined(__gfx950__))
-  #define __HIP__GFX9__
-#endif
-
-#if defined(__HIPCC__) && (defined(__gfx942__) || defined(__gfx950__))
-  #define __HIP__MI3XX__
-#endif
-
-#if defined(__gfx950__)
-  #define LDS_SIZE 160 * 1024
-#else
-  #define LDS_SIZE 64 * 1024
-#endif
+#include "rocm_arch.h"
 
 int get_lds_size() {
   static bool is_cached = false;
@@ -136,6 +123,32 @@ __device__ __forceinline__ float4 load_ntmprl(const float4* addr) {
   auto dat2 = loadnt(addr_alias + 2);
   auto dat3 = loadnt(addr_alias + 3);
   return make_float4(dat0, dat1, dat2, dat3);
+}
+
+using floatx4 = __attribute__((__vector_size__(4 * sizeof(float)))) float;
+
+using bit16_t = uint16_t;
+using bit16x2 = __attribute__((__vector_size__(2 * sizeof(uint16_t)))) uint16_t;
+using bit16x4 = __attribute__((__vector_size__(4 * sizeof(uint16_t)))) uint16_t;
+typedef bit16x4 _B16x4;
+typedef struct _B16x8 {
+  _B16x4 xy[2];
+} _B16x8;
+
+template <int absz, int cbid, int blgp>
+__device__ __forceinline__ floatx4 gcn_mfma4x4x4bf16_instr(
+    const _B16x4& inpA, const _B16x4& inpB, const floatx4& inpC) {
+#if __HIP__GFX9__CNDA__ < 2
+  return __builtin_amdgcn_mfma_f32_4x4x2bf16(
+      (bit16x2){inpA[0], inpA[1]}, (bit16x2){inpB[0], inpB[1]},
+      __builtin_amdgcn_mfma_f32_4x4x2bf16((bit16x2){inpA[2], inpA[3]},
+                                          (bit16x2){inpB[2], inpB[3]}, inpC,
+                                          absz, cbid, blgp),
+      absz, cbid, blgp);
+#else
+  return __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(inpA, inpB, inpC, absz, cbid,
+                                                blgp);
+#endif
 }
 
 // TBlock fetches entire rows of A, and entire col of B (K dimension); assume
@@ -309,7 +322,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                      const scalar_t* __restrict__ BIAS, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  #if defined(__HIP__MI3XX__)
+  #if defined(__HIP__GFX9__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
   #else
   constexpr bool use_mfma = false;
@@ -446,8 +459,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
         uint32_t k_ = k + threadIdx.x * A_CHUNK;
         if (k_ >= K) break;
-        // Do the matrix multiplication of activation and weight matrix
-        // - Remember the accumulation is happening for K-split of 64!
+          // Do the matrix multiplication of activation and weight matrix
+          // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
         for (uint32_t n = 0; n < N; n++) {
   #pragma unroll
@@ -457,11 +470,13 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
               for (uint32_t b = 0; b < A_CHUNK / 2; b++) {
                 DOT2C(sum[n][y], bigA[n][k2].f[b], bigB[y][k2].f[b])
               }
-            else
+            else {
   #pragma unroll
-              for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
-                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+              for (uint32_t b = 0; b < A_CHUNK / 4; b++) {
+                sum4[n][y] = gcn_mfma4x4x4bf16_instr<0, 0, 0>(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y]);
+              }
+            }
           }
         }
       }
@@ -582,7 +597,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                  const scalar_t* __restrict__ BIAS, scalar_t* C,
                  const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  #if defined(__HIP__MI3XX__)
+  #if defined(__HIP__GFX9__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
   #else
   constexpr bool use_mfma = false;
@@ -748,8 +763,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
           uint32_t k = k1 + k2 * THRDS * A_CHUNK;
           uint32_t k_ = k + threadIdx.x * A_CHUNK;
           if (k_ >= K) break;
-          // Do the matrix multiplication of activation and weight matrix
-          // - Remember the accumulation is happening for K-split of 64!
+            // Do the matrix multiplication of activation and weight matrix
+            // - Remember the accumulation is happening for K-split of 64!
   #pragma unroll
           for (int y = 0; y < YTILE; y++) {
             if constexpr (!use_mfma)
@@ -760,8 +775,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             else
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
-                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+                sum4[n][y] = gcn_mfma4x4x4bf16_instr<0, 0, 0>(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y]);
           }
         }
       }
@@ -899,7 +914,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
                      const scalar_t* __restrict__ BIAS, scalar_t* C,
                      const int _WvPrGrp, const int CuCount) {
   constexpr int max_lds_len = LDS_SIZE / 2;
-  #if defined(__HIP__MI3XX__)
+  #if defined(__HIP__GFX9__)
   constexpr bool use_mfma = (std::is_same_v<scalar_t, __hip_bfloat16>);
   #else
   constexpr bool use_mfma = false;
@@ -1067,7 +1082,7 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
       if (m >= M) continue;
   #endif
 
-      // Fetch the weight matrix from memory!
+        // Fetch the weight matrix from memory!
   #pragma unroll
       for (uint32_t k2 = 0; k2 < UNRL; k2++) {
         uint32_t k = k1 + k2 * THRDS * A_CHUNK;
@@ -1120,8 +1135,8 @@ __global__ void __launch_bounds__(WvPrGrp* THRDS)
             else
   #pragma unroll
               for (uint32_t b = 0; b < A_CHUNK / 4; b++)
-                sum4[n][y] = __builtin_amdgcn_mfma_f32_4x4x4bf16_1k(
-                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y], 0, 0, 0);
+                sum4[n][y] = gcn_mfma4x4x4bf16_instr<0, 0, 0>(
+                    bigA[n][k2].h4[b], bigB[y][k2].h4[b], sum4[n][y]);
           }
         }
       }
