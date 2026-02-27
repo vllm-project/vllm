@@ -48,12 +48,15 @@ from vllm.config import (
     ModelConfig,
     MultiModalConfig,
     ObservabilityConfig,
+    OffloadConfig,
     ParallelConfig,
     PoolerConfig,
+    PrefetchOffloadConfig,
     ProfilerConfig,
     SchedulerConfig,
     SpeculativeConfig,
     StructuredOutputsConfig,
+    UVAOffloadConfig,
     VllmConfig,
     WeightTransferConfig,
     get_attr_docs,
@@ -67,6 +70,7 @@ from vllm.config.cache import (
     PrefixCachingHashAlgo,
 )
 from vllm.config.device import Device
+from vllm.config.kernel import MoEBackend
 from vllm.config.lora import MaxLoRARanks
 from vllm.config.model import (
     ConvertOption,
@@ -86,7 +90,7 @@ from vllm.config.parallel import (
 )
 from vllm.config.scheduler import SchedulerPolicy
 from vllm.config.utils import get_field
-from vllm.config.vllm import OptimizationLevel
+from vllm.config.vllm import OptimizationLevel, PerformanceMode
 from vllm.logger import init_logger, suppress_logging
 from vllm.platforms import CpuArchEnum, current_platform
 from vllm.plugins import load_general_plugins
@@ -420,6 +424,7 @@ class EngineArgs:
     data_parallel_external_lb: bool = False
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    moe_backend: MoEBackend = KernelConfig.moe_backend
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_dbo: bool = ParallelConfig.enable_dbo
     ubatch_size: int = ParallelConfig.ubatch_size
@@ -446,8 +451,13 @@ class EngineArgs:
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     swap_space: float = CacheConfig.swap_space
-    cpu_offload_gb: float = CacheConfig.cpu_offload_gb
-    cpu_offload_params: set[str] = get_field(CacheConfig, "cpu_offload_params")
+    offload_backend: str = OffloadConfig.offload_backend
+    cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
+    cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
+    offload_group_size: int = PrefetchOffloadConfig.offload_group_size
+    offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
+    offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
+    offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
     max_num_batched_tokens: int | None = None
@@ -595,6 +605,7 @@ class EngineArgs:
 
     kv_sharing_fast_prefill: bool = CacheConfig.kv_sharing_fast_prefill
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
+    performance_mode: PerformanceMode = VllmConfig.performance_mode
 
     kv_offloading_size: float | None = CacheConfig.kv_offloading_size
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
@@ -955,10 +966,6 @@ class EngineArgs:
         cache_group.add_argument(
             "--prefix-caching-hash-algo", **cache_kwargs["prefix_caching_hash_algo"]
         )
-        cache_group.add_argument("--cpu-offload-gb", **cache_kwargs["cpu_offload_gb"])
-        cache_group.add_argument(
-            "--cpu-offload-params", **cache_kwargs["cpu_offload_params"]
-        )
         cache_group.add_argument(
             "--calculate-kv-scales", **cache_kwargs["calculate_kv_scales"]
         )
@@ -982,6 +989,37 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
+        )
+
+        # Model weight offload related configs
+        offload_kwargs = get_kwargs(OffloadConfig)
+        uva_kwargs = get_kwargs(UVAOffloadConfig)
+        prefetch_kwargs = get_kwargs(PrefetchOffloadConfig)
+        offload_group = parser.add_argument_group(
+            title="OffloadConfig",
+            description=OffloadConfig.__doc__,
+        )
+        offload_group.add_argument(
+            "--offload-backend", **offload_kwargs["offload_backend"]
+        )
+        offload_group.add_argument("--cpu-offload-gb", **uva_kwargs["cpu_offload_gb"])
+        offload_group.add_argument(
+            "--cpu-offload-params", **uva_kwargs["cpu_offload_params"]
+        )
+        offload_group.add_argument(
+            "--offload-group-size",
+            **prefetch_kwargs["offload_group_size"],
+        )
+        offload_group.add_argument(
+            "--offload-num-in-group",
+            **prefetch_kwargs["offload_num_in_group"],
+        )
+        offload_group.add_argument(
+            "--offload-prefetch-step",
+            **prefetch_kwargs["offload_prefetch_step"],
+        )
+        offload_group.add_argument(
+            "--offload-params", **prefetch_kwargs["offload_params"]
         )
 
         # Multimodal related configs
@@ -1198,6 +1236,9 @@ class EngineArgs:
             "--enable-flashinfer-autotune",
             **kernel_kwargs["enable_flashinfer_autotune"],
         )
+        moe_backend_kwargs = kernel_kwargs["moe_backend"]
+        moe_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
+        kernel_group.add_argument("--moe-backend", **moe_backend_kwargs)
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -1236,6 +1277,7 @@ class EngineArgs:
         vllm_group.add_argument(
             "--optimization-level", **vllm_kwargs["optimization_level"]
         )
+        vllm_group.add_argument("--performance-mode", **vllm_kwargs["performance_mode"])
         vllm_group.add_argument(
             "--weight-transfer-config", **vllm_kwargs["weight_transfer_config"]
         )
@@ -1473,8 +1515,6 @@ class EngineArgs:
             sliding_window=sliding_window,
             enable_prefix_caching=self.enable_prefix_caching,
             prefix_caching_hash_algo=self.prefix_caching_hash_algo,
-            cpu_offload_gb=self.cpu_offload_gb,
-            cpu_offload_params=self.cpu_offload_params,
             calculate_kv_scales=self.calculate_kv_scales,
             kv_sharing_fast_prefill=self.kv_sharing_fast_prefill,
             mamba_cache_dtype=self.mamba_cache_dtype,
@@ -1789,6 +1829,8 @@ class EngineArgs:
                     "are mutually exclusive"
                 )
             kernel_config.enable_flashinfer_autotune = self.enable_flashinfer_autotune
+        if self.moe_backend != "auto":
+            kernel_config.moe_backend = self.moe_backend
 
         load_config = self.create_load_config()
 
@@ -1832,6 +1874,21 @@ class EngineArgs:
             compilation_config.max_cudagraph_capture_size = (
                 self.max_cudagraph_capture_size
             )
+
+        offload_config = OffloadConfig(
+            offload_backend=self.offload_backend,
+            uva=UVAOffloadConfig(
+                cpu_offload_gb=self.cpu_offload_gb,
+                cpu_offload_params=self.cpu_offload_params,
+            ),
+            prefetch=PrefetchOffloadConfig(
+                offload_group_size=self.offload_group_size,
+                offload_num_in_group=self.offload_num_in_group,
+                offload_prefetch_step=self.offload_prefetch_step,
+                offload_params=self.offload_params,
+            ),
+        )
+
         config = VllmConfig(
             model_config=model_config,
             cache_config=cache_config,
@@ -1839,6 +1896,7 @@ class EngineArgs:
             scheduler_config=scheduler_config,
             device_config=device_config,
             load_config=load_config,
+            offload_config=offload_config,
             attention_config=attention_config,
             kernel_config=kernel_config,
             lora_config=lora_config,
@@ -1852,6 +1910,7 @@ class EngineArgs:
             profiler_config=self.profiler_config,
             additional_config=self.additional_config,
             optimization_level=self.optimization_level,
+            performance_mode=self.performance_mode,
             weight_transfer_config=self.weight_transfer_config,
         )
 
@@ -2024,20 +2083,19 @@ class EngineArgs:
             )
 
         # Disable chunked prefill and prefix caching for:
-        # POWER (ppc64le)/RISCV CPUs in V1
+        # RISCV CPUs in V1
         if current_platform.is_cpu() and current_platform.get_cpu_architecture() in (
-            CpuArchEnum.POWERPC,
             CpuArchEnum.RISCV,
         ):
             logger.info(
-                "Chunked prefill is not supported for POWER, "
-                "and RISC-V CPUs; "
+                "Chunked prefill is not supported for"
+                "RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_chunked_prefill = False
             logger.info(
-                "Prefix caching is not supported for POWER, "
-                "and RISC-V CPUs; "
+                "Prefix caching is not supported for "
+                "RISC-V CPUs; "
                 "disabling it for V1 backend."
             )
             self.enable_prefix_caching = False
@@ -2067,6 +2125,13 @@ class EngineArgs:
                 usage_context,
                 SchedulerConfig.DEFAULT_MAX_NUM_SEQS,
             )
+
+        # If throughput mode is set, double max_num_batched_tokens and max_num_seqs.
+        if self.performance_mode == "throughput":
+            if orig_max_num_batched_tokens is None:
+                self.max_num_batched_tokens *= 2
+            if orig_max_num_seqs is None:
+                self.max_num_seqs *= 2
 
         if orig_max_num_batched_tokens is None:
             assert model_config.max_model_len is not None, (
