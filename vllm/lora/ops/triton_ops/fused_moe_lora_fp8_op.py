@@ -10,6 +10,7 @@ from vllm.distributed import (
     tensor_model_parallel_all_gather,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -74,6 +75,7 @@ def _get_token_offs(
 
 
 _LORA_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
+_LORA_SCALE_PTR_DICT: dict[tuple[int, ...], torch.tensor] = {}
 
 
 def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
@@ -95,6 +97,23 @@ def _get_ptr(lora_weights: list[torch.Tensor], device: torch.device):
 
     _LORA_PTR_DICT[key] = ptr_tensor
     return _LORA_PTR_DICT.get(key)
+
+
+def _get_scale_ptr(lora_scales: list[torch.Tensor], device: torch.device):
+    """
+    Separate pointer cache for scale tensors, kept distinct from
+    `_LORA_PTR_DICT` to avoid mixing weight and scale pointers.
+    """
+    key = tuple(s.data_ptr() for s in lora_scales)
+
+    if (ptr_tensor := _LORA_SCALE_PTR_DICT.get(key)) is not None:
+        return ptr_tensor
+
+    tensor_ptrs = [s.data_ptr() for s in lora_scales]
+    ptr_tensor = torch.tensor(tensor_ptrs, device=device, dtype=torch.uint64)
+
+    _LORA_SCALE_PTR_DICT[key] = ptr_tensor
+    return _LORA_SCALE_PTR_DICT.get(key)
 
 
 def _adjust_kernel_inputs(
@@ -295,7 +314,9 @@ def _fused_moe_lora_kernel_fp8(
         cur_a_scale_ptr = a_scale_ptr + (slice_id % num_slice_a) * slice_a_scale_size
         # block-wise scale ptrs
         if group_k > 0 and group_n > 0:
-            a_scale_ptrs = cur_a_scale_ptr + (offs_token // top_k_num) * stride_asm
+            a_scale_ptrs = (
+                cur_a_scale_ptr + (offs_token // token_mapping_factor) * stride_asm
+            )
             offs_bsn = offs_bn // group_n
             b_scale_ptrs = (
                 cur_b_scale_ptr
@@ -312,7 +333,9 @@ def _fused_moe_lora_kernel_fp8(
             )
             b_scale = tl.load(b_scale_ptrs)
             # load per-token scale for activations
-            a_scale_ptrs = cur_a_scale_ptr + (offs_token // top_k_num) * stride_asm
+            a_scale_ptrs = (
+                cur_a_scale_ptr + (offs_token // token_mapping_factor) * stride_asm
+            )
             a_scale = tl.load(a_scale_ptrs, mask=token_mask, other=0.0)[:, None]
         # tensor-wise
         else:
@@ -467,7 +490,7 @@ def _fused_moe_lora_shrink_fp8(
         block_size_k = min(block_size_k, min(block_shape[0], block_shape[1]))
 
     if lora_a_scale_stacked is not None:
-        b_scale_ptr = _get_ptr(lora_a_scale_stacked, device)
+        b_scale_ptr = _get_scale_ptr(lora_a_scale_stacked, device)
         w1_lora_a_scale_stacked = lora_a_scale_stacked[0]
 
     w1_lora_a_stacked = lora_a_stacked[0]
@@ -621,7 +644,7 @@ def _fused_moe_lora_expand_fp8(
         assert lora_b_scale_stacked is None
 
     if lora_b_scale_stacked is not None:
-        b_scale_ptr = _get_ptr(lora_b_scale_stacked, device)
+        b_scale_ptr = _get_scale_ptr(lora_b_scale_stacked, device)
         w1_lora_b_scale_stacked = lora_b_scale_stacked[0]
 
     if block_shape is not None:
@@ -792,6 +815,12 @@ def _fused_moe_lora_fp8(
         )
     assert output.shape[0] == topk_weights.shape[0]
     assert top_k_num == topk_weights.shape[1]
+    # Convert empty lists to None for internal functions
+    # (custom op schema requires List[Tensor], but internals expect None)
+    if not lora_a_scale_stacked:
+        lora_a_scale_stacked = None  # type: ignore[assignment]
+    if not lora_b_scale_stacked:
+        lora_b_scale_stacked = None  # type: ignore[assignment]
     device = qcurr_hidden_states.device
     num_slices = len(lora_a_stacked)
     w1_lora_b_stacked = lora_b_stacked[0]
@@ -865,6 +894,30 @@ def _fused_moe_lora_fp8(
 
             # reset max_lora_rank to the full rank after allgather
             max_lora_rank = a_intermediate_cache1.shape[-1]
+
+    # Dynamic quantization of intermediate cache for the expand pass.
+    # The shrink kernel outputs in output.dtype (bf16/fp16).
+    # The expand kernel needs FP8 activations to do FP8 dot with FP8 lora_b.
+    if use_fp8_w8a8:
+        orig_shape = a_intermediate_cache1.shape
+        flat_intermediate = a_intermediate_cache1.view(-1, orig_shape[-1])
+        quant_dtype = torch.float8_e4m3fn
+        # Clamp block_shape for intermediate cache: max_lora_rank may be
+        # smaller than the original block dimensions.
+        intermediate_block_shape = block_shape
+        if block_shape is not None:
+            intermediate_block_shape = [
+                min(block_shape[0], orig_shape[-1]),
+                min(block_shape[1], orig_shape[-1]),
+            ]
+        flat_intermediate, expand_act_scale = moe_kernel_quantize_input(
+            A=flat_intermediate,
+            A_scale=expand_act_scale,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_channel_quant,
+            block_shape=intermediate_block_shape,
+        )
+        a_intermediate_cache1 = flat_intermediate.view(orig_shape)
 
     _fused_moe_lora_expand_fp8(
         output,
