@@ -55,6 +55,13 @@ try:
 except ImportError:
     from argparse import ArgumentParser as FlexibleArgumentParser
 
+# Import utility functions from shared module
+from structured_output_utils import (
+    eval_json_response,
+    generate_json_prompt,
+    load_json_schema,
+)
+
 from vllm.v1.structured_output.backend_xgrammar import (
     has_xgrammar_unsupported_json_features,
 )
@@ -116,14 +123,9 @@ def sample_requests(
     tokenizer: PreTrainedTokenizerBase, args: argparse.Namespace
 ) -> list[SampleRequest]:
     if args.dataset == "json" or args.dataset == "json-unique":
-        if args.json_schema_path is None:
-            dir_path = os.path.dirname(os.path.realpath(__file__))
-            args.json_schema_path = os.path.join(
-                dir_path, "structured_schemas", "structured_schema_1.json"
-            )
+        # Use utility function for schema loading
+        schema = load_json_schema(args.json_schema_path)
         json_schemas = []
-        with open(args.json_schema_path) as f:
-            schema = json.load(f)
 
         if args.dataset == "json-unique":
             json_schemas = [copy.deepcopy(schema) for _ in range(args.num_prompts)]
@@ -138,7 +140,7 @@ def sample_requests(
             json_schemas = [schema] * args.num_prompts
 
         def gen_prompt(index: int):
-            return f"Generate an example of a brief user profile given the following schema: {json.dumps(get_schema(index))}"  # noqa: E501
+            return generate_json_prompt(get_schema(index))
 
         def get_schema(index: int):
             return json_schemas[index % len(json_schemas)]
@@ -311,7 +313,7 @@ async def get_request(
 
 def calculate_metrics(
     input_requests: list[tuple[str, int, int]],
-    outputs: list[RequestFuncOutput],
+    outputs: list["RequestFuncOutput"],
     dur_s: float,
     tokenizer: PreTrainedTokenizerBase,
     selected_percentile_metrics: list[str],
@@ -668,19 +670,6 @@ async def benchmark(
 
 
 def evaluate(ret, args):
-    def _eval_correctness_json(expected, actual):
-        # extract json string from string using regex
-        import regex as re
-
-        actual = actual.replace("\n", "").replace(" ", "").strip()
-        try:
-            actual = re.search(r"\{.*\}", actual).group()
-            actual = json.loads(actual)
-        except Exception:
-            return False
-
-        return True
-
     def _eval_correctness_choice(expected, actual):
         return actual in args.choice
 
@@ -691,7 +680,7 @@ def evaluate(ret, args):
 
     def _eval_correctness(expected, actual):
         if args.structure_type == "json":
-            return _eval_correctness_json(expected, actual)
+            return eval_json_response(actual)
         elif args.structure_type == "regex":
             return _eval_correctness_regex(expected, actual)
         elif args.structure_type == "choice":
