@@ -11,6 +11,7 @@ token, corresponding to PCIe Gen4 at ~40 GB/s for fp16 KV tokens) until at
 least 10 observations have been collected.  After that it uses a true rolling
 harmonic mean over the last *window_size* completed transfers.
 """
+
 from collections import deque
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations  # enable PEP 604 (X|Y) on Python 3.8-3.9
 import statistics
 from collections import defaultdict, deque
 from collections.abc import Iterable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import islice
 from typing import Any
 
@@ -112,9 +112,7 @@ class AdaptiveOffloadingPolicy:
             maxlen: int = self.recent_ttfts.maxlen or 200
             if len(self.recent_ttfts) >= max(maxlen // 2, 10):
                 current = statistics.median(self.recent_ttfts)
-                overhead = (
-                    (current - self.baseline_ttft) / self.baseline_ttft * 100
-                )
+                overhead = (current - self.baseline_ttft) / self.baseline_ttft * 100
                 new_paused = overhead > self.overhead_threshold_pct
                 if new_paused != self.paused:
                     logger.info(
@@ -130,7 +128,6 @@ class AdaptiveOffloadingPolicy:
     def effective_load_mode(self) -> str:
         """'blocking' during warm-up or regression; 'async_with_fallback' otherwise."""
         return "blocking" if self.paused else "async_with_fallback"
-
 
 
 @dataclass
@@ -238,7 +235,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         assert self.connector_worker is not None
         self.connector_worker.handle_preemptions(preempted_req_ids)
 
-    def start_load_kv(self, forward_context: "ForwardContext", **kwargs) -> None:
+    def start_load_kv(self, forward_context: ForwardContext, **kwargs) -> None:
         assert self.connector_worker is not None
         assert isinstance(self._connector_metadata, OffloadingConnectorMetadata)
         self.connector_worker.start_kv_transfers(self._connector_metadata)
@@ -250,7 +247,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         self,
         layer_name: str,
         kv_layer: torch.Tensor,
-        attn_metadata: "AttentionMetadata",
+        attn_metadata: AttentionMetadata,
         **kwargs,
     ) -> None:
         pass
@@ -265,7 +262,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         return self.connector_worker.get_finished(finished_req_ids)
 
     def get_num_new_matched_tokens(
-        self, request: "Request", num_computed_tokens: int
+        self, request: Request, num_computed_tokens: int
     ) -> tuple[int | None, bool]:
         assert self.connector_scheduler is not None
         return self.connector_scheduler.get_num_new_matched_tokens(
@@ -273,7 +270,7 @@ class OffloadingConnector(KVConnectorBase_V1):
         )
 
     def update_state_after_alloc(
-        self, request: "Request", blocks: "KVCacheBlocks", num_external_tokens: int
+        self, request: Request, blocks: KVCacheBlocks, num_external_tokens: int
     ):
         assert self.connector_scheduler is not None
         return self.connector_scheduler.update_state_after_alloc(
@@ -292,7 +289,7 @@ class OffloadingConnector(KVConnectorBase_V1):
 
     def request_finished(
         self,
-        request: "Request",
+        request: Request,
         block_ids: list[int],
     ) -> tuple[bool, dict[str, Any] | None]:
         assert self.connector_scheduler is not None
@@ -363,9 +360,7 @@ class OffloadingConnectorScheduler:
             overhead_threshold_pct=float(
                 spec.extra_config.get("overhead_threshold_pct", 5.0)
             ),
-            warmup_steps=int(
-                spec.extra_config.get("warmup_steps", 50)
-            ),
+            warmup_steps=int(spec.extra_config.get("warmup_steps", 50)),
             expected_baseline_ttft_ms=spec.extra_config.get(
                 "expected_baseline_ttft_ms"
             ),
@@ -851,17 +846,16 @@ class OffloadingConnectorWorker:
                     time=transfer_result.transfer_time,
                     transfer_type=transfer_result.transfer_type,
                 )
-                if not store:
+                if not store and req_id in self._pending_load_info:
                     # Feed load timing stats for the Strategy B cost model.
                     # Use the exact prefix_len (in tokens) already recorded in
                     # _pending_load_info — far more accurate than bytes // 2
                     # which ignores head_size, num_heads, num_layers etc.
-                    if req_id in self._pending_load_info:
-                        _, prefix_len = self._pending_load_info[req_id]
-                        self.timing_stats.record(
-                            tokens=prefix_len,
-                            elapsed_ms=transfer_result.transfer_time * 1e3,
-                        )
+                    _, prefix_len = self._pending_load_info[req_id]
+                    self.timing_stats.record(
+                        tokens=prefix_len,
+                        elapsed_ms=transfer_result.transfer_time * 1e3,
+                    )
             if store:
                 req_jobs = self._store_jobs[req_id]
                 req_jobs.remove(job_id)
