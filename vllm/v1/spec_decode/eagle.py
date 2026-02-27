@@ -497,7 +497,7 @@ class SpecDecodeBaseProposer:
 
         # Early exit if there is only one draft token to be generated.
         if self.num_speculative_tokens == 1 or self.parallel_drafting:
-            draft_token_ids = self.model.sample_chain(sample_hidden_states)
+            draft_token_ids = self.model.sample_chain(sample_hidden_states, use_local_argmax_reduction=self.use_local_argmax_reduction)
             return draft_token_ids.view(-1, self.num_speculative_tokens)
 
         if self.uses_mrope:
@@ -528,7 +528,7 @@ class SpecDecodeBaseProposer:
             # [batch_size, num_tree_tokens]
             return torch.cat(draft_token_ids_list, dim=1)
 
-        draft_token_ids = self._greedy_sample(sample_hidden_states)
+        draft_token_ids = self.model.sample_chain(sample_hidden_states, use_local_argmax_reduction=self.use_local_argmax_reduction)
 
         if self.allowed_attn_types is not None and not isinstance(
             attn_metadata, self.allowed_attn_types
@@ -693,7 +693,7 @@ class SpecDecodeBaseProposer:
                     last_hidden_states, hidden_states = ret_hidden_states
 
             hidden_states = hidden_states[:batch_size]
-            draft_token_ids = self._greedy_sample(last_hidden_states[:batch_size])
+            draft_token_ids = self.model.sample_chain(last_hidden_states[:batch_size], use_local_argmax_reduction=self.use_local_argmax_reduction)
             draft_token_ids_list.append(draft_token_ids)
 
         # [batch_size, num_speculative_tokens]
