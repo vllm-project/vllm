@@ -62,6 +62,7 @@ from vllm.v1.engine import (
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
+    SignalCallback,
     get_device_indices,
 )
 from vllm.v1.executor import Executor
@@ -1032,6 +1033,7 @@ class EngineCoreProc(EngineCore):
         maybe_register_config_serialize_by_value()
 
         engine_core: EngineCoreProc | None = None
+        signal_callback: SignalCallback | None = None
         try:
             vllm_config: VllmConfig = kwargs["vllm_config"]
             parallel_config: ParallelConfig = vllm_config.parallel_config
@@ -1072,10 +1074,18 @@ class EngineCoreProc(EngineCore):
 
             assert engine_core is not None
 
+            def wakeup_engine():
+                # Wakes up idle engine via input_queue when shutdown is requested
+                # Not safe in a signal handler - we may interrupt the main thread
+                # while it is holding the non-reentrant input_queue.mutex
+                engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
+
+            signal_callback = SignalCallback(wakeup_engine)
+
             def signal_handler(signum, frame):
                 engine_core.shutdown_state = EngineShutdownState.REQUESTED
+                signal_callback.trigger()
 
-            # Either SIGTERM or SIGINT will terminate the engine_core
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
@@ -1092,6 +1102,10 @@ class EngineCoreProc(EngineCore):
                 engine_core._send_engine_dead()
             raise e
         finally:
+            signal.signal(signal.SIGTERM, signal.SIG_DFL)
+            signal.signal(signal.SIGINT, signal.SIG_DFL)
+            if signal_callback is not None:
+                signal_callback.stop()
             if engine_core is not None:
                 engine_core.shutdown()
 
@@ -1105,6 +1119,10 @@ class EngineCoreProc(EngineCore):
             or self.scheduler.has_requests()
             or bool(self.batch_queue)
         )
+
+    def is_running(self) -> bool:
+        """Returns true if shutdown has not been requested."""
+        return self.shutdown_state == EngineShutdownState.RUNNING
 
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
@@ -1120,7 +1138,7 @@ class EngineCoreProc(EngineCore):
         """Exits when an engine step needs to be performed."""
 
         waited = False
-        while not self.has_work():
+        while not self.has_work() and self.is_running():
             # Notify callbacks waiting for engine to become idle.
             self._notify_idle_state_callbacks()
             if self.input_queue.empty():
@@ -1213,7 +1231,9 @@ class EngineCoreProc(EngineCore):
     ) -> None:
         """Dispatch request from client."""
 
-        if request_type == EngineCoreRequestType.ADD:
+        if request_type == EngineCoreRequestType.WAKEUP:
+            return
+        elif request_type == EngineCoreRequestType.ADD:
             req, request_wave = request
             if self._reject_add_in_shutdown(req):
                 return

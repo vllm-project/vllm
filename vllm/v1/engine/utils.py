@@ -3,8 +3,9 @@
 
 import contextlib
 import os
+import threading
 import weakref
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
@@ -167,6 +168,33 @@ class CoreEngineProcManager:
             for proc in self.processes
             if proc.exitcode is not None
         }
+
+
+class SignalCallback:
+    """Safely trigger a callback from signal handler context via a dedicated thread."""
+
+    def __init__(self, callback: Callable[[], None]):
+        self._callback = callback
+        self._event = threading.Event()
+        self._stopped = False
+        self._thread = threading.Thread(
+            target=self._run,
+            daemon=True,
+            name="signal-callback",
+        )
+        self._thread.start()
+
+    def _run(self):
+        self._event.wait()
+        if not self._stopped:
+            self._callback()
+
+    def trigger(self):
+        self._event.set()
+
+    def stop(self):
+        self._stopped = True
+        self._event.set()
 
 
 @contextlib.contextmanager
