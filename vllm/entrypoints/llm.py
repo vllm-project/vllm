@@ -1745,17 +1745,13 @@ class LLM:
         seq_prompts = prompt_to_seq(prompts)
         seq_params = self._params_to_seq(params, len(seq_prompts))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_prompts))
-        seq_tok_kwargs = [tokenization_kwargs] * len(seq_params)
         seq_priority = self._priority_to_seq(priority, len(prompts))
 
         return self._render_and_add_requests(
             prompts=(
-                self._preprocess_cmpl_one(prompt, tok_kwargs)
-                for prompt, tok_kwargs in zip(
-                    maybe_tqdm(
-                        seq_prompts, use_tqdm=use_tqdm, desc="Rendering prompts"
-                    ),
-                    seq_tok_kwargs,
+                self._preprocess_cmpl_one(prompt, tokenization_kwargs)
+                for prompt in maybe_tqdm(
+                    seq_prompts, use_tqdm=use_tqdm, desc="Rendering prompts"
                 )
             ),
             params=seq_params,
@@ -1809,7 +1805,6 @@ class LLM:
         seq_convs = conversation_to_seq(messages)
         seq_params = self._params_to_seq(params, len(seq_convs))
         seq_lora_requests = self._lora_request_to_seq(lora_request, len(seq_convs))
-        seq_tok_kwargs = [tokenization_kwargs] * len(seq_params)
 
         return self._render_and_run_requests(
             prompts=(
@@ -1821,16 +1816,13 @@ class LLM:
                     add_generation_prompt=add_generation_prompt,
                     continue_final_message=continue_final_message,
                     tools=tools,
-                    tokenization_kwargs=tok_kwargs,
+                    tokenization_kwargs=tokenization_kwargs,
                     mm_processor_kwargs=mm_processor_kwargs,
                 )
-                for conversation, tok_kwargs in zip(
-                    maybe_tqdm(
-                        seq_convs,
-                        use_tqdm=use_tqdm,
-                        desc="Rendering conversations",
-                    ),
-                    seq_tok_kwargs,
+                for conversation in maybe_tqdm(
+                    seq_convs,
+                    use_tqdm=use_tqdm,
+                    desc="Rendering conversations",
                 )
             ),
             params=seq_params,
