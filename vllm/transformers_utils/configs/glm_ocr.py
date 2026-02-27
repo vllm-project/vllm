@@ -74,8 +74,8 @@ class GlmOcrConfig(PretrainedConfig):
         if isinstance(text_config, dict):
             from transformers import AutoConfig
 
-            model_type = text_config.get("model_type", "chatglm")
-            self.text_config = AutoConfig.for_model(model_type, **text_config)
+            text_config.setdefault("model_type", "chatglm")
+            self.text_config = AutoConfig.for_model(**text_config)
         elif text_config is None:
             from transformers import AutoConfig
 
