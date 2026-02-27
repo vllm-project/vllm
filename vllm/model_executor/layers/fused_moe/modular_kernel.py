@@ -1172,9 +1172,9 @@ class FusedMoEModularKernel(torch.nn.Module):
         # This happens when none of the tokens from the all2all reach this
         # EP rank. Also, note that this is only relevant for CUDAGraph
         # incompatible all2all kernels like the DeepEP high-throughput
-        # kernels. CUDAGraph compatible all2all kernels like the pplx
-        # kernels and the DeepEP low-latency kernels are always batched
-        # and can never run into the tensor.numel() == 0 case.
+        # kernels. CUDAGraph compatible all2all kernels like the DeepEP
+        # low-latency kernels are always batched and can never run into
+        # the tensor.numel() == 0 case.
         if M_full == 0:
             assert num_chunks == 0
             workspace13 = None
