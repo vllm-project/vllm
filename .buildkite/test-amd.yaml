@@ -1507,7 +1507,7 @@ steps:
   agent_pool: mi325_1
   grade: Blocking
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: "/vllm-workspace"
   source_file_dependencies:
   - tests/evals/gpt_oss
   - vllm/model_executor/models/gpt_oss.py
@@ -1515,7 +1515,7 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
   - uv pip install --system 'gpt-oss[eval]==0.0.5'
-  - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
+  - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --config-list-file=tests/evals/gpt_oss/configs/gpt-oss-20b-rocm.yaml
 
 
 - label: DeepSeek V2-Lite Accuracy # 6.7m
@@ -2877,7 +2877,7 @@ steps:
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   optional: true
-  working_dir: "/vllm-workspace/"
+  working_dir: "/vllm-workspace"
   source_file_dependencies:
   - tests/evals/gpt_oss
   - vllm/model_executor/models/gpt_oss.py
@@ -2885,7 +2885,7 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
   - uv pip install --system 'gpt-oss[eval]==0.0.5'
-  - VLLM_ROCM_USE_AITER_MHA=0 VLLM_ROCM_USE_AITER=1 VLLM_USE_AITER_UNIFIED_ATTENTION=1 pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --model openai/gpt-oss-20b --metric 0.58
+  - pytest -s -v tests/evals/gpt_oss/test_gpqa_correctness.py --config-list-file=tests/evals/gpt_oss/configs/gpt-oss-20b-rocm.yaml
 
 
 - label: DeepSeek V2-Lite Accuracy # TBD
