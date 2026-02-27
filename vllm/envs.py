@@ -26,7 +26,6 @@ if TYPE_CHECKING:
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
-    VLLM_USE_GPU_FOR_POOLING_SCORE: bool = False
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -639,12 +638,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False"
     ).lower()
     == "true",
-    # If set, run pooling score MaxSim on GPU in the API server process.
-    # Huge performance improvement, https://github.com/vllm-project/vllm/pull/35330
-    "VLLM_USE_GPU_FOR_POOLING_SCORE": lambda: (
-        os.environ.get("VLLM_USE_GPU_FOR_POOLING_SCORE", "0").strip().lower()
-        in ("1", "true")
-    ),
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID": lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
     "S3_SECRET_ACCESS_KEY": lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
@@ -1738,7 +1731,6 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
-        "VLLM_USE_GPU_FOR_POOLING_SCORE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
         "VLLM_HTTP_TIMEOUT_KEEP_ALIVE",

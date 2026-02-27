@@ -7,7 +7,6 @@ import torch
 from torch.nn import CosineSimilarity
 from typing_extensions import Required, TypedDict
 
-from vllm import envs
 from vllm.config import ModelConfig
 from vllm.entrypoints.chat_utils import (
     BaseMultiModalItemTracker,
@@ -55,8 +54,8 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
     return token_scores.amax(dim=-1).sum()
 
 
-def _should_use_gpu_for_maxsim() -> bool:
-    return envs.VLLM_USE_GPU_FOR_POOLING_SCORE and not current_platform.is_cpu()
+def _should_use_gpu_for_maxsim(use_gpu_for_pooling_score: bool) -> bool:
+    return use_gpu_for_pooling_score and not current_platform.is_cpu()
 
 
 def compute_maxsim_scores(
@@ -64,6 +63,7 @@ def compute_maxsim_scores(
     d_embs: Sequence[torch.Tensor],
     max_batch_size: int = 16,
     max_score_matrix_elements: int = 16_000_000,
+    use_gpu_for_pooling_score: bool = False,
 ) -> list[torch.Tensor]:
     """Compute ColBERT MaxSim scores in padded mini-batches."""
     if len(q_embs) != len(d_embs):
@@ -79,7 +79,11 @@ def compute_maxsim_scores(
         if q_emb.shape[1] != d_emb.shape[1]:
             raise ValueError("Query and document embeddings must have same dim")
 
-    compute_device = torch.device(current_platform.device_type if _should_use_gpu_for_maxsim() else "cpu")
+    compute_device = torch.device(
+        current_platform.device_type
+        if _should_use_gpu_for_maxsim(use_gpu_for_pooling_score)
+        else "cpu"
+    )
     scores: list[torch.Tensor] = []
     start = 0
     while start < num_pairs:
