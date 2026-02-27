@@ -1181,7 +1181,7 @@ class GPUModelRunner(
 
         # Find the number of accepted tokens for each sequence.
         num_reqs = output_token_ids.size(0)
-        num_accepted_tokens = (
+        self.num_accepted_tokens.gpu[:num_reqs] = (
             (
                 torch.cat(
                     [
@@ -1200,7 +1200,9 @@ class GPUModelRunner(
             .argmax(-1)
         )
         if self.cache_config.mamba_cache_mode == "align":
-            for i, num_tokens in enumerate(num_accepted_tokens.cpu().numpy()):
+            for i, num_tokens in enumerate(
+                self.num_accepted_tokens.gpu[:num_reqs].cpu().numpy()
+            ):
                 self.input_batch.num_accepted_tokens_cpu[i] = num_tokens
 
             mamba_utils.postprocess_mamba(
@@ -1214,7 +1216,7 @@ class GPUModelRunner(
             )
         else:
             self.input_batch.num_accepted_tokens_cpu_tensor[:num_reqs].copy_(
-                num_accepted_tokens, non_blocking=True
+                self.num_accepted_tokens.gpu[:num_reqs], non_blocking=True
             )
 
     def _update_streaming_request(
