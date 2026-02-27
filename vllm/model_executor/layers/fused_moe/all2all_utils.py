@@ -214,6 +214,7 @@ def maybe_make_prepare_finalize(
             top_k=moe.experts_per_token,
             num_experts=moe.num_experts,
             hidden_size=moe.hidden_dim,
+            num_dispatchers=all2all_manager.world_size,
         )
 
     elif moe.use_naive_all2all_kernels and allow_new_interface:
