@@ -452,13 +452,13 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @staticmethod
     def _normalize_openresponses_input_item(item: Any) -> Any:
-        """Normalize OpenResponses input items for compatibility across
-        openai-python versions.
+        """Normalize input items to bridge OpenResponses schema and openai-python.
 
-        Some openai-python versions require ``id`` and ``status`` for assistant
-        message/reasoning inputs even though OpenResponses accepts them as
-        optional. Populate sensible defaults so multi-turn agent payloads
-        validate consistently.
+        The OpenResponses specification treats several fields as optional
+        (``id``, ``status`` on assistant/reasoning items; ``annotations``
+        on output_text content) that the openai-python SDK marks as
+        required.  Fill sensible defaults so payloads conforming to the
+        OpenResponses spec pass SDK validation.
         """
         if not isinstance(item, dict):
             return item
@@ -478,6 +478,20 @@ class ResponsesRequest(OpenAIBaseModel):
             normalized_item["status"] = "completed"
         if item_type == "reasoning" and normalized_item.get("summary") is None:
             normalized_item["summary"] = []
+
+        # OpenResponses schema treats ``annotations`` as optional for
+        # output_text content, but the openai SDK requires it.
+        if item_type == "message" and isinstance(normalized_item.get("content"), list):
+            normalized_content = []
+            for content_item in normalized_item["content"]:
+                if (
+                    isinstance(content_item, dict)
+                    and content_item.get("type") == "output_text"
+                    and "annotations" not in content_item
+                ):
+                    content_item = {**content_item, "annotations": []}
+                normalized_content.append(content_item)
+            normalized_item["content"] = normalized_content
 
         return normalized_item
 
