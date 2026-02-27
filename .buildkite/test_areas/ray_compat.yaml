@@ -5,7 +5,7 @@ steps:
 - label: Ray Dependency Compatibility Check
   # Informational only — does not block the pipeline.
   # If this fails, it means the PR introduces a dependency that
-  # conflicts with Ray's lock file (ray_test_py311_cu128.lock).
+  # conflicts with Ray's dependency constraints.
   # See https://github.com/vllm-project/vllm/issues/33599
   soft_fail: true
   timeout_in_minutes: 10
