@@ -90,6 +90,21 @@ endif()
 #
 find_package(Torch REQUIRED)
 
+# Log '+PTX' only when it appears as an arch suffix (e.g., 8.9+PTX)
+if(DEFINED ENV{TORCH_CUDA_ARCH_LIST})
+  string(REPLACE "," ";" _vllm_archs "$ENV{TORCH_CUDA_ARCH_LIST}")
+  string(REPLACE " " ";" _vllm_archs "${_vllm_archs}")
+  foreach(_tok ${_vllm_archs})
+    string(TOUPPER "${_tok}" _tok_up)
+    if(_tok_up MATCHES "\\+PTX$")
+      message(STATUS
+        "TORCH_CUDA_ARCH_LIST contains '+PTX'; PTX entries are ignored by vLLM "
+        "(expected when using torch defaults). Remove '+PTX' to silence.")
+      break()
+    endif()
+  endforeach()
+endif()
+
 # Supported NVIDIA architectures.
 # This check must happen after find_package(Torch) because that's when CMAKE_CUDA_COMPILER_VERSION gets defined
 if(DEFINED CMAKE_CUDA_COMPILER_VERSION AND
@@ -1169,4 +1184,11 @@ if (VLLM_GPU_LANG STREQUAL "CUDA")
 
     # vllm-flash-attn should be last as it overwrites some CMake functions
     include(cmake/external_projects/vllm_flash_attn.cmake)
+    if(NOT TARGET _vllm_fa3_C)
+      message(STATUS
+        "vllm-flash-attn did not define target _vllm_fa3_C "
+        "(Hopper-or-newer arch not present in TORCH_CUDA_ARCH_LIST); "
+        "adding placeholder so setup.py builds continue to work.")
+      add_custom_target(_vllm_fa3_C)
+    endif()
 endif ()
