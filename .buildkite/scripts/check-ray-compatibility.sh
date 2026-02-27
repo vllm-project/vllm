@@ -168,6 +168,7 @@ fi
 
 # Notify Slack if webhook is configured.
 if [ -n "$RAY_COMPAT_SLACK_WEBHOOK_URL" ]; then
+    echo ">>> Sending Slack notification"
     # Single quotes are intentional: the f-string expressions are Python, not shell.
     # shellcheck disable=SC2016
     PAYLOAD=$(python3 -c '
@@ -193,9 +194,12 @@ data = {
 print(json.dumps(data))
 ')
 
-    curl -s -X POST "$RAY_COMPAT_SLACK_WEBHOOK_URL" \
+    HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$RAY_COMPAT_SLACK_WEBHOOK_URL" \
         -H 'Content-type: application/json' \
-        -d "$PAYLOAD"
+        -d "$PAYLOAD")
+    echo "    Slack webhook response: $HTTP_CODE"
+else
+    echo ">>> Skipping Slack notification (RAY_COMPAT_SLACK_WEBHOOK_URL not set)"
 fi
 
 exit 1
