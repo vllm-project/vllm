@@ -128,6 +128,7 @@ class OlmoeAttention(nn.Module):
 
         self.hidden_size = config.hidden_size
         max_position_embeddings = getattr(config, "max_position_embeddings", 4096)
+        self.clip_qkv = getattr(config, "clip_qkv", None)
 
         num_heads = config.num_attention_heads
         num_kv_heads = config.num_key_value_heads
@@ -211,6 +212,10 @@ class OlmoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self._apply_qk_norm(q, k)
+        if self.clip_qkv is not None:
+            q.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
+            k.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
+            v.clamp_(min=-self.clip_qkv, max=self.clip_qkv)
         q, k = self.rotary_emb(positions, q, k)
         attn_output = self.attn(q, k, v)
         output, _ = self.o_proj(attn_output)
