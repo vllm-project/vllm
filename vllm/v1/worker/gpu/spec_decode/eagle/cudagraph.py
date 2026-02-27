@@ -54,6 +54,26 @@ class EagleCudaGraphManager:
     def get_cudagraph_size(self, num_tokens: int) -> int | None:
         return self.cudagraph_sizes.get(num_tokens)
 
+    def get_cudagraph_runtime_mode(
+        self, num_tokens: int
+    ) -> tuple[CUDAGraphMode, int | None]:
+        cudagraph_size = self.get_cudagraph_size(num_tokens)
+        if cudagraph_size is None:
+            cudagraph_mode = CUDAGraphMode.NONE
+        else:
+            cudagraph_mode = self.cudagraph_mode
+
+        if (
+            cudagraph_mode == CUDAGraphMode.FULL
+            and cudagraph_size is not None
+            and cudagraph_size not in self.graphs
+        ):
+            # If graph wasn't captured yet, fall back to eager.
+            # This might happen when the dummy run is called before capture.
+            cudagraph_mode = CUDAGraphMode.NONE
+            cudagraph_size = None
+        return cudagraph_mode, cudagraph_size
+
     def capture_graph(
         self,
         num_tokens: int,
