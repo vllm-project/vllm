@@ -100,8 +100,17 @@ class IOProcessorRequest(PoolingBasicRequestMixin, EncodingRequestMixin, Generic
     data: T
     task: PoolingTask = "plugin"
 
-    def to_pooling_params(self):
-        return PoolingParams(task=self.task)
+    def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
+        encoder_config = model_config.encoder_config or {}
+
+        return TokenizeParams(
+            max_total_tokens=model_config.max_model_len,
+            max_output_tokens=0,
+            truncate_prompt_tokens=self.truncate_prompt_tokens,
+            do_lower_case=encoder_config.get("do_lower_case", False),
+            add_special_tokens=not model_config.is_encoder_decoder,
+            max_total_tokens_param="max_model_len",
+        )
 
 
 class IOProcessorResponse(OpenAIBaseModel, Generic[T]):

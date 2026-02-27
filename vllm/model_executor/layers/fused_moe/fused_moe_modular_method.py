@@ -37,7 +37,6 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             not self.moe_mk.supports_expert_map(),
         )
         self.old_quant_method = old_quant_method
-        assert not self.old_quant_method.is_monolithic
         logger.debug("Swapping out %s", self.old_quant_method.__class__.__name__)
 
     @staticmethod
@@ -89,6 +88,7 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         assert self.moe_mk is not None
         return self.moe_mk(
@@ -101,5 +101,5 @@ class FusedMoEModularMethod(FusedMoEMethodBase, CustomOp):
             global_num_experts=layer.global_num_experts,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             expert_map=None if self.disable_expert_map else layer.expert_map,
-            shared_experts_input=layer._get_shared_experts_input(x),
+            shared_experts_input=shared_experts_input,
         )

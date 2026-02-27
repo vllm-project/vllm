@@ -169,13 +169,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.qwen2_vllm_to_hf_output,
         patch_hf_runner=model_utils.qwen3_vl_patch_hf_runner,
-        vllm_runner_kwargs={
-            "attention_config": {
-                "backend": "ROCM_AITER_FA",
-            },
-        }
-        if current_platform.is_rocm()
-        else None,
         image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
         marks=[
             pytest.mark.core_model,
@@ -959,12 +952,6 @@ VLM_TEST_SETTINGS = {
                     formatter=lambda vid_prompt: f"<|im_start|>user\n{vid_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
                 ),
                 limit_mm_per_prompt={"image": 4},
-            )
-        ],
-        marks=[
-            pytest.mark.skipif(
-                Version(TRANSFORMERS_VERSION) == Version("4.57.1"),
-                reason="This model is broken in Transformers v4.57.1",
             )
         ],
     ),

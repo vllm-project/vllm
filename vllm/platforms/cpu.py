@@ -129,6 +129,7 @@ class CpuPlatform(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         if selected_backend and selected_backend != AttentionBackendEnum.CPU_ATTN:
             logger.info("Cannot use %s backend on CPU.", selected_backend)
@@ -345,7 +346,6 @@ class CpuPlatform(Platform):
                 ld_preload_str += pytorch_libgomp_so
                 os.environ["LD_PRELOAD"] = ld_preload_str
 
-        # To hint IPEX uses shared memory based AllReduce
         os.environ["LOCAL_WORLD_SIZE"] = str(
             vllm_config.parallel_config.tensor_parallel_size
         )

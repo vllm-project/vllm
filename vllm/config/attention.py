@@ -43,6 +43,9 @@ class AttentionConfig:
     disable_flashinfer_q_quantization: bool = False
     """If set, when using fp8 kv, do not quantize Q to fp8."""
 
+    use_prefill_query_quantization: bool = False
+    """If set, quantize query for attention in prefill."""
+
     def compute_hash(self) -> str:
         """
         Provide a hash that uniquely identifies all the configs

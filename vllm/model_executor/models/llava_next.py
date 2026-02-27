@@ -78,6 +78,7 @@ class LlavaNextImageEmbeddingInputs(TensorSchema):
 LlavaNextImageInputs: TypeAlias = (
     LlavaNextImagePixelInputs | LlavaNextImageEmbeddingInputs
 )
+"""Alias for supported LLaVA-NeXT image input types."""
 
 
 class LlavaNextLikeConfig(LlavaLikeConfig, Protocol):
@@ -106,6 +107,7 @@ class LlavaNextProcessingInfo(BaseLlavaProcessingInfo):
         image_width: int,
         image_height: int,
     ) -> int:
+        """Get the number of image tokens for the given image dimensions."""
         hf_config = self.get_hf_config()
         vision_encoder_info = self.get_vision_encoder_info()
 
@@ -283,6 +285,8 @@ class LlavaNextForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsP
                 text_hidden_size=config.text_config.hidden_size,
                 projector_hidden_act=config.projector_hidden_act,
                 multimodal_projector_bias=config.multimodal_projector_bias,
+                quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "multi_modal_projector"),
             )
 
         with self._mark_language_model(vllm_config):
