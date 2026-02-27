@@ -10,9 +10,11 @@ This test file focuses on what CAN be tested without FlashMLA/full environment:
 """
 
 import pytest
-from vllm.config import CacheConfig, ModelConfig, VllmConfig
-from vllm.model_executor.models.config import DeepseekV32ForCausalLM, VerifyAndUpdateConfig
 from unittest.mock import Mock
+
+from vllm.model_executor.models.config import (
+    DeepseekV32ForCausalLM,
+    VerifyAndUpdateConfig)
 
 
 # ============================================================================
@@ -32,12 +34,14 @@ class TestDeepSeekV32ConfigArchitecture:
         assert issubclass(DeepseekV32ForCausalLM, VerifyAndUpdateConfig), (
             "DeepseekV32ForCausalLM should inherit from VerifyAndUpdateConfig"
         )
-        print("✓ DeepseekV32ForCausalLM correctly inherits from VerifyAndUpdateConfig")
+        print("✓ DeepseekV32ForCausalLM correctly inherits from "
+              "VerifyAndUpdateConfig")
 
     def test_deepseek_v3_class_removed(self):
         """Verify DeepseekV3ForCausalLM class no longer exists.
 
-        This class was the workaround that disabled fusion. It should be removed.
+        This class was the workaround that disabled fusion.
+        It should be removed.
         """
         from vllm.model_executor.models import config as config_module
 
@@ -82,13 +86,14 @@ class TestDeepSeekV32ConfigUpdateLogic:
         DeepseekV32ForCausalLM.verify_and_update_config(mock_vllm_config)
 
         # Verify it was updated
-        assert mock_vllm_config.cache_config.cache_dtype == "fp8_ds_mla", (
-            f"Expected fp8_ds_mla, got {mock_vllm_config.cache_config.cache_dtype}"
+        cache_dtype = mock_vllm_config.cache_config.cache_dtype
+        assert cache_dtype == "fp8_ds_mla", (
+            f"Expected fp8_ds_mla, got {cache_dtype}"
         )
         print("✓ fp8 cache_dtype correctly converted to fp8_ds_mla")
 
     def test_verify_and_update_config_updates_fp8_e4m3_to_fp8_ds_mla(self):
-        """Test that verify_and_update_config converts fp8_e4m3 to fp8_ds_mla."""
+        """Test verify_and_update_config converts fp8_e4m3 to fp8_ds_mla."""
 
         mock_vllm_config = Mock()
         mock_vllm_config.model_config = Mock()
@@ -159,7 +164,8 @@ class TestDeepSeekV32ConfigUpdateLogic:
 def test_pr_34899_summary():
     """Summary test that validates the key changes from PR #34899.
 
-    This test documents what PR #34899 actually changed and verifies those changes.
+    This test documents what PR #34899 actually changed and verifies
+    those changes.
     """
     print("\n" + "="*70)
     print("PR #34899 Validation Summary")
