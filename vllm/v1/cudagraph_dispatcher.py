@@ -11,10 +11,6 @@ from vllm.lora.utils import get_captured_lora_counts
 
 logger = init_logger(__name__)
 
-ALL_CUDAGRAPH_RUNTIME_MODES = frozenset(
-    {CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL}
-)
-
 
 class CudagraphDispatcher:
     """
@@ -260,7 +256,7 @@ class CudagraphDispatcher:
                 features like cascade attention not supported by full
                 cudagraphs). None means no modes are excluded.
         """
-        allowed_modes = valid_modes or ALL_CUDAGRAPH_RUNTIME_MODES
+        allowed_modes = valid_modes or CUDAGraphMode.valid_runtime_modes()
 
         if invalid_modes:
             allowed_modes -= invalid_modes

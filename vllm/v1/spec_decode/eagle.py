@@ -1663,16 +1663,10 @@ class SpecDecodeBaseProposer:
         num_tokens: int,
         use_cudagraphs: bool = True,
     ) -> tuple[CUDAGraphMode, int, torch.Tensor | None]:
-        dispatch_cudagraph = (
-            lambda num_tokens, valid_modes=None: self.cudagraph_dispatcher.dispatch(
-                num_tokens,
-                valid_modes=(
-                    {CUDAGraphMode.NONE} if not use_cudagraphs else valid_modes
-                ),
-            )
+        cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
+            num_tokens,
+            valid_modes=({CUDAGraphMode.NONE} if not use_cudagraphs else None),
         )
-
-        cudagraph_mode, batch_desc = dispatch_cudagraph(num_tokens)
         num_tokens_padded = batch_desc.num_tokens
 
         # Extra coordination when running data-parallel since we need to
@@ -1697,7 +1691,7 @@ class SpecDecodeBaseProposer:
                 num_tokens_padded = int(num_tokens_across_dp[dp_rank].item())
                 # Re-dispatch with DP padding so we have the correct
                 # batch_descriptor
-                cudagraph_mode, batch_desc = dispatch_cudagraph(
+                cudagraph_mode, batch_desc = self.cudagraph_dispatcher.dispatch(
                     num_tokens_padded,
                     valid_modes={CUDAGraphMode(synced_cudagraph_mode)},
                 )

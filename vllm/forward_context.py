@@ -241,7 +241,7 @@ class ForwardContext:
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
     def __post_init__(self):
-        assert self.cudagraph_runtime_mode.valid_runtime_modes(), (
+        assert self.cudagraph_runtime_mode.is_valid_runtime_mode(), (
             f"Invalid cudagraph runtime mode: {self.cudagraph_runtime_mode}"
         )
 
