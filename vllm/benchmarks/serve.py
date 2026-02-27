@@ -491,7 +491,10 @@ def calculate_metrics(
     max_concurrent_requests = 0
 
     # Find the time range across all successful requests
-    successful_outputs = [output for output in outputs if output.success]
+    successful_data = [
+        (output, actual_output_lens[i]) 
+        for i, output in enumerate(outputs) if output.success
+    ]
     failed_outputs = [output for output in outputs if not output.success]
 
     if len(failed_outputs) > 0:
@@ -499,10 +502,10 @@ def calculate_metrics(
         for i, err in enumerate(failed_outputs[:10]):
             print(f"Error {i}: {err.error}")
 
-    if successful_outputs:
-        min_start_time = min(output.start_time for output in successful_outputs)
+    if successful_data:
+        min_start_time = min(output.start_time for output, _ in successful_data)
         max_end_time = max(
-            output.start_time + output.latency for output in successful_outputs
+            output.start_time + output.latency for output, _ in successful_data
         )
 
         # Create second buckets (ceiling to ensure we capture all time)
@@ -510,8 +513,8 @@ def calculate_metrics(
         tokens_per_second = np.zeros(duration_seconds)
         concurrent_requests_per_second = np.zeros(duration_seconds)
 
-        for i, output in enumerate(successful_outputs):
-            # Calculate token generation timestamp using
+        for output, output_len in successful_data:
+            # Calculate chunk generation timestamps using
             # start_time, ttft, and itl
             token_times = [output.start_time + output.ttft]
             current_time = token_times[0]
@@ -519,11 +522,19 @@ def calculate_metrics(
                 current_time += itl_value
                 token_times.append(current_time)
 
-            # Add tokens to second buckets
+            # Calculate the total number of chunks returned for this request
+            num_chunks = len(token_times)
+            
+            # Distribute the actual total output tokens evenly across all chunks.
+            # This correctly handles speculative decoding where a single chunk 
+            # may contain multiple tokens.
+            tokens_per_chunk = output_len / num_chunks if num_chunks > 0 else 0
+
+            # Add distributed tokens to second buckets
             for token_time in token_times:
                 second_bucket = int(token_time - min_start_time)
                 if 0 <= second_bucket < duration_seconds:
-                    tokens_per_second[second_bucket] += 1
+                    tokens_per_second[second_bucket] += tokens_per_chunk
 
             # Track concurrent requests for each second this request was active
             request_start_second = int(output.start_time - min_start_time)
