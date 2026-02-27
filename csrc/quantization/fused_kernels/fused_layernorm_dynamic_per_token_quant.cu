@@ -97,7 +97,7 @@ __global__ void rms_norm_per_block_quant_kernel(
     scalar_t const* __restrict__ input,   // [..., hidden_size]
     scalar_t const* __restrict__ weight,  // [hidden_size]
     float const* scale_ub, float const var_epsilon, int32_t const hidden_size,
-    scalar_t* __restrict__ residual = nullptr) {
+    scalar_t* __restrict__ residual = nullptr, int64_t outer_scale_stride = 1) {
   float rms;
   // Compute RMS
   // Always able to vectorize due to constraints on hidden_size
@@ -108,7 +108,8 @@ __global__ void rms_norm_per_block_quant_kernel(
   // Always able to vectorize due to constraints on hidden_size and group_size
   vllm::vectorized::compute_dynamic_per_token_scales<
       scalar_t, scalar_out_t, has_residual, is_scale_transposed, group_size>(
-      nullptr, scales, input, weight, rms, scale_ub, hidden_size, residual);
+      nullptr, scales, input, weight, rms, scale_ub, hidden_size, residual,
+      outer_scale_stride);
 
   // RMS Norm + Quant
   // Always able to vectorize due to constraints on hidden_size
@@ -119,7 +120,8 @@ __global__ void rms_norm_per_block_quant_kernel(
   vllm::vectorized::norm_and_quant<
       scalar_t, scalar_out_t, std::is_same_v<scalar_out_t, int8_t>,
       has_residual, is_scale_transposed, group_size>(
-      out, input, weight, rms, scales, hidden_size, residual);
+      out, input, weight, rms, scales, hidden_size, residual,
+      outer_scale_stride);
 }
 
 }  // namespace vllm
@@ -225,7 +227,8 @@ void rms_norm_per_block_quant_dispatch(
                                                  : nullptr,
                             var_epsilon, hidden_size,
                             has_residual ? residual->data_ptr<scalar_in_t>()
-                                         : nullptr);
+                                         : nullptr,
+                            scales.stride(1));
                   });
             });
           });
@@ -256,6 +259,11 @@ void rms_norm_per_block_quant(torch::Tensor& out, torch::Tensor const& input,
 
   TORCH_CHECK(group_size == 128 || group_size == 64,
               "Unsupported group size: ", group_size);
+
+  if (scales.stride(1) > 1) {
+    TORCH_CHECK(is_scale_transposed,
+                "Outer scale stride must be 1 when scales are not transposed");
+  }
 
   rms_norm_per_block_quant_dispatch(out, input, weight, scales, group_size,
                                     var_epsilon, scale_ub, residual,

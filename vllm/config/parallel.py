@@ -152,7 +152,6 @@ class ParallelConfig:
 
     - "naive": Naive all2all implementation using broadcasts\n
     - "allgather_reducescatter": All2all based on allgather and reducescatter\n
-    - "pplx": Use pplx kernels\n
     - "deepep_high_throughput": Use deepep high-throughput kernels\n
     - "deepep_low_latency": Use deepep low-latency kernels\n
     - "mori": Use mori kernels\n
@@ -182,7 +181,7 @@ class ParallelConfig:
     threshold, microbatching will be used. Otherwise, the request will be
     processed in a single batch."""
 
-    disable_nccl_for_dp_synchronization: bool = Field(default=None)
+    disable_nccl_for_dp_synchronization: bool | None = Field(default=None)
     """Forces the dp synchronization logic in vllm/v1/worker/dp_utils.py 
     to use Gloo instead of NCCL for its all reduce.
 
@@ -309,6 +308,13 @@ class ParallelConfig:
                 f"Expected to be `-1` or `[0, {self._api_process_count})`, "
                 f"but found: {self._api_process_rank}"
             )
+
+        if self.all2all_backend == "pplx":
+            logger.warning(
+                "The 'pplx' all2all backend has been removed. "
+                "Falling back to 'allgather_reducescatter'."
+            )
+            self.all2all_backend = "allgather_reducescatter"
 
         if self.data_parallel_size_local > self.data_parallel_size:
             raise ValueError(
@@ -442,7 +448,6 @@ class ParallelConfig:
     # In this case, ensure the input to the experts is sequence parallel
     # to avoid the excess work.
     #
-    # Not needed for pplx-kernels as it can handle duplicate input tokens.
     @property
     def use_sequence_parallel_moe(self) -> bool:
         return (

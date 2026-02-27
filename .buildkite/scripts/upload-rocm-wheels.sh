@@ -55,7 +55,7 @@ mkdir -p all-rocm-wheels
 cp artifacts/rocm-base-wheels/*.whl all-rocm-wheels/ 2>/dev/null || true
 cp artifacts/rocm-vllm-wheel/*.whl all-rocm-wheels/ 2>/dev/null || true
 
-WHEEL_COUNT=$(ls all-rocm-wheels/*.whl 2>/dev/null | wc -l)
+WHEEL_COUNT=$(find all-rocm-wheels -maxdepth 1 -name '*.whl' 2>/dev/null | wc -l)
 echo "Total wheels to upload: $WHEEL_COUNT"
 
 if [ "$WHEEL_COUNT" -eq 0 ]; then
@@ -115,7 +115,7 @@ if [[ "$BUILDKITE_BRANCH" == "main" && "$BUILDKITE_PULL_REQUEST" == "false" ]] |
 fi
 
 # Extract version from vLLM wheel and update version-specific index
-VLLM_WHEEL=$(ls all-rocm-wheels/vllm*.whl 2>/dev/null | head -1)
+VLLM_WHEEL=$(find all-rocm-wheels -maxdepth 1 -name 'vllm*.whl' 2>/dev/null | head -1)
 if [ -n "$VLLM_WHEEL" ]; then
     VERSION=$(unzip -p "$VLLM_WHEEL" '**/METADATA' | grep '^Version: ' | cut -d' ' -f2)
     echo "Version in wheel: $VERSION"

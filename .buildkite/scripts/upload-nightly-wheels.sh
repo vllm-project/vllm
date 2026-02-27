@@ -76,16 +76,15 @@ mkdir -p "$INDICES_OUTPUT_DIR"
 # this indices have relative paths that could work as long as it is next to the wheel directory in s3
 # i.e., the wheels are always in s3://vllm-wheels/<commit>/
 # and indices can be placed in /<commit>/, or /nightly/, or /<version>/
-if [[ ! -z "$DEFAULT_VARIANT_ALIAS" ]]; then
-    alias_arg="--alias-to-default $DEFAULT_VARIANT_ALIAS"
-else
-    alias_arg=""
+alias_args=()
+if [[ -n "$DEFAULT_VARIANT_ALIAS" ]]; then
+    alias_args=(--alias-to-default "$DEFAULT_VARIANT_ALIAS")
 fi
 
 # HACK: we do not need regex module here, but it is required by pre-commit hook
 # To avoid any external dependency, we simply replace it back to the stdlib re module
 sed -i 's/import regex as re/import re/g' .buildkite/scripts/generate-nightly-index.py
-$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" $alias_arg
+$PYTHON .buildkite/scripts/generate-nightly-index.py --version "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "commit $BUILDKITE_COMMIT" "${alias_args[@]}"
 
 # copy indices to /<commit>/ unconditionally
 echo "Uploading indices to $S3_COMMIT_PREFIX"
@@ -100,9 +99,9 @@ fi
 # re-generate and copy to /<pure_version>/ only if it does not have "dev" in the version
 if [[ "$version" != *"dev"* ]]; then
     echo "Re-generating indices for /$pure_version/"
-    rm -rf "$INDICES_OUTPUT_DIR/*"
+    rm -rf "${INDICES_OUTPUT_DIR:?}/*"
     mkdir -p "$INDICES_OUTPUT_DIR"
     # wheel-dir is overridden to be the commit directory, so that the indices point to the correct wheel path
-    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --wheel-dir "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" $alias_arg
+    $PYTHON .buildkite/scripts/generate-nightly-index.py --version "$pure_version" --wheel-dir "$SUBPATH" --current-objects "$obj_json" --output-dir "$INDICES_OUTPUT_DIR" --comment "version $pure_version" "${alias_args[@]}"
     aws s3 cp --recursive "$INDICES_OUTPUT_DIR/" "s3://$BUCKET/$pure_version/"
 fi
