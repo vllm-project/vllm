@@ -7,6 +7,7 @@ import zmq
 
 from vllm.utils.network_utils import (
     get_open_port,
+    get_open_ports_list,
     get_tcp_uri,
     join_host_port,
     make_zmq_path,
@@ -26,6 +27,46 @@ def test_get_open_port(monkeypatch: pytest.MonkeyPatch):
                 s2.bind(("localhost", get_open_port()))
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s3:
                     s3.bind(("localhost", get_open_port()))
+
+
+@pytest.mark.parametrize(
+    "vllm_port,vllm_dp_master_port",
+    [
+        (5000, None),  # Only VLLM_PORT set
+        (None, 5000),  # Only VLLM_DP_MASTER_PORT set
+        (None, None),  # Neither set
+        (5000, 5005),  # Both set with overlapping ranges
+    ],
+)
+def test_get_open_port_list(
+    vllm_port: int | None,
+    vllm_dp_master_port: int | None,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    with monkeypatch.context() as m:
+        if vllm_port is None:
+            m.delenv("VLLM_PORT", raising=False)
+        else:
+            m.setenv("VLLM_PORT", str(vllm_port))
+
+        if vllm_dp_master_port is None:
+            m.delenv("VLLM_DP_MASTER_PORT", raising=False)
+        else:
+            m.setenv("VLLM_DP_MASTER_PORT", str(vllm_dp_master_port))
+
+        port_list = get_open_ports_list(5)
+        assert len(port_list) == 5
+
+        for port in port_list:
+            # Verify port constraints based on environment variables
+            if vllm_port is not None:
+                assert vllm_port <= port < vllm_port + 10
+            if vllm_dp_master_port is not None:
+                assert not (vllm_dp_master_port <= port < vllm_dp_master_port + 10)
+
+            # Verify port is bindable
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("localhost", port))
 
 
 @pytest.mark.parametrize(
