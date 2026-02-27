@@ -914,9 +914,9 @@ class AsyncLLM(EngineClient):
             raise self.dead_error
 
     async def start_profile(self, profile_prefix: str | None = None,
-                            delay: int = 0) -> None:
+                            delay: int = 0, max_steps: int = 0) -> None:
         coros = [self.engine_core.profile_async(True, profile_prefix,
-                                                delay=delay)]
+                                                delay=delay, max_steps=max_steps)]
         if self.profiler is not None:
             coros.append(asyncio.to_thread(self.profiler.start))
             self._profiler_running = True

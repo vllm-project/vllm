@@ -189,9 +189,12 @@ def build_prompts(
         benchmark_prompt = same as context_prompt (full prefix cache hit)
         We measure only decode iterations (no prefill work).
     """
-    # Build context portion ("hello " is roughly 1-2 tokens per word)
-    context_words = context_len // 2
-    context_part = "hello " * max(1, context_words) if context_len > 0 else ""
+    # Build context portion.
+    # Use "a " which tokenizes to ~1 token per repetition on most models.
+    # The exact token count may vary by model but will be close to the
+    # requested length.  For precise control, a tokenizer-based approach
+    # would be needed, but that requires loading the model tokenizer.
+    context_part = "a " * max(1, context_len) if context_len > 0 else ""
 
     # Context prompt for prefix cache warmup
     context_prompt = context_part if context_len > 0 else None
@@ -199,8 +202,7 @@ def build_prompts(
     # Build benchmark prompt
     if mode == "prefill":
         # Add new input tokens after context (these will be prefilled)
-        input_words = input_len // 2
-        input_part = "world " * max(1, input_words)
+        input_part = "b " * max(1, input_len)
         benchmark_prompt = context_part + input_part
     else:
         # Decode: same as context (full prefix cache hit, no prefill)
@@ -327,6 +329,57 @@ async def run_prefix_cache_warmup(
     )
 
 
+async def wait_for_batch_ready(
+    session: aiohttp.ClientSession,
+    rotator: EndpointRotator,
+    target_running: int,
+    timeout_s: float = 120.0,
+    poll_interval_s: float = 0.1,
+) -> bool:
+    """Poll /debug/batch_info until all requests are running (in decode).
+
+    On TPU, new requests must each go through a mandatory prefill step
+    even with prefix cache hits.  With max_num_batched_tokens limiting
+    how many can prefill per step, the batch ramps up incrementally
+    (e.g. 8 -> 16 -> 32 -> 64).  This function waits for the ramp-up
+    to finish so that profiling captures only steady-state decode.
+
+    Returns True if the target was reached, False on timeout.
+    """
+    endpoint = rotator.all()[0]
+    deadline = time.perf_counter() + timeout_s
+
+    while time.perf_counter() < deadline:
+        try:
+            resp = await session.get(f"{endpoint}/debug/batch_info")
+            if resp.status == 200:
+                info = await resp.json()
+                num_running = info.get("num_running", 0)
+                num_waiting = info.get("num_waiting", -1)
+                if num_waiting == 0 and num_running >= target_running:
+                    logger.info(
+                        "Batch ready: %d running, %d waiting",
+                        num_running, num_waiting,
+                    )
+                    return True
+            elif resp.status == 404:
+                # Server doesn't have /debug/batch_info — skip polling
+                logger.info(
+                    "Server does not support /debug/batch_info, "
+                    "skipping batch readiness wait"
+                )
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(poll_interval_s)
+
+    logger.warning(
+        "Timeout waiting for batch to reach %d running requests",
+        target_running,
+    )
+    return False
+
+
 async def run_single_iteration(
     session: aiohttp.ClientSession,
     config: BenchmarkConfig,
@@ -334,46 +387,148 @@ async def run_single_iteration(
     benchmark_prompt: str,
     batch_size: int,
     num_tokens_to_generate: int = 0,
-) -> tuple[float, int, int]:
-    """Run one iteration: sleep -> queue requests -> wake -> measure.
+    trace_prefix: str | None = None,
+    use_sleep_wake: bool = True,
+) -> tuple[float, int, int, bool]:
+    """Run one iteration: queue requests and measure decode.
 
-    All requests use non-streaming mode for robustness. Streaming was
-    previously used for TPU warmup token exclusion but caused
-    ServerDisconnectedError on large batch+context combinations.
+    Two modes depending on use_sleep_wake:
+
+    DP=1 (use_sleep_wake=True):
+        sleep -> prefill_only -> queue -> wake -> wait for all prefilled
+        -> disable prefill_only -> profile -> time decode -> stop profile
+        Gives exact batch control via scheduler pause.
+
+    DP>1 (use_sleep_wake=False):
+        queue requests normally -> wait for batch to fill -> profile
+        -> time remaining decode -> stop profile
+        Cannot pause scheduler because DP engines must execute in lockstep.
+        Uses extra max_tokens so requests survive the ramp-up.
+
+    Returns:
+        (elapsed_ms, prompt_tokens, completion_tokens, trace_started)
     """
 
-    # 1. Pause scheduling on ALL endpoints
-    await call_debug_endpoint(session, rotator, "/debug/sleep", {"level": "0"})
-
-    # 2. Build requests and start sending them (they queue while server sleeps)
     max_tokens = 1 if config.mode == "prefill" else num_tokens_to_generate
+    request_body_base = {
+        "model": config.model,
+        "prompt": benchmark_prompt,
+        "max_tokens": max_tokens,
+        "stream": False,
+    }
+    if config.mode == "decode":
+        request_body_base["min_tokens"] = max_tokens
+        request_body_base["ignore_eos"] = True
 
-    tasks = []
-    for _ in range(batch_size):
-        endpoint = rotator.next()
-        task = asyncio.ensure_future(
-            session.post(
-                f"{endpoint}/v1/completions",
-                json={
-                    "model": config.model,
-                    "prompt": benchmark_prompt,
-                    "max_tokens": max_tokens,
-                    "stream": False,
-                },
-            )
-        )
-        tasks.append(task)
+    if use_sleep_wake:
+        # === DP=1 path: full scheduler control ===
 
-    # Small delay to ensure requests are queued on server
-    await asyncio.sleep(0.1)
+        # 1. Pause scheduling
+        await call_debug_endpoint(
+            session, rotator, "/debug/sleep", {"level": "0"})
 
-    # 3. Resume scheduling on ALL endpoints and time the batch
-    start = time.perf_counter()
-    await call_debug_endpoint(session, rotator, "/debug/wake_up")
-    responses = await asyncio.gather(*tasks)
-    elapsed_ms = (time.perf_counter() - start) * 1000
+        # 2. Enable prefill-only scheduling
+        if config.mode == "decode":
+            await call_debug_endpoint(
+                session, rotator, "/debug/prefill_only", {"enabled": "true"})
 
-    # 4. Count tokens
+        # 3. Queue all requests (they accumulate while scheduler is paused)
+        tasks = []
+        for _ in range(batch_size):
+            endpoint = rotator.next()
+            task = asyncio.ensure_future(
+                session.post(
+                    f"{endpoint}/v1/completions", json=request_body_base))
+            tasks.append(task)
+
+        # Wait for all requests to arrive at the engine
+        if config.mode == "decode":
+            endpoint = rotator.all()[0]
+            for _ in range(100):
+                try:
+                    resp = await session.get(f"{endpoint}/debug/batch_info")
+                    if resp.status == 200:
+                        info = await resp.json()
+                        total = (info.get("num_running", 0)
+                                 + info.get("num_waiting", 0))
+                        if total >= batch_size:
+                            logger.info(
+                                "All %d requests queued (running=%d, "
+                                "waiting=%d)",
+                                total, info["num_running"],
+                                info["num_waiting"])
+                            break
+                except Exception:
+                    pass
+                await asyncio.sleep(0.1)
+        else:
+            await asyncio.sleep(0.1)
+
+        # 4. Resume scheduling (prefill_only: only prefills run)
+        await call_debug_endpoint(session, rotator, "/debug/wake_up")
+
+        # 5. Wait for all prefills, then switch to decode + profile
+        trace_started = False
+        if config.mode == "decode":
+            await wait_for_batch_ready(session, rotator, batch_size)
+            await call_debug_endpoint(
+                session, rotator, "/debug/prefill_only",
+                {"enabled": "false"})
+
+            if trace_prefix is not None:
+                params = {"prefix": trace_prefix, "delay": 0}
+                for attempt in range(3):
+                    trace_started = await call_debug_endpoint(
+                        session, rotator, "/debug/profile/start", params)
+                    if trace_started:
+                        break
+                    logger.warning(
+                        "Failed to start profiling for %s (attempt %d/3)",
+                        trace_prefix, attempt + 1)
+                    await asyncio.sleep(2.0)
+
+        # 6. Time decode (steady-state)
+        start = time.perf_counter()
+        responses = await asyncio.gather(*tasks)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+    else:
+        # === DP>1 path: no scheduler control ===
+
+        # 1. Send all requests normally (no sleep/wake)
+        tasks = []
+        for _ in range(batch_size):
+            endpoint = rotator.next()
+            task = asyncio.ensure_future(
+                session.post(
+                    f"{endpoint}/v1/completions", json=request_body_base))
+            tasks.append(task)
+
+        # 2. Wait for batch to reach full size (ramp-up completes)
+        trace_started = False
+        if config.mode == "decode":
+            await wait_for_batch_ready(session, rotator, batch_size)
+            logger.info("Batch ramped up, starting profiling")
+
+            # 3. Start profiling (captures steady-state decode)
+            if trace_prefix is not None:
+                params = {"prefix": trace_prefix, "delay": 0}
+                for attempt in range(3):
+                    trace_started = await call_debug_endpoint(
+                        session, rotator, "/debug/profile/start", params)
+                    if trace_started:
+                        break
+                    logger.warning(
+                        "Failed to start profiling for %s (attempt %d/3)",
+                        trace_prefix, attempt + 1)
+                    await asyncio.sleep(2.0)
+
+        # 4. Time remaining decode
+        start = time.perf_counter()
+        responses = await asyncio.gather(*tasks)
+        elapsed_ms = (time.perf_counter() - start) * 1000
+
+    # Count tokens
     total_prompt_tokens = 0
     total_completion_tokens = 0
     for resp in responses:
@@ -385,7 +540,7 @@ async def run_single_iteration(
         except Exception as e:
             logger.warning("Failed to parse response: %s", e)
 
-    return elapsed_ms, total_prompt_tokens, total_completion_tokens
+    return elapsed_ms, total_prompt_tokens, total_completion_tokens, trace_started
 
 
 async def fetch_traces(
@@ -437,15 +592,14 @@ async def run_benchmark(
     async with aiohttp.ClientSession(connector=connector) as session:
         # Fetch server config once
         server_config = await fetch_server_config(session, rotator)
-        dp_size = server_config.data_parallel_size
-        display_dp = server_config.real_data_parallel_size or dp_size
+        dp_size = server_config.real_data_parallel_size or server_config.data_parallel_size
         display_tp = (
             server_config.real_tensor_parallel_size
             or server_config.tensor_parallel_size
         )
         logger.info(
             "Server config: DP=%d, TP=%d, PP=%d",
-            display_dp,
+            dp_size,
             display_tp,
             server_config.pipeline_parallel_size,
         )
@@ -477,6 +631,37 @@ async def run_benchmark(
         # steps it becomes a small fraction of the total.
         is_tpu = server_config.real_data_parallel_size is not None
         tpu_extra_tokens = 3 if (is_tpu and config.mode == "decode") else 0
+
+        # For DP>1 decode: sleep/wake/prefill_only cannot be used because
+        # DP engine cores execute in lockstep and request distribution is
+        # handled server-side.  Instead, we send requests normally and
+        # generate enough extra tokens for the batch to fill up before
+        # any request finishes.  We then profile only the steady-state
+        # window after ramp-up completes.
+        #
+        # Ramp-up tokens needed: with max_num_batched_tokens=T and
+        # context_len=C, each prefill step handles T/C requests.
+        # Total ramp-up steps ≈ global_batch_size / (T/C) = BS * C / T.
+        # Each ramp-up step generates 1 decode token for already-running
+        # requests, so the first request accumulates ~(BS*C/T) tokens
+        # during ramp-up.  Add a safety margin of 2x.
+        use_sleep_wake = dp_size <= 1 and config.mode == "decode"
+        if not use_sleep_wake and config.mode == "decode":
+            max_ctx = max(config.context_lens)
+            max_bs = max(config.batch_sizes) * dp_size
+            max_batched = 10240  # conservative default
+            ramp_up_tokens = max(
+                int(max_bs * max_ctx / max_batched * 2),
+                50,
+            )
+            tpu_extra_tokens = max(tpu_extra_tokens, ramp_up_tokens)
+            logger.info(
+                "DP>1: adding %d extra tokens for ramp-up survival "
+                "(total output=%d)",
+                ramp_up_tokens,
+                config.iterations + tpu_extra_tokens,
+            )
+
         num_tokens_to_generate = num_output_tokens + tpu_extra_tokens
 
         # Track all trace prefixes for fetching at the end
@@ -509,38 +694,74 @@ async def run_benchmark(
                 session, rotator, config.model, context_prompt, global_batch_size
             )
 
-            # Start profiling
-            # For decode mode, use delay=1 to skip the prefill step in both
-            # the trace AND timing. The server defers jax.profiler.start_trace()
-            # by 1 engine step so only decode iterations are captured.
+            # Wait for engine to fully drain warmup requests before
+            # starting the benchmark.  Without this, a stale warmup
+            # request can linger in the scheduler's running queue and
+            # be counted toward the batch size target, then finish
+            # after 1 token — shrinking the batch during decode.
+            if config.mode == "decode":
+                endpoint = rotator.all()[0]
+                for _ in range(100):
+                    try:
+                        resp = await session.get(f"{endpoint}/debug/batch_info")
+                        if resp.status == 200:
+                            info = await resp.json()
+                            if (info.get("num_running", 1) == 0
+                                    and info.get("num_waiting", 1) == 0):
+                                break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.1)
+
+            # Build trace prefix for this param combo
             trace_prefix = None
             trace_started = False
-            profile_delay = 1 if config.mode == "decode" else 0
             if config.profile:
                 trace_prefix = (
                     f"{config.mode}_ctx{ctx_len}_in{in_len}_bs{batch_size_per_dp}"
                 )
-                params = {"prefix": trace_prefix, "delay": profile_delay}
-                # Retry profile/start with backoff — large batch warmup passes
-                # can saturate the server's connection queue, dropping requests
+
+            # For prefill mode with profiling: use prefill_only scheduling
+            # to prevent any decode steps from running while profiling.
+            # Flow: sleep -> prefill_only=true -> queue requests -> wake
+            # -> start profile -> prefill runs (traced) -> poll until
+            # all prefilled -> stop profile -> prefill_only=false ->
+            # decode runs (not traced) -> responses arrive.
+            #
+            # For DP>1, skip sleep/wake (deadlocks because requests go
+            # to one engine while DP requires lockstep execution).
+            # Instead, just profile normally — trace includes both
+            # prefill and 1 decode step.
+            # For prefill mode with profiling:
+            # Start profiling, send requests, wait for completion, stop.
+            # The trace includes both prefill and 1 decode step
+            # (max_tokens=1 means 1 output token). The decode step is
+            # trivially short (~6ms) vs prefill (~2000ms) and uses a
+            # different JIT hash, so it's easily identifiable.
+            #
+            # We don't use sleep/wake+prefill_only here because:
+            # - On TPU, jax.profiler.start_trace() produces empty device
+            #   traces when called while the engine is sleeping
+            # - DP>1 deadlocks with sleep/wake
+            if config.profile and config.mode == "prefill" and trace_prefix:
+                # Start profiling
+                params = {"prefix": trace_prefix, "delay": 0}
                 for attempt in range(3):
                     trace_started = await call_debug_endpoint(
-                        session, rotator, "/debug/profile/start",
-                        params,
-                    )
+                        session, rotator, "/debug/profile/start", params)
                     if trace_started:
                         trace_prefixes.append(trace_prefix)
                         break
                     logger.warning(
                         "Failed to start profiling for %s (attempt %d/3)",
-                        trace_prefix, attempt + 1,
-                    )
+                        trace_prefix, attempt + 1)
                     await asyncio.sleep(2.0)
 
             (
                 elapsed_ms,
                 prompt_tokens,
                 completion_tokens,
+                decode_trace_started,
             ) = await run_single_iteration(
                 session,
                 config,
@@ -548,10 +769,17 @@ async def run_benchmark(
                 benchmark_prompt,
                 global_batch_size,
                 num_tokens_to_generate,
+                trace_prefix=trace_prefix if config.mode == "decode" else None,
+                use_sleep_wake=use_sleep_wake,
             )
 
+            # For decode mode, trace_started comes from run_single_iteration
+            # (profiling starts after batch ramp-up inside that function).
+            if config.mode == "decode" and decode_trace_started:
+                trace_started = True
+                trace_prefixes.append(trace_prefix)
+
             # Stop profiling only if start succeeded
-            # Read server-reported decode-only elapsed_ms from response
             server_elapsed_ms = None
             if trace_started:
                 for endpoint in rotator.all():

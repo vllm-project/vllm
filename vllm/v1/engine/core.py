@@ -213,6 +213,10 @@ class EngineCore:
         # Pause state for "keep" mode - freezes requests in queue.
         self._scheduler_paused = False
 
+        # Profiling state: auto-stop after max_steps engine steps.
+        self._profiling_steps_remaining: int | None = None
+        self._profiling_stop_pending: bool = False
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -340,6 +344,26 @@ class EngineCore:
         """
         self._scheduler_paused = False
 
+    def get_request_counts(self) -> tuple[int, int]:
+        """Return (num_running, num_waiting) request counts.
+
+        Used by the /debug/batch_info endpoint to detect when all
+        requests have finished prefill and entered decode (i.e.,
+        num_waiting == 0).
+        """
+        return self.scheduler.get_request_counts()
+
+    def set_prefill_only(self, enabled: bool) -> None:
+        """Skip decode scheduling while waiting requests remain.
+
+        When enabled, the scheduler gives the full token budget to
+        prefilling waiting requests and does not schedule any decode
+        tokens for running requests.  This ensures all requests finish
+        prefill before any decode begins, so the full batch reaches
+        steady-state together (used by benchmarking).
+        """
+        self.scheduler.prefill_only = enabled
+
     @contextmanager
     def log_error_detail(self, scheduler_output: SchedulerOutput):
         """Execute the model and log detailed info on failure."""
@@ -397,6 +421,14 @@ class EngineCore:
         if self._scheduler_paused:
             return {}, False
 
+        # Auto-stop profiling from previous step's max_steps trigger.
+        # Must happen BEFORE execute_model so the decode step is excluded
+        # from the trace, but AFTER the device has flushed trace data
+        # from the previous (profiled) step.
+        if self._profiling_stop_pending:
+            self._profiling_stop_pending = False
+            self.model_executor.profile(False)
+
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
@@ -418,6 +450,10 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+        # Auto-stop profiling after max_steps (e.g. prefill-only trace)
+        if scheduler_output.total_num_scheduled_tokens > 0:
+            self._maybe_auto_stop_profile()
 
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
 
@@ -568,12 +604,30 @@ class EngineCore:
         if self.scheduler:
             self.scheduler.shutdown()
 
-    def profile(self, is_start: bool = True, profile_prefix: str | None = None, delay: int = 0):
+    def profile(self, is_start: bool = True, profile_prefix: str | None = None,
+                delay: int = 0, max_steps: int = 0):
         results = self.model_executor.profile(is_start, profile_prefix, delay=delay)
+        if is_start and max_steps > 0:
+            self._profiling_steps_remaining = max_steps
+        elif not is_start:
+            self._profiling_steps_remaining = None
         # Return elapsed_ms from worker on stop (first worker's value)
         if not is_start and results:
             return results[0]
         return None
+
+    def _maybe_auto_stop_profile(self):
+        """Mark profiling for auto-stop after max_steps engine steps.
+
+        Sets _profiling_stop_pending which is checked at the beginning
+        of the next step() call.  This gives the TPU device time to
+        flush trace data between the last profiled step and stop_trace.
+        """
+        if self._profiling_steps_remaining is not None:
+            self._profiling_steps_remaining -= 1
+            if self._profiling_steps_remaining <= 0:
+                self._profiling_steps_remaining = None
+                self._profiling_stop_pending = True
 
     def reset_mm_cache(self):
         # NOTE: Since this is mainly for debugging, we don't attempt to

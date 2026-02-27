@@ -34,19 +34,61 @@ async def debug_wake_up(request: Request):
     return JSONResponse(content={"status": "awake"})
 
 
+@router.get("/batch_info")
+async def debug_batch_info(request: Request):
+    """Return current scheduler batch composition.
+
+    Used by vllm bench iterations to detect when all requests have
+    finished prefill and entered decode (num_waiting == 0), so that
+    profiling captures only steady-state decode iterations.
+
+    For DP>1, sums request counts across all DP engine cores.
+    """
+    client = engine_client(request)
+    all_counts = await client.engine_core.call_utility_all_async(
+        "get_request_counts")
+    total_running = sum(c[0] for c in all_counts)
+    total_waiting = sum(c[1] for c in all_counts)
+    return JSONResponse(content={
+        "num_running": total_running,
+        "num_waiting": total_waiting,
+    })
+
+
+@router.post("/prefill_only")
+async def debug_prefill_only(request: Request, enabled: bool = True):
+    """Set prefill-only scheduling mode.
+
+    When enabled, the scheduler skips decode tokens for running requests,
+    giving the full token budget to prefilling waiting requests.  This
+    ensures all requests finish prefill before any decode begins.
+
+    Use enabled=false to resume normal (prefill + decode) scheduling.
+    """
+    client = engine_client(request)
+    await client.engine_core.call_utility_async("set_prefill_only", enabled)
+    return JSONResponse(content={
+        "status": "prefill_only" if enabled else "normal",
+    })
+
+
 @router.post("/profile/start")
 async def debug_profile_start(request: Request, prefix: str = "benchmark",
-                              delay: int = 0):
+                              delay: int = 0, max_steps: int = 0):
     """Start profiling with optional trace prefix and delay.
 
     Args:
         prefix: Subdirectory name for trace files.
         delay: Number of engine steps to skip before starting the trace.
                Use delay=1 for decode benchmarks to exclude the prefill step.
+        max_steps: Stop tracing automatically after this many engine steps.
+                   Use max_steps=1 for prefill benchmarks to exclude the
+                   decode step.  0 means no auto-stop (manual stop required).
     """
-    await engine_client(request).start_profile(prefix, delay=delay)
+    await engine_client(request).start_profile(prefix, delay=delay,
+                                                max_steps=max_steps)
     return JSONResponse(content={"status": "profiling", "prefix": prefix,
-                                 "delay": delay})
+                                 "delay": delay, "max_steps": max_steps})
 
 
 @router.post("/profile/stop")
