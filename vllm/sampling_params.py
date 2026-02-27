@@ -682,9 +682,9 @@ class SamplingParams(
             return
 
         # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_tokens > 1 or self.min_p > _SAMPLING_EPS or self.logit_bias:
+        if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise ValueError(
-                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
 
