@@ -316,6 +316,10 @@ _MULTIMODAL_MODELS = {
     "BagelForConditionalGeneration": ("bagel", "BagelForConditionalGeneration"),
     "BeeForConditionalGeneration": ("bee", "BeeForConditionalGeneration"),
     "Blip2ForConditionalGeneration": ("blip2", "Blip2ForConditionalGeneration"),
+    "CheXagentForConditionalGeneration": (
+        "chexagent",
+        "CheXagentForConditionalGeneration",
+    ),
     "ChameleonForConditionalGeneration": (
         "chameleon",
         "ChameleonForConditionalGeneration",

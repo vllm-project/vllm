@@ -341,6 +341,15 @@ VLM_TEST_SETTINGS = {
         max_tokens=8,
         dtype="bfloat16",
     ),
+    "chexagent": VLMTestInfo(
+        models=["StanfordAIMI/CheXagent-8b"],
+        test_type=VLMTestType.IMAGE,
+        prompt_formatter=lambda img_prompt: f"Question: {img_prompt} Answer:",
+        img_idx_to_prompt=lambda idx: "",
+        auto_cls=AutoModelForImageTextToText,
+        vllm_output_post_proc=model_utils.blip2_vllm_to_hf_output,
+        marks=[large_gpu_mark(min_gb=32)],
+    ),
     "deepseek_vl_v2": VLMTestInfo(
         models=["Isotr0py/deepseek-vl2-tiny"],  # model repo using dynamic module
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
