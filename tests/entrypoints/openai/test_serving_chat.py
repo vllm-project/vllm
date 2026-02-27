@@ -126,7 +126,7 @@ def gptoss_speculative_server(default_server_args: list[str]):
     if is_aiter_found_and_supported():
         env_dict = {"VLLM_ROCM_USE_AITER": "1"}
     with RemoteOpenAIServer(
-        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict
+        GPT_OSS_MODEL_NAME, server_args, env_dict=env_dict, max_wait_seconds=480
     ) as remote_server:
         yield remote_server
 
@@ -511,6 +511,7 @@ class MockHFConfig:
 class MockModelConfig:
     task = "generate"
     runner_type = "generate"
+    model = MODEL_NAME
     tokenizer = MODEL_NAME
     trust_remote_code = False
     tokenizer_mode = "auto"
@@ -520,24 +521,31 @@ class MockModelConfig:
     hf_config = MockHFConfig()
     hf_text_config = MockHFConfig()
     logits_processors: list[str] | None = None
-    logits_processor_pattern = None
     diff_sampling_param: dict | None = None
     allowed_local_media_path: str = ""
     allowed_media_domains: list[str] | None = None
     encoder_config = None
     generation_config: str = "auto"
+    override_generation_config: dict[str, Any] = field(default_factory=dict)
     media_io_kwargs: dict[str, dict[str, Any]] = field(default_factory=dict)
     skip_tokenizer_init: bool = False
+    is_encoder_decoder: bool = False
+    is_multimodal_model: bool = False
 
     def get_diff_sampling_param(self):
         return self.diff_sampling_param or {}
 
 
+@dataclass
+class MockVllmConfig:
+    model_config: MockModelConfig
+
+
 def _build_renderer(model_config: MockModelConfig):
     _, tokenizer_name, _, kwargs = tokenizer_args_from_config(model_config)
 
-    return HfRenderer(
-        model_config,
+    return HfRenderer.from_config(
+        MockVllmConfig(model_config),
         tokenizer_kwargs={**kwargs, "tokenizer_name": tokenizer_name},
     )
 
@@ -556,19 +564,6 @@ def _build_serving_chat(engine: AsyncLLM) -> OpenAIServingChat:
         request_logger=None,
     )
 
-    async def _fake_process_inputs(
-        request_id,
-        engine_prompt,
-        sampling_params,
-        *,
-        lora_request,
-        trace_headers,
-        priority,
-        data_parallel_rank,
-    ):
-        return dict(engine_prompt), {}
-
-    serving_chat._process_inputs = AsyncMock(side_effect=_fake_process_inputs)
     return serving_chat
 
 
@@ -657,12 +652,10 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
 
-    # Setting server's max_tokens in the generation_config.json
-    # lower than context_window - prompt_tokens
+    # Model author's generation_config.json sets max_tokens (auto, no override)
+    # — should act as fallback only, not ceiling
     mock_model_config = MockModelConfig()
-    mock_model_config.diff_sampling_param = {
-        "max_tokens": 10  # Setting server-side max_tokens limit
-    }
+    mock_model_config.diff_sampling_param = {"max_tokens": 10}
 
     # Reinitialize the engine with new settings
     mock_engine = MagicMock(spec=AsyncLLM)
@@ -686,7 +679,50 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
 
-    # Test Case 2: Request's max_tokens set higher than server accepts
+    # Test Case 2: Request's max_tokens set higher than generation_config
+    # default so request-provided max_tokens takes precedence
+    req.max_tokens = 15
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 15
+
+    # Test Case 3: Request's max_tokens set lower than server accepts
+    req.max_tokens = 5
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 5
+
+    # User explicitly sets max_tokens via --override-generation-config
+    # — should act as a ceiling
+    mock_model_config = MockModelConfig()
+    mock_model_config.diff_sampling_param = {"max_tokens": 10}
+    mock_model_config.override_generation_config = {"max_new_tokens": 10}
+
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = mock_model_config
+    mock_engine.input_processor = MagicMock()
+    mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    # Test Case 3.1: No max_tokens — uses override as default
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req)
+
+    assert mock_engine.generate.call_args.args[1].max_tokens == 10
+
+    # Test Case 3.2: Request max_tokens higher — capped by user ceiling from override
     req.max_tokens = 15
 
     with suppress(Exception):
@@ -694,7 +730,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
 
     assert mock_engine.generate.call_args.args[1].max_tokens == 10
 
-    # Test Case 3: Request's max_tokens set lower than server accepts
+    # Test Case 3.3: Request max_tokens lower — respected
     req.max_tokens = 5
 
     with suppress(Exception):
@@ -705,9 +741,7 @@ async def test_serving_chat_should_set_correct_max_tokens():
     # Setting server's max_tokens in the generation_config.json
     # higher than context_window - prompt_tokens
     mock_model_config = MockModelConfig()
-    mock_model_config.diff_sampling_param = {
-        "max_tokens": 200  # Setting server-side max_tokens limit
-    }
+    mock_model_config.diff_sampling_param = {"max_tokens": 200}
 
     # Reinitialize the engine with new settings
     mock_engine = MagicMock(spec=AsyncLLM)
@@ -761,8 +795,10 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
     mock_engine.io_processor = MagicMock()
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
-    mock_renderer = MistralRenderer(mock_engine.model_config, tokenizer_kwargs={})
-    mock_renderer._tokenizer = mock_tokenizer
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config),
+        tokenizer=mock_tokenizer,
+    )
     # Force the Mistral chat template renderer to return token IDs.
     # Choose a prompt length that is < max_model_len, but large enough that
     # adding max_tokens should exceed the model context window.
@@ -784,7 +820,7 @@ async def test_serving_chat_mistral_token_ids_prompt_is_validated():
 
     resp = await serving_chat.create_chat_completion(req)
     assert isinstance(resp, ErrorResponse)
-    assert "max_tokens" in resp.error.message
+    assert "context length is only" in resp.error.message
 
 
 @pytest.mark.asyncio
@@ -800,8 +836,10 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
     mock_engine.io_processor = MagicMock()
 
     mock_tokenizer = MagicMock(spec=MistralTokenizer)
-    mock_renderer = MistralRenderer(mock_engine.model_config, tokenizer_kwargs={})
-    mock_renderer._tokenizer = mock_tokenizer
+    mock_renderer = MistralRenderer(
+        MockVllmConfig(mock_engine.model_config),
+        tokenizer=mock_tokenizer,
+    )
     # prompt_token_ids length == max_model_len should be rejected for
     # completion-like requests (ChatCompletionRequest).
     mock_renderer.render_messages_async = AsyncMock(
@@ -824,7 +862,7 @@ async def test_serving_chat_mistral_token_ids_prompt_too_long_is_rejected():
 
     resp = await serving_chat.create_chat_completion(req)
     assert isinstance(resp, ErrorResponse)
-    assert "maximum context length" in resp.error.message
+    assert "context length is only" in resp.error.message
 
 
 @pytest.mark.asyncio
@@ -890,6 +928,20 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
 
     serving_chat = _build_serving_chat(mock_engine)
 
+    orig_render_chat_request = serving_chat.render_chat_request
+    captured_prompts = []
+
+    async def render_chat_request(request):
+        result = await orig_render_chat_request(request)
+
+        assert isinstance(result, tuple)
+        conversation, engine_prompts = result
+        captured_prompts.extend(engine_prompts)
+
+        return result
+
+    serving_chat.render_chat_request = render_chat_request
+
     # Test cache_salt
     req = ChatCompletionRequest(
         model=MODEL_NAME,
@@ -899,15 +951,19 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
     # By default, cache_salt in the engine prompt is not set
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    engine_prompt = serving_chat._process_inputs.await_args_list[0].args[1]
-    assert "cache_salt" not in engine_prompt
+
+    assert len(captured_prompts) == 1
+    assert "cache_salt" not in captured_prompts[0]
+
+    captured_prompts.clear()
 
     # Test with certain cache_salt
     req.cache_salt = "test_salt"
     with suppress(Exception):
         await serving_chat.create_chat_completion(req)
-    engine_prompt = serving_chat._process_inputs.await_args_list[1].args[1]
-    assert engine_prompt.get("cache_salt") == "test_salt"
+
+    assert len(captured_prompts) == 1
+    assert captured_prompts[0]["cache_salt"] == "test_salt"
 
 
 @pytest.mark.asyncio
@@ -1007,11 +1063,11 @@ class TestServingChatWithHarmony:
     @pytest.fixture()
     def mock_engine(self) -> AsyncLLM:
         mock_engine = MagicMock(spec=AsyncLLM)
-        mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
         mock_engine.errored = False
         mock_engine.model_config = MockModelConfig()
         mock_engine.input_processor = MagicMock()
         mock_engine.io_processor = MagicMock()
+        mock_engine.renderer = _build_renderer(mock_engine.model_config)
         return mock_engine
 
     @pytest.fixture()
@@ -1618,11 +1674,11 @@ async def test_tool_choice_validation_without_parser():
     """Test that tool_choice='required' or named tool without tool_parser
     returns an appropriate error message."""
     mock_engine = MagicMock(spec=AsyncLLM)
-    mock_engine.get_tokenizer.return_value = get_tokenizer(MODEL_NAME)
     mock_engine.errored = False
     mock_engine.model_config = MockModelConfig()
     mock_engine.input_processor = MagicMock()
     mock_engine.io_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
 
     models = OpenAIServingModels(
         engine_client=mock_engine,

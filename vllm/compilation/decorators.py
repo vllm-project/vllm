@@ -7,12 +7,11 @@ import inspect
 import os
 import sys
 from collections.abc import Callable, Generator
-from typing import TYPE_CHECKING, Any, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Any, TypeVar, overload
 from unittest.mock import patch
 
 import torch
 import torch.nn as nn
-from packaging import version
 from torch._dynamo.symbolic_convert import InliningInstructionTranslator
 
 import vllm.envs as envs
@@ -334,7 +333,7 @@ def _support_torch_compile(
     ) -> None:
         def mark_dynamic(arg: torch.Tensor, dims: list[int]) -> None:
             if ds_type == DynamicShapesType.UNBACKED:
-                if is_torch_equal_or_newer("2.10.0.dev"):
+                if is_torch_equal_or_newer("2.10.0"):
                     for dim in dims:
                         torch._dynamo.decorators.mark_unbacked(
                             arg, dim, hint_override=arg.size()[dim]
@@ -374,7 +373,7 @@ def _support_torch_compile(
                     if isinstance(arg, torch.Tensor):
                         # In case dims is specified with negative indexing
                         dims = [arg.ndim + dim if dim < 0 else dim for dim in dims]
-                        if is_torch_equal_or_newer("2.10.0.dev"):
+                        if is_torch_equal_or_newer("2.10.0"):
                             for dim in dims:
                                 torch._dynamo.decorators.mark_unbacked(
                                     arg, dim, hint_override=arg.size()[dim]
@@ -408,10 +407,10 @@ def _support_torch_compile(
         if envs.VLLM_USE_AOT_COMPILE:
             """
             When using torch.compile in AOT mode, we store the cache artifacts
-            under VLLM_CACHE_ROOT/torch_aot_compile/{hash}/rank_i_j. The {hash}
-            contains all of the factors except for the source files being
-            traced through, because we don't actually know which source files
-            to check at this point (before dynamo runs).
+            under VLLM_CACHE_ROOT/torch_compile_cache/torch_aot_compile/{hash}
+            The {hash} contains all of the factors except for the source files
+            being traced through, because we don't actually know which source
+            files to check at this point (before dynamo runs).
             On loading we will actually look at the source files being traced
             through. If any source file have changed (compared with the
             serialized backend artifacts), then we need to generate a new AOT
@@ -425,6 +424,7 @@ def _support_torch_compile(
             hash_key = hashlib.sha256(str(factors).encode()).hexdigest()
             cache_dir = os.path.join(
                 envs.VLLM_CACHE_ROOT,
+                "torch_compile_cache",
                 "torch_aot_compile",
                 hash_key,
             )
@@ -449,10 +449,15 @@ def _support_torch_compile(
                 self.was_aot_compile_fn_loaded_from_disk = True
             except Exception as e:
                 if os.path.exists(aot_compilation_path):
+                    if isinstance(e, EOFError):
+                        message = "Compile cache file corrupted."
+                    else:
+                        message = str(e)
                     logger.warning(
-                        "Cannot load aot compilation from path %s, error: %s",
+                        "Compiling model again due to a load failure from %s, "
+                        "reason: %s",
                         aot_compilation_path,
-                        str(e),
+                        message,
                     )
                 if envs.VLLM_FORCE_AOT_LOAD:
                     raise e
@@ -526,9 +531,9 @@ def _support_torch_compile(
             fx_config_patches["backed_size_oblivious"] = True
 
         # Prepare inductor config patches
-        # assume_32bit_indexing is only available in torch 2.10.0.dev+
+        # assume_32bit_indexing is only available in torch 2.10.0+
         inductor_config_patches = {}
-        if is_torch_equal_or_newer("2.10.0.dev"):
+        if is_torch_equal_or_newer("2.10.0"):
             inductor_config_patches["assume_32bit_indexing"] = (
                 self.compilation_config.dynamic_shapes_config.assume_32_bit_indexing
             )
@@ -540,7 +545,6 @@ def _support_torch_compile(
             torch._dynamo.config.patch(**dynamo_config_patches),
             maybe_use_cudagraph_partition_wrapper(self.vllm_config),
             torch.fx.experimental._config.patch(**fx_config_patches),
-            _torch27_patch_tensor_subclasses(),
             torch._inductor.config.patch(**inductor_config_patches),
         ):
             use_aot_compile = envs.VLLM_USE_AOT_COMPILE
@@ -576,7 +580,11 @@ def _support_torch_compile(
         logger.info("saving AOT compiled function to %s", self._aot_compilation_path)
         try:
             os.makedirs(self._aot_cache_dir, exist_ok=True)
-            self.aot_compiled_fn.save_compiled_function(self._aot_compilation_path)
+            # File saving should be atomic, so we will save to a temporary location
+            # first. Should be upstreamed to PyTorch 2.12 as well.
+            tmp_file = f"{self._aot_compilation_path}.{os.getpid()}.tmp"
+            self.aot_compiled_fn.save_compiled_function(tmp_file)
+            os.replace(tmp_file, self._aot_compilation_path)
             logger.info("saved AOT compiled function to %s", self._aot_compilation_path)
         except Exception as e:
             logger.warning(
@@ -647,42 +655,3 @@ def maybe_use_cudagraph_partition_wrapper(
         and compilation_config.use_inductor_graph_partition
     ):
         torch._inductor.utils.set_customized_partition_wrappers(None)
-
-
-@contextlib.contextmanager
-def _torch27_patch_tensor_subclasses() -> Generator[None, None, None]:
-    """
-    Add support for using tensor subclasses (ie `BasevLLMParameter`, ect) when
-    using torch 2.7.0. This enables using weight_loader_v2 and the use of
-    `BasevLLMParameters` without having to replace them with regular tensors
-    before `torch.compile`-time.
-    """
-    from vllm.model_executor.parameter import (
-        BasevLLMParameter,
-        ModelWeightParameter,
-        RowvLLMParameter,
-        _ColumnvLLMParameter,
-    )
-
-    def return_false(*args: Any, **kwargs: Any) -> Literal[False]:
-        return False
-
-    if version.parse("2.7") <= version.parse(torch.__version__) < version.parse("2.8"):
-        yield
-        return
-
-    with (
-        torch._dynamo.config.patch(
-            "traceable_tensor_subclasses",
-            [
-                BasevLLMParameter,
-                ModelWeightParameter,
-                _ColumnvLLMParameter,
-                RowvLLMParameter,
-            ],
-        ),
-        patch(
-            "torch._dynamo.variables.torch.can_dispatch_torch_function", return_false
-        ),
-    ):
-        yield

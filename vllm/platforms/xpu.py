@@ -3,11 +3,17 @@
 
 import contextlib
 import os
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
+# import custom ops, trigger op registration
+import vllm_xpu_kernels._C  # noqa
+import vllm_xpu_kernels._moe_C  # noqa
+import vllm_xpu_kernels._xpu_C  # noqa
+
 from vllm.logger import init_logger
+from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -29,7 +35,7 @@ class XPUPlatform(Platform):
     # Intel XPU's device key is "GPU" for Ray.
     # see https://github.com/ray-project/ray/blob/6a5eb5865eeb9ccf058a79b44f107e327e360673/python/ray/_private/accelerators/intel_gpu.py#L20 # noqa: E501
     ray_device_key: str = "GPU"
-    dist_backend: str = "ccl"  # ccl | xccl
+    dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
 
     @classmethod
@@ -43,6 +49,7 @@ class XPUPlatform(Platform):
         cls,
         selected_backend: "AttentionBackendEnum",
         attn_selector_config: "AttentionSelectorConfig",
+        num_heads: int | None = None,
     ) -> str:
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
@@ -55,6 +62,9 @@ class XPUPlatform(Platform):
         dtype = attn_selector_config.dtype
         if attn_selector_config.use_sparse:
             raise NotImplementedError("Sparse Attention is not supported on XPU.")
+        if attn_selector_config.use_mla:
+            logger.info_once("Using Triton MLA backend on V1 engine.")
+            return AttentionBackendEnum.TRITON_MLA.get_path()
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
@@ -78,9 +88,10 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_supported_vit_attn_backends(cls) -> list["AttentionBackendEnum"]:
-        # XPU only supports FLASH_ATTN for vision attention.
         return [
             AttentionBackendEnum.FLASH_ATTN,
+            AttentionBackendEnum.TRITON_ATTN,
+            AttentionBackendEnum.TORCH_SDPA,
         ]
 
     @classmethod
@@ -88,7 +99,7 @@ class XPUPlatform(Platform):
         cls,
         head_size: int,
         dtype: torch.dtype,
-        backend: Optional["AttentionBackendEnum"] = None,
+        backend: "AttentionBackendEnum | None" = None,
     ) -> "AttentionBackendEnum":
         if backend is not None:
             assert backend in cls.get_supported_vit_attn_backends(), (
@@ -142,10 +153,15 @@ class XPUPlatform(Platform):
         return torch.no_grad()
 
     @classmethod
+    def get_static_graph_wrapper_cls(cls) -> str:
+        return "vllm.compilation.cuda_graph.CUDAGraphWrapper"
+
+    @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
-        # in V1(or with ipex chunked prefill) block_size is 64
+        parallel_config = vllm_config.parallel_config
+        # in V1(or with chunked prefill) block_size is 64
         if cache_config and cache_config.block_size is None:
             cache_config.block_size = 64
 
@@ -156,15 +172,35 @@ class XPUPlatform(Platform):
         if compilation_config.compile_sizes is None:
             compilation_config.compile_sizes = []
 
-        assert compilation_config.cudagraph_mode == CUDAGraphMode.NONE, (
-            "CUDA graph mode should be NONE on XPU"
-        )
+        attention_config = vllm_config.attention_config
+        if attention_config.backend is None:
+            attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+        if not supports_xpu_graph():
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(
+                "XPU Graph is not supported in the current PyTorch version, "
+                "disabling cudagraph_mode."
+            )
+        elif parallel_config.world_size_across_dp > 1:
+            compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            logger.warning(
+                "XPU Graph doesn't support capture communication ops, "
+                "disabling cudagraph_mode."
+            )
+        else:
+            if (
+                attention_config.backend == AttentionBackendEnum.FLASH_ATTN
+                and compilation_config.cudagraph_mode
+                not in {CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE}
+            ):
+                compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+                logger.warning(
+                    "FMHA sycl-tla kernels cannot be captured with XPU graphs, "
+                    "falling back to PIECEWISE graph mode on XPU platform."
+                )
 
         if vllm_config.lora_config is not None:
             compilation_config.mode = CompilationMode.NONE
-        # decrease triton kernel compilation scratch space for speculative decoding
-        if vllm_config.speculative_config is not None:
-            os.environ["IGC_ForceOCLSIMDWidth"] = "16"  # noqa: SIM112
         # check and update parallel config
         parallel_config = vllm_config.parallel_config
         # Only override worker_cls if it's still the default "auto"
@@ -191,7 +227,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def support_static_graph_mode(cls) -> bool:
-        return False
+        return True
 
     @classmethod
     def is_pin_memory_available(cls):
@@ -206,7 +242,7 @@ class XPUPlatform(Platform):
 
     @classmethod
     def fp8_dtype(cls) -> torch.dtype:
-        return torch.float8_e5m2
+        return torch.float8_e4m3fn
 
     @classmethod
     def is_data_center_gpu(cls) -> bool:
@@ -215,6 +251,13 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
+        from vllm.utils.torch_utils import supports_xccl
+
+        if not supports_xccl():
+            logger.warning(
+                "xccl is not enabled in this torch build, communication"
+                " is not available."
+            )
         return "vllm.distributed.device_communicators.xpu_communicator.XpuCommunicator"  # noqa
 
     @classmethod
@@ -260,3 +303,7 @@ class XPUPlatform(Platform):
         """Copy blocks from XPU to host (CPU)."""
         _src_cache = src_cache[:, src_block_indices]
         dst_cache[:, dst_block_indices] = _src_cache.cpu()
+
+    @classmethod
+    def num_compute_units(cls, device_id: int = 0) -> int:
+        return torch.xpu.get_device_properties(device_id).max_compute_units

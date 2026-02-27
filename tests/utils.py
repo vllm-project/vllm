@@ -42,11 +42,9 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+from vllm.model_executor.kernels.linear import (
     FP8ScaledMMLinearKernel,
+    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -128,6 +126,9 @@ class RemoteOpenAIServer:
             env=env,
             stdout=sys.stdout,
             stderr=sys.stderr,
+            # Create a dedicated process group so we can kill
+            # the entire tree (parent + EngineCore + workers) at once.
+            start_new_session=True,
         )
 
     def __init__(
@@ -189,20 +190,184 @@ class RemoteOpenAIServer:
             model_loader = get_model_loader(load_config)
             model_loader.download_model(model_config)
 
+        # Record GPU memory before server start so we know what
+        # "released" looks like.
+        self._pre_server_gpu_memory = self._get_gpu_memory_used()
+        if self._pre_server_gpu_memory is not None:
+            pre_gb = self._pre_server_gpu_memory / 1e9
+            print(
+                f"[RemoteOpenAIServer] GPU memory before server start: {pre_gb:.2f} GB"
+            )
+
         self._start_server(model, vllm_serve_args, env_dict)
-        max_wait_seconds = max_wait_seconds or 240
+        max_wait_seconds = max_wait_seconds or 360
         self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
 
     def __enter__(self):
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
-        self.proc.terminate()
+        pid = self.proc.pid
+
+        # Get the process group ID. Because we used
+        # start_new_session=True the pgid equals the server's pid.
         try:
-            self.proc.wait(8)
+            pgid = os.getpgid(pid)
+        except (ProcessLookupError, OSError):
+            pgid = None
+
+        # Phase 1: graceful SIGTERM to the entire process group
+        if pgid is not None:
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(pgid, signal.SIGTERM)
+                print(f"[RemoteOpenAIServer] Sent SIGTERM to process group {pgid}")
+        else:
+            self.proc.terminate()
+
+        try:
+            self.proc.wait(timeout=15)
+            print(f"[RemoteOpenAIServer] Server {pid} terminated gracefully")
         except subprocess.TimeoutExpired:
-            # force kill if needed
-            self.proc.kill()
+            # Phase 2: SIGKILL the entire process group
+            print(
+                f"[RemoteOpenAIServer] Server {pid} did not respond "
+                "to SIGTERM, sending SIGKILL to process group"
+            )
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+
+            try:
+                self.proc.wait(timeout=10)
+                print(f"[RemoteOpenAIServer] Server {pid} killed")
+            except subprocess.TimeoutExpired:
+                # Phase 3: last resort - find and kill any orphaned children
+                self._kill_orphaned_children(pid)
+
+        # Wait for GPU memory to actually be *freed*, not just
+        # "stabilized at whatever level it's at".
+        self._wait_for_gpu_memory_release()
+
+    def _kill_orphaned_children(self, parent_pid: int) -> None:
+        """Best-effort cleanup of any lingering child processes."""
+        try:
+            import psutil
+
+            parent = psutil.Process(parent_pid)
+            children = parent.children(recursive=True)
+            for child in children:
+                print(
+                    f"[RemoteOpenAIServer] Killing orphaned child "
+                    f"pid={child.pid} name={child.name()}"
+                )
+                child.kill()
+            psutil.wait_procs(children, timeout=5)
+        except Exception as e:
+            # psutil may not be installed, or processes already gone
+            print(f"[RemoteOpenAIServer] Orphan cleanup failed: {e}")
+            # Fallback: try to kill by pgid one more time
+            with contextlib.suppress(ProcessLookupError, OSError):
+                os.killpg(parent_pid, signal.SIGKILL)
+
+    def _get_gpu_memory_used(self) -> float | None:
+        """Get total GPU memory used across all visible devices in bytes."""
+        try:
+            if current_platform.is_rocm():
+                with _nvml():
+                    handles = amdsmi_get_processor_handles()
+                    total_used = 0
+                    for handle in handles:
+                        vram_info = amdsmi_get_gpu_vram_usage(handle)
+                        total_used += vram_info["vram_used"]
+                    return total_used
+            elif current_platform.is_cuda():
+                with _nvml():
+                    total_used = 0
+                    device_count = cuda_device_count_stateless()
+                    for i in range(device_count):
+                        handle = nvmlDeviceGetHandleByIndex(i)
+                        mem_info = nvmlDeviceGetMemoryInfo(handle)
+                        total_used += mem_info.used
+                    return total_used
+        except Exception as e:
+            print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
+            return None
+        return None
+
+    def _wait_for_gpu_memory_release(self, timeout: float = 60.0):
+        """Wait for GPU memory to drop back toward pre-server levels.
+
+        Two-phase strategy:
+          1. Try to wait for memory to return close to pre-server baseline.
+          2. If that doesn't happen, fall back to waiting for stabilization
+             and log a warning (the next server might still OOM).
+        """
+        baseline = self._pre_server_gpu_memory
+        if baseline is None:
+            # Can't query GPU memory - nothing to do
+            return
+
+        # Allow up to 2 GiB overhead above baseline for driver/context state
+        # that may persist between server instances.
+        headroom_bytes = 2 * 1024 * 1024 * 1024
+        target = baseline + headroom_bytes
+
+        start = time.time()
+        last_used: float | None = None
+        stable_count = 0
+
+        while time.time() - start < timeout:
+            used = self._get_gpu_memory_used()
+
+            if used is None:
+                return  # Can't query, assume ok
+
+            used_gb = used / 1e9
+            target_gb = target / 1e9
+            elapsed = time.time() - start
+
+            # Phase 1: memory dropped to near baseline - we're done.
+            if used <= target:
+                print(
+                    f"[RemoteOpenAIServer] GPU memory released to "
+                    f"{used_gb:.2f} GB (target: {target_gb:.2f} GB) "
+                    f"in {elapsed:.1f}s"
+                )
+                return
+
+            # Phase 2 (after 40s): fall back to stabilization check.
+            # This handles cases where another process is using GPU memory
+            # and we'll never reach baseline.
+            if elapsed > 40.0 and last_used is not None:
+                delta = abs(used - last_used)
+                if delta < 200 * 1024 * 1024:  # 200 MB
+                    stable_count += 1
+                    if stable_count >= 3:
+                        print(
+                            f"[RemoteOpenAIServer] WARNING: GPU memory "
+                            f"stabilized at {used_gb:.2f} GB "
+                            f"(target was {target_gb:.2f} GB). "
+                            f"Proceeding - next server may OOM."
+                        )
+                        return
+                else:
+                    stable_count = 0
+
+            last_used = used
+            time.sleep(1.0)
+
+        # Timeout - log clearly so CI failures are diagnosable
+        final_used = self._get_gpu_memory_used()
+        final_gb = final_used / 1e9 if final_used else 0.0
+        raise RuntimeError(
+            f"[RemoteOpenAIServer] GPU memory did not release within "
+            f"{timeout}s. Current: {final_gb:.2f} GB, "
+            f"target: {target / 1e9:.2f} GB, "
+            f"baseline: {baseline / 1e9:.2f} GB. "
+            f"Child processes may still be holding GPU memory."
+        )
 
     def _poll(self) -> int | None:
         """Subclasses override this method to customize process polling"""
@@ -1158,6 +1323,57 @@ def multi_gpu_test(*, num_gpus: int):
             func = mark(func)
 
         return func
+
+    return wrapper
+
+
+def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
+    """
+    Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
+
+    Examples:
+        @gpu_tier_mark(min_gpus=2)          # only on multi-GPU
+        @gpu_tier_mark(max_gpus=1)          # only on single-GPU
+        @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
+    """
+    gpu_count = cuda_device_count_stateless()
+    marks = []
+
+    if min_gpus > 1:
+        marks.append(pytest.mark.distributed(num_gpus=min_gpus))
+
+    reasons = []
+    if gpu_count < min_gpus:
+        reasons.append(f"Need at least {min_gpus} GPUs (have {gpu_count})")
+    if max_gpus is not None and gpu_count > max_gpus:
+        reasons.append(f"Need at most {max_gpus} GPUs (have {gpu_count})")
+
+    if reasons:
+        marks.append(pytest.mark.skipif(True, reason="; ".join(reasons)))
+
+    return marks
+
+
+def single_gpu_only(f=None):
+    """Skip this test when running in a multi-GPU environment."""
+    marks = gpu_tier_mark(max_gpus=1)
+
+    def wrapper(func):
+        for mark in reversed(marks):
+            func = mark(func)
+        return func
+
+    return wrapper(f) if f is not None else wrapper
+
+
+def multi_gpu_only(*, num_gpus: int = 2):
+    """Skip this test when running on fewer than num_gpus GPUs."""
+    marks = gpu_tier_mark(min_gpus=num_gpus)
+
+    def wrapper(f):
+        for mark in reversed(marks):
+            f = mark(f)
+        return f
 
     return wrapper
 

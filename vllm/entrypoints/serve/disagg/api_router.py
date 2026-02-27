@@ -67,7 +67,7 @@ async def generate(request: GenerateRequest, raw_request: Request):
     try:
         generator = await handler.serve_tokens(request, raw_request)
     except Exception as e:
-        return handler.create_error_response(e)
+        generator = handler.create_error_response(e)
 
     if isinstance(generator, ErrorResponse):
         return JSONResponse(

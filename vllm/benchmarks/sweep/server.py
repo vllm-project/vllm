@@ -12,6 +12,12 @@ from typing_extensions import Self
 
 
 class ServerProcess:
+    VLLM_RESET_CACHE_ENDPOINTS = [
+        "/reset_prefix_cache",
+        "/reset_mm_cache",
+        "/reset_encoder_cache",
+    ]
+
     def __init__(
         self,
         server_cmd: list[str],
@@ -120,11 +126,9 @@ class ServerProcess:
             server_address = self._get_vllm_server_address()
             print(f"Resetting caches at {server_address}")
 
-            res = requests.post(f"{server_address}/reset_prefix_cache")
-            res.raise_for_status()
-
-            res = requests.post(f"{server_address}/reset_mm_cache")
-            res.raise_for_status()
+            for endpoint in self.VLLM_RESET_CACHE_ENDPOINTS:
+                res = requests.post(server_address + endpoint)
+                res.raise_for_status()
         elif server_cmd[0].endswith("infinity_emb"):
             if "--vector-disk-cache" in server_cmd:
                 raise NotImplementedError(

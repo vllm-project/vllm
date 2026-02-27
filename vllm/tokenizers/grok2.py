@@ -277,6 +277,8 @@ class Grok2Tokenizer(TokenizerLike):
         self._pad_token_id = self._special_tokens.get(PAD, self._eos_token_id)
         self._unk_token_id = self._pad_token_id
 
+        self._max_chars_per_token = max(len(tok) for tok in self._token_to_id)
+
     def num_special_tokens_to_add(self) -> int:
         return 0
 
@@ -311,6 +313,10 @@ class Grok2Tokenizer(TokenizerLike):
     @property
     def max_token_id(self) -> int:
         return self._tokenizer.n_vocab - 1
+
+    @property
+    def max_chars_per_token(self) -> int:
+        return self._max_chars_per_token
 
     @property
     def truncation_side(self) -> str:
@@ -432,6 +438,7 @@ class Grok2Tokenizer(TokenizerLike):
             raise ValueError(
                 "No chat template available. Provide `chat_template` explicitly."
             )
+        kwargs["return_dict"] = False
         prompt = hf_chat_utils.apply_chat_template(
             conversation=messages,
             chat_template=template,

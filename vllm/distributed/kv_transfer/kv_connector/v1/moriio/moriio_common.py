@@ -5,7 +5,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Optional
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 import torch
@@ -101,7 +101,7 @@ class MoRIIOAgentMetadata(
 class RoleManager:
     """Manages role state across the connector."""
 
-    _instance: Optional["RoleManager"] = None
+    _instance: "RoleManager | None" = None
     _lock = threading.Lock()
 
     def __init__(self) -> None:

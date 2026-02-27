@@ -30,7 +30,7 @@ def _make_get_num_new_matched_tokens(
 
 @pytest.fixture
 def scheduler():
-    vllm_config = create_vllm_config()
+    vllm_config = create_vllm_config(kv_load_failure_policy="recompute")
     return create_scheduler(vllm_config)
 
 

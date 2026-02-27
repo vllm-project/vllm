@@ -74,7 +74,11 @@ def test_batched_deepgemm_vs_triton(
         quant_config=quant_config,
         moe_config=make_dummy_moe_config(),
     )
-    mk_triton = FusedMoEModularKernel(prep_finalize, triton_experts)
+    mk_triton = FusedMoEModularKernel(
+        prep_finalize,
+        triton_experts,
+        inplace=False,
+    )
 
     out_triton = mk_triton(
         hidden_states=a,
@@ -82,7 +86,6 @@ def test_batched_deepgemm_vs_triton(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         global_num_experts=E,
     )
 
@@ -93,7 +96,11 @@ def test_batched_deepgemm_vs_triton(
         quant_config=quant_config,
         moe_config=make_dummy_moe_config(),
     )
-    mk_deepgemm = FusedMoEModularKernel(prep_finalize, deepgemm_experts)
+    mk_deepgemm = FusedMoEModularKernel(
+        prep_finalize,
+        deepgemm_experts,
+        inplace=False,
+    )
 
     out_deepgemm = mk_deepgemm(
         hidden_states=a,
@@ -101,7 +108,6 @@ def test_batched_deepgemm_vs_triton(
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         global_num_experts=E,
     )
 

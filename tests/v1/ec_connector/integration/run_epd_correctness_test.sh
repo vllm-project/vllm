@@ -24,7 +24,7 @@ MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 # Set 1 to use multimodal prompts; else to use text-only
 USE_MM_PROMPTS="${USE_MM_PROMPTS:-1}"
 MM_FLAG=""
-if [ $USE_MM_PROMPTS = "1" ]; then
+if [ "$USE_MM_PROMPTS" = "1" ]; then
     MM_FLAG="--use_mm_prompts"
 fi
 
@@ -51,7 +51,7 @@ LOG_PATH="${LOG_PATH:-/tmp}"
 BASELINE_FILE="${BASELINE_FILE:-/tmp/vllm_baseline.txt}"
 BASELINE_PD_FILE="${BASELINE_PD_FILE:-/tmp/vllm_epd_baseline.txt}"
 
-mkdir -p $LOG_PATH
+mkdir -p "$LOG_PATH"
 
 # Trap the SIGINT signal (triggered by Ctrl+C)
 trap 'kill $(jobs -pr)' SIGINT SIGTERM EXIT
@@ -87,20 +87,20 @@ run_baseline() {
     # Start baseline instance
     echo "Starting baseline instance on GPU $GPU_SINGLE, port $PORT"
     CUDA_VISIBLE_DEVICES="$GPU_SINGLE" vllm serve "$MODEL" \
-        --port $PORT \
+        --port "$PORT" \
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --max-num-seqs 128 \
-        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
-        > $LOG_PATH/baseline.log 2>&1 &
+        --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
+        > "$LOG_PATH"/baseline.log 2>&1 &
     
     local BASELINE_PID=$!
     
     # Wait for baseline to start
     echo "Waiting for baseline instance to start..."
-    wait_for_server $PORT
+    wait_for_server "$PORT"
 
-    curl http://127.0.0.1:$PORT/v1/models
+    curl http://127.0.0.1:"$PORT"/v1/models
     echo ""
     
     # Run test in baseline mode
@@ -139,14 +139,14 @@ run_epd_1e_1pd() {
     # Start encoder instance
     echo "Starting encoder instance on GPU $GPU_E, port $ENCODE_PORT"
     CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-        --port $ENCODE_PORT \
+        --port "$ENCODE_PORT" \
         --enforce-eager \
         --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
         --max-num-batched-tokens 114688 \
         --max-num-seqs 128 \
-        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+        --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECExampleConnector",
             "ec_role": "ec_producer",
@@ -154,18 +154,18 @@ run_epd_1e_1pd() {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
-        > $LOG_PATH/1e1pd_encoder.log 2>&1 &
+        > "$LOG_PATH"/1e1pd_encoder.log 2>&1 &
     PIDS+=($!)
     
     # Start prefill+decode instance
     echo "Starting PD instance on GPU $GPU_PD, port $PREFILL_DECODE_PORT"
     CUDA_VISIBLE_DEVICES="$GPU_PD" vllm serve "$MODEL" \
-        --port $PREFILL_DECODE_PORT \
+        --port "$PREFILL_DECODE_PORT" \
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
-        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+        --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECExampleConnector",
             "ec_role": "ec_consumer",
@@ -173,32 +173,32 @@ run_epd_1e_1pd() {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
-        > $LOG_PATH/1e1pd_pd.log 2>&1 &
+        > "$LOG_PATH"/1e1pd_pd.log 2>&1 &
     PIDS+=($!)
     
     # Wait for instances to start
     echo "Waiting for encoder instance..."
-    wait_for_server $ENCODE_PORT
+    wait_for_server "$ENCODE_PORT"
     echo "Waiting for PD instance..."
-    wait_for_server $PREFILL_DECODE_PORT
+    wait_for_server "$PREFILL_DECODE_PORT"
 
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
     python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
         --host "0.0.0.0" \
-        --port $PROXY_PORT \
+        --port "$PROXY_PORT" \
         --encode-servers-urls "http://localhost:$ENCODE_PORT" \
         --prefill-servers-urls "disable" \
         --decode-servers-urls "http://localhost:$PREFILL_DECODE_PORT" \
-        > $LOG_PATH/1e1pd_proxy.log 2>&1 &
+        > "$LOG_PATH"/1e1pd_proxy.log 2>&1 &
     PIDS+=($!)
     
     # Wait for proxy
     echo "Waiting for proxy..."
-    wait_for_server $PROXY_PORT
+    wait_for_server "$PROXY_PORT"
 
-    curl http://127.0.0.1:$PROXY_PORT/v1/models
-    curl http://127.0.0.1:$PROXY_PORT/health
+    curl http://127.0.0.1:"$PROXY_PORT"/v1/models
+    curl http://127.0.0.1:"$PROXY_PORT"/health
     echo ""
 
     echo "All EPD (1E+1PD) services are up!"
@@ -217,7 +217,7 @@ run_epd_1e_1pd() {
     echo "✓✓ 1E+1PD Correctness Test finished"
     echo "Stopping EPD (1E+1PD) instances..."
     for pid in "${PIDS[@]}"; do
-        kill $pid 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
     done
     sleep 2
     cleanup_instances
@@ -244,17 +244,17 @@ run_baseline_1p_1d() {
     CUDA_VISIBLE_DEVICES="$GPU_P" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
     vllm serve "$MODEL" \
-        --port $PREFILL_PORT \
+        --port "$PREFILL_PORT" \
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
-        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+        --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_producer"
         }' \
-        > $LOG_PATH/1p1d_prefill.log 2>&1 &
+        > "$LOG_PATH"/1p1d_prefill.log 2>&1 &
     PIDS+=($!)
     
     # Start decode instance
@@ -262,40 +262,40 @@ run_baseline_1p_1d() {
     CUDA_VISIBLE_DEVICES="$GPU_D" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
     vllm serve "$MODEL" \
-        --port $DECODE_PORT \
+        --port "$DECODE_PORT" \
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
-        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+        --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_consumer"
         }' \
-        > $LOG_PATH/1p1d_decode.log 2>&1 &
+        > "$LOG_PATH"/1p1d_decode.log 2>&1 &
     PIDS+=($!)
     
     # Wait for instances to start
     echo "Waiting for prefill instance..."
-    wait_for_server $PREFILL_PORT
+    wait_for_server "$PREFILL_PORT"
     echo "Waiting for decode instance..."
-    wait_for_server $DECODE_PORT
+    wait_for_server "$DECODE_PORT"
     
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
     python "${GIT_ROOT}/tests/v1/kv_connector/nixl_integration/toy_proxy_server.py" \
         --host "0.0.0.0" \
-        --port $PROXY_PORT \
-        --prefiller-ports $PREFILL_PORT \
-        --decoder-ports $DECODE_PORT \
-        > $LOG_PATH/1p1d_proxy.log 2>&1 &
+        --port "$PROXY_PORT" \
+        --prefiller-ports "$PREFILL_PORT" \
+        --decoder-ports "$DECODE_PORT" \
+        > "$LOG_PATH"/1p1d_proxy.log 2>&1 &
     PIDS+=($!)
     
     # Wait for proxy
     echo "Waiting for proxy..."
-    wait_for_server $PROXY_PORT
+    wait_for_server "$PROXY_PORT"
 
-    curl http://127.0.0.1:$PROXY_PORT/healthcheck
+    curl http://127.0.0.1:"$PROXY_PORT"/healthcheck
     echo ""
 
     echo "All PD (1P+1D) services are up!"
@@ -313,7 +313,7 @@ run_baseline_1p_1d() {
     # Cleanup
     echo "Stopping PD (1P+1D) instances..."
     for pid in "${PIDS[@]}"; do
-        kill $pid 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
     done
     sleep 2
     cleanup_instances
@@ -339,14 +339,14 @@ run_epd_1e_1p_1d() {
     # Start encoder instance
     echo "Starting encoder instance on GPU $GPU_E, port $ENCODE_PORT"
     CUDA_VISIBLE_DEVICES="$GPU_E" vllm serve "$MODEL" \
-        --port $ENCODE_PORT \
+        --port "$ENCODE_PORT" \
         --enforce-eager \
         --gpu-memory-utilization 0.01 \
         --enable-request-id-headers \
         --no-enable-prefix-caching \
         --max-num-batched-tokens 114688 \
         --max-num-seqs 128 \
-        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+        --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECExampleConnector",
             "ec_role": "ec_producer",
@@ -354,7 +354,7 @@ run_epd_1e_1p_1d() {
                 "shared_storage_path": "'"$EC_SHARED_STORAGE_PATH"'"
             }
         }' \
-        > $LOG_PATH/1e1p1d_encoder.log 2>&1 &
+        > "$LOG_PATH"/1e1p1d_encoder.log 2>&1 &
     PIDS+=($!)
     
     # Start prefill instance
@@ -362,12 +362,12 @@ run_epd_1e_1p_1d() {
     CUDA_VISIBLE_DEVICES="$GPU_P" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=5559 \
     vllm serve "$MODEL" \
-        --port $PREFILL_PORT \
+        --port "$PREFILL_PORT" \
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
-        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+        --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --ec-transfer-config '{
             "ec_connector": "ECExampleConnector",
             "ec_role": "ec_consumer",
@@ -379,7 +379,7 @@ run_epd_1e_1p_1d() {
             "kv_connector": "NixlConnector",
             "kv_role": "kv_producer"
         }' \
-        > $LOG_PATH/1e1p1d_prefill.log 2>&1 &
+        > "$LOG_PATH"/1e1p1d_prefill.log 2>&1 &
     PIDS+=($!)
     
     # Start decode instance
@@ -387,44 +387,44 @@ run_epd_1e_1p_1d() {
     CUDA_VISIBLE_DEVICES="$GPU_D" \
     VLLM_NIXL_SIDE_CHANNEL_PORT=6000 \
     vllm serve "$MODEL" \
-        --port $DECODE_PORT \
+        --port "$DECODE_PORT" \
         --enforce-eager \
         --gpu-memory-utilization 0.7 \
         --enable-request-id-headers \
         --max-num-seqs 128 \
-        --allowed-local-media-path ${GIT_ROOT}/tests/v1/ec_connector/integration \
+        --allowed-local-media-path "${GIT_ROOT}"/tests/v1/ec_connector/integration \
         --kv-transfer-config '{
             "kv_connector": "NixlConnector",
             "kv_role": "kv_consumer"
         }' \
-        > $LOG_PATH/1e1p1d_decode.log 2>&1 &
+        > "$LOG_PATH"/1e1p1d_decode.log 2>&1 &
     PIDS+=($!)
     
     # Wait for instances to start
     echo "Waiting for encoder instance..."
-    wait_for_server $ENCODE_PORT
+    wait_for_server "$ENCODE_PORT"
     echo "Waiting for prefill instance..."
-    wait_for_server $PREFILL_PORT
+    wait_for_server "$PREFILL_PORT"
     echo "Waiting for decode instance..."
-    wait_for_server $DECODE_PORT
+    wait_for_server "$DECODE_PORT"
     
     # Start proxy
     echo "Starting EPD proxy on port $PROXY_PORT"
     python "${GIT_ROOT}/examples/online_serving/disaggregated_encoder/disagg_epd_proxy.py" \
         --host "0.0.0.0" \
-        --port $PROXY_PORT \
+        --port "$PROXY_PORT" \
         --encode-servers-urls "http://localhost:$ENCODE_PORT" \
         --prefill-servers-urls "http://localhost:$PREFILL_PORT" \
         --decode-servers-urls "http://localhost:$DECODE_PORT" \
-        > $LOG_PATH/1e1p1d_proxy.log 2>&1 &
+        > "$LOG_PATH"/1e1p1d_proxy.log 2>&1 &
     PIDS+=($!)
     
     # Wait for proxy
     echo "Waiting for proxy..."
-    wait_for_server $PROXY_PORT
+    wait_for_server "$PROXY_PORT"
 
-    curl http://127.0.0.1:$PROXY_PORT/v1/models
-    curl http://127.0.0.1:$PROXY_PORT/health
+    curl http://127.0.0.1:"$PROXY_PORT"/v1/models
+    curl http://127.0.0.1:"$PROXY_PORT"/health
     echo ""
 
     echo "All EPD (1E+1P+1D) services are up!"
@@ -443,7 +443,7 @@ run_epd_1e_1p_1d() {
     echo "✓✓ 1E+1P+1D Correctness Test finished"
     echo "Stopping EPD (1E+1P+1D) instances..."
     for pid in "${PIDS[@]}"; do
-        kill $pid 2>/dev/null || true
+        kill "$pid" 2>/dev/null || true
     done
     sleep 2
     cleanup_instances

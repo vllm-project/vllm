@@ -127,6 +127,42 @@ def list_filtered_repo_files(
     return file_list
 
 
+def any_pattern_in_repo_files(
+    model_name_or_path: str,
+    allow_patterns: list[str],
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+):
+    return (
+        len(
+            list_filtered_repo_files(
+                model_name_or_path=model_name_or_path,
+                allow_patterns=allow_patterns,
+                revision=revision,
+                repo_type=repo_type,
+                token=token,
+            )
+        )
+        > 0
+    )
+
+
+def is_mistral_model_repo(
+    model_name_or_path: str,
+    revision: str | None = None,
+    repo_type: str | None = None,
+    token: str | bool | None = None,
+) -> bool:
+    return any_pattern_in_repo_files(
+        model_name_or_path=model_name_or_path,
+        allow_patterns=["consolidated*.safetensors"],
+        revision=revision,
+        repo_type=repo_type,
+        token=token,
+    )
+
+
 def file_exists(
     repo_id: str,
     file_name: str,
@@ -249,7 +285,7 @@ def get_hf_file_to_dict(
             EntryNotFoundError,
             LocalEntryNotFoundError,
         ) as e:
-            logger.debug("File or repository not found in hf_hub_download", e)
+            logger.debug("File or repository not found in hf_hub_download:", exc_info=e)
             return None
         except HfHubHTTPError as e:
             logger.warning(

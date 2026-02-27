@@ -552,6 +552,29 @@ class FunAudioChatDiscreteEncoder(nn.Module):
 class FunAudioChatProcessingInfo(BaseProcessingInfo):
     token_fps: int = 25
 
+    @cached_property
+    def feature_extractor(self) -> WhisperFeatureExtractor:
+        return WhisperFeatureExtractor.from_pretrained(self.model_id)
+
+    @cached_property
+    def speech_tokenizer(self) -> PreTrainedTokenizerFast:
+        return PreTrainedTokenizerFast.from_pretrained(
+            self.model_id, subfolder="speech_tokenizer"
+        )
+
+    def get_feature_extractor(self) -> WhisperFeatureExtractor:
+        return self.feature_extractor
+
+    def get_speech_tokenizer(self) -> PreTrainedTokenizerFast:
+        return self.speech_tokenizer
+
+    def get_data_parser(self):
+        return MultiModalDataParser(
+            target_sr=int(self.feature_extractor.sampling_rate),
+            target_channels=self.get_target_channels(),
+            expected_hidden_size=self._get_expected_hidden_size(),
+        )
+
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"audio": None}
 
@@ -570,22 +593,6 @@ class FunAudioChatProcessingInfo(BaseProcessingInfo):
         max_audio_tokens = int(getattr(audio_cfg, "max_source_positions", 1500))
         return {"audio": max_audio_tokens}
 
-    @cached_property
-    def feature_extractor(self) -> WhisperFeatureExtractor:
-        return WhisperFeatureExtractor.from_pretrained(self.model_id)
-
-    @cached_property
-    def speech_tokenizer(self) -> PreTrainedTokenizerFast:
-        return PreTrainedTokenizerFast.from_pretrained(
-            self.model_id, subfolder="speech_tokenizer"
-        )
-
-    def get_feature_extractor(self) -> WhisperFeatureExtractor:
-        return self.feature_extractor
-
-    def get_speech_tokenizer(self) -> PreTrainedTokenizerFast:
-        return self.speech_tokenizer
-
     def get_audio_group_size(self) -> int:
         cfg = self.get_hf_config()
         audio_cfg = getattr(cfg, "audio_config", None)
@@ -603,7 +610,7 @@ class FunAudioChatDummyInputsBuilder(
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         feature_extractor = self.info.get_feature_extractor()
         sampling_rate = int(feature_extractor.sampling_rate)
@@ -622,7 +629,7 @@ class FunAudioChatDummyInputsBuilder(
         )
         num_audios = int(mm_counts.get("audio", 0))
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
         return {
             "audio": self._get_dummy_audios(
                 length=audio_len,
@@ -635,13 +642,6 @@ class FunAudioChatDummyInputsBuilder(
 class FunAudioChatMultiModalProcessor(
     BaseMultiModalProcessor[FunAudioChatProcessingInfo]
 ):
-    def _get_data_parser(self) -> MultiModalDataParser:
-        feature_extractor = self.info.get_feature_extractor()
-        return MultiModalDataParser(
-            target_sr=int(feature_extractor.sampling_rate),
-            target_channels=self.info.get_target_channels(),
-        )
-
     def _call_hf_processor(
         self,
         prompt: str,
@@ -656,7 +656,7 @@ class FunAudioChatMultiModalProcessor(
         if not audios:
             return BatchFeature({"input_ids": input_ids})
 
-        feature_extractor = self.info.get_feature_extractor()
+        feature_extractor = self.info.get_feature_extractor(**mm_kwargs)
         sr = int(feature_extractor.sampling_rate)
         min_samples = int(getattr(feature_extractor, "n_fft", 400) or 400)
 
@@ -819,9 +819,6 @@ class FunAudioChatForConditionalGeneration(nn.Module, SupportsMultiModal, Suppor
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    def get_language_model(self) -> torch.nn.Module:
-        return self.language_model
 
     def _get_continuous_audio_features(
         self,

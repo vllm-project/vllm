@@ -75,7 +75,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
                 self.rotary_dim,
                 2,
                 dtype=torch.float,
-                device=current_platform.device_type,
             )
             / self.rotary_dim
         )
@@ -104,7 +103,6 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
         inv_freq = self._compute_inv_freq(self.scaling_factor)
         t = torch.arange(
             self.max_position_embeddings * self.scaling_factor,
-            device=current_platform.device_type,
             dtype=torch.float32,
         )
         freqs = torch.einsum("i,j -> ij", t, inv_freq)
@@ -122,14 +120,14 @@ class DeepseekScalingRotaryEmbedding(RotaryEmbeddingBase):
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         """PyTorch-native implementation equivalent to forward()."""
         assert key is not None
-        self._match_cos_sin_cache_dtype(query)
+        cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         query_rot = query[..., : self.rotary_dim]
         key_rot = key[..., : self.rotary_dim]
         if self.rotary_dim < self.head_size:
             query_pass = query[..., self.rotary_dim :]
             key_pass = key[..., self.rotary_dim :]
 
-        cos_sin = self.cos_sin_cache[
+        cos_sin = cos_sin_cache[
             torch.add(positions, offsets) if offsets is not None else positions
         ]
         cos, sin = cos_sin.chunk(2, dim=-1)

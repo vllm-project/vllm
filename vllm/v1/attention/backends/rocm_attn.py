@@ -7,6 +7,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -383,45 +384,78 @@ class RocmAttentionImpl(AttentionImpl):
             kv_cache, self.num_kv_heads, self.head_size
         )
 
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
+        # Reshape the input keys and values and store them in the cache.
+        # Get the actual block_size from value_cache
+        # value_cache shape: [num_blocks, num_heads, head_size, block_size]
+        block_size = value_cache.shape[3]
+        # Determine if it is a power of 2
+        is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
 
-            # Get the actual block_size from value_cache
-            # value_cache shape: [num_blocks, num_heads, head_size, block_size]
-            block_size = value_cache.shape[3]
-            # Determine if it is a power of 2
-            is_pow2 = block_size > 0 and (block_size & (block_size - 1) == 0)
+        if is_pow2:
+            # Normal 16, 32, 64, etc., use vLLM native HIP C++ logic
+            PagedAttention.write_to_paged_cache(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
+        else:
+            # Case B: Non-standard blocks (e.g., 544 in Qwen3),
+            # force using our modified Triton logic
+            triton_reshape_and_cache_flash(
+                key,
+                value,
+                key_cache,
+                value_cache,
+                slot_mapping,
+                self.kv_cache_dtype,
+                layer._k_scale,
+                layer._v_scale,
+            )
 
-            if is_pow2:
-                # Normal 16, 32, 64, etc., use vLLM native HIP C++ logic
-                PagedAttention.write_to_paged_cache(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
-            else:
-                # Case B: Non-standard blocks (e.g., 544 in Qwen3),
-                # force using our modified Triton logic
-                triton_reshape_and_cache_flash(
-                    key,
-                    value,
-                    key_cache,
-                    value_cache,
-                    slot_mapping,
-                    self.kv_cache_dtype,
-                    layer._k_scale,
-                    layer._v_scale,
-                )
+    def fused_rope_kvcache_supported(self):
+        return rocm_aiter_ops.is_enabled()
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ):
+        key_cache, value_cache = PagedAttention.split_kv_cache(
+            kv_cache,
+            layer.num_kv_heads,  # type: ignore[attr-defined]
+            layer.head_size,  # type: ignore[attr-defined]
+        )
+        flash_layout = False
+
+        is_fp8_kv_cache = self.kv_cache_dtype.startswith("fp8")
+        if is_fp8_kv_cache:
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+
+        rocm_aiter_ops.triton_rope_and_cache(
+            query,
+            key,
+            value,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            layer._k_scale,
+            layer._v_scale,
+            flash_layout,
+            is_fp8_kv_cache,
+        )

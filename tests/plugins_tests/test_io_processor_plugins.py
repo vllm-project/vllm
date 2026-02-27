@@ -1,18 +1,39 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import base64
+import io
 
+import imagehash
 import pytest
 import requests
+from PIL import Image
 
 from tests.utils import RemoteOpenAIServer
 from vllm.config import VllmConfig
 from vllm.entrypoints.pooling.pooling.protocol import IOProcessorResponse
 from vllm.plugins.io_processors import get_io_processor
 
-MODEL_NAME = "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11"
+models_config = {
+    "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11": {
+        "image_url": "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff",  # noqa: E501
+        "out_hash": "aa6d92ad25926a5e",
+        "plugin": "prithvi_to_tiff",
+    },
+    "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars": {
+        "image_url": "https://huggingface.co/ibm-nasa-geospatial/Prithvi-EO-2.0-300M-BurnScars/resolve/main/examples/subsetted_512x512_HLS.S30.T10SEH.2018190.v1.4_merged.tif",  # noqa: E501
+        "out_hash": "c07f4f602da73552",
+        "plugin": "prithvi_to_tiff",
+    },
+}
 
-image_url = "https://huggingface.co/christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM/resolve/main/valencia_example_2024-10-26.tiff"  # noqa: E501
+
+def _compute_image_hash(base64_data: str) -> str:
+    # Decode the base64 output and create image from byte stream
+    decoded_image = base64.b64decode(base64_data)
+    image = Image.open(io.BytesIO(decoded_image))
+
+    # Compute perceptual hash of the output image
+    return str(imagehash.phash(image))
 
 
 def test_loading_missing_plugin():
@@ -22,33 +43,39 @@ def test_loading_missing_plugin():
 
 
 @pytest.fixture(scope="function")
-def server():
+def server(model_name, plugin):
     args = [
         "--runner",
         "pooling",
         "--enforce-eager",
-        "--trust-remote-code",
         "--skip-tokenizer-init",
         # Limit the maximum number of parallel requests
         # to avoid the model going OOM in CI.
         "--max-num-seqs",
         "32",
         "--io-processor-plugin",
-        "prithvi_to_tiff",
-        "--model-impl",
-        "terratorch",
+        plugin,
         "--enable-mm-embeds",
     ]
 
-    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
+    with RemoteOpenAIServer(model_name, args) as remote_server:
         yield remote_server
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize(
+    "model_name, image_url, plugin, expected_hash",
+    [
+        (model_name, config["image_url"], config["plugin"], config["out_hash"])
+        for model_name, config in models_config.items()
+    ],
+)
 async def test_prithvi_mae_plugin_online(
     server: RemoteOpenAIServer,
     model_name: str,
+    image_url: str | dict,
+    plugin: str,
+    expected_hash: str,
 ):
     request_payload_url = {
         "data": {
@@ -74,46 +101,54 @@ async def test_prithvi_mae_plugin_online(
 
     # verify the output is formatted as expected for this plugin
     plugin_data = parsed_response.data
+    assert all(plugin_data.get(attr) for attr in ["type", "format", "data"])
 
-    assert all(
-        plugin_data.get(attr) for attr in ["type", "format", "data", "request_id"]
+    # Compute the output image hash and compare it against the expected hash
+    image_hash = _compute_image_hash(plugin_data["data"])
+    assert image_hash == expected_hash, (
+        f"Image hash mismatch: expected {expected_hash}, got {image_hash}"
     )
 
-    # We just check that the output is a valid base64 string.
-    # Raises an exception and fails the test if the string is corrupted.
-    base64.b64decode(plugin_data["data"])
 
-
-@pytest.mark.parametrize("model_name", [MODEL_NAME])
-def test_prithvi_mae_plugin_offline(vllm_runner, model_name: str):
-    img_prompt = dict(
+@pytest.mark.parametrize(
+    "model_name, image_url, plugin, expected_hash",
+    [
+        (model_name, config["image_url"], config["plugin"], config["out_hash"])
+        for model_name, config in models_config.items()
+    ],
+)
+def test_prithvi_mae_plugin_offline(
+    vllm_runner, model_name: str, image_url: str | dict, plugin: str, expected_hash: str
+):
+    img_data = dict(
         data=image_url,
         data_format="url",
         image_format="tiff",
         out_data_format="b64_json",
     )
 
+    prompt = dict(data=img_data)
+
     with vllm_runner(
         model_name,
         runner="pooling",
         skip_tokenizer_init=True,
         enable_mm_embeds=True,
-        trust_remote_code=True,
         enforce_eager=True,
         # Limit the maximum number of parallel requests
         # to avoid the model going OOM in CI.
-        max_num_seqs=1,
-        model_impl="terratorch",
-        io_processor_plugin="prithvi_to_tiff",
+        max_num_seqs=32,
+        io_processor_plugin=plugin,
+        default_torch_num_threads=1,
     ) as llm_runner:
-        pooler_output = llm_runner.get_llm().encode(img_prompt, pooling_task="plugin")
+        pooler_output = llm_runner.get_llm().encode(prompt, pooling_task="plugin")
     output = pooler_output[0].outputs
 
     # verify the output is formatted as expected for this plugin
-    assert all(
-        hasattr(output, attr) for attr in ["type", "format", "data", "request_id"]
-    )
+    assert all(hasattr(output, attr) for attr in ["type", "format", "data"])
 
-    # We just check that the output is a valid base64 string.
-    # Raises an exception and fails the test if the string is corrupted.
-    base64.b64decode(output.data)
+    # Compute the output image hash and compare it against the expected hash
+    image_hash = _compute_image_hash(output.data)
+    assert image_hash == expected_hash, (
+        f"Image hash mismatch: expected {expected_hash}, got {image_hash}"
+    )

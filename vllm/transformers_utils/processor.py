@@ -11,6 +11,7 @@ from transformers import (
     AutoImageProcessor,
     AutoProcessor,
     AutoVideoProcessor,
+    processing_utils,
 )
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
@@ -18,12 +19,64 @@ from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from typing_extensions import TypeVar
 
+from vllm.logger import init_logger
 from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
 
+logger = init_logger(__name__)
+
 if TYPE_CHECKING:
     from vllm.config import ModelConfig
+
+
+def _transformers_v4_compatibility_import():
+    """Some remote code processors still import `ChatTemplateLoadKwargs` which was a
+    subset of `ProcessorChatTemplateKwargs` as defined in Transformers v4.
+    In Transformers v5 these were merged into `ProcessorChatTemplateKwargs` and
+    `ChatTemplateLoadKwargs` was removed. For backward compatibility, we add an alias
+    for `ChatTemplateLoadKwargs` if it doesn't exist.
+
+    This can be removed if `HCXVisionForCausalLM` is upstreamed to Transformers."""
+    old_import = getattr(processing_utils, "ChatTemplateLoadKwargs", None)
+    new_import = getattr(processing_utils, "ProcessorChatTemplateKwargs", None)
+    if old_import is None and new_import is not None:
+        processing_utils.ChatTemplateLoadKwargs = new_import
+
+
+def _transformers_v4_compatibility_init() -> Any:
+    """Some remote code processors may define `optional_attributes` in their
+    `ProcessorMixin` subclass, and then pass these arbitrary attributes directly to
+    `ProcessorMixin.__init__`, which is no longer allowed in Transformers v5. For
+    backward compatibility, we intercept these optional attributes and set them on the
+    processor instance before calling the original `ProcessorMixin.__init__`.
+
+    This can be removed if `Molmo2ForConditionalGeneration` is upstreamed to
+    Transformers."""
+    # Transformers v4
+    if hasattr(ProcessorMixin, "optional_attributes"):
+        return
+    # Transformers v5
+    if hasattr(ProcessorMixin.__init__, "_vllm_patched"):
+        return
+
+    original_init = ProcessorMixin.__init__
+
+    def __init__(self, *args, **kwargs):
+        for optional_attribute in getattr(self, "optional_attributes", []):
+            if optional_attribute in kwargs:
+                setattr(self, optional_attribute, kwargs.pop(optional_attribute))
+
+        original_init(self, *args, **kwargs)
+
+    # Only patch if ProcessorMixin is not mocked (for docs builds)
+    if not hasattr(ProcessorMixin, "_mock_name"):
+        __init__._vllm_patched = True  # type: ignore[attr-defined]
+        ProcessorMixin.__init__ = __init__
+
+
+_transformers_v4_compatibility_import()
+_transformers_v4_compatibility_init()
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
@@ -68,7 +121,13 @@ def _collect_dynamic_keys_from_processing_kwargs(kwargs_cls: type) -> set[str]:
     kwargs_type_annotations = get_type_hints(kwargs_cls)
     for kw_type in ("text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"):
         if kw_type in kwargs_type_annotations:
-            kw_annotations = get_type_hints(kwargs_type_annotations[kw_type])
+            # Use __annotations__ instead of get_type_hints() to avoid
+            # NameError from unresolved forward references (e.g.
+            # PILImageResampling). We only need key names, not types.
+            kw_cls = kwargs_type_annotations[kw_type]
+            kw_annotations: dict[str, Any] = {}
+            for base in reversed(kw_cls.__mro__):
+                kw_annotations.update(getattr(base, "__annotations__", {}))
             for kw_name in kw_annotations:
                 dynamic_kwargs.add(kw_name)
     dynamic_kwargs |= {"text_kwargs", "images_kwargs", "videos_kwargs", "audio_kwargs"}
@@ -195,6 +254,7 @@ def get_processor_kwargs_from_processor(processor: _P) -> set[str]:
                     )
             return processor_kwargs
     except Exception:
+        logger.exception("Failed to collect processor kwargs")
         return set()
 
 

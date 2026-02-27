@@ -355,5 +355,22 @@
         "is_deepseek_mla": true,
         "is_multimodal_model": false,
         "dtype": "torch.float32"
+    },
+    "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {
+        "architectures": [
+            "NemotronHForCausalLM"
+        ],
+        "model_type": "nemotron_h",
+        "text_model_type": "nemotron_h",
+        "hidden_size": 2688,
+        "total_num_hidden_layers": 52,
+        "total_num_attention_heads": 32,
+        "head_size": 128,
+        "vocab_size": 131072,
+        "total_num_kv_heads": 2,
+        "num_experts": 128,
+        "is_deepseek_mla": false,
+        "is_multimodal_model": false,
+        "dtype": "torch.bfloat16"
     }
 }

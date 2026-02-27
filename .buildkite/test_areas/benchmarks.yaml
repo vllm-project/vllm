@@ -17,3 +17,15 @@ steps:
   - tests/benchmarks/
   commands:
   - pytest -v -s benchmarks/
+
+- label: Attention Benchmarks Smoke Test (B200)
+  device: b200
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/"
+  timeout_in_minutes: 10
+  source_file_dependencies:
+  - benchmarks/attention_benchmarks/
+  - vllm/v1/attention/
+  commands:
+  - python3 benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1

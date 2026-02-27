@@ -14,9 +14,7 @@ import requests
 # - install TerraTorch v1.1 (or later):
 #   pip install terratorch>=v1.1
 # - start vllm in serving mode with the below args
-#   --model='christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM'
-#   --model-impl terratorch
-#   --trust-remote-code
+#   --model='ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11'
 #   --skip-tokenizer-init --enforce-eager
 #   --io-processor-plugin terratorch_segmentation
 #   --enable-mm-embeds
@@ -34,7 +32,7 @@ def main():
             "out_data_format": "b64_json",
         },
         "priority": 0,
-        "model": "christian-pinto/Prithvi-EO-2.0-300M-TL-VLLM",
+        "model": "ibm-nasa-geospatial/Prithvi-EO-2.0-300M-TL-Sen1Floods11",
     }
 
     ret = requests.post(server_endpoint, json=request_payload_url)

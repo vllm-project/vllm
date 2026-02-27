@@ -19,12 +19,13 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
 from vllm.logger import init_logger
 from vllm.plugins import STAT_LOGGER_PLUGINS_GROUP, load_plugins_by_group
 from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.perf import PerfMetricsLogging
+from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
     CachingMetrics,
     IterationStats,
     MultiModalCacheStats,
+    PromptTokenStats,
     SchedulerStats,
 )
 from vllm.v1.spec_decode.metrics import SpecDecodingLogging, SpecDecodingProm
@@ -136,7 +137,8 @@ class LoggingStatLogger(StatLoggerBase):
 
     def _track_iteration_stats(self, iteration_stats: IterationStats):
         # Save tracked stats for token counters.
-        self.num_prompt_tokens += iteration_stats.num_prompt_tokens
+        # Use computed tokens for prompt throughput (excludes cached/transferred)
+        self.num_prompt_tokens += iteration_stats.prompt_token_stats.computed
         self.num_generation_tokens += iteration_stats.num_generation_tokens
         self.num_corrupted_reqs += iteration_stats.num_corrupted_reqs
         self.num_preemptions += iteration_stats.num_preempted_reqs
@@ -390,6 +392,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _histogram_cls = Histogram
     _spec_decoding_cls = SpecDecodingProm
     _kv_connector_cls = KVConnectorPrometheus
+    _perf_metrics_cls = PerfMetricsProm
 
     def __init__(
         self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
@@ -420,6 +423,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             vllm_config.speculative_config, labelnames, per_engine_labelvalues
         )
         self.kv_connector_prom = self._kv_connector_cls(
+            vllm_config, labelnames, per_engine_labelvalues
+        )
+        self.perf_metrics_prom = self._perf_metrics_cls(
             vllm_config, labelnames, per_engine_labelvalues
         )
 
@@ -588,6 +594,41 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
         self.counter_prompt_tokens = make_per_engine(
             counter_prompt_tokens, engine_indexes, model_name
+        )
+
+        # Labeled prompt token counters by source
+        counter_prompt_tokens_by_source = self._counter_cls(
+            name="vllm:prompt_tokens_by_source",
+            documentation="Number of prompt tokens by source.",
+            labelnames=labelnames + ["source"],
+        )
+        self.counter_prompt_tokens_by_source: dict[str, dict[int, Counter]] = {}
+        for source in PromptTokenStats.ALL_SOURCES:
+            self.counter_prompt_tokens_by_source[source] = {
+                idx: counter_prompt_tokens_by_source.labels(
+                    model_name, str(idx), source
+                )
+                for idx in engine_indexes
+            }
+
+        # Cached prompt tokens counter
+        counter_prompt_tokens_cached = self._counter_cls(
+            name="vllm:prompt_tokens_cached",
+            documentation="Number of cached prompt tokens (local + external).",
+            labelnames=labelnames,
+        )
+        self.counter_prompt_tokens_cached = make_per_engine(
+            counter_prompt_tokens_cached, engine_indexes, model_name
+        )
+
+        # Recomputed tokens (last token recomputed when entire prompt is cached)
+        counter_prompt_tokens_recomputed = self._counter_cls(
+            name="vllm:prompt_tokens_recomputed",
+            documentation="Number of cached tokens recomputed for forward pass.",
+            labelnames=labelnames,
+        )
+        self.counter_prompt_tokens_recomputed = make_per_engine(
+            counter_prompt_tokens_recomputed, engine_indexes, model_name
         )
 
         counter_generation_tokens = self._counter_cls(
@@ -1028,6 +1069,9 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                     scheduler_stats.kv_connector_stats, engine_idx
                 )
 
+            if scheduler_stats.perf_stats is not None:
+                self.perf_metrics_prom.observe(scheduler_stats.perf_stats, engine_idx)
+
             if (
                 self.kv_cache_metrics_enabled
                 and scheduler_stats.kv_cache_eviction_events
@@ -1070,6 +1114,14 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             iteration_stats.num_preempted_reqs
         )
         self.counter_prompt_tokens[engine_idx].inc(iteration_stats.num_prompt_tokens)
+        # Labeled prompt token counters by source
+        pts = iteration_stats.prompt_token_stats
+        for source in PromptTokenStats.ALL_SOURCES:
+            self.counter_prompt_tokens_by_source[source][engine_idx].inc(
+                pts.get_by_source(source)
+            )
+        self.counter_prompt_tokens_cached[engine_idx].inc(pts.cached_tokens)
+        self.counter_prompt_tokens_recomputed[engine_idx].inc(pts.recomputed_tokens)
         self.counter_generation_tokens[engine_idx].inc(
             iteration_stats.num_generation_tokens
         )
@@ -1260,8 +1312,8 @@ class StatLoggerManager:
     ):
         if engine_idx is None:
             engine_idx = 0
-        for logger in self.stat_loggers:
-            logger.record(
+        for stat_logger in self.stat_loggers:
+            stat_logger.record(
                 scheduler_stats,
                 iteration_stats,
                 mm_cache_stats=mm_cache_stats,

@@ -139,7 +139,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                             openai_messages.append(
                                 {
                                     "role": "tool",
-                                    "tool_call_id": block.id or "",
+                                    "tool_call_id": block.tool_use_id or "",
                                     "content": str(block.content)
                                     if block.content
                                     else "",
@@ -432,6 +432,19 @@ class AnthropicServingMessages(OpenAIServingChat):
                                 data = chunk.model_dump_json(exclude_unset=True)
                                 yield wrap_data_with_event(data, "content_block_start")
                                 content_block_started = True
+                                if tool_call.function and tool_call.function.arguments:
+                                    chunk = AnthropicStreamEvent(
+                                        index=content_block_index,
+                                        type="content_block_delta",
+                                        delta=AnthropicDelta(
+                                            type="input_json_delta",
+                                            partial_json=tool_call.function.arguments,
+                                        ),
+                                    )
+                                    data = chunk.model_dump_json(exclude_unset=True)
+                                    yield wrap_data_with_event(
+                                        data, "content_block_delta"
+                                    )
 
                             else:
                                 chunk = AnthropicStreamEvent(

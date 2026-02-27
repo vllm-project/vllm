@@ -211,7 +211,7 @@ LLM(model, compilation_config=CompilationConfig(
 These modes are stricter and reduce or eliminate the need of dynamic shapes guarding, which can help isolate issues:
 
 - `unbacked`: Uses unbacked symints which don't allow guards, making it easier to identify where guards are being incorrectly added
-- `backed_size_oblivious`: Uses a mode that is more strict about guarding.
+- `backed_size_oblivious`: Uses a mode that is stricter about guarding.
 
 For more details on dynamic shapes modes, see [Dynamic shapes and vLLM guard dropping](torch_compile.md#dynamic-shapes-and-vllm-guard-dropping).
 
@@ -281,6 +281,15 @@ the cache key via combining multiple factors (e.g. config flags and model name).
 If vLLM's compile cache is wrong, this usually means that a factor is missing.
 Please see [this example](https://github.com/vllm-project/vllm/blob/18b39828d90413d05d770dfd2e2f48304f4ca0eb/vllm/config/model.py#L310)
 of how vLLM computes part of the cache key.
+
+vLLM's compilation cache requires that the code being compiled ends up being serializable.
+If this is not the case, then it will error out on save. Usually the fixes are to either:
+
+- rewrite the non-serializable pieces (perhaps difficult because it's difficult to
+  tell right now what is serializable and what isn't)
+- file a bug report
+- ignore the error by setting `VLLM_DISABLE_COMPILE_CACHE=1` (note that this will
+  make warm server starts a lot slower).
 
 ## Debugging CUDAGraphs
 

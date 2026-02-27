@@ -67,9 +67,12 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     def maybe_get_kv_connector_output(
         scheduler_output: "SchedulerOutput",
+        clear_metadata: bool = True,
     ) -> AbstractContextManager[KVConnectorOutput | None]:
         return (
-            KVConnectorModelRunnerMixin._get_kv_connector_output(scheduler_output)
+            KVConnectorModelRunnerMixin._get_kv_connector_output(
+                scheduler_output, clear_metadata=clear_metadata
+            )
             if has_kv_transfer_group()
             else nullcontext()
         )
@@ -79,7 +82,9 @@ class KVConnectorModelRunnerMixin:
     @staticmethod
     @contextmanager
     def _get_kv_connector_output(
-        scheduler_output: "SchedulerOutput", wait_for_save: bool = True
+        scheduler_output: "SchedulerOutput",
+        wait_for_save: bool = True,
+        clear_metadata: bool = True,
     ) -> Generator[KVConnectorOutput, None, None]:
         output = KVConnectorOutput()
 
@@ -108,6 +113,14 @@ class KVConnectorModelRunnerMixin:
             output.kv_connector_stats = kv_connector.get_kv_connector_stats()
             output.kv_cache_events = kv_connector.get_kv_connector_kv_cache_events()
 
+            if clear_metadata:
+                kv_connector.clear_connector_metadata()
+
+    @staticmethod
+    def clear_kv_connector_metadata() -> None:
+        """Clear the KV connector metadata. Call after draft model runs."""
+        if has_kv_transfer_group():
+            kv_connector = get_kv_transfer_group()
             kv_connector.clear_connector_metadata()
 
     @staticmethod

@@ -18,6 +18,7 @@ set(ENABLE_AVX512 $ENV{VLLM_CPU_AVX512})
 set(ENABLE_AVX512BF16 $ENV{VLLM_CPU_AVX512BF16})
 set(ENABLE_AVX512VNNI $ENV{VLLM_CPU_AVX512VNNI})
 set(ENABLE_AMXBF16 $ENV{VLLM_CPU_AMXBF16})
+set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -114,6 +115,10 @@ else()
     if (ENABLE_AVX512)
         set(AVX512_FOUND ON)
         message(STATUS "AVX512 support enabled via VLLM_CPU_AVX512 environment variable")
+    endif()
+    if (ENABLE_ARM_BF16)
+        set(ARM_BF16_FOUND ON)
+        message(STATUS "ARM BF16 support enabled via VLLM_CPU_ARM_BF16 environment variable")
     endif()
 endif()
 
@@ -357,6 +362,19 @@ if(ENABLE_NUMA)
 else()
     message(STATUS "NUMA is disabled")
     add_compile_definitions(-DVLLM_NUMA_DISABLED)
+endif()
+
+#
+# Generate CPU attention dispatch header
+#
+message(STATUS "Generating CPU attention dispatch header")
+execute_process(
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/csrc/cpu/generate_cpu_attn_dispatch.py
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/csrc/cpu
+    RESULT_VARIABLE GEN_RESULT
+)
+if(NOT GEN_RESULT EQUAL 0)
+    message(FATAL_ERROR "Failed to generate CPU attention dispatch header")
 endif()
 
 #

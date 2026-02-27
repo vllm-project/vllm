@@ -14,6 +14,7 @@ from vllm.config import VllmConfig, get_current_vllm_config, get_layers_from_vll
 from vllm.distributed.kv_transfer.kv_connector.factory import KVConnectorFactory
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.outputs import KVConnectorOutput, ModelRunnerOutput
 
@@ -192,8 +193,6 @@ def copy_kv_blocks(
         dst_device=dst_device,
     )
 
-    from vllm.platforms import current_platform
-
     if direction == "h2d":
         copy_fn = current_platform.insert_blocks_to_device
     else:
@@ -316,18 +315,52 @@ class TpKVTopology:
     attn_backend: type[AttentionBackend]
     engine_id: EngineId
     remote_block_size: dict[EngineId, int]
+    tensor_shape: torch.Size | None = None
 
     def __post_init__(self):
         # Figure out whether the first dimension of the cache is K/V
         # or num_blocks. This is used to register the memory regions correctly.
+        _MOCK_BLOCK_SIZE = 16
         kv_cache_shape = self.attn_backend.get_kv_cache_shape(
-            num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
+            num_blocks=1, block_size=_MOCK_BLOCK_SIZE, num_kv_heads=1, head_size=1
         )
+        logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
         # Non-MLA backends caches have 5 dims [2, num_blocks, H,N,D],
         # we just mock num_blocks to 1 for the dimension check below.
         self._is_kv_layout_blocks_first = (
             len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
         )
+
+        self._cross_layers_blocks = False
+        if self.tensor_shape is not None:
+            self._cross_layers_blocks = (
+                len(self.tensor_shape) == len(kv_cache_shape) + 1
+            )
+
+        if self._cross_layers_blocks:
+            logger.debug("Using cross-layer KV cache")
+            # prepend layers dimension
+            _MOCK_NUM_LAYERS = 80
+            kv_cache_shape = (_MOCK_NUM_LAYERS,) + kv_cache_shape
+            try:
+                kv_cache_stride_order = self.attn_backend.get_kv_cache_stride_order(
+                    include_num_layers_dimension=self._cross_layers_blocks
+                )
+            except (AttributeError, NotImplementedError):
+                kv_cache_stride_order = tuple(range(len(self.tensor_shape)))
+
+            # In case of cross layers permute kv_cache_shape according to
+            # stride_order to retrieve physical position of block_size
+            kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
+
+        # In the default non-cross layers layout the block_size position
+        # is logical while in the cross layers case it is the physical
+        # position. This matches the shape of the actual kv cache tensors
+        # passed at register_kv_caches()/register_cross_layers_kv_cache()
+        block_size_position = kv_cache_shape.index(_MOCK_BLOCK_SIZE)
+
+        assert block_size_position is not None
+        self._block_size_position = -(len(kv_cache_shape) - block_size_position)
 
     @property
     def is_kv_layout_blocks_first(self) -> bool:
@@ -336,7 +369,9 @@ class TpKVTopology:
     @property
     def split_k_and_v(self) -> bool:
         # Whether to register regions for K and V separately (when present).
-        return not (self.is_mla or self.is_kv_layout_blocks_first)
+        return not (
+            self._cross_layers_blocks or self.is_mla or self.is_kv_layout_blocks_first
+        )
 
     @property
     def tp_size(self) -> int:
@@ -345,6 +380,14 @@ class TpKVTopology:
     @property
     def block_size(self) -> int:
         return self.remote_block_size[self.engine_id]
+
+    @property
+    def cross_layers_blocks(self) -> bool:
+        return self._cross_layers_blocks
+
+    @property
+    def block_size_position(self) -> int:
+        return self._block_size_position
 
     def tp_ratio(
         self,

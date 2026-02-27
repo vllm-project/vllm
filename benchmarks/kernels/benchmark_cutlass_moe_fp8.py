@@ -11,6 +11,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from tests.kernels.moe.utils import make_dummy_moe_config
 from vllm import _custom_ops as ops
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import fp8_w8a8_moe_quant_config
 from vllm.model_executor.layers.fused_moe.cutlass_moe import CutlassExpertsFp8
 from vllm.model_executor.layers.fused_moe.fused_moe import fused_experts, fused_topk
@@ -161,7 +162,7 @@ def bench_run(
                 w2_fp8q_cutlass,
                 topk_weights,
                 topk_ids,
-                activation="silu",
+                activation=MoEActivation.SILU,
                 global_num_experts=num_experts,
             )
     torch.cuda.synchronize()

@@ -8,7 +8,8 @@ import torch
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, is_deep_gemm_supported
+from vllm.utils.deep_gemm import get_paged_mqa_logits_metadata, has_deep_gemm
+from vllm.utils.platform_utils import num_compute_units
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -86,6 +87,8 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
+    use_large_context_topk: bool
+    offsets: torch.Tensor | None  # Precomputed offsets for speculative decoding
 
 
 @dataclass
@@ -194,9 +197,7 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = (
-        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
-    )
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
     reorder_batch_threshold: int = 1
 
@@ -210,11 +211,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             if self.vllm_config.speculative_config
             else 0
         )
-        # Now deepgemm fp8_paged_mqa_logits does not support next_n > 2
-        self.reorder_batch_threshold += min(self.num_speculative_tokens, 1)
+        if self.num_speculative_tokens > 1:
+            raise ValueError(
+                "Sparse MLA only supports "
+                "num_speculative_tokens <= 1 because the DeepGEMM "
+                "fp8_paged_mqa_logits kernel does not support next_n > 2. "
+                f"Got num_speculative_tokens={self.num_speculative_tokens}."
+            )
+        self.reorder_batch_threshold += self.num_speculative_tokens
 
-        props = torch.cuda.get_device_properties(self.device)
-        sm_count = props.multi_processor_count
+        sm_count = num_compute_units(self.device.index)
         self.num_sms = sm_count
 
         self.decode_lens_buffer = torch.empty(
@@ -320,17 +326,42 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # Use CPU to avoid GPU sync; breaking async scheduling
             requires_padding = (decode_lens_cpu.max() > decode_lens_cpu.min()).item()
 
+            # Decide which top-k kernel to use based on batch size and sequence length
+            batch_size = num_decodes
+            _is_large_context = common_attn_metadata.max_seq_len > 8192
+
+            # Decision logic based on micro-benchmark results:
+            # - large_context_topk wins for batch <= 128 and seq_len > 8K
+            # - top_k_per_row_decode wins for batch > 128 or seq_len <= 8K
+            use_large_context_topk = batch_size <= 128 and _is_large_context
+
+            next_n = 1 + self.num_speculative_tokens
+            if next_n > 1:
+                offsets = torch.arange(next_n, device=self.device, dtype=torch.int32)
+            else:
+                offsets = None
+
             seq_lens = common_attn_metadata.seq_lens[:num_decodes]
-            if is_deep_gemm_supported():
+
+            # DeepGEMM is required for the paged MQA logits on CUDA devices
+            if current_platform.is_cuda() and has_deep_gemm():
                 self.scheduler_metadata_buffer[:] = get_paged_mqa_logits_metadata(
                     seq_lens, self.kv_cache_spec.block_size, self.num_sms
                 )
+            block_table = common_attn_metadata.block_table_tensor[:num_decodes, ...]
+            # Padded CUDA graph requests have block_table entries of -1.
+            # Clamp to 0 to prevent OOB access in the DeepGEMM kernel.
+            # This is safe because padded requests have seq_lens=0, so the
+            # kernel produces no meaningful output for those rows.
+            block_table.clamp_(min=0)
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
-                block_table=common_attn_metadata.block_table_tensor[:num_decodes, ...],
+                block_table=block_table,
                 seq_lens=common_attn_metadata.seq_lens[:num_decodes],
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
+                use_large_context_topk=use_large_context_topk,
+                offsets=offsets,
             )
 
         attn_metadata = DeepseekV32IndexerMetadata(

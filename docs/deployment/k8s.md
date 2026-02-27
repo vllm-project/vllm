@@ -59,11 +59,15 @@ First, create a Kubernetes PVC and Secret for downloading and storing Hugging Fa
 Here, the `token` field stores your **Hugging Face access token**. For details on how to generate a token,
 see the [Hugging Face documentation](https://huggingface.co/docs/hub/en/security-tokens).
 
-Next, start the vLLM server as a Kubernetes Deployment and Service:
+Next, start the vLLM server as a Kubernetes Deployment and Service.
+
+Note that you will want to configure your vLLM image based on your processor arch:
 
 ??? console "Config"
 
     ```bash
+    VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-cpu-release-repo:latest       # use this for x86_64
+    VLLM_IMAGE=public.ecr.aws/q9t5s3a7/vllm-arm64-cpu-release-repo:latest # use this for arm64
     cat <<EOF |kubectl apply -f -
     apiVersion: apps/v1
     kind: Deployment
@@ -81,7 +85,7 @@ Next, start the vLLM server as a Kubernetes Deployment and Service:
         spec:
           containers:
           - name: vllm
-            image: vllm/vllm-openai:latest
+            image: $VLLM_IMAGE
             command: ["/bin/sh", "-c"]
             args: [
               "vllm serve meta-llama/Llama-3.2-1B-Instruct"

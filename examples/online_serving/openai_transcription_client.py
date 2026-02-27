@@ -26,7 +26,9 @@ from openai import AsyncOpenAI, OpenAI
 from vllm.assets.audio import AudioAsset
 
 
-def sync_openai(audio_path: str, client: OpenAI, model: str):
+def sync_openai(
+    audio_path: str, client: OpenAI, model: str, *, repetition_penalty: float = 1.3
+):
     """
     Perform synchronous transcription using OpenAI-compatible API.
     """
@@ -40,7 +42,7 @@ def sync_openai(audio_path: str, client: OpenAI, model: str):
             # Additional sampling params not provided by OpenAI API.
             extra_body=dict(
                 seed=4419,
-                repetition_penalty=1.3,
+                repetition_penalty=repetition_penalty,
             ),
         )
         print("transcription result [sync]:", transcription.text)
@@ -129,7 +131,12 @@ def main(args):
     print(f"Using model: {model}")
 
     # Run the synchronous function
-    sync_openai(args.audio_path if args.audio_path else mary_had_lamb, client, model)
+    sync_openai(
+        audio_path=args.audio_path if args.audio_path else mary_had_lamb,
+        client=client,
+        model=model,
+        repetition_penalty=args.repetition_penalty,
+    )
 
     # Run the asynchronous function
     if "openai" in model:
@@ -160,6 +167,12 @@ if __name__ == "__main__":
         type=str,
         default=None,
         help="The path to the audio file to transcribe.",
+    )
+    parser.add_argument(
+        "--repetition_penalty",
+        type=float,
+        default=1.3,
+        help="repetition penalty",
     )
     args = parser.parse_args()
     main(args)

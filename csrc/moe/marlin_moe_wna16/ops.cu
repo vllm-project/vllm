@@ -770,7 +770,7 @@ torch::Tensor moe_wna16_marlin_gemm(
     b_bias = b_bias_or_none.value();
     TORCH_CHECK(b_bias.device().is_cuda(), "b_bias is not on GPU");
     TORCH_CHECK(b_bias.is_contiguous(), "b_bias is not contiguous");
-    TORCH_CHECK(b_bias.size(1) == size_n, "b_bias.size(0) != size_n");
+    TORCH_CHECK(b_bias.size(1) == size_n, "b_bias.size(1) != size_n");
     TORCH_CHECK(b_bias.stride(1) == 1, "b_bias.stride(1) != 1");
   } else {
     b_bias = torch::empty({0}, options);
