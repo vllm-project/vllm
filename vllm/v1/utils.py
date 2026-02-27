@@ -167,6 +167,7 @@ class APIServerProcessManager:
         self,
         target_server_fn: Callable,
         listen_address: str,
+        engine_registry_address: str,
         sock: Any,
         args: argparse.Namespace,
         num_servers: int,
@@ -179,6 +180,9 @@ class APIServerProcessManager:
         Args:
             target_server_fn: Function to call for each API server process
             listen_address: Address to listen for client connections
+            engine_registry_address: Address of the engine registry used by
+            the engine process manager, which can be used to notify it of
+            events such as elastic EP scaling.
             sock: Socket for client connections
             args: Command line arguments
             num_servers: Number of API server processes to start
@@ -202,6 +206,7 @@ class APIServerProcessManager:
                 "output_address": out_addr,
                 "client_count": num_servers,
                 "client_index": i,
+                "engine_registry_address": engine_registry_address,
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
@@ -246,29 +251,43 @@ def wait_for_completion_or_failure(
 
     try:
         logger.info("Waiting for API servers to complete ...")
+
         # Create a mapping of sentinels to their corresponding processes
         # for efficient lookup
-        sentinel_to_proc: dict[Any, BaseProcess] = {
-            proc.sentinel: proc for proc in api_server_manager.processes
-        }
+        def create_sentinel_to_proc():
+            sentinel_to_proc: dict[Any, BaseProcess] = {
+                proc.sentinel: proc for proc in api_server_manager.processes
+            }
 
-        if coordinator:
-            sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
+            if coordinator:
+                sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
+
+            if isinstance(engine_manager, CoreEngineProcManager):
+                for proc in engine_manager.processes:
+                    sentinel_to_proc[proc.sentinel] = proc
+
+            return sentinel_to_proc
 
         actor_run_refs = []
-        if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
-                sentinel_to_proc[proc.sentinel] = proc
-        elif isinstance(engine_manager, CoreEngineActorManager):
+        if isinstance(engine_manager, CoreEngineActorManager):
             actor_run_refs = engine_manager.get_run_refs()
 
         # Check if any process terminates
+        sentinel_to_proc = create_sentinel_to_proc()
         while sentinel_to_proc or actor_run_refs:
             # Wait for any process to terminate
             ready_sentinels: list[Any] = connection.wait(sentinel_to_proc, timeout=5)
 
+            # Rebuild the sentinel_to_process mapping because processes can
+            # exit during scale-down, which is expected.
+            sentinel_to_proc = create_sentinel_to_proc()
+
             # Process any terminated processes
             for sentinel in ready_sentinels:
+                if sentinel not in sentinel_to_proc:
+                    # Process may have exited during scale-down; ignore stale
+                    # sentinel.
+                    continue
                 proc = sentinel_to_proc.pop(sentinel)
 
                 # Check if process exited with error

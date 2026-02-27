@@ -14,7 +14,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_distributed_init_method, get_ip, get_open_port
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-from vllm.v1.engine import ReconfigureDistributedRequest, ReconfigureRankType
+from vllm.v1.engine import ReconfigureDistributedRequest
 from vllm.v1.executor.abstract import Executor
 from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 from vllm.v1.serial_utils import run_method
@@ -126,11 +126,6 @@ class UniProcExecutor(Executor):
         self, reconfig_request: ReconfigureDistributedRequest
     ) -> None:
         self.driver_worker.reinitialize_distributed(reconfig_request)
-        if (
-            reconfig_request.new_data_parallel_rank
-            == ReconfigureRankType.SHUTDOWN_CURRENT_RANK
-        ):
-            self.shutdown()
 
     def shutdown(self) -> None:
         if worker := self.driver_worker:
