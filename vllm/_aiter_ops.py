@@ -1647,8 +1647,6 @@ class rocm_aiter_ops:
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert group_size == 128, "Group size must be 128"
 
-        if on_gfx12x():
-            return torch.ops.vllm.triton_per_token_group_quant_fp8(input_2d, group_size)
         return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
 
     @staticmethod
