@@ -16,38 +16,44 @@ def _rejection_sample_kernel(
     target_probs_stride,
     draft_probs_ptr,  # [num_draft_tokens, vocab_size]
     draft_probs_stride,
-    recovered_ids_ptr,  # [num_draft_tokens + num_reqs]
+    recovered_ids_ptr,  # [num_draft_tokens + num_draft_tokens + num_reqs)]
     seeds_ptr,  # [num_reqs]
-    pos_ptr,  # [num_reqs]
-    idx_mapping_ptr,  # [max_num_reqs]
+    pos_ptr,  # [num_draft_tokens + num_reqs]
+    temperature_ptr,  # [max_num_reqs]
 ):
     req_idx = tl.program_id(0)
     start_idx = tl.load(cu_num_logits_ptr + req_idx)
     end_idx = tl.load(cu_num_logits_ptr + req_idx + 1)
-    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
-    pos = tl.load(pos_ptr + req_idx)
-    seed = tl.load(seeds_ptr + req_state_idx)
+    seed = tl.load(seeds_ptr + req_idx)
+    temperature = tl.load(temperature_ptr + req_idx)
     num_tokens = end_idx - start_idx
+    is_zero_temp = temperature == 0.0
 
     num_sampled = 0
     rejected = False
     for i in range(num_tokens - 1):
         if not rejected:
             draft_id = tl.load(input_ids_ptr + start_idx + i + 1)
-            target_prob = tl.load(
-                target_probs_ptr + (start_idx + i) * target_probs_stride + draft_id
-            )
-            draft_prob = tl.load(
-                draft_probs_ptr
-                + (start_idx + i - req_idx) * draft_probs_stride
-                + draft_id
-            )
-            u = tl.rand(seed=seed, offset=pos + i)
-            if target_prob >= u * draft_prob:  # Accept
-                token_id = draft_id
-            else:  # Reject
+            if is_zero_temp:
                 token_id = tl.load(recovered_ids_ptr + start_idx + i).to(tl.int32)
-                rejected = True
+                if token_id != draft_id:
+                    rejected = True
+            else:
+                target_prob = tl.load(
+                    target_probs_ptr + (start_idx + i) * target_probs_stride + draft_id
+                )
+                draft_prob = tl.load(
+                    draft_probs_ptr
+                    + (start_idx + i - req_idx) * draft_probs_stride
+                    + draft_id
+                )
+                pos = tl.load(pos_ptr + start_idx + i)
+                u = tl.rand(seed=seed, offset=pos)
+                if target_prob >= u * draft_prob:  # Accept
+                    token_id = draft_id
+                else:  # Reject
+                    token_id = tl.load(recovered_ids_ptr + start_idx + i).to(tl.int32)
+                    rejected = True
             tl.store(sampled_ptr + req_idx * sampled_stride + i, token_id)
             num_sampled += 1
     if not rejected:
@@ -70,10 +76,10 @@ def rejection_sample(
     cu_num_logits: torch.Tensor,
     # [num_reqs]
     seeds: torch.Tensor,
-    # [num_reqs]
+    # [num_draft_tokens + num_reqs]
     pos: torch.Tensor,
     # [max_num_reqs]
-    idx_mapping: torch.Tensor,
+    temperature: torch.Tensor,
     num_speculative_steps: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = cu_num_logits.shape[0] - 1
@@ -101,7 +107,7 @@ def rejection_sample(
         recovered_ids,
         seeds,
         pos,
-        idx_mapping,
+        temperature,
         num_warps=1,
     )
     return sampled, num_sampled
@@ -118,6 +124,7 @@ def _sample_recovered_and_bonus_tokens_kernel(
     draft_probs_ptr,
     draft_probs_stride,
     cu_num_logits_ptr,
+    temperature_ptr,
     seeds_ptr,
     pos_ptr,
     idx_mapping_ptr,
@@ -127,6 +134,9 @@ def _sample_recovered_and_bonus_tokens_kernel(
     token_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + token_idx)
     end_idx = tl.load(cu_num_logits_ptr + req_state_idx + 1)
+    seed = tl.load(seeds_ptr + req_state_idx)
+    pos = tl.load(pos_ptr + token_idx)
+    temperature = tl.load(temperature_ptr + req_state_idx)
     is_bonus_token_idx = token_idx == end_idx - 1
 
     block_idx = tl.program_id(1)
@@ -137,24 +147,34 @@ def _sample_recovered_and_bonus_tokens_kernel(
         mask=mask,
         other=0.0,
     )
-    if not is_bonus_token_idx:
-        draft_probs = tl.load(
-            draft_probs_ptr + (token_idx - req_state_idx) * draft_probs_stride + block,
-            mask=mask,
-            other=0.0,
-        )
-        target_probs -= draft_probs
 
-    # Calculate the seed for exponential noise.
-    seed = tl.load(seeds_ptr + req_state_idx)
-    pos = tl.load(pos_ptr + token_idx)
-    gumbel_seed = tl.randint(seed, pos)
-    # Generate exponential noise in FP32.
-    u = tl.rand(gumbel_seed, block)
-    u = tl.maximum(u, 1e-7)
-    exp_noise = -tl.log(u)
+    if temperature == 0.0:
+        # Sample max of target_prons
+        value, idx = tl.max(target_probs, axis=0, return_indices=True)
+    else:
+        # Generate exponential noise
+        # Calculate the seed for exponential noise.
+        gumbel_seed = tl.randint(seed, pos)
+        u = tl.rand(gumbel_seed, block)
+        u = tl.maximum(u, 1e-7)
+        exp_noise = -tl.log(u)
 
-    value, idx = tl.max(target_probs / exp_noise, axis=0, return_indices=True)
+        if is_bonus_token_idx:
+            # Sample from target_probs
+            value, idx = tl.max(target_probs / exp_noise, axis=0, return_indices=True)
+        else:
+            # Sample from max(target_probs - draft_probs, 0)
+            draft_probs = tl.load(
+                draft_probs_ptr
+                + (token_idx - req_state_idx) * draft_probs_stride
+                + block,
+                mask=mask,
+                other=0.0,
+            )
+            target_probs -= draft_probs
+            # No need to clamp 0 because the maximum is guaranteed to be >= 0 anyway
+            value, idx = tl.max(target_probs / exp_noise, axis=0, return_indices=True)
+
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
     tl.store(local_max_ptr + token_idx * local_max_stride + block_idx, value)
@@ -165,9 +185,14 @@ def sample_recovered_and_bonus_tokens(
     draft_probs: torch.Tensor,  # [num_draft_tokens, vocab_size]
     cu_num_logits: torch.Tensor,  # [num_reqs + 1]
     idx_mapping: torch.Tensor,  # [num_draft_tokens + num_reqs]
+    temperature: torch.Tensor,  # [max_num_reqs]
     seed: torch.Tensor,  # [max_num_reqs]
     pos: torch.Tensor,  # [num_reqs]
-) -> torch.Tensor:
+) -> torch.Tensor:  # [num_draft_tokens + num_draft_tokens + num_reqs]
+    """Returned a packed tensor of:
+    - recovered_ids [num_draft_tokens]
+    - sampled_ids [num_draft_tokens + num_reqs]
+    """
     num_tokens, vocab_size = target_probs.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
@@ -193,6 +218,7 @@ def sample_recovered_and_bonus_tokens(
         draft_probs,
         draft_probs.stride(0),
         cu_num_logits,
+        temperature,
         seed,
         pos,
         idx_mapping,

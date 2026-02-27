@@ -124,7 +124,8 @@ class Sampler:
         draft_logits: torch.Tensor,  # [num_draft_tokens + num_reqs]
         cu_num_logits: torch.Tensor,  # [num_reqs + 1]
         cu_num_logits_np: np.ndarray,  # [num_reqs + 1]
-        idx_mapping: torch.Tensor,  # [num_draft_tokens + num_reqs]
+        idx_mapping: torch.Tensor,  # [max_num_reqs]
+        expanded_idx_mapping: torch.Tensor,  # [num_draft_tokens + num_reqs]
         idx_mapping_np: np.ndarray,  # [num_draft_tokens + num_reqs]
         pos: torch.Tensor,  # [num_draft_tokens + num_reqs]
         input_ids: torch.Tensor,  # [num_draft_tokens + num_reqs]
@@ -134,7 +135,7 @@ class Sampler:
         # TODO: Check whether functions expect expanded idx_mapping or not
         processed_logits = self._process_logits(
             logits,
-            idx_mapping,
+            expanded_idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
@@ -146,7 +147,8 @@ class Sampler:
             processed_probs,
             draft_probs,
             cu_num_logits,
-            idx_mapping,
+            expanded_idx_mapping,
+            self.sampling_states.temperature.gpu,
             self.sampling_states.seeds.gpu,
             pos,
         )
@@ -158,7 +160,7 @@ class Sampler:
             cu_num_logits,
             self.sampling_states.seeds.gpu,
             pos,
-            idx_mapping,
+            self.sampling_states.temperature.gpu,
             num_speculative_steps,
         )
         max_num_logprobs = self.sampling_states.max_num_logprobs(idx_mapping_np)

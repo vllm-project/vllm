@@ -274,7 +274,7 @@ class EagleSpeculator:
             # Early exit.
             return Speculation(
                 draft_tokens=draft_tokens.view(-1, 1),
-                draft_logits=draft_logits.view(-1, 1),
+                draft_logits=draft_logits.view(-1, 1, self.vocab_size),
             )
 
         # Save the draft tokens/probs for the first step.

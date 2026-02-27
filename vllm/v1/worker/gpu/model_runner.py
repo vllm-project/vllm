@@ -822,6 +822,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch.draft_logits,
                 input_batch.cu_num_logits,
                 input_batch.cu_num_logits_np,
+                input_batch.idx_mapping,
                 input_batch.expanded_idx_mapping,
                 input_batch.idx_mapping_np,
                 sample_pos,
