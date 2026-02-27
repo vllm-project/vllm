@@ -124,15 +124,20 @@ class ModelState:
                 dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             )
 
-        query_lens = (
-            query_start_loc_cpu[1 : num_reqs + 1] - query_start_loc_cpu[:num_reqs]
+        query_lens_np = (
+            input_batch.query_start_loc_np[1 : num_reqs + 1]
+            - input_batch.query_start_loc_np[:num_reqs]
         )
-        if (
+        # for separate-routine FULL decode, uniform query lengths must use
+        # num_reqs = ceil(num_tokens_after_padding / uniform_decode_query_len)
+        # to match the capture-time graph shape (host-side check, no GPU sync).
+        is_uniform_full_decode = (
             self.cudagraph_mode.separate_routine()
             and self.cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and num_reqs > 0
-            and bool(torch.all(query_lens == self.uniform_decode_query_len))
-        ):
+            and bool((query_lens_np == self.uniform_decode_query_len).all())
+        )
+        if is_uniform_full_decode:
             attn_num_reqs = min(
                 cdiv(
                     input_batch.num_tokens_after_padding, self.uniform_decode_query_len
