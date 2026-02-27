@@ -71,7 +71,10 @@ def get_attn_backend(
     vllm_config = get_current_vllm_config()
 
     cache_config = vllm_config.cache_config
-    block_size = cache_config.block_size if cache_config is not None else None
+    if cache_config is not None and cache_config.user_specified_block_size:
+        block_size = cache_config.block_size
+    else:
+        block_size = None
 
     attn_selector_config = AttentionSelectorConfig(
         head_size=head_size,

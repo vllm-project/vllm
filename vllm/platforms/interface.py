@@ -428,7 +428,7 @@ class Platform:
         from vllm.config.cache import CacheConfig
 
         cache_config = vllm_config.cache_config
-        if cache_config.block_size is not None:
+        if cache_config.user_specified_block_size:
             # User specified --block-size; keep it.
             return
 

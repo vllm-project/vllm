@@ -18,7 +18,6 @@ import msgspec
 import zmq
 
 from vllm.config import ParallelConfig, VllmConfig
-from vllm.config.cache import CacheConfig
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.envs import enable_envs_cache
 from vllm.logger import init_logger
@@ -120,9 +119,6 @@ class EngineCore:
             vllm_config.cache_config.block_size = min(
                 g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
             )
-        elif vllm_config.cache_config.block_size is None:
-            # Attention-free models (encoder-only, SSM) — use default.
-            vllm_config.cache_config.block_size = CacheConfig.DEFAULT_BLOCK_SIZE
         vllm_config.validate_block_size()
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
         vllm_config.cache_config.num_cpu_blocks = num_cpu_blocks

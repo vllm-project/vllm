@@ -5,7 +5,7 @@ import math
 from dataclasses import field
 from typing import TYPE_CHECKING, Any, ClassVar, Literal
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -40,11 +40,16 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: int | None = Field(default=None)
+    block_size: int = Field(default=DEFAULT_BLOCK_SIZE)
     """Size of a contiguous cache block in number of tokens.
 
-    This is None until the platform sets it. Always an int by the time
-    the engine starts."""
+    Defaults to DEFAULT_BLOCK_SIZE and may be overridden by the platform
+    or attention backend."""
+    user_specified_block_size: bool = Field(default=False, init=False)
+    """Whether the user explicitly set --block-size. When True, platform
+    and backend auto-selection will not override block_size.
+    Automatically set when block_size is provided in the constructor
+    or assigned after construction."""
     gpu_memory_utilization: float = Field(default=0.9, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
     range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory
@@ -214,6 +219,19 @@ class CacheConfig:
         # convert cache_config to dict(key: str, value: str) for prometheus
         # metrics info
         return {key: str(value) for key, value in self.__dict__.items()}
+
+    @model_validator(mode="after")
+    def _detect_user_specified_block_size(self) -> "CacheConfig":
+        fields_set = getattr(self, "__pydantic_fields_set__", set())
+        if "block_size" in fields_set:
+            object.__setattr__(self, "user_specified_block_size", True)
+        object.__setattr__(self, "_init_complete", True)
+        return self
+
+    def __setattr__(self, name: str, value: object) -> None:
+        super().__setattr__(name, value)
+        if name == "block_size" and getattr(self, "_init_complete", False):
+            super().__setattr__("user_specified_block_size", True)
 
     @field_validator("cache_dtype", mode="after")
     @classmethod
