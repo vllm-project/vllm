@@ -528,6 +528,7 @@ class EplbState:
         self.model_states[model_config.compute_hash()] = model_state
 
     def reinitialize_model_states(self, num_replicas: int):
+        assert not self.is_async
         for eplb_model_state in self.model_states.values():
             model = eplb_model_state.model
             model.num_physical_experts = num_replicas

@@ -607,10 +607,10 @@ class MPClient(EngineCoreClient):
         # logs an error, shuts down the client and invokes the failure
         # callback to inform the engine.
         def monitor_engine_cores():
-            died_proc = None
+            exited_proc = None
             while True:
                 sentinels = [proc.sentinel for proc in engine_processes]
-                died = multiprocessing.connection.wait(sentinels)
+                exited_sentinals = multiprocessing.connection.wait(sentinels)
                 # Re-read engine_processes to detect scale-down changes.
                 # If the died sentinel is no longer in the current list,
                 # it means a scale down removed the process (expected).
@@ -619,26 +619,30 @@ class MPClient(EngineCoreClient):
                     break
 
                 sentinel_to_proc = {proc.sentinel: proc for proc in engine_processes}
-                if died[0] not in sentinel_to_proc:
-                    # Scale down in progress: process was removed, continue monitoring
-                    continue
-                # An engine process actually died unexpectedly
-                died_proc = sentinel_to_proc[died[0]]
-                break
+                # During scale down, exited sentinels will have already been
+                # removed from engine_processes, so they won't appear in
+                # sentinel_to_proc. Any sentinel that is in sentinel_to_proc is
+                # an unexpected crash.
+                for sentinel in exited_sentinals:
+                    if sentinel in sentinel_to_proc:
+                        exited_proc = sentinel_to_proc[sentinel]
+                        break
+                if exited_proc is not None:
+                    break
 
             _self = self_ref()
             if not _self or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
 
-            if died_proc is None:
+            if exited_proc is None:
                 logger.error(
                     "All engine core processes have exited, shutting down client."
                 )
             else:
                 logger.error(
                     "Engine core proc %s died unexpectedly, shutting down client.",
-                    died_proc.name,
+                    exited_proc.name,
                 )
             _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism
