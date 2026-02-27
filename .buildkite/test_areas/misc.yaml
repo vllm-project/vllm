@@ -9,29 +9,15 @@ steps:
     - tests/v1
   commands:
     - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
-    # Run the hanging test first (should pass in isolation)
-    - pytest -v -s v1/kv_connector/unit/test_example_connector.py
-    # Compact diagnostic: GPU mem, locked pages, shm count, CUDA alloc test
-    # Uses .cuda() instead of device='cuda' to avoid YAML/shell quoting issues
-    - echo "=== DIAG POST test_example_connector ==="; nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null; grep Mlocked /proc/meminfo; echo "SHM_FILES=$(ls /dev/shm/ 2>/dev/null | wc -l)"; (timeout 30 python3 -c "import torch; torch.zeros(1).cuda(); torch.zeros(10000, pin_memory=True); print(42)" && echo "CUDA_OK" || echo "CUDA_WEDGED"); echo "=== END ==="
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
-    - echo "=== DIAG POST v1/core ==="; nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null; grep Mlocked /proc/meminfo; echo "SHM_FILES=$(ls /dev/shm/ 2>/dev/null | wc -l)"; (timeout 30 python3 -c "import torch; torch.zeros(1).cuda(); torch.zeros(10000, pin_memory=True); print(42)" && echo "CUDA_OK" || echo "CUDA_WEDGED"); echo "=== END ==="
     - pytest -v -s v1/executor
-    - echo "=== DIAG POST v1/executor ==="; nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null; grep Mlocked /proc/meminfo; echo "SHM_FILES=$(ls /dev/shm/ 2>/dev/null | wc -l)"; (timeout 30 python3 -c "import torch; torch.zeros(1).cuda(); torch.zeros(10000, pin_memory=True); print(42)" && echo "CUDA_OK" || echo "CUDA_WEDGED"); echo "=== END ==="
     - pytest -v -s v1/kv_offload
-    - echo "=== DIAG POST v1/kv_offload ==="; nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null; grep Mlocked /proc/meminfo; echo "SHM_FILES=$(ls /dev/shm/ 2>/dev/null | wc -l)"; (timeout 30 python3 -c "import torch; torch.zeros(1).cuda(); torch.zeros(10000, pin_memory=True); print(42)" && echo "CUDA_OK" || echo "CUDA_WEDGED"); echo "=== END ==="
     - pytest -v -s v1/sample
-    - echo "=== DIAG POST v1/sample ==="; nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null; grep Mlocked /proc/meminfo; echo "SHM_FILES=$(ls /dev/shm/ 2>/dev/null | wc -l)"; (timeout 30 python3 -c "import torch; torch.zeros(1).cuda(); torch.zeros(10000, pin_memory=True); print(42)" && echo "CUDA_OK" || echo "CUDA_WEDGED"); echo "=== END ==="
     - pytest -v -s v1/logits_processors
-    - echo "=== DIAG POST v1/logits_processors ==="; nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null; grep Mlocked /proc/meminfo; echo "SHM_FILES=$(ls /dev/shm/ 2>/dev/null | wc -l)"; (timeout 30 python3 -c "import torch; torch.zeros(1).cuda(); torch.zeros(10000, pin_memory=True); print(42)" && echo "CUDA_OK" || echo "CUDA_WEDGED"); echo "=== END ==="
     - pytest -v -s v1/worker
-    - echo "=== DIAG POST v1/worker ==="; nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null; grep Mlocked /proc/meminfo; echo "SHM_FILES=$(ls /dev/shm/ 2>/dev/null | wc -l)"; (timeout 30 python3 -c "import torch; torch.zeros(1).cuda(); torch.zeros(10000, pin_memory=True); print(42)" && echo "CUDA_OK" || echo "CUDA_WEDGED"); echo "=== END ==="
     # TODO: create another `optional` test group for slow tests
     - pytest -v -s -m 'not slow_test' v1/spec_decode
-    - echo "=== DIAG POST v1/spec_decode ==="; nvidia-smi --query-gpu=memory.used --format=csv,noheader 2>/dev/null; grep Mlocked /proc/meminfo; echo "SHM_FILES=$(ls /dev/shm/ 2>/dev/null | wc -l)"; (timeout 30 python3 -c "import torch; torch.zeros(1).cuda(); torch.zeros(10000, pin_memory=True); print(42)" && echo "CUDA_OK" || echo "CUDA_WEDGED"); echo "=== END ==="
-    # Detailed diagnostic dump right before the test that hangs
-    - echo "=== DETAILED DIAG BEFORE KV_CONNECTOR ==="; nvidia-smi; grep -E "Mlocked|Unevictable|MemFree|MemAvailable" /proc/meminfo; echo "SHM_LISTING:"; ls -la /dev/shm/ 2>/dev/null | head -30; echo "NV_CACHE:"; ls /tmp/.nv/ 2>/dev/null || echo "none"; echo "IPCS_SHM:"; ipcs -m 2>/dev/null | tail -10; echo "PYTHON_PROCS:"; pgrep -af python 2>/dev/null || echo "none"; echo "=== END DETAILED ==="
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
     - pytest -v -s v1/test_oracle.py
