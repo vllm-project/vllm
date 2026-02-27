@@ -61,12 +61,10 @@ def has_sys_ptrace_capability() -> bool:
         pass
 
     # If we can't determine, assume it's not available in container environments
-    # Check if we're in a container
-    if os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"):
-        return False
-
-    # If not in a container and can't check, assume it's available
-    return True
+    # Check if we're in a container; if not, assume it's available
+    return not (
+        os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
+    )
 
 
 def test_flashinfer_all2all_import():
@@ -132,7 +130,10 @@ def manager_initialization_worker(rank: int, world_size: int):
     manager = FlashInferAllToAllManager(cpu_group)
 
     # Verify multi-GPU properties
-    print(f"[Rank {rank}] Manager rank: {manager.rank}, world_size: {manager.world_size}")
+    print(
+        f"[Rank {rank}] Manager rank: {manager.rank}, "
+        f"world_size: {manager.world_size}"
+    )
     assert manager is not None
     assert manager.rank == rank
     assert manager.world_size == world_size
@@ -174,7 +175,11 @@ def workspace_reinitialization_worker(rank: int, world_size: int):
     manager = FlashInferAllToAllManager(cpu_group)
 
     # Initialize
-    manager.initialize(world_size=world_size, rank=rank, gpus_per_node=torch.cuda.device_count())
+    manager.initialize(
+        world_size=world_size,
+        rank=rank,
+        gpus_per_node=torch.cuda.device_count(),
+    )
     assert manager.initialized
     print(f"[Rank {rank}] First initialization complete")
 
@@ -188,7 +193,11 @@ def workspace_reinitialization_worker(rank: int, world_size: int):
     torch.distributed.barrier()
 
     # Re-initialize
-    manager.initialize(world_size=world_size, rank=rank, gpus_per_node=torch.cuda.device_count())
+    manager.initialize(
+        world_size=world_size,
+        rank=rank,
+        gpus_per_node=torch.cuda.device_count(),
+    )
     assert manager.initialized
     print(f"[Rank {rank}] Re-initialization complete")
 
@@ -231,7 +240,10 @@ def ensure_initialized_worker(rank: int, world_size: int):
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.skipif(
     not has_sys_ptrace_capability(),
-    reason="SYS_PTRACE capability required for MNNVL. Run container with: docker run --cap-add=SYS_PTRACE"
+    reason=(
+        "SYS_PTRACE capability required for MNNVL. "
+        "Run container with: docker run --cap-add=SYS_PTRACE"
+    ),
 )
 @pytest.mark.parametrize("world_size", [2])
 def test_flashinfer_alltoall_manager_initialization(world_size: int):
@@ -267,7 +279,10 @@ def test_flashinfer_alltoall_manager_initialization(world_size: int):
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.skipif(
     not has_sys_ptrace_capability(),
-    reason="SYS_PTRACE capability required for MNNVL. Run container with: docker run --cap-add=SYS_PTRACE"
+    reason=(
+        "SYS_PTRACE capability required for MNNVL. "
+        "Run container with: docker run --cap-add=SYS_PTRACE"
+    ),
 )
 @pytest.mark.parametrize("world_size", [2])
 def test_flashinfer_alltoall_workspace_reinitialization(world_size: int):
@@ -302,7 +317,10 @@ def test_flashinfer_alltoall_workspace_reinitialization(world_size: int):
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Need at least 2 GPUs")
 @pytest.mark.skipif(
     not has_sys_ptrace_capability(),
-    reason="SYS_PTRACE capability required for MNNVL. Run container with: docker run --cap-add=SYS_PTRACE"
+    reason=(
+        "SYS_PTRACE capability required for MNNVL. "
+        "Run container with: docker run --cap-add=SYS_PTRACE"
+    ),
 )
 @pytest.mark.parametrize("world_size", [2])
 def test_flashinfer_alltoall_ensure_initialized(world_size: int):
