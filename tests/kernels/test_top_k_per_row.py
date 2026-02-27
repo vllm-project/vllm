@@ -480,7 +480,7 @@ def test_deepseek_radix_topk(
         lengths = (seq_lens.unsqueeze(1) - next_n + 1 + offsets).flatten()
 
     if kernel_name == "radix_topk":
-        workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
+        workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
         torch.ops._C.radix_topk(logits, lengths, indices, workspace, top_k)
     elif kernel_name == "large_context_topk":
         torch.ops._C.large_context_topk(logits, indices, lengths, None)
@@ -568,7 +568,7 @@ def run_radix_topk_test(
     indices = torch.empty((num_rows, top_k), dtype=torch.int32, device="cuda")
 
     if kernel_name == "radix_topk":
-        workspace = torch.zeros(1024 * 1024, dtype=torch.uint8, device="cuda")
+        workspace = torch.empty(1024 * 1024, dtype=torch.uint8, device="cuda")
         torch.ops._C.radix_topk(logits, lengths, indices, workspace, top_k)
     elif kernel_name == "large_context_topk":
         torch.ops._C.large_context_topk(logits, indices, lengths, None)

@@ -62,7 +62,10 @@ from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
 )
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.sparse_attn_indexer import SparseAttnIndexer
+from vllm.model_executor.layers.sparse_attn_indexer import (
+    RADIX_TOPK_WORKSPACE_SIZE,
+    SparseAttnIndexer,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -1060,7 +1063,7 @@ class DeepseekV2Model(nn.Module):
                 device=self.device,
             )
             topk_workspace = torch.empty(
-                1024 * 1024,
+                RADIX_TOPK_WORKSPACE_SIZE,
                 dtype=torch.uint8,
                 device=self.device,
             )
