@@ -1359,8 +1359,6 @@ class NanoNemotronBaseVLMultiModalProcessor(BaseMultiModalProcessor[_I]):
                     image_height=image_size.height,
                     max_num_tiles=max_num_tiles,
                 )
-            msg = f"Determined num tokens of image: {feature_size=}"
-            logger.debug(msg)
 
             num_patches = None
             local_image_num_patches = image_num_patches
