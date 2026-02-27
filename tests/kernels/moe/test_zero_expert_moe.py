@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for ZeroExpertFusedMoE.
+"""Tests for FusedMoE with zero experts.
 
 Verifies that:
 - The ZeroExpertRouter is properly created and used as the layer router.
-- A forward pass through ZeroExpertFusedMoE produces correct output.
+- A forward pass through FusedMoE with zero experts produces correct output.
 - The output decomposes correctly into real expert + zero expert contributions.
 """
 
@@ -17,15 +17,12 @@ from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
-from vllm.model_executor.layers.fused_moe.zero_expert_fused_moe import (
-    ZeroExpertFusedMoE,
-)
 from vllm.v1.worker.workspace import init_workspace_manager
 
 
 @pytest.fixture
 def zero_expert_moe(dist_init, default_vllm_config):
-    """Create a ZeroExpertFusedMoE layer with zero experts."""
+    """Create a FusedMoE layer with zero experts."""
     num_experts = 4
     top_k = 2
     # hidden_size must be >= 256 for the zero expert identity kernel to
@@ -46,7 +43,7 @@ def zero_expert_moe(dist_init, default_vllm_config):
     with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
         init_workspace_manager(torch.cuda.current_device())
 
-        layer = ZeroExpertFusedMoE(
+        layer = FusedMoE(
             zero_expert_type="identity",
             e_score_correction_bias=e_score_correction_bias,
             num_experts=num_experts,
@@ -67,7 +64,7 @@ def zero_expert_moe(dist_init, default_vllm_config):
 
 @pytest.mark.parametrize("num_tokens", [1, 32])
 def test_zero_expert_moe_router_is_zero_expert_router(zero_expert_moe, num_tokens):
-    """Verify that ZeroExpertFusedMoE creates a ZeroExpertRouter."""
+    """Verify that FusedMoE with zero_expert_type creates a ZeroExpertRouter."""
     layer, _ = zero_expert_moe
     assert isinstance(layer.router, ZeroExpertRouter), (
         f"Expected ZeroExpertRouter but got {type(layer.router).__name__}."
@@ -84,7 +81,7 @@ def test_zero_expert_moe_no_custom_routing_fn(zero_expert_moe, num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [1, 32])
 def test_zero_expert_moe_forward(zero_expert_moe, num_tokens):
-    """Run a forward pass through ZeroExpertFusedMoE and verify output shape."""
+    """Run a forward pass through FusedMoE with zero experts and verify output shape."""
     layer, vllm_config = zero_expert_moe
 
     hidden_size = layer.hidden_size
@@ -119,7 +116,7 @@ def test_zero_expert_moe_forward(zero_expert_moe, num_tokens):
 
 @pytest.mark.parametrize("num_tokens", [1, 32])
 def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
-    """Validate that the ZeroExpertFusedMoE output equals a plain FusedMoE
+    """Validate that the FusedMoE output equals a plain FusedMoE
     output (real experts only) plus the zero expert contribution.
 
     The key invariant is:
@@ -128,7 +125,7 @@ def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
 
     We create a plain FusedMoE layer with the same weights and real-expert-only
     router logits, compute the zero expert output via the ZeroExpertRouter, and
-    verify the sum matches the ZeroExpertFusedMoE output.
+    verify the sum matches the FusedMoE output.
     """
     layer, vllm_config = zero_expert_moe
     num_experts = 4
@@ -201,7 +198,7 @@ def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
         expected,
         atol=0,
         rtol=0,
-        msg="ZeroExpertFusedMoE output should equal plain FusedMoE output "
+        msg="FusedMoE output should equal plain FusedMoE output "
         "plus zero expert contribution",
     )
 
