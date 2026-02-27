@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -16,6 +17,18 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
+
+
+@dataclass
+class AttnMetadataInputs:
+    num_reqs: int
+    num_tokens: int
+    query_start_loc_gpu: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
+    seq_lens: torch.Tensor
+    block_tables: tuple[torch.Tensor, ...]
+    slot_mappings: torch.Tensor
+    dcp_local_seq_lens: torch.Tensor | None
 
 
 class ModelState:
@@ -94,30 +107,21 @@ class ModelState:
         input_batch: InputBatch,
         block_tables: tuple[torch.Tensor, ...],
         slot_mappings: torch.Tensor,
-    ) -> tuple[
-        int,
-        int,
-        torch.Tensor,
-        torch.Tensor,
-        torch.Tensor,
-        tuple[torch.Tensor, ...],
-        torch.Tensor,
-        torch.Tensor | None,
-    ]:
+    ) -> AttnMetadataInputs:
         num_reqs = input_batch.num_reqs
         num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
 
         if input_batch.num_tokens_after_padding <= num_tokens:
-            return (
-                num_reqs,
-                num_tokens,
-                input_batch.query_start_loc,
-                query_start_loc_cpu,
-                input_batch.seq_lens,
-                block_tables,
-                slot_mappings[:, :num_tokens],
-                input_batch.dcp_local_seq_lens,
+            return AttnMetadataInputs(
+                num_reqs=num_reqs,
+                num_tokens=num_tokens,
+                query_start_loc_gpu=input_batch.query_start_loc,
+                query_start_loc_cpu=query_start_loc_cpu,
+                seq_lens=input_batch.seq_lens,
+                block_tables=block_tables,
+                slot_mappings=slot_mappings[:, :num_tokens],
+                dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
             )
 
         query_lens = (
@@ -190,15 +194,15 @@ class ModelState:
             )
             attn_dcp_local_seq_lens[:num_reqs] = input_batch.dcp_local_seq_lens
 
-        return (
-            attn_num_reqs,
-            attn_num_tokens,
-            attn_query_start_loc,
-            attn_query_start_loc_cpu,
-            attn_seq_lens,
-            attn_block_tables,
-            attn_slot_mappings,
-            attn_dcp_local_seq_lens,
+        return AttnMetadataInputs(
+            num_reqs=attn_num_reqs,
+            num_tokens=attn_num_tokens,
+            query_start_loc_gpu=attn_query_start_loc,
+            query_start_loc_cpu=attn_query_start_loc_cpu,
+            seq_lens=attn_seq_lens,
+            block_tables=attn_block_tables,
+            slot_mappings=attn_slot_mappings,
+            dcp_local_seq_lens=attn_dcp_local_seq_lens,
         )
 
     def prepare_attn(
@@ -209,29 +213,22 @@ class ModelState:
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
     ) -> dict[str, Any]:
-        (
-            attn_num_reqs,
-            attn_num_tokens,
-            attn_query_start_loc,
-            attn_query_start_loc_cpu,
-            attn_seq_lens,
-            attn_block_tables,
-            attn_slot_mappings,
-            attn_dcp_local_seq_lens,
-        ) = self._prepare_attn_metadata_inputs(input_batch, block_tables, slot_mappings)
+        attn_inputs = self._prepare_attn_metadata_inputs(
+            input_batch, block_tables, slot_mappings
+        )
         max_query_len = input_batch.num_scheduled_tokens.max().item()
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
-            num_reqs=attn_num_reqs,
-            num_tokens=attn_num_tokens,
-            query_start_loc_gpu=attn_query_start_loc,
-            query_start_loc_cpu=attn_query_start_loc_cpu,
+            num_reqs=attn_inputs.num_reqs,
+            num_tokens=attn_inputs.num_tokens,
+            query_start_loc_gpu=attn_inputs.query_start_loc_gpu,
+            query_start_loc_cpu=attn_inputs.query_start_loc_cpu,
             max_query_len=max_query_len,
-            seq_lens=attn_seq_lens,
+            seq_lens=attn_inputs.seq_lens,
             max_seq_len=self.max_model_len,
-            block_tables=attn_block_tables,
-            slot_mappings=attn_slot_mappings,
+            block_tables=attn_inputs.block_tables,
+            slot_mappings=attn_inputs.slot_mappings,
             kv_cache_config=kv_cache_config,
-            dcp_local_seq_lens=attn_dcp_local_seq_lens,
+            dcp_local_seq_lens=attn_inputs.dcp_local_seq_lens,
         )
         return attn_metadata
