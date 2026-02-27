@@ -2,31 +2,31 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai.types.responses import ResponseFunctionToolCall, ResponseReasoningItem
-from openai.types.responses.response_output_item import McpCall
-from openai_harmony import Author, Message, Role, TextContent
+from openai_harmony import Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     get_encoding,
+    get_system_message,
     has_custom_tools,
     parse_chat_input_to_harmony_message,
     parse_chat_output,
-    parse_input_to_harmony_message,
-    parse_output_message,
+)
+from vllm.entrypoints.openai.responses.harmony import (
+    response_previous_input_to_harmony,
 )
 
 
 class TestCommonParseInputToHarmonyMessage:
     """
     Tests for scenarios that are common to both Chat Completion
-    parse_chat_input_to_harmony_message and Responsees API
-    parse_input_to_harmony_message functions.
+    parse_chat_input_to_harmony_message and Responses API
+    response_previous_input_to_harmony functions.
     """
 
     @pytest.fixture(
-        params=[parse_chat_input_to_harmony_message, parse_input_to_harmony_message]
+        params=[parse_chat_input_to_harmony_message, response_previous_input_to_harmony]
     )
     def parse_function(self, request):
         return request.param
@@ -209,81 +209,6 @@ class TestCommonParseInputToHarmonyMessage:
         assert len(messages[0].content) == 2
         assert messages[0].content[0].text == ""
         assert messages[0].content[1].text == "actual text"
-
-
-class TestParseInputToHarmonyMessage:
-    """
-    Tests for scenarios that are specific to the Responses API
-    parse_input_to_harmony_message function.
-    """
-
-    def test_message_with_empty_content(self):
-        """Test parsing message with empty string content."""
-        chat_msg = {
-            "role": "user",
-            "content": "",
-        }
-
-        messages = parse_input_to_harmony_message(chat_msg)
-
-        assert len(messages) == 1
-        assert messages[0].content[0].text == ""
-
-    def test_tool_message_with_string_content(self):
-        """Test parsing tool message with string content."""
-        chat_msg = {
-            "role": "tool",
-            "name": "get_weather",
-            "content": "The weather in San Francisco is sunny, 72°F",
-        }
-
-        messages = parse_input_to_harmony_message(chat_msg)
-
-        assert len(messages) == 1
-        assert messages[0].author.role == Role.TOOL
-        assert messages[0].author.name == "functions.get_weather"
-        assert (
-            messages[0].content[0].text == "The weather in San Francisco is sunny, 72°F"
-        )
-        assert messages[0].channel == "commentary"
-
-    def test_tool_message_with_array_content(self):
-        """Test parsing tool message with array content."""
-        chat_msg = {
-            "role": "tool",
-            "name": "search_results",
-            "content": [
-                {"type": "text", "text": "Result 1: "},
-                {"type": "text", "text": "Result 2: "},
-                {
-                    "type": "image",
-                    "url": "http://example.com/img.png",
-                },  # Should be ignored
-                {"type": "text", "text": "Result 3"},
-            ],
-        }
-
-        messages = parse_input_to_harmony_message(chat_msg)
-
-        assert len(messages) == 1
-        assert messages[0].author.role == Role.TOOL
-        assert messages[0].author.name == "functions.search_results"
-        assert messages[0].content[0].text == "Result 1: Result 2: Result 3"
-
-    def test_tool_message_with_empty_content(self):
-        """Test parsing tool message with None content."""
-        chat_msg = {
-            "role": "tool",
-            "name": "empty_tool",
-            "content": None,
-        }
-
-        messages = parse_input_to_harmony_message(chat_msg)
-
-        assert len(messages) == 1
-        assert messages[0].author.role == Role.TOOL
-        assert messages[0].author.name == "functions.empty_tool"
-        assert messages[0].content[0].text == ""
 
 
 class TestParseChatInputToHarmonyMessage:
@@ -840,192 +765,47 @@ class TestParseChatOutput:
         assert reasoning == "I've thought hard about this."
         assert final_content == "The answer is 4."
 
+    def test_parse_chat_output_commentary_with_recipient_excluded(self) -> None:
+        """Commentary with a recipient (tool call) should not appear in
+        final_content — those are handled separately by the tool parser.
 
-class TestParseOutputMessage:
-    """Tests for parse_output_message function."""
-
-    def test_commentary_with_no_recipient_creates_reasoning(self):
-        """Test that commentary with recipient=None (preambles) creates reasoning items.
-
-        Per Harmony format, commentary channel can contain preambles to calling
-        multiple functions - explanatory text with no recipient.
+        The first message is a preamble (visible), the second is a tool
+        call (excluded). Only the preamble should appear in final_content.
         """
-        message = Message.from_role_and_content(
-            Role.ASSISTANT, "I will now search for the weather information."
+        harmony_str = (
+            "<|channel|>commentary"
+            "<|message|>Let me check the weather.<|end|>"
+            "<|start|>assistant to=functions.get_weather"
+            "<|channel|>commentary"
+            '<|message|>{"location": "SF"}<|end|>'
         )
-        message = message.with_channel("commentary")
-        # recipient is None by default, representing a preamble
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "Let me check the weather."
 
-        output_items = parse_output_message(message)
+    def test_parse_chat_output_interrupted_preamble(self) -> None:
+        """Partial/interrupted preamble (commentary without recipient) should
+        appear in final_content, not reasoning."""
+        harmony_str = "<|channel|>commentary<|message|>I'll search for that"
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "I'll search for that"
 
-        assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
-        assert (
-            output_items[0].content[0].text
-            == "I will now search for the weather information."
+    def test_parse_chat_output_preamble_then_final(self) -> None:
+        """Preamble followed by a final message should both appear in
+        final_content, joined by newline."""
+        harmony_str = (
+            "<|channel|>commentary"
+            "<|message|>Let me look that up.<|end|>"
+            "<|start|>assistant<|channel|>final"
+            "<|message|>The answer is 42.<|end|>"
         )
-        assert output_items[0].content[0].type == "reasoning_text"
-
-    def test_commentary_with_function_recipient_creates_function_call(self):
-        """Test commentary with recipient='functions.X' creates function calls."""
-        message = Message.from_role_and_content(
-            Role.ASSISTANT, '{"location": "San Francisco", "units": "celsius"}'
-        )
-        message = message.with_channel("commentary")
-        message = message.with_recipient("functions.get_weather")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseFunctionToolCall)
-        assert output_items[0].type == "function_call"
-        assert output_items[0].name == "get_weather"
-        assert (
-            output_items[0].arguments
-            == '{"location": "San Francisco", "units": "celsius"}'
-        )
-        assert output_items[0].call_id.startswith("call_")
-        assert output_items[0].id.startswith("fc_")
-
-    def test_commentary_with_python_recipient_creates_reasoning(self):
-        """Test that commentary with recipient='python' creates reasoning items."""
-        message = Message.from_role_and_content(
-            Role.ASSISTANT, "import numpy as np\nprint(np.array([1, 2, 3]))"
-        )
-        message = message.with_channel("commentary")
-        message = message.with_recipient("python")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
-        assert (
-            output_items[0].content[0].text
-            == "import numpy as np\nprint(np.array([1, 2, 3]))"
-        )
-
-    def test_commentary_with_browser_recipient_creates_reasoning(self):
-        """Test that commentary with recipient='browser' creates reasoning items."""
-        message = Message.from_role_and_content(
-            Role.ASSISTANT, "Navigating to the specified URL"
-        )
-        message = message.with_channel("commentary")
-        message = message.with_recipient("browser")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
-        assert output_items[0].content[0].text == "Navigating to the specified URL"
-
-    def test_commentary_with_container_recipient_creates_reasoning(self):
-        """Test that commentary with recipient='container' creates reasoning items."""
-        message = Message.from_role_and_content(
-            Role.ASSISTANT, "Running command in container"
-        )
-        message = message.with_channel("commentary")
-        message = message.with_recipient("container")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
-        assert output_items[0].content[0].text == "Running command in container"
-
-    def test_commentary_with_empty_content_and_no_recipient(self):
-        """Test edge case: empty commentary with recipient=None."""
-        message = Message.from_role_and_content(Role.ASSISTANT, "")
-        message = message.with_channel("commentary")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].content[0].text == ""
-
-    def test_commentary_with_multiple_contents_and_no_recipient(self):
-        """Test multiple content items in commentary with no recipient."""
-        contents = [
-            TextContent(text="Step 1: Analyze the request"),
-            TextContent(text="Step 2: Prepare to call functions"),
-        ]
-        message = Message.from_role_and_contents(Role.ASSISTANT, contents)
-        message = message.with_channel("commentary")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 2
-        assert all(isinstance(item, ResponseReasoningItem) for item in output_items)
-        assert output_items[0].content[0].text == "Step 1: Analyze the request"
-        assert output_items[1].content[0].text == "Step 2: Prepare to call functions"
-
-    def test_commentary_with_multiple_function_calls(self):
-        """Test multiple function calls in commentary channel."""
-        contents = [
-            TextContent(text='{"location": "San Francisco"}'),
-            TextContent(text='{"location": "New York"}'),
-        ]
-        message = Message.from_role_and_contents(Role.ASSISTANT, contents)
-        message = message.with_channel("commentary")
-        message = message.with_recipient("functions.get_weather")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 2
-        assert all(isinstance(item, ResponseFunctionToolCall) for item in output_items)
-        assert output_items[0].name == "get_weather"
-        assert output_items[1].name == "get_weather"
-        assert output_items[0].arguments == '{"location": "San Francisco"}'
-        assert output_items[1].arguments == '{"location": "New York"}'
-
-    def test_commentary_with_unknown_recipient_creates_mcp_call(self):
-        """Test that commentary with unknown recipient creates MCP call."""
-        message = Message.from_role_and_content(Role.ASSISTANT, '{"arg": "value"}')
-        message = message.with_channel("commentary")
-        message = message.with_recipient("custom_tool")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 1
-        assert isinstance(output_items[0], McpCall)
-        assert output_items[0].type == "mcp_call"
-        assert output_items[0].name == "custom_tool"
-        assert output_items[0].server_label == "custom_tool"
-
-    def test_analysis_channel_creates_reasoning(self):
-        """Test that analysis channel creates reasoning items."""
-        message = Message.from_role_and_content(
-            Role.ASSISTANT, "Analyzing the problem step by step..."
-        )
-        message = message.with_channel("analysis")
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 1
-        assert isinstance(output_items[0], ResponseReasoningItem)
-        assert output_items[0].type == "reasoning"
-        assert (
-            output_items[0].content[0].text == "Analyzing the problem step by step..."
-        )
-
-    def test_non_assistant_message_returns_empty(self):
-        """Test that non-assistant messages return empty list.
-
-        Per the implementation, tool messages to assistant (e.g., search results)
-        are not included in final output to align with OpenAI behavior.
-        """
-        message = Message.from_author_and_content(
-            Author.new(Role.TOOL, "functions.get_weather"),
-            "The weather is sunny, 72°F",
-        )
-
-        output_items = parse_output_message(message)
-
-        assert len(output_items) == 0
+        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
+        reasoning, final_content, _ = parse_chat_output(token_ids)
+        assert reasoning is None
+        assert final_content == "Let me look that up.\nThe answer is 42."
 
 
 def test_has_custom_tools() -> None:
@@ -1037,165 +817,27 @@ def test_has_custom_tools() -> None:
     )
 
 
-def test_parse_mcp_call_basic() -> None:
-    """Test that MCP calls are parsed with correct type and server_label."""
-    message = Message.from_role_and_content(Role.ASSISTANT, '{"path": "/tmp"}')
-    message = message.with_recipient("filesystem")
-    message = message.with_channel("commentary")
+class TestGetSystemMessage:
+    """Tests for get_system_message channel configuration."""
 
-    output_items = parse_output_message(message)
+    def test_commentary_channel_present_without_custom_tools(self) -> None:
+        """Commentary channel must be valid even without custom tools."""
+        sys_msg = get_system_message(with_custom_tools=False)
+        valid_channels = sys_msg.content[0].channel_config.valid_channels
+        assert "commentary" in valid_channels
 
-    assert len(output_items) == 1
-    assert isinstance(output_items[0], McpCall)
-    assert output_items[0].type == "mcp_call"
-    assert output_items[0].name == "filesystem"
-    assert output_items[0].server_label == "filesystem"
-    assert output_items[0].arguments == '{"path": "/tmp"}'
-    assert output_items[0].status == "completed"
+    def test_commentary_channel_present_with_custom_tools(self) -> None:
+        """Commentary channel present when custom tools are enabled."""
+        sys_msg = get_system_message(with_custom_tools=True)
+        valid_channels = sys_msg.content[0].channel_config.valid_channels
+        assert "commentary" in valid_channels
 
-
-def test_parse_mcp_call_dotted_recipient() -> None:
-    """Test that dotted recipients extract the tool name correctly."""
-    message = Message.from_role_and_content(Role.ASSISTANT, '{"cmd": "ls"}')
-    message = message.with_recipient("repo_browser.list")
-    message = message.with_channel("commentary")
-
-    output_items = parse_output_message(message)
-
-    assert len(output_items) == 1
-    assert isinstance(output_items[0], McpCall)
-    assert output_items[0].name == "list"
-    assert output_items[0].server_label == "repo_browser"
-
-
-def test_mcp_vs_function_call() -> None:
-    """Test that function calls are not parsed as MCP calls."""
-    func_message = Message.from_role_and_content(Role.ASSISTANT, '{"arg": "value"}')
-    func_message = func_message.with_recipient("functions.my_tool")
-    func_message = func_message.with_channel("commentary")
-
-    func_items = parse_output_message(func_message)
-
-    assert len(func_items) == 1
-    assert not isinstance(func_items[0], McpCall)
-    assert func_items[0].type == "function_call"
-
-
-def test_mcp_vs_builtin_tools() -> None:
-    """Test that built-in tools (python, container) are not parsed as MCP calls."""
-    # Test python (built-in tool) - should be reasoning, not MCP
-    python_message = Message.from_role_and_content(Role.ASSISTANT, "print('hello')")
-    python_message = python_message.with_recipient("python")
-    python_message = python_message.with_channel("commentary")
-
-    python_items = parse_output_message(python_message)
-
-    assert len(python_items) == 1
-    assert not isinstance(python_items[0], McpCall)
-    assert python_items[0].type == "reasoning"
-
-
-def test_parse_remaining_state_commentary_channel() -> None:
-    """Test parse_remaining_state with commentary channel and various recipients."""
-    from unittest.mock import Mock
-
-    from vllm.entrypoints.openai.parser.harmony_utils import parse_remaining_state
-
-    # Test 1: functions.* recipient → should return function tool call
-    parser_func = Mock()
-    parser_func.current_content = '{"arg": "value"}'
-    parser_func.current_role = Role.ASSISTANT
-    parser_func.current_channel = "commentary"
-    parser_func.current_recipient = "functions.my_tool"
-
-    func_items = parse_remaining_state(parser_func)
-
-    assert len(func_items) == 1
-    assert not isinstance(func_items[0], McpCall)
-    assert func_items[0].type == "function_call"
-    assert func_items[0].name == "my_tool"
-    assert func_items[0].status == "in_progress"
-
-    # Test 2: MCP tool (not builtin) → should return MCP call
-    parser_mcp = Mock()
-    parser_mcp.current_content = '{"path": "/tmp"}'
-    parser_mcp.current_role = Role.ASSISTANT
-    parser_mcp.current_channel = "commentary"
-    parser_mcp.current_recipient = "filesystem"
-
-    mcp_items = parse_remaining_state(parser_mcp)
-
-    assert len(mcp_items) == 1
-    assert isinstance(mcp_items[0], McpCall)
-    assert mcp_items[0].type == "mcp_call"
-    assert mcp_items[0].name == "filesystem"
-    assert mcp_items[0].server_label == "filesystem"
-    assert mcp_items[0].status == "in_progress"
-
-    # Test 3: Built-in tool (python)
-    # should NOT return MCP call, falls through to reasoning
-    parser_builtin = Mock()
-    parser_builtin.current_content = "print('hello')"
-    parser_builtin.current_role = Role.ASSISTANT
-    parser_builtin.current_channel = "commentary"
-    parser_builtin.current_recipient = "python"
-
-    builtin_items = parse_remaining_state(parser_builtin)
-
-    # Should fall through to reasoning logic
-    assert len(builtin_items) == 1
-    assert not isinstance(builtin_items[0], McpCall)
-    assert builtin_items[0].type == "reasoning"
-
-
-def test_parse_remaining_state_analysis_channel() -> None:
-    """Test parse_remaining_state with analysis channel and various recipients."""
-    from unittest.mock import Mock
-
-    from vllm.entrypoints.openai.parser.harmony_utils import parse_remaining_state
-
-    # Test 1: functions.* recipient → should return function tool call
-    parser_func = Mock()
-    parser_func.current_content = '{"arg": "value"}'
-    parser_func.current_role = Role.ASSISTANT
-    parser_func.current_channel = "analysis"
-    parser_func.current_recipient = "functions.my_tool"
-
-    func_items = parse_remaining_state(parser_func)
-
-    assert len(func_items) == 1
-    assert not isinstance(func_items[0], McpCall)
-    assert func_items[0].type == "function_call"
-    assert func_items[0].name == "my_tool"
-    assert func_items[0].status == "in_progress"
-
-    # Test 2: MCP tool (not builtin) → should return MCP call
-    parser_mcp = Mock()
-    parser_mcp.current_content = '{"query": "test"}'
-    parser_mcp.current_role = Role.ASSISTANT
-    parser_mcp.current_channel = "analysis"
-    parser_mcp.current_recipient = "database"
-
-    mcp_items = parse_remaining_state(parser_mcp)
-
-    assert len(mcp_items) == 1
-    assert isinstance(mcp_items[0], McpCall)
-    assert mcp_items[0].type == "mcp_call"
-    assert mcp_items[0].name == "database"
-    assert mcp_items[0].server_label == "database"
-    assert mcp_items[0].status == "in_progress"
-
-    # Test 3: Built-in tool (container)
-    # should NOT return MCP call, falls through to reasoning
-    parser_builtin = Mock()
-    parser_builtin.current_content = "docker run"
-    parser_builtin.current_role = Role.ASSISTANT
-    parser_builtin.current_channel = "analysis"
-    parser_builtin.current_recipient = "container"
-
-    builtin_items = parse_remaining_state(parser_builtin)
-
-    # Should fall through to reasoning logic
-    assert len(builtin_items) == 1
-    assert not isinstance(builtin_items[0], McpCall)
-    assert builtin_items[0].type == "reasoning"
+    def test_all_standard_channels_present(self) -> None:
+        """All three standard Harmony channels should always be valid."""
+        for with_tools in (True, False):
+            sys_msg = get_system_message(with_custom_tools=with_tools)
+            valid_channels = sys_msg.content[0].channel_config.valid_channels
+            for channel in ("analysis", "commentary", "final"):
+                assert channel in valid_channels, (
+                    f"{channel} missing when with_custom_tools={with_tools}"
+                )

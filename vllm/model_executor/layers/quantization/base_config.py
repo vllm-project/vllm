@@ -18,6 +18,11 @@ else:
 class QuantizeMethodBase(ABC):
     """Base class for different quantized methods."""
 
+    # Whether this method creates weights on meta device for online quantization.
+    # When True, weights are created on meta device and quantized layer-wise
+    # in process_weights_after_loading, reducing peak memory during loading.
+    uses_meta_device: bool = False
+
     @abstractmethod
     def create_weights(
         self, layer: torch.nn.Module, *weight_args, **extra_weight_attrs
@@ -168,3 +173,19 @@ class QuantizationConfig(ABC):
         Interface to update values after config initialization.
         """
         pass
+
+    def is_mxfp4_quant(self, prefix: str, layer: torch.nn.Module) -> bool:
+        """
+        Determine if mxfp4 quantization will be used for this config.
+
+        This allows hidden_size rounding to happen before moe_config creation
+        without needing to instantiate quant_method first.
+
+        Args:
+            prefix: The layer prefix/name in the model
+            layer: The layer module
+
+        Returns:
+            True if this config uses MXFP4 quantization, False otherwise
+        """
+        return False

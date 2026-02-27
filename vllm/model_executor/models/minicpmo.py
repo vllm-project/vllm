@@ -24,6 +24,7 @@
 # limitations under the License.
 """Inference-only MiniCPM-O model compatible with HuggingFace weights."""
 
+import os
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import Annotated, Any, Literal, TypeAlias
 
@@ -74,6 +75,47 @@ from .minicpmv import (
 from .utils import AutoWeightsLoader, cast_overflow_tensors, maybe_prefix
 
 CPU_DEVICE = torch.device("cpu")
+
+if os.getenv("USE_FLAGOS") == "1":
+    import flag_gems
+
+    FLAG_GEMS_CONFIG = [
+        "sort",
+        "sort_stable",
+        "layer_norm",
+        "clamp_",
+        "cos",
+        "embedding",
+        "exp",
+        "exponential_",
+        "full",
+        "gather",
+        "gelu",
+        "index",
+        "le",
+        "lt",
+        "lt_scalar",
+        "masked_fill_",
+        "max",
+        "ones",
+        "pow_scalar",
+        "prod_dim",
+        "rand_like",
+        "reciprocal",
+        "repeat",
+        "scatter",
+        "scatter_",
+        "sin",
+        "sub",
+        "true_divide",
+        "true_divide_",
+        "uniform_",
+        "where_scalar_self",
+        "where_self_out",
+        "zeros",
+        "zeros_like",
+    ]
+    flag_gems.only_enable(record=False, include=FLAG_GEMS_CONFIG)
 
 
 class MiniCPMOAudioFeatureInputs(TensorSchema):
@@ -259,7 +301,7 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder[MiniCPMOProcessingIn
         self,
         seq_len: int,
         mm_counts: Mapping[str, int],
-        mm_options: Mapping[str, BaseDummyOptions] | None = None,
+        mm_options: Mapping[str, BaseDummyOptions],
     ) -> MultiModalDataDict:
         num_audios = mm_counts.get("audio", 0)
         audio_len = (
@@ -267,11 +309,13 @@ class MiniCPMODummyInputsBuilder(MiniCPMVDummyInputsBuilder[MiniCPMOProcessingIn
             * self.info.get_default_audio_sampling_rate()
         )
 
-        audio_overrides = mm_options.get("audio") if mm_options else None
+        audio_overrides = mm_options.get("audio")
 
         audio_mm_data = {
             "audio": self._get_dummy_audios(
-                length=audio_len, num_audios=num_audios, overrides=audio_overrides
+                length=audio_len,
+                num_audios=num_audios,
+                overrides=audio_overrides,
             )
         }
 

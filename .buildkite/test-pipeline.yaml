@@ -1,10 +1,11 @@
-# In this file, you can add more tests to run either by adding a new step or
-# adding a new command to an existing step. See different options here for examples.
+# This file has been deprecated as of Feb 18, 2026. The content has already been migrated to:
 
-# This script will be feed into Jinja template in `test-template-aws.j2` at
-# https://github.com/vllm-project/buildkite-ci/blob/main/scripts/test-template-aws.j2
-# to generate the final pipeline yaml file.
+# .buildkite/test_areas for test jobs
+# .buildkite/image_build for image building jobs
+# .buildkite/hardware_tests for jobs running on other hardwares (Intel, Ascend NPU, Arm, etc..)
+# .buildkite/ci_config.yaml for configuration of CI pipeline
 
+<<<<<<< HEAD
 # Documentation
 # label(str): the name of the test. emojis allowed.
 # fast_check(bool): whether to run this on each commit on the fastcheck pipeline.
@@ -1521,3 +1522,6 @@ steps:
   num_gpus: 2
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
+=======
+# If you need to make changes to CI, please find the relevant file in these directories and make changes there.
+>>>>>>> 2ce6f3cf67934ebe199188c9a1f83ff1c2d8ba96

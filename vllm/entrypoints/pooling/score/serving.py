@@ -31,17 +31,18 @@ from vllm.entrypoints.pooling.score.utils import (
     ScoreInputs,
     _cosine_similarity,
     compress_token_type_ids,
-    compute_maxsim_score,
+    compute_maxsim_scores,
     get_score_prompt,
+    parse_score_data_single,
     validate_score_input,
 )
-from vllm.inputs.data import TokensPrompt
+from vllm.inputs.data import ProcessorInputs, TokensPrompt, token_inputs
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.outputs import PoolingRequestOutput, ScoringRequestOutput
 from vllm.tokenizers import TokenizerLike
-from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.utils.async_utils import make_async, merge_async_iterators
+from vllm.utils.mistral import is_mistral_tokenizer
 
 logger = init_logger(__name__)
 
@@ -108,12 +109,15 @@ class ServingScores(OpenAIServing):
             *(encode_async(t, **tokenization_kwargs) for t in input_texts)
         )
 
-        engine_prompts: list[TokensPrompt] = []
+        engine_prompts: list[ProcessorInputs] = []
         for tok_result, input_text in zip(tokenized_prompts, input_texts):
             text_token_prompt = self._validate_input(request, tok_result, input_text)
 
             engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
+                token_inputs(
+                    text_token_prompt["prompt_token_ids"],
+                    prompt=input_text,
+                )
             )
 
         # Schedule the request and get the result generator.
@@ -125,7 +129,7 @@ class ServingScores(OpenAIServing):
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -171,6 +175,43 @@ class ServingScores(OpenAIServing):
 
         return final_res_batch
 
+    def _preprocess_late_interaction_item(
+        self,
+        data: ScoreData,
+        role: str,
+        request: RerankRequest | ScoreRequest,
+        tokenizer: TokenizerLike,
+        tokenization_kwargs: dict[str, Any],
+    ) -> tuple[str, TokensPrompt]:
+        """Parse a single ScoreData into a text + optional multimodal
+        TokensPrompt for late-interaction encoding.
+
+        For plain strings, tokenises directly.
+        For multimodal content parts, extracts text and multi_modal_data.
+        """
+        model_config = self.model_config
+
+        if isinstance(data, str):
+            text, mm_data, mm_uuids = data, None, None
+        else:
+            text, mm_data, mm_uuids = parse_score_data_single(data, role, model_config)
+
+        prompt_inputs = tokenizer(text, **tokenization_kwargs)
+        self._validate_input(request, prompt_inputs["input_ids"], text)
+
+        engine_prompt = TokensPrompt(
+            prompt_token_ids=prompt_inputs["input_ids"],
+        )
+
+        if mm_data is not None:
+            engine_prompt["multi_modal_data"] = mm_data
+        if mm_uuids is not None:
+            engine_prompt["multi_modal_uuids"] = mm_uuids
+        if request.mm_processor_kwargs is not None:
+            engine_prompt["mm_processor_kwargs"] = request.mm_processor_kwargs
+
+        return text, engine_prompt
+
     async def _late_interaction_score(
         self,
         data_1: list[ScoreData],
@@ -186,34 +227,36 @@ class ServingScores(OpenAIServing):
         Encodes queries and documents into per-token embeddings, then computes
         MaxSim: sum over query tokens of max similarity to any document token.
         """
-        input_texts: list[str] = []
-        for text in data_1 + data_2:
-            if not isinstance(text, str):
-                raise NotImplementedError(
-                    "Late interaction scores currently do not support multimodal input."
-                )
-            input_texts.append(text)
-
         model_config = self.model_config
         tokenizer = self.renderer.get_tokenizer()
+        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
 
-        encode_async = make_async(
-            tokenizer.encode,
+        all_data = data_1 + data_2
+        roles = ["query"] * len(data_1) + ["document"] * len(data_2)
+
+        preprocess_async = make_async(
+            self._preprocess_late_interaction_item,
             executor=self._tokenizer_executor,
         )
 
-        tokenization_kwargs = request.build_tok_params(model_config).get_encode_kwargs()
-        tokenized_prompts = await asyncio.gather(
-            *(encode_async(t, **tokenization_kwargs) for t in input_texts)
+        preprocessed = await asyncio.gather(
+            *(
+                preprocess_async(
+                    data=d,
+                    role=r,
+                    request=request,
+                    tokenizer=tokenizer,
+                    tokenization_kwargs=tokenization_kwargs,
+                )
+                for d, r in zip(all_data, roles)
+            )
         )
 
+        input_texts: list[str] = []
         engine_prompts: list[TokensPrompt] = []
-        for tok_result, input_text in zip(tokenized_prompts, input_texts):
-            text_token_prompt = self._validate_input(request, tok_result, input_text)
-
-            engine_prompts.append(
-                TokensPrompt(prompt_token_ids=text_token_prompt["prompt_token_ids"])
-            )
+        for text, engine_prompt in preprocessed:
+            input_texts.append(text)
+            engine_prompts.append(engine_prompt)
 
         # Schedule the request and get the result generator.
         generators: list[AsyncGenerator[PoolingRequestOutput, None]] = []
@@ -225,7 +268,7 @@ class ServingScores(OpenAIServing):
 
             self._log_inputs(
                 request_id_item,
-                input_texts[i],
+                engine_prompt,
                 params=pooling_params,
                 lora_request=lora_request,
             )
@@ -268,19 +311,17 @@ class ServingScores(OpenAIServing):
         # Compute MaxSim scores
         from vllm.outputs import PoolingOutput
 
+        maxsim_scores = compute_maxsim_scores(
+            [emb.outputs.data for emb in emb_data_1],
+            [emb.outputs.data for emb in emb_data_2],
+        )
+
         scores: list[PoolingRequestOutput] = []
         padding: list[int] = []
         if (pad_token_id := tokenizer.pad_token_id) is not None:
             padding = [pad_token_id]
 
-        for emb_1, emb_2 in zip(emb_data_1, emb_data_2):
-            # emb_1.outputs.data: [query_len, dim]
-            # emb_2.outputs.data: [doc_len, dim]
-            q_emb = emb_1.outputs.data
-            d_emb = emb_2.outputs.data
-
-            maxsim_score = compute_maxsim_score(q_emb, d_emb)
-
+        for emb_1, emb_2, maxsim_score in zip(emb_data_1, emb_data_2, maxsim_scores):
             tokens = emb_1.prompt_token_ids + padding + emb_2.prompt_token_ids
 
             scores.append(
@@ -305,7 +346,7 @@ class ServingScores(OpenAIServing):
         trace_headers: Mapping[str, str] | None = None,
     ) -> list[PoolingRequestOutput] | ErrorResponse:
         tokenizer = self.renderer.get_tokenizer()
-        if isinstance(tokenizer, MistralTokenizer):
+        if is_mistral_tokenizer(tokenizer):
             raise ValueError("MistralTokenizer not supported for cross-encoding")
 
         model_config = self.model_config
