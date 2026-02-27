@@ -4,9 +4,6 @@
 import torch
 
 from vllm.model_executor.layers.fused_moe.layer import FusedMoE
-from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
-    ZeroExpertRouter,
-)
 
 
 class ZeroExpertFusedMoE(FusedMoE):
@@ -44,43 +41,20 @@ class ZeroExpertFusedMoE(FusedMoE):
         kwargs.pop("custom_routing_function", None)
         kwargs.pop("router", None)
 
-        # Slice e_score_correction_bias to only include real experts
-        # for the base FusedMoE router factory (which we'll replace anyway).
+        # Pass the full e_score_correction_bias (real + zero experts) and
+        # zero_expert_type through to the router factory, which will create
+        # a ZeroExpertRouter.
         num_real_experts = kwargs["num_experts"]
         if e_score_correction_bias is not None:
-            user_bias = kwargs.get("e_score_correction_bias")
-            if (
-                user_bias is None
-                or user_bias.shape[0] == e_score_correction_bias.shape[0]
-            ):
-                kwargs["e_score_correction_bias"] = e_score_correction_bias[
-                    :num_real_experts
-                ]
+            kwargs["e_score_correction_bias"] = e_score_correction_bias
+        kwargs["zero_expert_type"] = zero_expert_type
 
         super().__init__(**kwargs)
 
-        # Replace the factory-created router with our ZeroExpertRouter.
-        # Uses self.eplb_state created by super().__init__() so EPLB state
-        # is shared between the layer and the router.
-        self.router = ZeroExpertRouter(
-            top_k=self.top_k,
-            global_num_experts=self.global_num_experts,
-            eplb_state=self.eplb_state,
-            e_score_correction_bias=e_score_correction_bias,
-            num_logical_experts=self.logical_num_experts,
-            zero_expert_type=zero_expert_type,
-            scoring_func=self.scoring_func,
-            renormalize=self.renormalize,
-            routed_scaling_factor=self.routed_scaling_factor,
-            enable_eplb=self.enable_eplb,
-            indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
-        )
-
-        # Update routing_method_type to match the new router
-        self.routing_method_type = self.router.routing_method_type
-
-        # Re-init runner with the new router
-        self.runner = self._init_runner()
+        # Fix self.e_score_correction_bias to only cover real experts,
+        # for compatibility with monolithic kernels that read it directly.
+        if e_score_correction_bias is not None:
+            self.e_score_correction_bias = e_score_correction_bias[:num_real_experts]
 
         # Expose zero_expert_num=0 and zero_expert_type=None for
         # compatibility with quantization methods that check these attributes.
