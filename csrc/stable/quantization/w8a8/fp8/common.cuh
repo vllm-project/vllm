@@ -1,25 +1,29 @@
 #pragma once
 
-#include "quantization/vectorization.cuh"
-#include "quantization/utils.cuh"
+#include "../../vectorization.cuh"
+#include "../../utils.cuh"
+#include "../../../torch_utils.h"
 
 #include <cmath>
+#include <string>
 
 #ifndef USE_ROCM
-  #include "nvidia/quant_utils.cuh"
+  #include "../../../../quantization/w8a8/fp8/nvidia/quant_utils.cuh"
 #else
-  #include "amd/quant_utils.cuh"
+  #include "../../../../quantization/w8a8/fp8/amd/quant_utils.cuh"
 #endif
 
 // Determines the preferred FP8 type for the current platform.
-// Note that for CUDA this just returns true,
-// but on ROCm it will check device props.
-static bool is_fp8_ocp() {
+// Returns true for OCP format (Float8_e4m3fn), false for FNUZ format
+// (Float8_e4m3fnuz). On CUDA this always returns true. On ROCm it checks
+// device properties to determine the format.
+inline bool is_fp8_ocp() {
 #ifndef USE_ROCM
   return true;
 #else
-  auto dprops = at::cuda::getCurrentDeviceProperties();
+  auto* dprops = get_device_prop();
   std::string device_arch = dprops->gcnArchName;
+  // gfx94x devices use FNUZ format, others use OCP format
   size_t substring = device_arch.find("gfx94");
   return substring == std::string::npos;
 #endif
