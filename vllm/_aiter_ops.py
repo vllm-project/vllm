@@ -1369,6 +1369,10 @@ class rocm_aiter_ops:
         return torch.ops.vllm.rocm_aiter_per_token_quant.default
 
     @staticmethod
+    def get_per_tensor_quant_op() -> OpOverload:
+        return torch.ops.vllm.rocm_aiter_per_tensor_fp8_quant.default
+
+    @staticmethod
     def get_group_quant_op() -> OpOverload:
         return torch.ops.vllm.rocm_aiter_group_fp8_quant.default
 
