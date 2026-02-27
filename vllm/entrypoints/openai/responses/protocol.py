@@ -328,8 +328,9 @@ class ResponsesRequest(OpenAIBaseModel):
         # Also check text.format for OpenAI-style json_schema
         if self.text is not None and self.text.format is not None:
             if structured_outputs is not None:
-                raise ValueError(
-                    "Cannot specify both structured_outputs and text.format"
+                raise VLLMValidationError(
+                    "Cannot specify both structured_outputs and text.format",
+                    parameter="structured_outputs",
                 )
             response_format = self.text.format
             if (
@@ -383,7 +384,10 @@ class ResponsesRequest(OpenAIBaseModel):
         if not data.get("background"):
             return data
         if not data.get("store", True):
-            raise ValueError("background can only be used when `store` is true")
+            raise VLLMValidationError(
+                "background can only be used when `store` is true",
+                parameter="background",
+            )
         return data
 
     @model_validator(mode="before")
@@ -401,8 +405,9 @@ class ResponsesRequest(OpenAIBaseModel):
         if data.get("cache_salt") is not None and (
             not isinstance(data["cache_salt"], str) or not data["cache_salt"]
         ):
-            raise ValueError(
-                "Parameter 'cache_salt' must be a non-empty string if provided."
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
             )
         return data
 
