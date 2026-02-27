@@ -39,6 +39,7 @@ from openai import OpenAI
 from transformers import AutoModelForCausalLM
 
 from vllm.distributed.weight_transfer.nccl_engine import (
+    NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
@@ -214,10 +215,13 @@ def main():
 
     # Broadcast all weights from trainer to vLLM workers
     print("Broadcasting weights via NCCL...")
-    NCCLWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
+    trainer_args = NCCLTrainerSendWeightsArgs(
         group=model_update_group,
         packed=True,
+    )
+    NCCLWeightTransferEngine.trainer_send_weights(
+        iterator=train_model.named_parameters(),
+        trainer_args=trainer_args,
     )
 
     # Wait for update_weights to complete
