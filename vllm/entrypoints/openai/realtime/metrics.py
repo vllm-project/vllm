@@ -51,9 +51,7 @@ class WebSocketMetricsMiddleware:
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
 
-    def __call__(
-        self, scope: Scope, receive: Receive, send: Send
-    ) -> Awaitable[None]:
+    def __call__(self, scope: Scope, receive: Receive, send: Send) -> Awaitable[None]:
         if scope["type"] != "websocket":
             return self.app(scope, receive, send)
 
