@@ -316,13 +316,7 @@ def test_fix_functionalization(
         outputs_func = model_func(*inputs_func)
         outputs_no_func = model_no_func(*inputs_no_func)
 
-        if not isinstance(outputs_func, (tuple, list)):
-            outputs_func = (outputs_func,)
-        if not isinstance(outputs_no_func, (tuple, list)):
-            outputs_no_func = (outputs_no_func,)
-
-        for out_func, out_no_func in zip(outputs_func, outputs_no_func):
-            torch.testing.assert_close(out_func, out_no_func)
+        torch.testing.assert_close(outputs_func, outputs_no_func)
 
         # check if the functionalization pass is applied
         for op in model.ops_in_model(do_fusion):
