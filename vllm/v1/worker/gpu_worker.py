@@ -462,7 +462,7 @@ class Worker(WorkerBase):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
     @instrument(span_name="Warmup (GPU)")
-    def compile_or_warm_up_model(self) -> None:
+    def compile_or_warm_up_model(self) -> float:
         warmup_sizes = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -583,6 +583,8 @@ class Worker(WorkerBase):
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
+
+        return self.compilation_config.compilation_time
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
