@@ -725,7 +725,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # CUTLASS MoE kernels
 
   # The MoE kernel cutlass_moe_mm requires CUDA 12.3 or later (and ONLY works
-  # on Hopper). get_cutlass_(pplx_)moe_mm_data should only be compiled
+  # on Hopper). get_cutlass_(batched_)moe_mm_data should only be compiled
   # if it's possible to compile MoE kernels that use its output.
   cuda_archs_loose_intersection(SCALED_MM_ARCHS "9.0a" "${CUDA_ARCHS}")
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
@@ -972,7 +972,8 @@ set(VLLM_MOE_EXT_SRC
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
     "csrc/moe/moe_wna16.cu"
-    "csrc/moe/grouped_topk_kernels.cu")
+    "csrc/moe/grouped_topk_kernels.cu"
+    "csrc/moe/router_gemm.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
