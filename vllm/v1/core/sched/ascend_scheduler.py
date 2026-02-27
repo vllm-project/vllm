@@ -258,7 +258,7 @@ class AscendScheduler(Scheduler):
                     ) = self._try_schedule_encoder_inputs(
                         request, num_computed_tokens, num_new_tokens, encoder_budget
                     )
-                    if num_new_tokens == 0 or len(encoder_inputs_to_schedule) == 0:
+                    if num_new_tokens == 0:
                         # The request cannot be scheduled.
                         break
 
