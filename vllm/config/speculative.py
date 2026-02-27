@@ -54,6 +54,10 @@ SpeculativeMethod = Literal[
     "suffix",
     EagleModelTypes,
 ]
+RejectionSampleMethod = Literal[
+    "strict",
+    "probabilistic",
+]
 
 
 @config
@@ -167,6 +171,12 @@ class SpeculativeConfig:
     draft_load_config: LoadConfig | None = None
     """Load config for the draft model. If not specified, will use the load
     config from the target model."""
+
+    rejection_sample_method: RejectionSampleMethod = "strict"
+    """Whether to use strict (target and draft sampled tokens match exactly)
+    or probabilistic rejection sampling. Both respect the target model
+    distribution, but the latter yields a higher acceptance rate at the cost
+    of more memory to cache draft logits."""
 
     def compute_hash(self) -> str:
         """
