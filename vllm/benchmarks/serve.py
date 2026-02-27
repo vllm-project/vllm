@@ -492,8 +492,9 @@ def calculate_metrics(
 
     # Find the time range across all successful requests
     successful_data = [
-        (output, actual_output_lens[i]) 
-        for i, output in enumerate(outputs) if output.success
+        (output, actual_output_lens[i])
+        for i, output in enumerate(outputs)
+        if output.success
     ]
     failed_outputs = [output for output in outputs if not output.success]
 
@@ -524,9 +525,9 @@ def calculate_metrics(
 
             # Calculate the total number of chunks returned for this request
             num_chunks = len(token_times)
-            
+
             # Distribute the actual total output tokens evenly across all chunks.
-            # This correctly handles speculative decoding where a single chunk 
+            # This correctly handles speculative decoding where a single chunk
             # may contain multiple tokens.
             tokens_per_chunk = output_len / num_chunks if num_chunks > 0 else 0
 
