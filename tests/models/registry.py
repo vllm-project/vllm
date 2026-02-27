@@ -289,7 +289,10 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GPTNeoXForCausalLM": _HfExamplesInfo(
         "EleutherAI/pythia-70m", {"1b": "EleutherAI/pythia-1.4b"}
     ),
-    "GptOssForCausalLM": _HfExamplesInfo("lmsys/gpt-oss-20b-bf16"),
+    "GptOssForCausalLM": _HfExamplesInfo(
+        "lmsys/gpt-oss-20b-bf16",
+        {"openai_20b": "openai/gpt-oss-20b", "openai_120b": "openai/gpt-oss-120b"},
+    ),
     "GraniteForCausalLM": _HfExamplesInfo("ibm/PowerLM-3b"),
     "GraniteMoeForCausalLM": _HfExamplesInfo("ibm/PowerMoE-3b"),
     "GraniteMoeHybridForCausalLM": _HfExamplesInfo(
