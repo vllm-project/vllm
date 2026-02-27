@@ -6014,7 +6014,10 @@ class GPUModelRunner(
             AttentionLayerBase,
         )
 
-        attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        attn_layers = get_layers_from_vllm_config(
+            self.vllm_config,
+            AttentionLayerBase,  # type: ignore[type-abstract]
+        )
         has_gdn = any(
             layer.get_attn_backend().get_name() == "GDN_ATTN"
             for layer in attn_layers.values()
@@ -6022,8 +6025,7 @@ class GPUModelRunner(
         if not has_gdn:
             return
 
-        # Filter cudagraph_capture_sizes
-        original_sizes = self.compilation_config.cudagraph_capture_sizes
+        original_sizes = self.compilation_config.cudagraph_capture_sizes or []
         filtered_sizes = [s for s in original_sizes if s <= num_blocks]
         self.compilation_config.cudagraph_capture_sizes = filtered_sizes
         # Set max_cudagraph_capture_size to the max of filtered sizes
