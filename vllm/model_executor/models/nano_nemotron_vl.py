@@ -74,7 +74,7 @@ from vllm.multimodal.parse import (
     MultiModalUUIDItems,
     VideoProcessorItems,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder
+from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs, TimingContext
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -1427,13 +1427,10 @@ class NanoNemotronVLMultiModalProcessor(
 
     def apply(
         self,
-        prompt: str | list[int],
-        mm_items: MultiModalDataItems,
-        mm_uuid_items: MultiModalUUIDItems | None = None,
-        hf_processor_mm_kwargs: Mapping[str, object] | None = None,
-        tokenization_kwargs: Mapping[str, object] | None = None,
+        processor_inputs: ProcessorInputs,
+        timing_ctx: TimingContext | None = None,
     ) -> MultiModalInputs:
-        if hf_processor_mm_kwargs is None:
+        if (hf_processor_mm_kwargs := processor_inputs.hf_processor_mm_kwargs) is None:
             hf_processor_mm_kwargs = {}
 
         use_audio_in_video = bool(
@@ -1444,26 +1441,25 @@ class NanoNemotronVLMultiModalProcessor(
             k: v for k, v in hf_processor_mm_kwargs.items() if k != "use_audio_in_video"
         }
 
-        if not (use_audio_in_video and "video" in mm_items and "audio" not in mm_items):
+        processor_inputs.hf_processor_mm_kwargs = hf_processor_mm_kwargs    
+
+        if not (use_audio_in_video and "video" in processor_inputs.mm_data_items and "audio" not in processor_inputs.mm_data_items):
             return super().apply(
-                prompt,
-                mm_items,
-                mm_uuid_items,
-                hf_processor_mm_kwargs,
-                tokenization_kwargs,
+                processor_inputs,
+                timing_ctx,
             )
 
-        mm_items, audio_items = self._extract_audio_from_videos(mm_items)
+        mm_items, audio_items = self._extract_audio_from_videos(processor_inputs.mm_data_items)
 
-        if not isinstance(prompt, str):
+        if not isinstance(processor_inputs.prompt, str):
             tokenizer = self.info.get_tokenizer()
-            prompt = tokenizer.decode(prompt, skip_special_tokens=False)
+            prompt = tokenizer.decode(processor_inputs.prompt, skip_special_tokens=False)
 
         for _ in audio_items:
             prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
 
-        if tokenization_kwargs is None:
-            tokenization_kwargs = {}
+        if processor_inputs.tokenization_kwargs is None:
+            processor_inputs.tokenization_kwargs = {}
 
         # Bypass the cached path: the HF processor must receive the
         # prompt (with injected <so_embedding>) and the audio data
@@ -1473,11 +1469,8 @@ class NanoNemotronVLMultiModalProcessor(
             mm_info,
             is_update_applied,
         ) = self._apply_hf_processor(
-            prompt,
-            mm_items,
-            mm_uuid_items,
-            hf_processor_mm_kwargs,
-            tokenization_kwargs,
+            processor_inputs,
+            timing_ctx=timing_ctx,
         )
 
         prompt_ids, mm_placeholders = self._maybe_apply_prompt_updates(
