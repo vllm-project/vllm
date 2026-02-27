@@ -8,7 +8,7 @@ EP is typically coupled with Data Parallelism (DP). While DP can be used indepen
 
 Before using EP, you need to install the necessary dependencies. We are actively working on making this easier in the future:
 
-1. **Install DeepEP and pplx-kernels**: Set up host environment following vLLM's guide for EP kernels [here](../../tools/ep_kernels).
+1. **Install DeepEP**: Set up host environment following vLLM's guide for EP kernels [here](../../tools/ep_kernels).
 2. **Install DeepGEMM library**: Follow the [official instructions](https://github.com/deepseek-ai/DeepGEMM#installation).
 3. **For disaggregated serving**: Install `gdrcopy` by running the [`install_gdrcopy.sh`](../../tools/install_gdrcopy.sh) script (e.g., `install_gdrcopy.sh "${GDRCOPY_OS_VERSION}" "12.8" "x64"`). You can find available OS versions [here](https://developer.download.nvidia.com/compute/redist/gdrcopy/CUDA%2012.8/).
 
@@ -19,7 +19,6 @@ vLLM provides multiple communication backends for EP. Use `--all2all-backend` to
 | Backend | Use Case | Features | Best For |
 |---------|----------|----------|----------|
 | `allgather_reducescatter` | Default backend | Standard all2all using allgather/reducescatter primitives | General purpose, works with any EP+DP configuration |
-| `pplx` | Single node | Chunked prefill support, efficient intra-node communication | Single-node deployments, development |
 | `deepep_high_throughput` | Multi-node prefill | Grouped GEMM with continuous layout, optimized for prefill | Prefill-dominated workloads, high-throughput scenarios |
 | `deepep_low_latency` | Multi-node decode | CUDA graph support, masked layout, optimized for decode | Decode-dominated workloads, low-latency scenarios |
 | `flashinfer_all2allv` | MNNVL systems | FlashInfer alltoallv kernels for multi-node NVLink | Systems with NVLink across nodes |
@@ -71,12 +70,11 @@ For example, with `TP=2, DP=4` (8 GPUs total):
 The following command serves a `DeepSeek-V3-0324` model with 1-way tensor parallel, 8-way (attention) data parallel, and 8-way expert parallel. The attention weights are replicated across all GPUs, while the expert weights are split across GPUs. It will work on a H200 (or H20) node with 8 GPUs. For H100, you can try to serve a smaller model or refer to the multi-node deployment section.
 
 ```bash
-# Single node EP deployment with pplx backend
+# Single node EP deployment
 vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --tensor-parallel-size 1 \       # Tensor parallelism across 1 GPU
     --data-parallel-size 8 \         # Data parallelism across 8 processes
-    --enable-expert-parallel \       # Enable expert parallelism
-    --all2all-backend pplx           # Use pplx communication backend
+    --enable-expert-parallel         # Enable expert parallelism
 ```
 
 ## Multi-Node Deployment
@@ -197,7 +195,6 @@ vllm serve deepseek-ai/DeepSeek-V3-0324 \
     --tensor-parallel-size 1 \       # Tensor parallelism
     --data-parallel-size 8 \         # Data parallelism
     --enable-expert-parallel \       # Enable EP
-    --all2all-backend pplx \         # Use pplx communication backend
     --enable-eplb \                  # Enable load balancer
     --eplb-config '{"window_size":1000,"step_interval":3000,"num_redundant_experts":2,"log_balancedness":true}'
 ```
