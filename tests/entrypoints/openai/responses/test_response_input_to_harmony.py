@@ -272,4 +272,3 @@ class TestResponseInputToHarmonyMessage:
                 {"type": "image_url", "url": "https://example.com/img.png"},
                 prev_responses=[],
             )
-

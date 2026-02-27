@@ -51,7 +51,11 @@ class TestResponseInputToHarmonyRenderParity:
         )
         resp_msgs = [
             response_input_to_harmony(
-                {"type": "message", "role": "user", "content": "What's the weather in Paris?"},
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": "What's the weather in Paris?",
+                },
                 prev_responses=[],
             )
         ]
@@ -70,7 +74,11 @@ class TestResponseInputToHarmonyRenderParity:
         )
         resp_msgs = [
             response_input_to_harmony(
-                {"type": "message", "role": "assistant", "content": "It is 18°C in Paris."},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": "It is 18°C in Paris.",
+                },
                 prev_responses=[],
             )
         ]
@@ -88,7 +96,11 @@ class TestResponseInputToHarmonyRenderParity:
     def test_reasoning_item(self):
         # Chat path: assistant message with only a reasoning field and no content.
         chat_msgs = parse_chat_input_to_harmony_message(
-            {"role": "assistant", "reasoning": "I should call get_weather.", "content": ""}
+            {
+                "role": "assistant",
+                "reasoning": "I should call get_weather.",
+                "content": "",
+            }
         )
         resp_msgs = [
             response_input_to_harmony(
@@ -306,12 +318,19 @@ class TestResponseInputToHarmonyRenderParity:
             tool_id_names=tool_id_names,
         )
         chat_msgs += parse_chat_input_to_harmony_message(
-            {"role": "assistant", "content": "It is currently 18°C in Paris with clear skies."}
+            {
+                "role": "assistant",
+                "content": "It is currently 18°C in Paris with clear skies.",
+            }
         )
 
         # --- Responses API path ---
         resp_input = [
-            {"type": "message", "role": "user", "content": "What's the weather in Paris?"},
+            {
+                "type": "message",
+                "role": "user",
+                "content": "What's the weather in Paris?",
+            },
             {
                 "type": "reasoning",
                 "content": [
@@ -326,7 +345,11 @@ class TestResponseInputToHarmonyRenderParity:
                 "name": "get_weather",
                 "arguments": '{"location": "Paris"}',
             },
-            {"type": "function_call_output", "call_id": "call_1", "output": "18°C, clear skies."},
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "18°C, clear skies.",
+            },
             {
                 "type": "message",
                 "role": "assistant",
@@ -424,18 +447,29 @@ class TestResponseInputToHarmonyRenderParity:
             # First reasoning + tool call
             {
                 "type": "reasoning",
-                "content": [{"type": "reasoning_text", "text": "I need current weather first."}],
+                "content": [
+                    {"type": "reasoning_text", "text": "I need current weather first."}
+                ],
             },
             {
                 "type": "function_call",
                 "name": "get_weather",
                 "arguments": '{"location": "Paris"}',
             },
-            {"type": "function_call_output", "call_id": "call_1", "output": "18°C, clear skies."},
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "18°C, clear skies.",
+            },
             # Second reasoning + tool call
             {
                 "type": "reasoning",
-                "content": [{"type": "reasoning_text", "text": "Now I need the weekly forecast."}],
+                "content": [
+                    {
+                        "type": "reasoning_text",
+                        "text": "Now I need the weekly forecast.",
+                    }
+                ],
             },
             {
                 "type": "function_call",
