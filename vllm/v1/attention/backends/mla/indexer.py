@@ -326,8 +326,14 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # Decision logic based on micro-benchmark results.
             # See: https://github.com/vllm-project/vllm/pull/34265
             max_seq_len = common_attn_metadata.max_seq_len
-            use_radix_topk = max_seq_len >= 65536
-            use_large_context_topk = max_seq_len == 2048 or (8192 < max_seq_len < 65536)
+            # radix_topk uses PTX intrinsics -> not supported on ROCm
+            use_radix_topk = max_seq_len >= 65536 and not current_platform.is_rocm()
+            use_large_context_topk = (
+                max_seq_len <= 2048
+                or (8192 < max_seq_len < 65536)
+                # Fallback for ROCm
+                or (max_seq_len >= 65536 and current_platform.is_rocm())
+            )
 
             next_n = 1 + self.num_speculative_tokens
             if next_n > 1:

@@ -24,6 +24,8 @@ elif current_platform.is_xpu():
 
 logger = init_logger(__name__)
 
+RADIX_TOPK_WORKSPACE_SIZE = 1024 * 1024
+
 
 def sparse_attn_indexer(
     hidden_states: torch.Tensor,
@@ -179,7 +181,6 @@ def sparse_attn_indexer(
                 ).flatten()
 
             if decode_metadata.use_radix_topk:
-                topk_workspace.zero_()
                 torch.ops._C.radix_topk(
                     logits, lengths, topk_indices, topk_workspace, topk_tokens
                 )

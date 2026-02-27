@@ -927,6 +927,20 @@ __global__ void __launch_bounds__(BLOCK_THREADS)
   RadixRowState* state = nullptr;
   if constexpr (!SINGLE_CTA) {
     state = &row_states[group_id];
+    if (cta_in_group == 0) {
+      for (uint32_t buf = 0; buf < 3; ++buf) {
+        for (uint32_t i = tx; i < RADIX; i += BLOCK_THREADS) {
+          state->histogram[buf][i] = 0;
+        }
+      }
+      if (tx == 0) {
+        state->remaining_k = 0;
+        state->prefix = 0;
+        state->arrival_counter = 0;
+        state->output_counter = 0;
+      }
+    }
+    __syncthreads();
   }
 
   uint32_t num_groups = gridDim.x / ctas_per_group;
