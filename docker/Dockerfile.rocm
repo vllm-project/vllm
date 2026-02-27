@@ -317,6 +317,12 @@ WORKDIR /vllm-workspace
 ARG COMMON_WORKDIR
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm /vllm-workspace
 
+# Source code is used in the `python_only_compile.sh` test
+# We hide it inside `src/` so that this source code
+# will not be imported by other tests
+RUN mkdir src
+RUN mv vllm src/vllm
+
 # install development dependencies (for testing)
 RUN cd /vllm-workspace \
     && python3 -m pip install -e tests/vllm_test_utils \
