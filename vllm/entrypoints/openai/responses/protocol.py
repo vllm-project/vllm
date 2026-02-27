@@ -429,21 +429,57 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if isinstance(item, dict) and item.get("type") == "function_call":
+            normalized_item = cls._normalize_openresponses_input_item(item)
+
+            if (
+                isinstance(normalized_item, dict)
+                and normalized_item.get("type") == "function_call"
+            ):
                 try:
-                    processed_input.append(ResponseFunctionToolCall(**item))
+                    processed_input.append(ResponseFunctionToolCall(**normalized_item))
                 except ValidationError:
                     # Let Pydantic handle validation for malformed function calls
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(normalized_item)
             else:
-                processed_input.append(item)
+                processed_input.append(normalized_item)
 
         data["input"] = processed_input
         return data
+
+    @staticmethod
+    def _normalize_openresponses_input_item(item: Any) -> Any:
+        """Normalize OpenResponses input items for compatibility across
+        openai-python versions.
+
+        Some openai-python versions require ``id`` and ``status`` for assistant
+        message/reasoning inputs even though OpenResponses accepts them as
+        optional. Populate sensible defaults so multi-turn agent payloads
+        validate consistently.
+        """
+        if not isinstance(item, dict):
+            return item
+
+        item_type = item.get("type", "message")
+        should_fill = item_type == "reasoning" or (
+            item_type == "message" and item.get("role") == "assistant"
+        )
+        if not should_fill:
+            return item
+
+        normalized_item = item.copy()
+        if normalized_item.get("id") in (None, ""):
+            prefix = "rs" if item_type == "reasoning" else "msg"
+            normalized_item["id"] = f"{prefix}_{random_uuid()}"
+        if normalized_item.get("status") in (None, ""):
+            normalized_item["status"] = "completed"
+        if item_type == "reasoning" and normalized_item.get("summary") is None:
+            normalized_item["summary"] = []
+
+        return normalized_item
 
 
 class ResponsesResponse(OpenAIBaseModel):
