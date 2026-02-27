@@ -18,13 +18,21 @@ from vllm.v1.kv_cache_interface import KVCacheSpec
 from vllm.v1.serial_utils import run_method
 
 if TYPE_CHECKING:
+    from vllm.tasks import SupportedTask
     from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
-    from vllm.v1.outputs import AsyncModelRunnerOutput, ModelRunnerOutput
+    from vllm.v1.engine import ReconfigureDistributedRequest
+    from vllm.v1.kv_cache_interface import KVCacheConfig
+    from vllm.v1.outputs import AsyncModelRunnerOutput, DraftTokenIds, ModelRunnerOutput
 else:
     SchedulerOutput = object
     GrammarOutput = object
     AsyncModelRunnerOutput = object
     ModelRunnerOutput = object
+    ReconfigureDistributedRequest = object
+    SupportedTask = object
+    DraftTokenIds = object
+    KVCacheConfig = object
+
 
 logger = init_logger(__name__)
 
@@ -160,6 +168,130 @@ class WorkerBase:
         raise NotImplementedError
 
     def list_loras(self) -> set[int]:
+        raise NotImplementedError
+
+    def reinitialize_distributed(
+        self, reconfig_request: ReconfigureDistributedRequest
+    ) -> None:
+        """Reinitialize the distributed environment.
+
+        This method is called by scale up/down elastic_ep API to reinitialize
+        the distributed environment.
+
+        Args:
+            reconfig_request: A request object containing the new distributed
+                configuration, such as dp size, rank, ip, port, etc.
+        """
+        raise NotImplementedError
+
+    def sleep(self, level: int = 1) -> None:
+        """Put the model to sleep.
+
+        This method is called by sleep API to put the model to sleep.
+
+        Args:
+            level: The sleep level. level=1 means only model weights are saved
+                to CPU memory, while level=2 means all model weights and kv
+                cache are saved.
+        """
+        raise NotImplementedError
+
+    def wake_up(self, tags: list[str] | None = None) -> None:
+        """Wake up the sleep model.
+
+        This method should be called after the model has been put to sleep.
+
+        Args:
+            tags: The tags of the memory allocation that will be loaded back to
+                device memory. If None, all memory allocation will be loaded
+                back.
+        """
+        raise NotImplementedError
+
+    def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
+        """Get the set of tasks supported by the model.
+
+        Returns:
+            A set of task names (SupportedTask) that the model can perform.
+        """
+        raise NotImplementedError
+
+    def save_sharded_state(
+        self, path: str, pattern: str | None = None, max_size: int | None = None
+    ) -> None:
+        """Saves each worker's model state dict directly to a checkpoint
+
+        This enables a fast load path for large tensor-parallel models where
+        each worker only needs toread its own shard rather than the entire
+        checkpoint.
+
+        Args:
+            path: The path where the sharded state should be saved.
+            pattern: The pattern of the filenames to save.
+            max_size: The maximum size (in bytes) of each safetensors file.
+        """
+        raise NotImplementedError
+
+    def profile(self, is_start: bool = True) -> None:
+        """Profile the worker's performance.
+
+        This method should be called to start/stop profiling the worker's
+        performance.
+
+        Args:
+            is_start: Whether to start profiling. If False, stop profiling.
+        """
+        raise NotImplementedError
+
+    def take_draft_token_ids(self) -> DraftTokenIds | None:
+        """Get draft token ids from the worker.
+
+        This method is called by EngineCore to get draft token ids from worker.
+
+        Returns:
+            A DraftTokenIds object containing the draft token ids.
+        """
+        raise NotImplementedError
+
+    def execute_dummy_batch(self) -> None:
+        """Execute a dummy batch to warm up the model.
+
+        This method is called by EngineCore in Data Parallel case to set up the
+        communication.
+        """
+        raise NotImplementedError
+
+    def get_kv_connector_handshake_metadata(self) -> dict | None:
+        """Get KV connector metadata from the worker if available.
+
+        This method is called by EngineCore initialization step to get KV
+        connector metadata from workers. The return value will be used to set
+        the KV connector handshake metadata.
+
+        Returns:
+            A dictionary of metadata for the KV connector handshake.
+        """
+        raise NotImplementedError
+
+    def determine_available_memory(self) -> int:
+        """Profiles the peak memory usage of the model to determine how much
+        memory can be used for KV cache without OOMs.
+
+        The engine will first conduct a profiling of the existing memory usage.
+        Then, it calculates the free memory that can be used for KV cache in
+        bytes.
+        """
+        raise NotImplementedError
+
+    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+        """Allocate KV cache with the specified kv_cache_config.
+
+        This method is called by EngineCore to initialize the model kv cache
+        with the given kv_cache_config.
+
+        Args:
+            kv_cache_config: The kv_cache_config to use for initialization.
+        """
         raise NotImplementedError
 
     @property
