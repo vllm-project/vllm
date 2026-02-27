@@ -1470,7 +1470,7 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
 
 - label: LM Eval Large Models (4 GPUs)(MI325) # 17.3m
@@ -2842,7 +2842,7 @@ steps:
   - vllm/model_executor/layers/quantization
   commands:
   - export VLLM_USE_DEEP_GEMM=0
-  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-rocm-fp8.txt --tp-size=4
 
 
 - label: LM Eval Large Models (4 GPUs)(MI355) # TBD
