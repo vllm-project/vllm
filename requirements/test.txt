@@ -306,7 +306,6 @@ h5py==3.13.0
     # via terratorch
 harfile==0.3.0
     # via schemathesis
-helion==0.3.0
 hf-xet==1.1.7
     # via huggingface-hub
 hiredis==3.0.0
