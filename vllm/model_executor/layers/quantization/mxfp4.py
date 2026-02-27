@@ -53,7 +53,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
     get_padding_alignment,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import is_layer_skipped
-from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.rocm import on_gfx950
 from vllm.utils.flashinfer import has_flashinfer
@@ -796,98 +796,103 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 ),
                 shared_experts=None,
             )
-        elif (
-            self.mxfp4_backend == Mxfp4Backend.TRITON
-            or self.mxfp4_backend == Mxfp4Backend.CK
-        ):
+        elif self.mxfp4_backend == Mxfp4Backend.CK:
+            if layer.w13_bias is not None:
+                layer.w13_bias.data = layer.w13_bias.data.to(torch.float32)
+            if layer.w2_bias.data is not None:
+                layer.w2_bias.data = layer.w2_bias.data.to(torch.float32)
+
+            e, n, k = layer.w13_weight.shape
+            layer.w13_weight.view(torch.uint8).copy_(
+                layer.w13_weight.data.view(torch.uint8)
+                .view(e, n // 2, 2, k)
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .view(e, n, k)
+            )
+            layer.w13_weight_scale.data = (
+                layer.w13_weight_scale.data.view(e, n // 2, 2, -1)
+                .permute(0, 2, 1, 3)
+                .contiguous()
+                .view(e, n, -1)
+            )
+            layer.w13_weight.data = layer.w13_weight.data.view(torch.float4_e2m1fn_x2)
+            layer.w2_weight.data = layer.w2_weight.data.view(torch.float4_e2m1fn_x2)
+
+            layer.w13_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(
+                layer.w13_weight, 16, True
+            )
+            shuffled_w13_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+                layer.w13_weight_scale.view(-1, layer.w13_weight_scale.shape[-1]),
+                self.num_experts,
+                True,
+            )
+
+            layer.w2_weight.data = rocm_aiter_ops.shuffle_weight_a16w4(
+                layer.w2_weight, 16, False
+            )
+            shuffled_w2_scale = rocm_aiter_ops.shuffle_scale_a16w4(
+                layer.w2_weight_scale.view(-1, layer.w2_weight_scale.shape[-1]),
+                self.num_experts,
+                False,
+            )
+
+            layer.w13_bias.data = (
+                layer.w13_bias.data.view(-1, n // 2, 2)
+                .permute(0, 2, 1)
+                .contiguous()
+                .view(-1, n)
+            )
+
+            layer.w13_weight_scale = torch.nn.Parameter(
+                shuffled_w13_scale, requires_grad=False
+            )
+            layer.w2_weight_scale = torch.nn.Parameter(
+                shuffled_w2_scale, requires_grad=False
+            )
+            # replace_parameter(layer, "w13_bias", w13_bias)
+            # replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
+            # replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
+            # replace_parameter(layer, "w13_weight", w13_weight)
+            # replace_parameter(layer, "w2_weight", w2_weight)
+
+        elif self.mxfp4_backend == Mxfp4Backend.TRITON:
+            from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+
             w13_bias = layer.w13_bias.to(torch.float32)
             w2_bias = layer.w2_bias.to(torch.float32)
 
             layer.w13_bias = Parameter(w13_bias, requires_grad=False)
             layer.w2_bias = Parameter(w2_bias, requires_grad=False)
-
-            if self.mxfp4_backend == Mxfp4Backend.CK:
-                w13_aiter_weight = layer.w13_weight.contiguous()
-                w13_aiter_scale = layer.w13_weight_scale.contiguous()
-                w2_aiter_weight = layer.w2_weight.contiguous()
-                w2_aiter_scale = layer.w2_weight_scale.contiguous()
-
-                e, n, k = w13_aiter_weight.shape
-                w13_aiter_weight = (
-                    w13_aiter_weight.view(e, n // 2, 2, k)
-                    .permute(0, 2, 1, 3)
-                    .contiguous()
-                    .view(e, n, k)
-                )
-                w13_aiter_scale = (
-                    w13_aiter_scale.view(e, n // 2, 2, -1)
-                    .permute(0, 2, 1, 3)
-                    .contiguous()
-                    .view(e, n, -1)
-                )
-
-                w13_aiter_weight = w13_aiter_weight.view(torch.float4_e2m1fn_x2)
-                w13_aiter_scale = w13_aiter_scale.view(-1, w13_aiter_scale.shape[-1])
-                w2_aiter_weight = w2_aiter_weight.view(torch.float4_e2m1fn_x2)
-                w2_aiter_scale = w2_aiter_scale.view(-1, w2_aiter_scale.shape[-1])
-
-                w13_weight = rocm_aiter_ops.shuffle_weight_a16w4(
-                    w13_aiter_weight, 16, True
-                )
-                w13_weight_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-                    w13_aiter_scale, self.num_experts, True
-                )
-                w2_weight = rocm_aiter_ops.shuffle_weight_a16w4(
-                    w2_aiter_weight, 16, False
-                )
-                w2_weight_scale = rocm_aiter_ops.shuffle_scale_a16w4(
-                    w2_aiter_scale, self.num_experts, False
-                )
-                w13_bias = (
-                    layer.w13_bias.view(-1, n // 2, 2)
-                    .permute(0, 2, 1)
-                    .contiguous()
-                    .view(-1, n)
-                )
-                replace_parameter(layer, "w13_bias", w13_bias)
-                replace_parameter(layer, "w13_weight_scale", w13_weight_scale)
-                replace_parameter(layer, "w2_weight_scale", w2_weight_scale)
-                replace_parameter(layer, "w13_weight", w13_weight)
-                replace_parameter(layer, "w2_weight", w2_weight)
+            # Ideally we'd use FusedMoEModularKernel.prepare_finalize object
+            # (stored in self.fused_experts) to determine if the MoE has a
+            # batched activation format. As self.fused_experts is not
+            # initialized at this point, we resort to checking the MoE config
+            # directly.
+            is_batched_moe = self.moe.use_pplx_kernels or self.moe.use_deepep_ll_kernels
+            if is_batched_moe:
+                num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
             else:
-                from triton_kernels.matmul_ogs import FlexCtx, PrecisionConfig
+                num_warps = 8
+            w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
+                layer.w13_weight, layer.w13_weight_scale, num_warps
+            )
+            w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
+                layer.w2_weight, layer.w2_weight_scale, num_warps
+            )
 
-                # Ideally we'd use FusedMoEModularKernel.prepare_finalize object
-                # (stored in self.fused_experts) to determine if the MoE has a
-                # batched activation format. As self.fused_experts is not
-                # initialized at this point, we resort to checking the MoE config
-                # directly.
-                is_batched_moe = (
-                    self.moe.use_pplx_kernels or self.moe.use_deepep_ll_kernels
-                )
-                if is_batched_moe:
-                    num_warps = 4 if envs.VLLM_MOE_DP_CHUNK_SIZE <= 512 else 8
-                else:
-                    num_warps = 8
-                w13_weight, w13_flex, w13_scale = _swizzle_mxfp4(
-                    layer.w13_weight, layer.w13_weight_scale, num_warps
-                )
-                w2_weight, w2_flex, w2_scale = _swizzle_mxfp4(
-                    layer.w2_weight, layer.w2_weight_scale, num_warps
-                )
-
-                self.w13_precision_config = PrecisionConfig(
-                    weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
-                )
-                self.w2_precision_config = PrecisionConfig(
-                    weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
-                )
-                self.w13_weight = w13_weight
-                self.w2_weight = w2_weight
-                del layer.w13_weight
-                del layer.w2_weight
-                layer.w13_weight = w13_weight
-                layer.w2_weight = w2_weight
+            self.w13_precision_config = PrecisionConfig(
+                weight_scale=w13_scale, flex_ctx=FlexCtx(rhs_data=w13_flex)
+            )
+            self.w2_precision_config = PrecisionConfig(
+                weight_scale=w2_scale, flex_ctx=FlexCtx(rhs_data=w2_flex)
+            )
+            self.w13_weight = w13_weight
+            self.w2_weight = w2_weight
+            del layer.w13_weight
+            del layer.w2_weight
+            layer.w13_weight = w13_weight
+            layer.w2_weight = w2_weight
 
         else:
             raise ValueError(
