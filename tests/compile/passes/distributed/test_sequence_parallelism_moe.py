@@ -19,6 +19,7 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
+from vllm.config.utils import Range
 from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
@@ -62,6 +63,7 @@ class TestAllReduceFusedAddRMSNormChunkModel(torch.nn.Module):
 
 
 @multi_gpu_test(num_gpus=2)
+@pytest.mark.parametrize("custom_ops", ["+rms_norm", "-rms_norm"])
 @pytest.mark.parametrize("with_residual", [False, True])
 # Cover both divisible and non-divisible sequence lengths. The pass handles
 # odd lengths via reduce_scatter_with_padding.
@@ -70,6 +72,7 @@ class TestAllReduceFusedAddRMSNormChunkModel(torch.nn.Module):
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.skipif(envs.VLLM_TARGET_DEVICE not in ["cuda"], reason="Only on CUDA")
 def test_sequence_parallelism_moe_pass(
+    custom_ops: str,
     with_residual: bool,
     seq_len: int,
     hidden_size: int,
@@ -79,7 +82,7 @@ def test_sequence_parallelism_moe_pass(
 
     torch.multiprocessing.spawn(
         sequence_parallelism_moe_pass_on_test_model,
-        args=(num_processes, with_residual, seq_len, hidden_size, dtype),
+        args=(num_processes, custom_ops, with_residual, seq_len, hidden_size, dtype),
         nprocs=num_processes,
     )
 
@@ -87,6 +90,7 @@ def test_sequence_parallelism_moe_pass(
 def sequence_parallelism_moe_pass_on_test_model(
     local_rank: int,
     world_size: int,
+    custom_ops: str,
     with_residual: bool,
     seq_len: int,
     hidden_size: int,
@@ -112,10 +116,11 @@ def sequence_parallelism_moe_pass_on_test_model(
     init_distributed_environment()
     initialize_model_parallel(tensor_model_parallel_size=world_size)
 
+    custom_ops_list = custom_ops.split(",") if custom_ops else []
     compilation_config = CompilationConfig(
         splitting_ops=[],
         cudagraph_mode=CUDAGraphMode.NONE,
-        custom_ops=["+rms_norm"],
+        custom_ops=custom_ops_list,
         pass_config=PassConfig(
             enable_sp=False,
             enable_sp_moe=True,
@@ -132,6 +137,28 @@ def sequence_parallelism_moe_pass_on_test_model(
 
     with set_current_vllm_config(vllm_config):
         sequence_parallelism_moe_pass = SequenceParallelismMoEPass(vllm_config)
+
+        # In piecewise mode, applicability should not require seq_len % tp_size
+        # when using reduce_scatter_with_padding.
+        piecewise_compilation_config = CompilationConfig(
+            splitting_ops=["vllm::unified_attention_with_output"],
+            cudagraph_mode=CUDAGraphMode.NONE,
+            custom_ops=custom_ops_list,
+            pass_config=PassConfig(
+                enable_sp=False,
+                enable_sp_moe=True,
+                eliminate_noops=True,
+            ),
+        )
+        piecewise_vllm_config = VllmConfig(
+            compilation_config=piecewise_compilation_config,
+            device_config=device_config,
+            parallel_config=parallel_config,
+        )
+        with set_current_vllm_config(piecewise_vllm_config):
+            piecewise_pass = SequenceParallelismMoEPass(piecewise_vllm_config)
+            assert piecewise_pass.is_applicable_for_range(Range(seq_len, seq_len))
+
         backend = TestBackend(sequence_parallelism_moe_pass)
         model: torch.nn.Module = (
             TestAllReduceFusedAddRMSNormChunkModel(hidden_size)

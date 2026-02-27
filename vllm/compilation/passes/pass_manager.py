@@ -117,11 +117,13 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.eliminate_noops:
                 self.passes += [NoOpEliminationPass(config)]
 
-            if (
-                self.pass_config.enable_sp_moe
-                and config.parallel_config.use_sequence_parallel_moe
-            ):
+            if current_platform.is_cuda_alike() and self.pass_config.enable_sp_moe:
                 self.passes += [SequenceParallelismMoEPass(config)]
+            elif self.pass_config.enable_sp_moe:
+                logger.warning_once(
+                    "Skipping SequenceParallelismMoEPass: this pass is only "
+                    "available on CUDA-alike platforms."
+                )
 
             if self.pass_config.enable_sp:
                 self.passes += [SequenceParallelismPass(config)]

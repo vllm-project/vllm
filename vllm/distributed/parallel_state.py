@@ -40,6 +40,7 @@ import torch
 import torch.distributed
 import torch.distributed._functional_collectives as funcol
 import torch.distributed._symmetric_memory
+import torch.nn.functional as F
 from torch.distributed import Backend, ProcessGroup
 
 import vllm.envs as envs
@@ -166,13 +167,9 @@ def reduce_scatter_with_padding(
     remainder = tensor.shape[dim] % world_size
     if remainder != 0:
         pad_len = world_size - remainder
-        x = tensor.movedim(dim, 0)
-        pad = torch.zeros(
-            (pad_len, *x.shape[1:]),
-            dtype=tensor.dtype,
-            device=tensor.device,
-        )
-        tensor = torch.cat((x, pad), dim=0).movedim(0, dim)
+        pad_width = [0] * (2 * tensor.dim())
+        pad_width[2 * (tensor.dim() - dim) - 1] = pad_len
+        tensor = F.pad(tensor, tuple(pad_width))
 
     return group._reduce_scatter_out_place(tensor, dim)
 

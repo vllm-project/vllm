@@ -1,17 +1,26 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import copy
+from unittest.mock import patch
 
 import pytest
 import torch
 
+from vllm.compilation.passes import pass_manager as pass_manager_module
 from vllm.compilation.passes.inductor_pass import (
     CallableInductorPass,
     InductorPass,
     pass_context,
 )
 from vllm.compilation.passes.pass_manager import PostGradPassManager
-from vllm.config import ModelConfig, VllmConfig
+from vllm.config import (
+    CompilationConfig,
+    DeviceConfig,
+    ModelConfig,
+    ParallelConfig,
+    VllmConfig,
+)
+from vllm.config.compilation import PassConfig
 from vllm.config.utils import Range
 
 
@@ -81,3 +90,35 @@ def test_pass_manager_uuid(callable):
         pass_manager3.configure(config2)
         pass_manager3.add(callable)
         assert uuid1 != pass_manager3.uuid()
+
+
+def test_sp_moe_pass_is_skipped_on_non_cuda_alike():
+    with patch("vllm.config.parallel.get_open_ports_list", return_value=[29500] * 5):
+        config = VllmConfig(
+            parallel_config=ParallelConfig(
+                tensor_parallel_size=2,
+                data_parallel_size=2,
+                enable_expert_parallel=True,
+                all2all_backend="allgather_reducescatter",
+            ),
+            compilation_config=CompilationConfig(
+                pass_config=PassConfig(enable_sp_moe=True),
+            ),
+            device_config=DeviceConfig(device="cpu"),
+        )
+
+    assert config.compilation_config.pass_config.enable_sp_moe is True
+    assert config.parallel_config.use_sequence_parallel_moe is True
+
+    pass_manager = PostGradPassManager()
+    with patch.object(
+        pass_manager_module.current_platform,
+        "is_cuda_alike",
+        return_value=False,
+    ):
+        pass_manager.configure(config)
+
+    assert not any(
+        pass_.__class__.__name__ == "SequenceParallelismMoEPass"
+        for pass_ in pass_manager.passes
+    )
