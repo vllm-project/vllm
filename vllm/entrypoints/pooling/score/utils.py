@@ -56,7 +56,7 @@ def compute_maxsim_score(q_emb: torch.Tensor, d_emb: torch.Tensor) -> torch.Tens
 
 
 def _should_use_gpu_for_maxsim() -> bool:
-    return envs.VLLM_USE_GPU_FOR_POOLING_SCORE and current_platform.is_cuda()
+    return envs.VLLM_USE_GPU_FOR_POOLING_SCORE and not current_platform.is_cpu()
 
 
 def compute_maxsim_scores(
