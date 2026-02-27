@@ -1561,7 +1561,7 @@ class ModelConfig:
     def attn_type(self) -> AttnTypeStr:
         """Determine the attention type based on model configuration."""
         if self.pooler_config is not None:
-            seq_pooling_type = self.pooler_config.seq_pooling_type
+            seq_pooling_type = self._model_info.default_seq_pooling_type
             if seq_pooling_type == "CLS":
                 return "encoder_only"
             else:
