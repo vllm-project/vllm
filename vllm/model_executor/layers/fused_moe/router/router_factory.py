@@ -25,6 +25,9 @@ from vllm.model_executor.layers.fused_moe.router.grouped_topk_router import (
 from vllm.model_executor.layers.fused_moe.router.routing_simulator_router import (
     RoutingSimulatorRouter,
 )
+from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
+    ZeroExpertRouter,
+)
 
 EMPTY_EPLB_STATE: EplbLayerState = EplbLayerState()
 
@@ -49,6 +52,9 @@ def create_fused_moe_router(
     # eplb parameters
     enable_eplb: bool = False,
     eplb_state: EplbLayerState = EMPTY_EPLB_STATE,
+    # zero expert parameters
+    zero_expert_type: str | None = None,
+    num_logical_experts: int | None = None,
 ) -> FusedMoERouter:
     """
     Factory function to create the appropriate FusedMoERouter subclass based on
@@ -56,10 +62,11 @@ def create_fused_moe_router(
 
     The selection logic follows this priority order:
     1. RoutingSimulatorRouter - if VLLM_MOE_ROUTING_SIMULATION_STRATEGY env var is set
-    2. GroupedTopKRouter - if use_grouped_topk is True
-    3. CustomRoutingRouter - if custom_routing_function is not None
-    4. FusedTopKBiasRouter - if e_score_correction_bias is not None
-    5. FusedTopKRouter - default fallback
+    2. ZeroExpertRouter - if zero_expert_type is not None
+    3. GroupedTopKRouter - if use_grouped_topk is True
+    4. CustomRoutingRouter - if custom_routing_function is not None
+    5. FusedTopKBiasRouter - if e_score_correction_bias is not None
+    6. FusedTopKRouter - default fallback
 
     Common arguments:
         top_k: Number of experts to select per token
@@ -86,6 +93,12 @@ def create_fused_moe_router(
         enable_eplb: Whether EPLB is enabled
         eplb_state: EPLB (Expert Parallelism Load Balancing) state
 
+    Zero expert arguments:
+        zero_expert_type: Type of zero expert (e.g. identity). If not None,
+            creates a ZeroExpertRouter.
+        num_logical_experts: Number of real (non-zero) experts. Required when
+            zero_expert_type is not None.
+
     Returns:
         An instance of the appropriate FusedMoERouter subclass
     """
@@ -96,6 +109,27 @@ def create_fused_moe_router(
             top_k=top_k,
             global_num_experts=global_num_experts,
             eplb_state=eplb_state,
+            enable_eplb=enable_eplb,
+            indices_type_getter=indices_type_getter,
+        )
+
+    if zero_expert_type is not None:
+        assert num_logical_experts is not None, (
+            "num_logical_experts is required when zero_expert_type is set"
+        )
+        assert e_score_correction_bias is not None, (
+            "e_score_correction_bias is required when zero_expert_type is set"
+        )
+        return ZeroExpertRouter(
+            top_k=top_k,
+            global_num_experts=global_num_experts,
+            eplb_state=eplb_state,
+            e_score_correction_bias=e_score_correction_bias,
+            num_logical_experts=num_logical_experts,
+            zero_expert_type=zero_expert_type,
+            scoring_func=scoring_func,
+            renormalize=renormalize,
+            routed_scaling_factor=routed_scaling_factor,
             enable_eplb=enable_eplb,
             indices_type_getter=indices_type_getter,
         )
