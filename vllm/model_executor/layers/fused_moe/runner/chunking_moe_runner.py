@@ -7,19 +7,7 @@ from vllm.forward_context import (
     get_forward_context,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.config import (
-    FusedMoEConfig,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe_method_base import (
-    FusedMoEMethodBase,
-)
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
 from vllm.model_executor.layers.fused_moe.runner.moe_runner_base import MoERunnerBase
-from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
-    SharedExperts,
-)
 from vllm.utils.math_utils import cdiv
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
 from vllm.v1.worker.workspace import current_workspace_manager
@@ -29,60 +17,40 @@ logger = init_logger(__name__)
 
 class ChunkingMoERunner(MoERunnerBase):
     """
-    Specialized MoE runner that processes large batches by breaking them into smaller
-    chunks.
+    MoE runner wrapper that adds chunked processing to any MoERunnerBase.
 
-    This runner is designed for scenarios where the input batch is too large to process
-    in a single pass, typically due to memory constraints or when using data parallel
-    (DP) chunking strategies. It provides:
-    - Automatic chunking of large input batches into manageable sizes
-    - Memory-efficient processing by reusing pre-allocated workspace tensors
-    - Support for both hidden states and router logits chunking
-    - Slice-and-copy operations to handle input/output tensor management
-    - Integration with workspace managers for optimal memory utilization
+    This runner wraps an inner MoERunnerBase and overrides forward_impl to
+    process large batches by breaking them into smaller chunks. Each chunk
+    is delegated to the inner runner's forward_impl, making chunking
+    composable with any runner implementation.
 
-    The chunking strategy allows processing of arbitrarily large batches by dividing
-    the computation across multiple smaller chunks, then combining the results.
-    This approach is particularly beneficial in distributed settings where memory
-    per rank is limited or when the batch size exceeds hardware capabilities.
+    All MoERunnerBase state (moe_config, router, quant_method, etc.) is
+    transparently delegated to the inner runner via __getattr__.
+    ChunkingMoERunner only owns chunking-specific state: the pre-allocated
+    workspace buffers and the reduce_results override.
 
-    Key differences from DefaultMoERunner:
-    - Uses pre-allocated workspace tensors for intermediate computations
-    - Implements chunked processing logic in forward_impl
+    Key behaviors:
+    - Pre-allocates workspace tensors for CUDA graph compatibility
+    - Processes chunks via inner.forward_impl per chunk
     - Never reduces results (reduce_results always returns False)
     """
 
-    def __init__(
-        self,
-        layer: torch.nn.Module,
-        moe_config: FusedMoEConfig,
-        router: FusedMoERouter,
-        routed_input_transform: torch.nn.Module | None,
-        gate: torch.nn.Module | None,
-        shared_experts: SharedExperts | None,
-        quant_method: FusedMoEMethodBase,
-        reduce_results: bool,
-        enable_dbo: bool,
-    ):
-        super().__init__(
-            layer,
-            moe_config,
-            router,
-            routed_input_transform,
-            gate,
-            shared_experts,
-            quant_method,
-            reduce_results,
-            enable_dbo,
-        )
+    def __init__(self, inner: MoERunnerBase):
+        # Skip MoERunnerBase.__init__ — all state is delegated to inner
+        # via __getattr__. Only chunking-specific state lives here.
+        self._inner = inner
 
-        # Chunked all2all staging tensor
-        # TODO rename these?
-        # These need to exist ahead of time due to CUDAgraph construction
-        # needing a fixed buffer address.
+        # Pre-allocated staging buffers. These need to exist ahead of time
+        # due to CUDA graph construction needing fixed buffer addresses.
         self.batched_hidden_states, self.batched_router_logits = (
             self._init_dp_chunking()
         )
+
+    def __getattr__(self, name):
+        # Delegate attribute access to the inner runner. This is only
+        # called when normal lookup (instance __dict__, class MRO) fails,
+        # so ChunkingMoERunner's own attributes and methods take priority.
+        return getattr(self._inner, name)
 
     @property
     def reduce_results(self) -> bool:
@@ -213,10 +181,10 @@ class ChunkingMoERunner(MoERunnerBase):
                     else None
                 )
 
-                shared_output_chunk, hidden_states_chunk = self._apply_quant_method(
+                # Delegate per-chunk computation to the inner runner.
+                chunk_result = self._inner.forward_impl(
                     layer=layer,
                     hidden_states=hidden_states_chunk,
-                    extra_tensor=None,
                     router_logits=router_logits_chunk,
                     shared_experts_input=shared_experts_input_chunk,
                 )
@@ -224,14 +192,21 @@ class ChunkingMoERunner(MoERunnerBase):
                 # Store outputs
                 # TODO(bnell): document when chunk_start >= num_tokens
                 if chunk_start < num_tokens:
-                    final_fused_hidden_states[chunk_start:chunk_end, :].copy_(
-                        hidden_states_chunk, non_blocking=True
-                    )
                     if self.shared_experts is not None:
+                        assert isinstance(chunk_result, tuple)
+                        shared_output_chunk, hidden_states_chunk = chunk_result
+                        final_fused_hidden_states[chunk_start:chunk_end, :].copy_(
+                            hidden_states_chunk, non_blocking=True
+                        )
                         assert shared_output_chunk is not None
                         assert final_shared_hidden_states is not None
                         final_shared_hidden_states[chunk_start:chunk_end, :].copy_(
                             shared_output_chunk, non_blocking=True
+                        )
+                    else:
+                        assert isinstance(chunk_result, torch.Tensor)
+                        final_fused_hidden_states[chunk_start:chunk_end, :].copy_(
+                            chunk_result, non_blocking=True
                         )
 
         if self.shared_experts is None:

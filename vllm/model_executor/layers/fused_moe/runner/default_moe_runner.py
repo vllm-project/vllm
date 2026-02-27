@@ -157,7 +157,6 @@ class DefaultMoERunner(MoERunnerBase):
                 hidden_states,
                 dim=0,
             )
-            # need RS for shared_output?
 
         if self.shared_experts is not None:
             assert shared_output is not None
