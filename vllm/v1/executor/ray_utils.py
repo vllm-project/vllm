@@ -110,7 +110,8 @@ try:
                     and hasattr(scheduler_output, "scheduled_new_reqs")
                 ):
                     # Strip mm_features before Ray forwards it to the next PP Stage.
-                    # PP Stage>0 only needs the intermediate tensors, not raw images.
+                    # PP Stage>0 only needs the intermediate tensors,
+                    # not preprocessed multimodal data.
                     for req in scheduler_output.scheduled_new_reqs:
                         req.mm_features = []
                 return scheduler_output, grammar_output, output
