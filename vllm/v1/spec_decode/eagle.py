@@ -274,6 +274,8 @@ class SpecDecodeBaseProposer:
             1, len(self.tree_choices) + 1, device=device, dtype=torch.int32
         ).repeat(max_batch_size, 1)
 
+        self.is_draft_moe: bool = self.draft_model_config.is_moe
+
     def _raise_if_padded_drafter_batch_disabled(self):
         if self.speculative_config.disable_padded_drafter_batch:
             raise NotImplementedError(
@@ -491,6 +493,7 @@ class SpecDecodeBaseProposer:
             slot_mapping=self._get_slot_mapping(
                 num_input_tokens, common_attn_metadata.slot_mapping
             ),
+            is_draft_model=True,
         ):
             ret_hidden_states = self.model(**model_kwargs)
             if not self.model_returns_tuple():
@@ -690,6 +693,7 @@ class SpecDecodeBaseProposer:
                 slot_mapping=self._get_slot_mapping(
                     input_batch_size, common_attn_metadata.slot_mapping
                 ),
+                is_draft_model=True,
             ):
                 ret_hidden_states = self.model(**model_kwargs)
                 if not self.model_returns_tuple():
@@ -1137,6 +1141,7 @@ class SpecDecodeBaseProposer:
                 slot_mapping=self._get_slot_mapping(
                     num_input_tokens, attn_metadata.slot_mapping
                 ),
+                is_draft_model=True,
             ):
                 last_hidden_states, hidden_states = self.model(
                     input_ids=self.input_ids[:num_input_tokens],
@@ -1599,6 +1604,7 @@ class SpecDecodeBaseProposer:
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=cudagraph_runtime_mode,
                 slot_mapping=slot_mapping_dict,
+                is_draft_model=True,
             ):
                 if self.supports_mm_inputs:
                     input_ids = None
@@ -1684,7 +1690,11 @@ class SpecDecodeBaseProposer:
         self,
         num_tokens_unpadded: int,
         num_tokens_padded: int,
-    ) -> tuple[int, torch.Tensor]:
+    ) -> tuple[int, torch.Tensor | None]:
+        if not self.is_draft_moe:
+            # For dense draft model, we don't need to pad the batch across DP.
+            return num_tokens_padded, None
+
         # TODO(Flechman): support DBO ubatching
         should_ubatch, num_toks_across_dp, _ = coordinate_batch_across_dp(
             num_tokens_unpadded=num_tokens_unpadded,

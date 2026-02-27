@@ -557,7 +557,9 @@ class SpeculativeConfig:
 
                 self.draft_parallel_config = (
                     SpeculativeConfig.create_draft_parallel_config(
-                        self.target_parallel_config, self.draft_tensor_parallel_size
+                        self.target_parallel_config,
+                        self.draft_tensor_parallel_size,
+                        is_moe_model=self.draft_model_config.is_moe,
                     )
                 )
         return self
@@ -675,6 +677,7 @@ class SpeculativeConfig:
     def create_draft_parallel_config(
         target_parallel_config: ParallelConfig,
         speculative_draft_tensor_parallel_size: int,
+        is_moe_model: bool = False,
     ) -> ParallelConfig:
         """Create a parallel config for use by the draft worker.
 
@@ -688,6 +691,7 @@ class SpeculativeConfig:
             disable_custom_all_reduce=target_parallel_config.disable_custom_all_reduce,
             ray_workers_use_nsight=target_parallel_config.ray_workers_use_nsight,
             placement_group=target_parallel_config.placement_group,
+            is_moe_model=is_moe_model,
         )
 
         return draft_parallel_config
