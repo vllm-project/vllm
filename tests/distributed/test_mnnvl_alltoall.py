@@ -11,7 +11,6 @@ import subprocess
 
 import pytest
 import torch
-import torch.distributed as dist
 
 from vllm.distributed import get_ep_group
 from vllm.utils.flashinfer import has_flashinfer_all2all
@@ -38,10 +37,7 @@ def has_sys_ptrace_capability() -> bool:
     try:
         # Try to check capabilities using capsh if available
         result = subprocess.run(
-            ["capsh", "--print"],
-            capture_output=True,
-            text=True,
-            timeout=5
+            ["capsh", "--print"], capture_output=True, text=True, timeout=5
         )
         if result.returncode == 0 and "cap_sys_ptrace" in result.stdout.lower():
             return True
@@ -50,7 +46,7 @@ def has_sys_ptrace_capability() -> bool:
 
     # Alternative check: try to read /proc/self/status
     try:
-        with open("/proc/self/status", "r") as f:
+        with open("/proc/self/status") as f:
             for line in f:
                 if line.startswith("CapEff:"):
                     # SYS_PTRACE is capability bit 19 (0x80000 = 1 << 19)
@@ -62,9 +58,7 @@ def has_sys_ptrace_capability() -> bool:
 
     # If we can't determine, assume it's not available in container environments
     # Check if we're in a container; if not, assume it's available
-    return not (
-        os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv")
-    )
+    return not (os.path.exists("/.dockerenv") or os.path.exists("/run/.containerenv"))
 
 
 def test_flashinfer_all2all_import():
@@ -73,6 +67,7 @@ def test_flashinfer_all2all_import():
         from flashinfer.comm import Mapping
         from flashinfer.comm.mnnvl import MnnvlConfig
         from flashinfer.comm.trtllm_alltoall import MnnvlMoe
+
         from vllm.distributed.device_communicators.all2all import (
             FlashInferAllToAllManager,
         )
@@ -107,8 +102,10 @@ def run_multi_gpu_test(rank: int, world_size: int, port: str, test_func):
     assert torch.distributed.get_world_size() == world_size
     assert torch.distributed.get_rank() == rank
 
-    print(f"\n[Rank {rank}] GPU: {torch.cuda.current_device()}, "
-          f"World size: {torch.distributed.get_world_size()}")
+    print(
+        f"\n[Rank {rank}] GPU: {torch.cuda.current_device()}, "
+        f"World size: {torch.distributed.get_world_size()}"
+    )
 
     # Run the actual test
     test_func(rank, world_size)
@@ -131,8 +128,7 @@ def manager_initialization_worker(rank: int, world_size: int):
 
     # Verify multi-GPU properties
     print(
-        f"[Rank {rank}] Manager rank: {manager.rank}, "
-        f"world_size: {manager.world_size}"
+        f"[Rank {rank}] Manager rank: {manager.rank}, world_size: {manager.world_size}"
     )
     assert manager is not None
     assert manager.rank == rank
@@ -265,7 +261,7 @@ def test_flashinfer_alltoall_manager_initialization(world_size: int):
     for rank in range(world_size):
         p = mp.Process(
             target=run_multi_gpu_test,
-            args=(rank, world_size, port, manager_initialization_worker)
+            args=(rank, world_size, port, manager_initialization_worker),
         )
         p.start()
         processes.append(p)
@@ -303,7 +299,7 @@ def test_flashinfer_alltoall_workspace_reinitialization(world_size: int):
     for rank in range(world_size):
         p = mp.Process(
             target=run_multi_gpu_test,
-            args=(rank, world_size, port, workspace_reinitialization_worker)
+            args=(rank, world_size, port, workspace_reinitialization_worker),
         )
         p.start()
         processes.append(p)
@@ -341,7 +337,7 @@ def test_flashinfer_alltoall_ensure_initialized(world_size: int):
     for rank in range(world_size):
         p = mp.Process(
             target=run_multi_gpu_test,
-            args=(rank, world_size, port, ensure_initialized_worker)
+            args=(rank, world_size, port, ensure_initialized_worker),
         )
         p.start()
         processes.append(p)
