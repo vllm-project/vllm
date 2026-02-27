@@ -236,6 +236,7 @@ class TestModel(torch.nn.Module):
                     AiterFusedAddRMSNormStaticQuantPattern,
                     AiterRMSNormStaticQuantPattern,
                 )
+
                 return [
                     AiterFusedAddRMSNormStaticQuantPattern.FUSED_OP,
                     AiterRMSNormStaticQuantPattern.FUSED_OP,
