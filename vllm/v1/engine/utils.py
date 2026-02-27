@@ -204,12 +204,14 @@ class CoreEngineProcManager:
     def join_first(self):
         """Wait for any process to exit."""
         while True:
-            died = connection.wait(proc.sentinel for proc in self.processes)
+            exited_sentinals = connection.wait(proc.sentinel for proc in self.processes)
             # Scale down may remove processes from self.processes, so verify
             # that the exited process is still in the current list.
             sentinel_to_proc = {proc.sentinel: proc for proc in self.processes}
             # Return if all processes have exited or an active process died
-            if not self.processes or died[0] in sentinel_to_proc:
+            if not self.processes or any(
+                sentinel in sentinel_to_proc for sentinel in exited_sentinals
+            ):
                 return
             # Otherwise, continue waiting (scale down removed the process)
 
