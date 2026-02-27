@@ -61,6 +61,7 @@ from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
+from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -558,12 +559,15 @@ class Worker(WorkerBase):
 
             logger.debug(msg)
 
-        # Warm up sampler and preallocate memory buffer for logits and other
-        # sampling related tensors of max possible shape to avoid memory
-        # fragmentation issue.
-        # NOTE: This is called after `capture_model` on purpose to prevent
-        # memory buffers from being cleared by `torch.cuda.empty_cache`.
-        if get_pp_group().is_last_rank:
+        if self.use_v2_model_runner:
+            # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
+            warmup_kernels(self.model_runner)
+        elif get_pp_group().is_last_rank:
+            # V1: Warm up sampler and preallocate memory buffer for logits and other
+            # sampling related tensors of max possible shape to avoid memory
+            # fragmentation issue.
+            # NOTE: This is called after `capture_model` on purpose to prevent
+            # memory buffers from being cleared by `torch.cuda.empty_cache`.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
