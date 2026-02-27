@@ -14,7 +14,7 @@ from datetime import datetime
 from enum import IntEnum
 from functools import lru_cache
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, TypeVar, get_args
+from typing import TYPE_CHECKING, Any, Literal, TypeVar, get_args
 
 import torch
 from pydantic import ConfigDict, Field, model_validator
@@ -37,6 +37,7 @@ from .load import LoadConfig
 from .lora import LoRAConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
+from .offload import OffloadConfig
 from .parallel import ParallelConfig
 from .profiler import ProfilerConfig
 from .scheduler import SchedulerConfig
@@ -74,6 +75,8 @@ class OptimizationLevel(IntEnum):
     O3 = 3
     """O3: Currently the same as -O2s."""
 
+
+PerformanceMode = Literal["balanced", "interactivity", "throughput"]
 
 IS_QUANTIZED = False
 IS_DENSE = False
@@ -123,6 +126,9 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
         # tp-dp combination broken:
         # https://github.com/vllm-project/vllm/issues/34458
         and cfg.parallel_config.data_parallel_size == 1
+        # tp-pp combination broken:
+        # https://github.com/vllm-project/vllm/issues/35426
+        and cfg.parallel_config.pipeline_parallel_size == 1
     )
 
 
@@ -259,6 +265,8 @@ class VllmConfig:
     """Device configuration."""
     load_config: LoadConfig = Field(default_factory=LoadConfig)
     """Load configuration."""
+    offload_config: OffloadConfig = Field(default_factory=OffloadConfig)
+    """Model weight offloading configuration."""
     attention_config: AttentionConfig = Field(default_factory=AttentionConfig)
     """Attention configuration."""
     kernel_config: KernelConfig = Field(default_factory=KernelConfig)
@@ -308,6 +316,13 @@ class VllmConfig:
     performance, with -O0 having the best startup time and -O3 having the best
     performance. -O2 is used by default. See OptimizationLevel for full
     description."""
+
+    performance_mode: PerformanceMode = "balanced"
+    """Performance mode for runtime behavior, 'balanced' is the default.
+    'interactivity' favors low end-to-end per-request latency at small batch
+    sizes (fine-grained CUDA graphs, latency-oriented kernels).
+    'throughput' favors aggregate tokens/sec at high concurrency (larger CUDA
+    graphs, more aggressive batching, throughput-oriented kernels)."""
 
     weight_transfer_config: WeightTransferConfig | None = None
     """The configurations for weight transfer during RL training."""
@@ -359,6 +374,10 @@ class VllmConfig:
             vllm_factors.append("None")
         if self.load_config:
             vllm_factors.append(self.load_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.offload_config:
+            vllm_factors.append(self.offload_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.attention_config:
@@ -636,6 +655,11 @@ class VllmConfig:
         # To give each torch profile run a unique instance name.
         self.instance_id = f"{time.time_ns()}"
 
+        if self.performance_mode != "balanced":
+            logger.info_once(
+                "Performance mode set to '%s'.", self.performance_mode, scope="local"
+            )
+
         self.try_verify_and_update_config()
 
         if self.model_config is not None:
@@ -788,6 +812,8 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        current_platform.apply_config_platform_defaults(self)
+
         if self.compilation_config.mode is None:
             if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
@@ -832,8 +858,33 @@ class VllmConfig:
                 logger.warning("Sequence Parallelism requires TP>1, disabling")
                 self.compilation_config.pass_config.enable_sp = False
                 self.compilation_config.pass_config.fuse_gemm_comms = False
+            else:
+                # Compute SP threshold early; disable if None (model too
+                # small) before +rms_norm gets forced into custom_ops.
+                pass_config = self.compilation_config.pass_config
+                if pass_config.sp_min_token_num is None:
+                    from vllm.compilation.passes.fusion.sequence_parallelism import (
+                        get_sequence_parallelism_threshold,
+                    )
 
-            elif "-rms_norm" in self.compilation_config.custom_ops:
+                    tp_size = self.parallel_config.tensor_parallel_size
+                    hidden_size = self.model_config.get_hidden_size()
+                    element_size = self.model_config.dtype.itemsize
+                    pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
+                        hidden_size, tp_size, element_size
+                    )
+
+                if pass_config.sp_min_token_num is None:
+                    logger.warning(
+                        "Model hidden_size too small for the SP "
+                        "threshold heuristic, disabling. To force SP, "
+                        "set pass_config.sp_min_token_num manually."
+                    )
+                    self.compilation_config.pass_config.enable_sp = False
+                    self.compilation_config.pass_config.fuse_gemm_comms = False
+
+        if self.compilation_config.pass_config.enable_sp:
+            if "-rms_norm" in self.compilation_config.custom_ops:
                 logger.warning(
                     "RMS norm force disabled, sequence parallelism might break"
                 )
@@ -1325,9 +1376,15 @@ class VllmConfig:
                 # sort to make sure the sizes are in ascending order
                 cudagraph_capture_sizes.sort()
             else:
-                cudagraph_capture_sizes = [
-                    i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
-                ]
+                if self.performance_mode == "interactivity":
+                    # Fine-grained CUDA graphs at small batch sizes
+                    # for minimal padding overhead
+                    interactivity_max = min(max_cudagraph_capture_size, 32)
+                    cudagraph_capture_sizes = list(range(1, interactivity_max + 1))
+                else:
+                    cudagraph_capture_sizes = [
+                        i for i in [1, 2, 4] if i <= max_cudagraph_capture_size
+                    ]
                 if max_cudagraph_capture_size >= 8:
                     # Step size 8 for small batch sizes, up to 256(not included)
                     cudagraph_capture_sizes += list(
@@ -1338,6 +1395,8 @@ class VllmConfig:
                     cudagraph_capture_sizes += list(
                         range(256, max_cudagraph_capture_size + 1, 16)
                     )
+                # de-duplicate and sort the sizes
+                cudagraph_capture_sizes = sorted(set(cudagraph_capture_sizes))
 
             if (
                 self.parallel_config.tensor_parallel_size > 1
@@ -1426,6 +1485,36 @@ class VllmConfig:
                         "Max num batched tokens below allreduce-rms fusion threshold, "
                         "allreduce-rms fusion will be enabled for all num_tokens."
                     )
+
+        # Add the compile ranges for sequence parallelism
+        if compilation_config.pass_config.enable_sp:
+            pass_config = compilation_config.pass_config
+
+            # Calculate min_token_num if not explicitly provided
+            # User override works regardless of hidden_size
+            if pass_config.sp_min_token_num is None:
+                from vllm.compilation.passes.fusion.sequence_parallelism import (
+                    get_sequence_parallelism_threshold,
+                )
+
+                tp_size = self.parallel_config.tensor_parallel_size
+                hidden_size = self.model_config.get_hidden_size()
+                element_size = self.model_config.dtype.itemsize
+                pass_config.sp_min_token_num = get_sequence_parallelism_threshold(
+                    hidden_size, tp_size, element_size
+                )
+
+            min_token_num = pass_config.sp_min_token_num
+            max_num_batched_tokens = self.scheduler_config.max_num_batched_tokens
+            if min_token_num is not None and (
+                max_num_batched_tokens is not None
+                and min_token_num < max_num_batched_tokens
+                and min_token_num > 1
+            ):
+                # Add split point at min_token_num - 1 to ensure SP applies
+                # starting from min_token_num
+                # This creates ranges: [1, min-1] (no SP), [min, max] (SP applies)
+                computed_compile_ranges_split_points.append(min_token_num - 1)
 
         if compilation_config.pass_config.fuse_rope_kvcache:
             max_token_num = (
