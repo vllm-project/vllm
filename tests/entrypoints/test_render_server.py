@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-End-to-end tests for the vLLM gRPC render server.
+End-to-end tests for the vLLM render server (gRPC and HTTP).
 """
 
 import asyncio
@@ -11,6 +11,7 @@ import sys
 import time
 
 import grpc
+import httpx
 import pytest
 import pytest_asyncio
 
@@ -29,10 +30,15 @@ def find_free_port() -> int:
     return port
 
 
-async def wait_for_server(port: int, timeout: float = 120.0) -> bool:
+# =====================
+# gRPC server fixtures & helpers
+# =====================
+
+
+async def wait_for_grpc(port: int, timeout: float = 120.0) -> bool:
     """Wait for the gRPC render server to be ready."""
     start_time = time.time()
-    print("waiting for render server to start...")
+    print("waiting for gRPC render server to start...")
     while time.time() - start_time < timeout:
         try:
             channel = grpc.aio.insecure_channel(f"localhost:{port}")
@@ -41,70 +47,132 @@ async def wait_for_server(port: int, timeout: float = 120.0) -> bool:
             response = await stub.HealthCheck(request, timeout=5.0)
             await channel.close()
             if response.healthy:
-                print("render server returned healthy=True")
+                print("gRPC render server returned healthy=True")
                 return True
         except Exception:
             await asyncio.sleep(0.5)
     return False
 
 
-class RenderServerProcess:
-    """Manages a gRPC render server running in a subprocess."""
-
-    def __init__(self):
-        self.process: subprocess.Popen | None = None
-        self.port: int | None = None
-
-    async def start(self):
-        """Start the gRPC render server process."""
-        self.port = find_free_port()
-
-        self.process = subprocess.Popen(
-            [
-                sys.executable,
-                "-m",
-                "vllm.entrypoints.cli.main",
-                "render",
-                "--model",
-                MODEL_NAME,
-                "--host",
-                "localhost",
-                "--port",
-                str(self.port),
-            ],
-        )
-
-        if not await wait_for_server(self.port):
-            self.stop()
-            raise RuntimeError("gRPC render server failed to start within timeout")
-
-    def stop(self):
-        """Stop the gRPC render server process."""
-        if self.process:
-            self.process.terminate()
-            try:
-                self.process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
-
-
 @pytest_asyncio.fixture(scope="module")
-async def render_server():
-    """Fixture providing a running gRPC render server in a subprocess."""
-    server = RenderServerProcess()
-    await server.start()
-    yield server
-    server.stop()
+async def grpc_server():
+    """Fixture providing a running gRPC render server."""
+    port = find_free_port()
+
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.cli.main",
+            "render",
+            "--model",
+            MODEL_NAME,
+            "--host",
+            "localhost",
+            "--port",
+            str(port),
+            "--server",
+            "grpc",
+        ],
+    )
+
+    if not await wait_for_grpc(port):
+        process.terminate()
+        process.wait()
+        raise RuntimeError("gRPC render server failed to start")
+
+    yield {"port": port, "process": process}
+
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
 
 
 @pytest_asyncio.fixture
-async def render_client(render_server):
+async def render_client(grpc_server):
     """Fixture providing a gRPC client connected to the render server."""
-    channel = grpc.aio.insecure_channel(f"localhost:{render_server.port}")
+    channel = grpc.aio.insecure_channel(f"localhost:{grpc_server['port']}")
     stub = render_pb2_grpc.RenderServiceStub(channel)
     yield stub
     await channel.close()
+
+
+# =====================
+# HTTP server fixtures & helpers
+# =====================
+
+
+async def wait_for_http(port: int, timeout: float = 120.0) -> bool:
+    """Wait for the HTTP render server to be ready."""
+    start_time = time.time()
+    print("waiting for HTTP render server to start...")
+    while time.time() - start_time < timeout:
+        try:
+            async with httpx.AsyncClient() as client:
+                response = await client.get(
+                    f"http://localhost:{port}/health", timeout=5.0
+                )
+                if response.status_code == 200:
+                    print("HTTP render server returned healthy")
+                    return True
+        except Exception:
+            await asyncio.sleep(0.5)
+    return False
+
+
+@pytest_asyncio.fixture(scope="module")
+async def http_server():
+    """Fixture providing a running HTTP render server."""
+    port = find_free_port()
+
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "vllm.entrypoints.cli.main",
+            "render",
+            "--model",
+            MODEL_NAME,
+            "--host",
+            "localhost",
+            "--port",
+            str(port),
+            "--server",
+            "http",
+        ],
+    )
+
+    if not await wait_for_http(port):
+        process.terminate()
+        process.wait()
+        raise RuntimeError("HTTP render server failed to start")
+
+    yield {"port": port, "process": process}
+
+    process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
+@pytest_asyncio.fixture
+async def http_client(http_server):
+    """Fixture providing an HTTP client connected to the render server."""
+    async with httpx.AsyncClient(
+        base_url=f"http://localhost:{http_server['port']}",
+        timeout=30.0,
+    ) as client:
+        yield client
+
+
+# =====================
+# gRPC Tests
+# =====================
 
 
 @pytest.mark.asyncio
@@ -141,7 +209,6 @@ async def test_render_chat(render_client):
     assert response.num_tokens > 0
     assert response.num_tokens == len(response.prompt_token_ids)
     assert len(response.conversation) > 0
-    # The conversation should contain our user message
     assert any(msg.role == "user" for msg in response.conversation)
 
 
@@ -263,3 +330,94 @@ async def test_render_chat_multi_turn(render_client):
     assert len(response.prompt_token_ids) > 0
     assert response.num_tokens > 0
     assert len(response.conversation) == 3
+
+
+# =====================
+# HTTP Tests
+# =====================
+
+
+@pytest.mark.asyncio
+async def test_http_health(http_client):
+    """Test HTTP health endpoint."""
+    response = await http_client.get("/health")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["healthy"] is True
+    assert data["message"] == "OK"
+
+
+@pytest.mark.asyncio
+async def test_http_render_chat(http_client):
+    """Test HTTP render chat endpoint."""
+    response = await http_client.post(
+        "/render/chat",
+        json={
+            "messages": [
+                {"role": "user", "content": "Hello, how are you?"},
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["prompt_token_ids"]) > 0
+    assert data["num_tokens"] > 0
+    assert data["num_tokens"] == len(data["prompt_token_ids"])
+    assert len(data["conversation"]) > 0
+
+
+@pytest.mark.asyncio
+async def test_http_render_chat_with_params(http_client):
+    """Test HTTP render chat with explicit params."""
+    response = await http_client.post(
+        "/render/chat",
+        json={
+            "messages": [
+                {"role": "user", "content": "Hi!"},
+            ],
+            "tok_params": {
+                "add_special_tokens": False,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["prompt_token_ids"]) > 0
+    assert data["num_tokens"] > 0
+
+
+@pytest.mark.asyncio
+async def test_http_render_completion(http_client):
+    """Test HTTP render completion endpoint."""
+    response = await http_client.post(
+        "/render/completion",
+        json={"prompt": "The quick brown fox"},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["prompt_token_ids"]) > 0
+    assert data["num_tokens"] > 0
+    assert data["num_tokens"] == len(data["prompt_token_ids"])
+
+
+@pytest.mark.asyncio
+async def test_http_render_completion_with_tok_params(http_client):
+    """Test HTTP render completion with explicit TokenizeParams."""
+    response = await http_client.post(
+        "/render/completion",
+        json={
+            "prompt": "Hello world",
+            "tok_params": {
+                "add_special_tokens": True,
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["prompt_token_ids"]) > 0
+    assert data["num_tokens"] > 0

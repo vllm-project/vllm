@@ -1,10 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """
-gRPC Render Server — lightweight chat template rendering + tokenization.
+Render Server — lightweight chat template rendering + tokenization.
 
-This server provides the RenderService gRPC API that maps 1:1 to the
-vLLM renderer's internal Python types (ChatParams, TokenizeParams).
+This server provides gRPC or HTTP APIs that map 1:1 to the vLLM
+renderer's internal Python types (ChatParams, TokenizeParams).
 No GPU or LLM inference is required.
 """
 
@@ -12,8 +12,12 @@ import argparse
 import asyncio
 import signal
 import time
+from typing import Any
 
 import grpc
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from grpc_reflection.v1alpha import reflection
 
 from vllm.engine.arg_utils import AsyncEngineArgs
@@ -30,6 +34,82 @@ from vllm.usage.usage_lib import UsageContext
 from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
+
+
+# =====================
+# Shared render logic
+# =====================
+
+
+async def _render_chat(renderer, body: dict) -> dict:
+    """Shared logic for RenderChat (used by both gRPC and HTTP)."""
+    messages = body.get("messages", [])
+
+    # Build ChatParams
+    chat_kwargs = body.get("chat_params") or {}
+    chat_params = ChatParams(**chat_kwargs) if chat_kwargs else ChatParams()
+
+    # Build TokenizeParams (with renderer defaults)
+    tok_kwargs = body.get("tok_params") or {}
+    if tok_kwargs:
+        defaults = renderer.default_chat_tok_params
+        merged = {
+            f.name: tok_kwargs.get(f.name, getattr(defaults, f.name))
+            for f in TokenizeParams.__dataclass_fields__.values()
+        }
+        tok_params = TokenizeParams(**merged)
+    else:
+        tok_params = renderer.default_chat_tok_params
+
+    # Step 1: Render messages → (conversation, DictPrompt)
+    conversation, dict_prompt = await renderer.render_messages_async(
+        messages, chat_params
+    )
+
+    # Step 2: Tokenize → TokPrompt
+    tok_prompt = await renderer.tokenize_prompt_async(dict_prompt, tok_params)
+
+    prompt_token_ids = tok_prompt.get("prompt_token_ids", [])
+    return {
+        "prompt_token_ids": prompt_token_ids,
+        "prompt_text": tok_prompt.get("prompt", ""),
+        "num_tokens": len(prompt_token_ids),
+        "conversation": conversation,
+    }
+
+
+async def _render_completion(renderer, body: dict) -> dict:
+    """Shared logic for RenderCompletion (used by both gRPC and HTTP)."""
+    # Build TokenizeParams (with renderer defaults)
+    tok_kwargs = body.get("tok_params") or {}
+    if tok_kwargs:
+        defaults = renderer.default_cmpl_tok_params
+        merged = {
+            f.name: tok_kwargs.get(f.name, getattr(defaults, f.name))
+            for f in TokenizeParams.__dataclass_fields__.values()
+        }
+        tok_params = TokenizeParams(**merged)
+    else:
+        tok_params = renderer.default_cmpl_tok_params
+
+    # Determine prompt type
+    if "text_prompt" in body:
+        dict_prompt: dict[str, Any] = {"prompt": body["text_prompt"]}
+    elif "token_ids_prompt" in body:
+        dict_prompt = {"prompt_token_ids": body["token_ids_prompt"]}
+    elif "prompt" in body:
+        # Convenience: accept "prompt" as alias for "text_prompt"
+        dict_prompt = {"prompt": body["prompt"]}
+    else:
+        raise ValueError("Either text_prompt, token_ids_prompt, or prompt must be set")
+
+    tok_prompt = await renderer.tokenize_prompt_async(dict_prompt, tok_params)
+
+    prompt_token_ids = tok_prompt.get("prompt_token_ids", [])
+    return {
+        "prompt_token_ids": prompt_token_ids,
+        "num_tokens": len(prompt_token_ids),
+    }
 
 
 # =====================
@@ -146,12 +226,53 @@ class RenderServicer(render_pb2_grpc.RenderServiceServicer):
 
 
 # =====================
+# HTTP App
+# =====================
+
+
+def build_http_app(renderer) -> FastAPI:
+    """Build a minimal FastAPI app for the render server."""
+    app = FastAPI(
+        title="vLLM Render Server",
+        version=VLLM_VERSION,
+    )
+
+    @app.get("/health")
+    async def health():
+        return {"healthy": True, "message": "OK"}
+
+    @app.post("/render/chat")
+    async def render_chat(request: dict):
+        try:
+            result = await _render_chat(renderer, request)
+            return JSONResponse(content=result)
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"RenderChat failed: {e}"},
+            )
+
+    @app.post("/render/completion")
+    async def render_completion(request: dict):
+        try:
+            result = await _render_completion(renderer, request)
+            return JSONResponse(content=result)
+        except Exception as e:
+            return JSONResponse(
+                status_code=500,
+                content={"error": f"RenderCompletion failed: {e}"},
+            )
+
+    return app
+
+
+# =====================
 # Server entrypoint
 # =====================
 
 
 async def serve_render(args: argparse.Namespace):
-    """Start the gRPC render server."""
+    """Start the gRPC or HTTP render server."""
     logger.info("vLLM Render Server v%s", VLLM_VERSION)
     logger.info("Model: %s", args.model)
 
@@ -181,36 +302,37 @@ async def serve_render(args: argparse.Namespace):
         vllm_config.model_config.max_model_len,
     )
 
-    # Create servicer
-    servicer = RenderServicer(renderer, start_time)
+    host = getattr(args, "host", "0.0.0.0")
+    port = getattr(args, "port", 50052)
+    server_type = getattr(args, "server", "grpc")
 
-    # Create gRPC server
-    server = grpc.aio.server(
+    if server_type == "grpc":
+        await _serve_grpc(renderer, host, port, start_time)
+    else:
+        await _serve_http(renderer, host, port)
+
+
+async def _serve_grpc(renderer, host: str, port: int, start_time: float):
+    """Run the gRPC render server."""
+    grpc_server = grpc.aio.server(
         options=[
             ("grpc.max_send_message_length", -1),
             ("grpc.max_receive_message_length", -1),
         ],
     )
+    servicer = RenderServicer(renderer, start_time)
+    render_pb2_grpc.add_RenderServiceServicer_to_server(servicer, grpc_server)
 
-    # Register servicer
-    render_pb2_grpc.add_RenderServiceServicer_to_server(servicer, server)
-
-    # Enable reflection for grpcurl and other tools
     service_names = (
         render_pb2.DESCRIPTOR.services_by_name["RenderService"].full_name,
         reflection.SERVICE_NAME,
     )
-    reflection.enable_server_reflection(service_names, server)
+    reflection.enable_server_reflection(service_names, grpc_server)
 
-    # Bind
-    host = getattr(args, "host", "0.0.0.0")
-    port = getattr(args, "port", 50052)
     address = f"{host}:{port}"
-    server.add_insecure_port(address)
-
-    # Start server
-    await server.start()
-    logger.info("vLLM Render gRPC server started on %s", address)
+    grpc_server.add_insecure_port(address)
+    await grpc_server.start()
+    logger.info("gRPC server started on %s", address)
 
     # Handle shutdown signals
     loop = asyncio.get_running_loop()
@@ -229,5 +351,20 @@ async def serve_render(args: argparse.Namespace):
         logger.info("Interrupted by user")
     finally:
         logger.info("Shutting down vLLM Render server...")
-        await server.stop(grace=5.0)
+        await grpc_server.stop(grace=5.0)
         logger.info("Shutdown complete")
+
+
+async def _serve_http(renderer, host: str, port: int):
+    """Run the HTTP render server."""
+    http_app = build_http_app(renderer)
+    uvicorn_config = uvicorn.Config(
+        http_app,
+        host=host,
+        port=port,
+        log_level="info",
+    )
+    http_server = uvicorn.Server(uvicorn_config)
+
+    logger.info("HTTP server started on %s:%d", host, port)
+    await http_server.serve()

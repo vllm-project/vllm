@@ -13,10 +13,11 @@ from vllm.entrypoints.cli.types import CLISubcommand
 from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
-DESCRIPTION = """Launch a lightweight gRPC render server that provides
-chat template rendering and tokenization without GPU or LLM inference.
-This is useful for disaggregated frontend architectures where input
-preprocessing is separated from model serving.
+DESCRIPTION = """Launch a lightweight render server that provides chat template
+rendering and tokenization without GPU or LLM inference. Supports both gRPC
+and HTTP protocols (selected via --server). This is useful for disaggregated
+frontend architectures where input preprocessing is separated from model
+serving.
 """
 
 
@@ -39,7 +40,7 @@ class RenderSubcommand(CLISubcommand):
     ) -> FlexibleArgumentParser:
         render_parser = subparsers.add_parser(
             self.name,
-            help="Launch a gRPC render server for chat template rendering "
+            help="Launch a render server for chat template rendering "
             "and tokenization (no GPU required).",
             description=DESCRIPTION,
             usage="vllm render [model_tag] [options]",
@@ -68,6 +69,13 @@ class RenderSubcommand(CLISubcommand):
             type=int,
             default=50052,
             help="Port to listen on.",
+        )
+        render_parser.add_argument(
+            "--server",
+            type=str,
+            default="grpc",
+            choices=["grpc", "http"],
+            help="Server protocol to use (default: grpc).",
         )
         render_parser.add_argument(
             "--tokenizer",
