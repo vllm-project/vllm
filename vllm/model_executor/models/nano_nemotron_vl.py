@@ -71,10 +71,13 @@ from vllm.multimodal.parse import (
     ImageSize,
     MultiModalDataItems,
     MultiModalDataParser,
-    MultiModalUUIDItems,
     VideoProcessorItems,
 )
-from vllm.multimodal.processing import BaseDummyInputsBuilder, ProcessorInputs, TimingContext
+from vllm.multimodal.processing import (
+    BaseDummyInputsBuilder,
+    ProcessorInputs,
+    TimingContext,
+)
 from vllm.multimodal.processing.processor import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
@@ -1441,19 +1444,27 @@ class NanoNemotronVLMultiModalProcessor(
             k: v for k, v in hf_processor_mm_kwargs.items() if k != "use_audio_in_video"
         }
 
-        processor_inputs.hf_processor_mm_kwargs = hf_processor_mm_kwargs    
+        processor_inputs.hf_processor_mm_kwargs = hf_processor_mm_kwargs
 
-        if not (use_audio_in_video and "video" in processor_inputs.mm_data_items and "audio" not in processor_inputs.mm_data_items):
+        if not (
+            use_audio_in_video
+            and "video" in processor_inputs.mm_data_items
+            and "audio" not in processor_inputs.mm_data_items
+        ):
             return super().apply(
                 processor_inputs,
                 timing_ctx,
             )
 
-        mm_items, audio_items = self._extract_audio_from_videos(processor_inputs.mm_data_items)
+        mm_items, audio_items = self._extract_audio_from_videos(
+            processor_inputs.mm_data_items
+        )
 
         if not isinstance(processor_inputs.prompt, str):
             tokenizer = self.info.get_tokenizer()
-            prompt = tokenizer.decode(processor_inputs.prompt, skip_special_tokens=False)
+            prompt = tokenizer.decode(
+                processor_inputs.prompt, skip_special_tokens=False
+            )
 
         for _ in audio_items:
             prompt = prompt.replace("<video>", "<video>" + AUDIO_CONTEXT, 1)
