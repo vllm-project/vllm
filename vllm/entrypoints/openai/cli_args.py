@@ -330,6 +330,9 @@ class FrontendArgs(BaseFrontendArgs):
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance."""
+    max_websocket_connections: int = 100
+    """Maximum number of concurrent WebSocket connections for the
+    Responses API WebSocket mode. Default: 100."""
 
     @classmethod
     def _customize_cli_kwargs(
