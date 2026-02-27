@@ -82,6 +82,7 @@ _TEXT_GENERATION_MODELS = {
     "BaichuanForCausalLM": ("baichuan", "BaichuanForCausalLM"),
     "BailingMoeForCausalLM": ("bailing_moe", "BailingMoeForCausalLM"),
     "BailingMoeV2ForCausalLM": ("bailing_moe", "BailingMoeV2ForCausalLM"),
+    "BailingMoeV2_5ForCausalLM": ("bailing_moe_linear", "BailingMoeV25ForCausalLM"),
     "BambaForCausalLM": ("bamba", "BambaForCausalLM"),
     "BloomForCausalLM": ("bloom", "BloomForCausalLM"),
     "ChatGLMModel": ("chatglm", "ChatGLMForCausalLM"),
@@ -260,6 +261,10 @@ _EMBEDDING_MODELS = {
     "OpsColQwen3Model": ("colqwen3", "ColQwen3Model"),
     "Qwen3VLNemotronEmbedModel": ("colqwen3", "ColQwen3Model"),
     "SiglipModel": ("siglip", "SiglipEmbeddingModel"),
+    "LlamaNemotronVLModel": (
+        "nemotron_vl",
+        "LlamaNemotronVLForEmbedding",
+    ),
     # Technically Terratorch models work on images, both in
     # input and output. I am adding it here because it piggy-backs on embedding
     # models for the time being.
