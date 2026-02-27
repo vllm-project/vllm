@@ -277,6 +277,9 @@ class FrontendArgs(BaseFrontendArgs):
     Enable offline FastAPI documentation for air-gapped environments.
     Uses vendored static assets bundled with vLLM.
     """
+    max_websocket_connections: int = 100
+    """Maximum number of concurrent WebSocket connections for the
+    Responses API WebSocket mode. Default: 100."""
 
     @classmethod
     def _customize_cli_kwargs(
