@@ -1157,6 +1157,7 @@ def causal_conv1d_update(
         else:
             assert (batch,) == conv_state_indices.shape
 
+        assert num_cache_lines >= batch
         assert weight.stride(1) == 1  # Need this
 
     # adopt the strategy in vLLM that overwrite on 'x' directly, rather than creating a new tensor 'o'

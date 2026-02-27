@@ -6043,6 +6043,56 @@ class GPUModelRunner(
                 else:
                     break
 
+    def _maybe_limit_cudagraph_sizes_by_num_blocks(self, num_blocks: int) -> None:
+        """
+        Limit cudagraph capture sizes based on num_blocks to prevent
+        assertion errors in GDN models where num_cache_lines (num_blocks)
+        can be smaller than the cudagraph capture batch size.
+
+        This is only applied when:
+        1. CUDAGraphMode > PIECEWISE (i.e., FULL or FULL_AND_PIECEWISE modes)
+        2. The model uses GDN attention (detected by GDN_ATTN backend)
+
+        Args:
+            num_blocks: The number of available KV cache blocks.
+        """
+        cudagraph_mode = self.compilation_config.cudagraph_mode
+        if cudagraph_mode is None or not cudagraph_mode.has_full_cudagraphs():
+            return
+
+        max_cudagraph_size = self.compilation_config.max_cudagraph_capture_size
+        if max_cudagraph_size is None or max_cudagraph_size <= num_blocks:
+            return
+
+        # Check if model uses GDN attention
+        from vllm.model_executor.layers.attention_layer_base import (
+            AttentionLayerBase,
+        )
+
+        attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
+        has_gdn = any(
+            layer.get_attn_backend().get_name() == "GDN_ATTN"
+            for layer in attn_layers.values()
+        )
+        if not has_gdn:
+            return
+
+        # Filter cudagraph_capture_sizes
+        original_sizes = self.compilation_config.cudagraph_capture_sizes
+        filtered_sizes = [s for s in original_sizes if s <= num_blocks]
+        self.compilation_config.cudagraph_capture_sizes = filtered_sizes
+        # Set max_cudagraph_capture_size to the max of filtered sizes
+        new_max = max(filtered_sizes) if filtered_sizes else num_blocks
+
+        logger.warning(
+            "Limiting max_cudagraph_capture_size from %d to %d "
+            "due to num_blocks=%d constraint for GDN model",
+            max_cudagraph_size,
+            new_max,
+            num_blocks,
+        )
+        self.compilation_config.max_cudagraph_capture_size = new_max
+
     def initialize_kv_cache(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Initialize KV cache based on `kv_cache_config`.
@@ -6054,6 +6104,11 @@ class GPUModelRunner(
         self.kv_cache_config = kv_cache_config
         self.may_add_encoder_only_layers_to_kv_cache_config()
         self.maybe_add_kv_sharing_layers_to_kv_cache_groups(kv_cache_config)
+
+        # Limit cudagraph sizes for GDN models to prevent assertion errors
+        # when num_cache_lines (num_blocks) < batch size during cudagraph capture.
+        self._maybe_limit_cudagraph_sizes_by_num_blocks(kv_cache_config.num_blocks)
+
         self.initialize_attn_backend(kv_cache_config)
         # The kernel block size for all KV cache groups. For example, if
         # kv_cache_manager uses block_size 256 for a given group, but the attention
