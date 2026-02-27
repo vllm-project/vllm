@@ -190,9 +190,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_num_tokens=self.max_num_tokens,
             device=self.device,
         )
-        # ring-buffered staging for prepare_inputs
         self._prepare_inputs_buffers = PrepareInputsBuffers(
-            ring_size=max(self.pp_size, 2),
             max_num_reqs=self.max_num_reqs,
             device=self.device,
         )
@@ -559,7 +557,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
         prep_buffers = self._prepare_inputs_buffers
-        slot = prep_buffers.acquire_ring_slot()
 
         # Decode first, then prefill.
         # batch_idx -> req_id
@@ -569,10 +566,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
-        idx_mapping_cpu = slot.idx_mapping_cpu[:num_reqs]
+        idx_mapping_cpu = prep_buffers.idx_mapping_cpu[:num_reqs]
         np.copyto(idx_mapping_cpu.numpy(), idx_mapping_np, casting="no")
         idx_mapping = prep_buffers.idx_mapping_gpu[:num_reqs]
-        idx_mapping.copy_(idx_mapping_cpu, non_blocking=True)
+        idx_mapping.copy_(idx_mapping_cpu, non_blocking=False)
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -593,13 +590,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             total_num_logits = num_reqs + total_num_draft_tokens
 
             num_logits = num_draft_tokens + 1
-            cu_num_logits_cpu = slot.cu_num_logits_cpu[: num_reqs + 1]
+            cu_num_logits_cpu = prep_buffers.cu_num_logits_cpu[: num_reqs + 1]
             cu_num_logits_cpu_np = cu_num_logits_cpu.numpy()
             cu_num_logits_cpu_np[0] = 0
             np.cumsum(num_logits, out=cu_num_logits_cpu_np[1:])
             cu_num_logits = prep_buffers.cu_num_logits_gpu[: num_reqs + 1]
-            cu_num_logits.copy_(cu_num_logits_cpu, non_blocking=True)
-            # keep an independent CPU snapshot because ring slots are reused.
+            cu_num_logits.copy_(cu_num_logits_cpu, non_blocking=False)
             cu_num_logits_np = cu_num_logits_cpu_np.copy()
 
             max_expand_len = self.num_speculative_steps + 1
@@ -608,7 +604,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
 
         # Get query_start_loc.
-        query_start_loc_cpu_full = slot.query_start_loc_cpu
+        query_start_loc_cpu_full = prep_buffers.query_start_loc_cpu
         query_start_loc_np_full = query_start_loc_cpu_full.numpy()
         query_start_loc_np_full[0] = 0
         np.cumsum(num_scheduled_tokens, out=query_start_loc_np_full[1 : num_reqs + 1])
@@ -616,11 +612,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Some attention backends like FA3 require query_start_loc to be non-decreasing.
         query_start_loc_np_full[num_reqs + 1 :] = num_tokens
         self.input_buffers.query_start_loc.copy_(
-            query_start_loc_cpu_full, non_blocking=True
+            query_start_loc_cpu_full, non_blocking=False
         )
-        prep_buffers.mark_ring_slot_inflight(slot)
 
-        # keep an independent CPU snapshot because ring slots are reused.
         query_start_loc_np = query_start_loc_np_full[: num_reqs + 1].copy()
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
