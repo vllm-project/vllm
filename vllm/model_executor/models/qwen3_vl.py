@@ -564,8 +564,6 @@ class Qwen3_VisionTransformer(nn.Module):
             cu_seqlens,
             self.hidden_size,
             self.tp_size,
-            rotary_pos_emb_cos,
-            rotary_pos_emb_sin,
         )
         cu_seqlens = torch.from_numpy(cu_seqlens).to(self.device, non_blocking=True)
         hidden_states = hidden_states.unsqueeze(1)

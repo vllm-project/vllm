@@ -287,12 +287,15 @@ def flashinfer_wrapper(
     if is_reshaped:
         reshape_batch_size = q.shape[0]
         q, k, v = (einops.rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v])
+    # cuDNN <= 9.10.2.21 requires q, k to be contiguous
+    # this comes with no cost for ViT's with RoPE because
+    # RoPE has already made q and k contiguous.
+    q, k = q.contiguous(), k.contiguous()
 
-    assert len(cu_seqlens) % 3 == 0, "cu_seqlens must be divisible by 3"
-    cu_seqlength = len(cu_seqlens) // 3
-    batch_offsets_qk = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
-    batch_offsets_v = cu_seqlens[cu_seqlength : cu_seqlength * 2].view(-1, 1, 1, 1)
-    batch_offsets_o = cu_seqlens[cu_seqlength * 2 :].view(-1, 1, 1, 1)
+    assert len(cu_seqlens) % 2 == 0, "cu_seqlens must be divisible by 2"
+    cu_seqlength = len(cu_seqlens) // 2
+    batch_offsets_qko = cu_seqlens[:cu_seqlength].view(-1, 1, 1, 1)
+    batch_offsets_v = cu_seqlens[cu_seqlength:].view(-1, 1, 1, 1)
     sequence_lengths = sequence_lengths.view(-1, 1, 1, 1)
     max_seqlen = max_seqlen.item()
 
@@ -308,10 +311,10 @@ def flashinfer_wrapper(
         actual_seq_lens_kv=sequence_lengths,
         causal=False,
         return_lse=False,
-        batch_offsets_q=batch_offsets_qk,
-        batch_offsets_k=batch_offsets_qk,
+        batch_offsets_q=batch_offsets_qko,
+        batch_offsets_k=batch_offsets_qko,
         batch_offsets_v=batch_offsets_v,
-        batch_offsets_o=batch_offsets_o,
+        batch_offsets_o=batch_offsets_qko,
     )
 
     if is_reshaped:

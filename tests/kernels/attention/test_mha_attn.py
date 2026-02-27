@@ -299,8 +299,6 @@ def test_mha_attn_varlen_forward_flashinfer(
             cu_seqlens_np,
             hidden_size,
             tp_size,
-            rotary_pos_emb_cos=None,
-            rotary_pos_emb_sin=None,
         )
         cu_seqlens = torch.from_numpy(cu_seqlens_np).to(
             device, dtype=torch.int32, non_blocking=True

@@ -139,8 +139,6 @@ class MMEncoderAttention(CustomOp):
         cu_seqlens: np.ndarray,
         hidden_size: int,
         tp_size: int,
-        rotary_pos_emb_cos: torch.Tensor | None = None,
-        rotary_pos_emb_sin: torch.Tensor | None = None,
     ) -> np.ndarray:
         if attn_backend != AttentionBackendEnum.FLASHINFER:
             return cu_seqlens
@@ -148,23 +146,17 @@ class MMEncoderAttention(CustomOp):
         batch_size = len(cu_seqlens) - 1
         scale = hidden_size // tp_size
         cu_seqlens = cu_seqlens * scale
-        if rotary_pos_emb_cos is not None and rotary_pos_emb_sin is not None:
-            cu_seqlens_qk = cu_seqlens
-        else:
-            cu_seqlens_qk = cu_seqlens * 3
-        cu_seqlens_v = cu_seqlens * 3
-        cu_seqlens_o = cu_seqlens
 
-        cu_seqlens_qk = add_padding_to_seqlens(
-            cu_seqlens_qk, batch_size, cu_seqlens_qk[-1]
+        cu_seqlens_qko = cu_seqlens
+        cu_seqlens_v = cu_seqlens * 3
+
+        cu_seqlens_qko = add_padding_to_seqlens(
+            cu_seqlens_qko, batch_size, cu_seqlens_qko[-1]
         )
         cu_seqlens_v = add_padding_to_seqlens(
             cu_seqlens_v, batch_size, cu_seqlens_v[-1]
         )
-        cu_seqlens_o = add_padding_to_seqlens(
-            cu_seqlens_o, batch_size, cu_seqlens_o[-1]
-        )
-        return np.concatenate([cu_seqlens_qk, cu_seqlens_v, cu_seqlens_o])
+        return np.concatenate([cu_seqlens_qko, cu_seqlens_v])
 
     def __init__(
         self,
