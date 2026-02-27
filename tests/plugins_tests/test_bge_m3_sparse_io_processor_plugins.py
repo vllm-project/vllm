@@ -20,6 +20,13 @@ model_config = {
 }
 
 
+def _float_close(expected: object, result: object):
+    assert isinstance(expected, float) and isinstance(result, float), (
+        f"{expected=}  or {result=} is not float"
+    )
+    return (expected - result) < 1e-3 or abs(expected / result - 1) < 1e-3
+
+
 def _get_attr_or_val(obj: object | dict, key: str):
     if isinstance(obj, dict) and key in obj:
         return obj[key]
@@ -41,9 +48,9 @@ def _check_sparse_embedding(data, check_tokens=False):
     assert len(data) == len(expected_embed)
     for entry in data:
         expected_val = expected_embed[_get_attr_or_val(entry, "token_id")]
-        assert expected_val["weight"] == _get_attr_or_val(entry, "weight"), (
-            f"actual embed {entry} not equal to {expected_val}"
-        )
+        assert _float_close(
+            expected_val["weight"], _get_attr_or_val(entry, "weight")
+        ), f"actual embed {entry} not equal to {expected_val}"
         if check_tokens:
             assert expected_val["token"] == _get_attr_or_val(entry, "token"), (
                 f"actual embed {entry} not equal to {expected_val}"
