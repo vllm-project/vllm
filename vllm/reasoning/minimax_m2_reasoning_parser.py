@@ -110,10 +110,10 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         delta_token_ids: Sequence[int],
     ) -> DeltaMessage | None:
         if len(previous_token_ids) == 0:
-            delta_text = "<think>" + delta_text
+            delta_text = "<think>\n" + delta_text
         return DeltaMessage(content=delta_text)
 
     def extract_reasoning(
         self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
     ) -> tuple[str | None, str | None]:
-        return None, "<think>" + model_output
+        return None, "<think>\n" + model_output
