@@ -3,37 +3,41 @@
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
     },
     "2": {
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
     },
     "4": {
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
     },
     "8": {
         "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
     },
     "16": {
         "BLOCK_SIZE_M": 16,
@@ -42,97 +46,108 @@
         "GROUP_SIZE_M": 1,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
     },
     "24": {
-        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
+        "BLOCK_SIZE_K": 64,
         "GROUP_SIZE_M": 1,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
     },
     "32": {
-        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 1,
+        "matrix_instr_nonkdim": 16
     },
     "48": {
-        "BLOCK_SIZE_M": 32,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 64,
         "GROUP_SIZE_M": 1,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
     },
     "64": {
-        "BLOCK_SIZE_M": 32,
+        "BLOCK_SIZE_M": 16,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
         "GROUP_SIZE_M": 1,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 1,
+        "matrix_instr_nonkdim": 16
     },
     "96": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 128,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 1,
+        "matrix_instr_nonkdim": 16
+    },
+    "128": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
+    },
+    "256": {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 128,
+        "GROUP_SIZE_M": 1,
+        "SPLIT_K": 1,
+        "num_warps": 4,
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
+    },
+    "512": {
         "BLOCK_SIZE_M": 32,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
-    },
-    "128": {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
-        "SPLIT_K": 1,
-        "num_warps": 4,
-        "num_stages": 2
-    },
-    "256": {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
-        "SPLIT_K": 1,
-        "num_warps": 4,
-        "num_stages": 2
-    },
-    "512": {
-        "BLOCK_SIZE_M": 64,
-        "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
-        "SPLIT_K": 1,
-        "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 32
     },
     "1024": {
-        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_M": 32,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 32
     },
     "1536": {
-        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_M": 32,
         "BLOCK_SIZE_N": 128,
         "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 32
     },
     "2048": {
         "BLOCK_SIZE_M": 64,
@@ -141,7 +156,8 @@
         "GROUP_SIZE_M": 1,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 1,
+        "matrix_instr_nonkdim": 16
     },
     "3072": {
         "BLOCK_SIZE_M": 64,
@@ -150,15 +166,27 @@
         "GROUP_SIZE_M": 1,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 1,
+        "matrix_instr_nonkdim": 16
     },
     "4096": {
-        "BLOCK_SIZE_M": 64,
+        "BLOCK_SIZE_M": 128,
         "BLOCK_SIZE_N": 128,
-        "BLOCK_SIZE_K": 128,
-        "GROUP_SIZE_M": 1,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 2,
         "SPLIT_K": 1,
         "num_warps": 4,
-        "num_stages": 2
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 16
+    },
+    "8192": {
+        "BLOCK_SIZE_M": 256,
+        "BLOCK_SIZE_N": 256,
+        "BLOCK_SIZE_K": 32,
+        "GROUP_SIZE_M": 2,
+        "SPLIT_K": 1,
+        "num_warps": 8,
+        "num_stages": 2,
+        "matrix_instr_nonkdim": 32
     }
 }
