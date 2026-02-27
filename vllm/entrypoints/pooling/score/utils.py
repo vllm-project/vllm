@@ -79,7 +79,7 @@ def compute_maxsim_scores(
         if q_emb.shape[1] != d_emb.shape[1]:
             raise ValueError("Query and document embeddings must have same dim")
 
-    compute_device = torch.device("cuda" if _should_use_gpu_for_maxsim() else "cpu")
+    compute_device = torch.device(current_platform.device_type if _should_use_gpu_for_maxsim() else "cpu")
     scores: list[torch.Tensor] = []
     start = 0
     while start < num_pairs:
