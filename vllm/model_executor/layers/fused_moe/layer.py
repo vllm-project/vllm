@@ -466,7 +466,7 @@ class FusedMoE(CustomOp):
             num_experts=self.global_num_experts,
             experts_per_token=top_k,
             hidden_dim=hidden_size,
-            hidden_dim_unpadded=hidden_size
+            hidden_dim_unpadded=hidden_size,
             intermediate_size_per_partition=intermediate_size_per_partition,
             intermediate_size_per_partition_unpadded=intermediate_size_per_partition,
             num_local_experts=self.local_num_experts,
