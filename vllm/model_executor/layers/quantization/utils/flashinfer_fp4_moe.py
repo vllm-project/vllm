@@ -566,4 +566,11 @@ def prepare_nvfp4_moe_layer_for_fi_or_cutlass(
 
         w2_scale = swizzle_blockscale(w2_scale)
 
+        # Pad w2 to match w2_scale. swizzle_blockscale rounds M up to
+        # a multiple of 128, and the CUTLASS kernel computes per-expert
+        # scale offsets using N = b.size(1) from the weight tensor.
+        w2_pad = w2_scale.size(1) - w2.size(1)
+        if w2_pad > 0:
+            w2 = torch.nn.functional.pad(w2, (0, 0, 0, w2_pad))
+
     return w13, w13_scale, w13_scale_2, a13_scale, w2, w2_scale, w2_scale_2, a2_scale

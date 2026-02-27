@@ -39,6 +39,9 @@ MNK_FACTORS = [
     (64, 2048, 1536),
     (224, 1024, 1024),
     (224, 1024, 1536),
+    # Non-128-aligned K: triggers swizzle_blockscale w2 padding mismatch
+    (2, 2880, 2880),
+    (64, 1024, 1600),
 ]
 
 

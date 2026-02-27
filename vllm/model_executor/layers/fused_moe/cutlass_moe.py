@@ -44,6 +44,7 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.scalar_type import scalar_types
+from vllm.utils.math_utils import round_up
 
 logger = init_logger(__name__)
 
@@ -550,12 +551,14 @@ def run_cutlass_moe_fp4(
         "Number of experts must match",
         f" between weights. {e_w1}, {e_w2}, {e}",
     )
-    assert k_a == half_k_w1 * 2 and k == k_w2, (
-        "Hidden size mismatch between a, w1 and w2"
+    # k_w2 may be padded by swizzle_blockscale (rounds M to multiple of 128)
+    assert k_a == half_k_w1 * 2 and k_w2 >= k, (
+        f"Hidden size mismatch: k_a={k_a}, half_k_w1*2={half_k_w1 * 2}, "
+        f"k_w2={k_w2}, k={k}"
     )
     assert nx2_w1 == n * 2 and half_n_w2 * 2 == n, "mismatch in expected `n`"
     assert m == m_a, "input shape mismatch"
-    assert 2 * half_k_w1 == k_w2, "Hidden size mismatch w2 and w1"
+    assert 2 * half_k_w1 <= k_w2, "Hidden size mismatch w2 and w1"
     assert a.dtype in [torch.half, torch.bfloat16], "Invalid input dtype"
     assert topk_weights.size(0) == m and topk_ids.size(0) == m, (
         "topk must be provided for each row of a"
@@ -596,6 +599,12 @@ def run_cutlass_moe_fp4(
         blockscale_offsets,
     )
 
+    # If w2 was padded (swizzle_blockscale rounds M to multiple of 128),
+    # fix problem_sizes2 column 1 (output dim N) to match the padded
+    # weight. The CUTLASS kernel checks b.size(1) == N.
+    if k_w2 != k:
+        problem_sizes2[:, 1] = k_w2
+
     a = ops.shuffle_rows(a, a_map)
     rep_a_fp4, rep_a_blockscale = ops.scaled_fp4_experts_quant(
         a,
@@ -606,7 +615,7 @@ def run_cutlass_moe_fp4(
     )
     c1 = _resize_cache(workspace13, (m * topk, n * 2))
     c2 = _resize_cache(workspace2, (m * topk, n))
-    c3 = _resize_cache(workspace13, (m * topk, k))
+    c3 = _resize_cache(workspace13, (m * topk, k_w2))
     ops.cutlass_fp4_moe_mm(
         c1,
         rep_a_fp4,
@@ -644,6 +653,10 @@ def run_cutlass_moe_fp4(
         blockscale_offsets[:-1],
     )
     del int_fp4, int_blockscale
+
+    # Slice output back to actual hidden_dim if w2 was padded
+    if k_w2 != k:
+        c3 = c3[:, :k].contiguous()
 
     c3 = ops.shuffle_rows(c3, c_map)
 
@@ -733,7 +746,10 @@ class CutlassExpertsFp4(mk.FusedMoEPermuteExpertsUnpermute):
         expert_tokens_meta: mk.ExpertTokensMetadata | None,
         activation: MoEActivation,
     ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
-        workspace1 = (M * topk, max(2 * N, K))
+        # Round K up to account for potential w2 padding from
+        # swizzle_blockscale (which rounds M to multiple of 128).
+        K_padded = round_up(K, 128)
+        workspace1 = (M * topk, max(2 * N, K_padded))
         workspace2 = (M * topk, N)
         output = (M, K)
         return (workspace1, workspace2, output)
