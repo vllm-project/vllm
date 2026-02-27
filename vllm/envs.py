@@ -435,7 +435,7 @@ def get_vllm_port() -> int | None:
             raise ValueError(
                 f"VLLM_PORT '{port}' appears to be a URI. "
                 "This may be caused by a Kubernetes service discovery issue,"
-                "check the warning in: https://docs.vllm.ai/en/stable/serving/env_vars.html"
+                "check the warning in: https://docs.vllm.ai/en/latest/configuration/env_vars.html"
             ) from None
         raise ValueError(f"VLLM_PORT '{port}' must be a valid integer") from err
 
