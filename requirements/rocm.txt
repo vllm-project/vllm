@@ -1,6 +1,11 @@
 # Common dependencies
 -r common.txt
 
+# The version of gRPC libraries should be consistent with each other
+grpcio==1.78.0
+grpcio-reflection==1.78.0
+grpcio-tools==1.78.0
+
 numba == 0.61.2 # Required for N-gram speculative decoding
 
 # Dependencies for AMD GPUs
@@ -15,4 +20,3 @@ setuptools-scm>=8
 runai-model-streamer[s3,gcs]==0.15.3
 conch-triton-kernels==1.2.1
 timm>=1.0.17
-grpcio-tools==1.78.0 # Should match `build.txt`

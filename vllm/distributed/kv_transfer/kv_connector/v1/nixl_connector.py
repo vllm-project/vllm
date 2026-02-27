@@ -935,6 +935,10 @@ class NixlConnectorWorker:
             ]
 
             if rsv_cores_for_kv:
+                if not hasattr(os, "sched_setaffinity"):
+                    raise NotImplementedError(
+                        "os.sched_setaffinity is not available on this platform"
+                    )
                 os.sched_setaffinity(0, rsv_cores_for_kv)
 
         # support for oot platform which can't register nixl memory

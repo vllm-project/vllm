@@ -249,7 +249,7 @@ class CompilerManager:
         if graph_index == 0:
             # before compiling the first graph, record the start time
             global compilation_start_time
-            compilation_start_time = time.time()
+            compilation_start_time = time.perf_counter()
 
         compilation_counter.num_backend_compilations += 1
 
@@ -261,8 +261,7 @@ class CompilerManager:
             if graph_index == num_graphs - 1:
                 # after loading the last graph for this shape, record the time.
                 # there can be multiple graphs due to piecewise compilation.
-                now = time.time()
-                elapsed = now - compilation_start_time
+                elapsed = time.perf_counter() - compilation_start_time
                 compilation_config.compilation_time += elapsed
                 logger.info_once(
                     "Directly load the compiled graph(s) for compile range %s "
@@ -362,8 +361,7 @@ class CompilerManager:
 
         # after compiling the last graph, record the end time
         if graph_index == num_graphs - 1:
-            now = time.time()
-            elapsed = now - compilation_start_time
+            elapsed = time.perf_counter() - compilation_start_time
             compilation_config.compilation_time += elapsed
             logger.info_once(
                 "Compiling a graph for compile range %s takes %.2f s",
@@ -974,7 +972,7 @@ class VllmBackend:
         compilation_counter.num_graphs_seen += 1
         from .monitor import torch_compile_start_time
 
-        dynamo_time = time.time() - torch_compile_start_time
+        dynamo_time = time.perf_counter() - torch_compile_start_time
         logger.info_once(
             "Dynamo bytecode transform time: %.2f s", dynamo_time, scope="local"
         )
