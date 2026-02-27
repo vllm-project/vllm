@@ -3,7 +3,7 @@ set -euo pipefail
 
 MODEL="${MODEL:-Qwen/Qwen2.5-VL-3B-Instruct}"
 PORT="${PORT:-8000}"
-GPU="${GPU:-0}"
+GPU="${GPU:-1}"
 EC_SHARED_STORAGE_PATH="${EC_SHARED_STORAGE_PATH:-/tmp/ec_cache}"
 
 rm -rf "$EC_SHARED_STORAGE_PATH"
