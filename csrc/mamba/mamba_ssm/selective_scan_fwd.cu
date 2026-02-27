@@ -325,13 +325,11 @@ void selective_scan_fwd_kernel(SSMParamsBase params) {
 
                     // Store state at the end of each aligned chunk when cache is enabled
                     if (params.cache_enabled && batch_cache_indices != nullptr) {
-                        const int position_after_chunk = current_position + chunk_tokens;
-                        const int block_idx_completed = (position_after_chunk - 1) / block_size;
-
                         size_t cache_slot;
                         if (chunk == n_chunks - 1) {
                             cache_slot = batch_cache_indices[block_idx_last_scheduled[batch_id]];
                         } else {
+                            const int block_idx_completed = (current_position + chunk_tokens - 1) / block_size;
                             cache_slot = batch_cache_indices[block_idx_completed];
                         }
 
