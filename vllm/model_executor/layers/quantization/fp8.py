@@ -74,7 +74,10 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_fp8 import (
 )
 from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
+    Mxfp8LinearBackend,
+    Mxfp8LinearOp,
     mxfp8_e4m3_quantize,
+    swizzle_mxfp8_scale,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -289,8 +292,7 @@ class Mxfp8Config(Fp8Config):
                 fused_mapping=self.packed_modules_mapping,
             ):
                 return UnquantizedLinearMethod()
-            # TODO: Add MXFP8 Linear method.
-            return UnquantizedLinearMethod()
+            return Mxfp8OnlineLinearMethod(self)
         elif isinstance(layer, FusedMoE):
             if is_layer_skipped(
                 prefix=prefix,
@@ -713,6 +715,111 @@ class Fp8OnlineLinearMethod(Fp8LinearMethod):
 
         # Prevent duplicate processing (e.g., during weight reload)
         layer._already_called_process_weights_after_loading = True
+
+
+class Mxfp8OnlineLinearMethod(Fp8OnlineLinearMethod):
+    """Online MXFP8 linear method.
+    Loads bf16/fp16 checkpoints and quantizes weights to MXFP8 (microscaling
+    FP8 with block-32 scales) during weight loading.
+
+    Args:
+        quant_config: The MXFP8 quantization config.
+    """
+
+    uses_meta_device: bool = True
+
+    def __init__(self, quant_config: "Mxfp8Config"):
+        # Bypass Fp8LinearMethod.__init__ entirely — we only need MXFP8 state.
+        self.quant_config = quant_config
+        self.out_dtype = torch.get_default_dtype()
+        self.mxfp8_linear = Mxfp8LinearOp(self._select_backend())
+        logger.info("MXFP8 linear backend: %s", self.mxfp8_linear.backend.value)
+
+    @staticmethod
+    def _select_backend() -> Mxfp8LinearBackend:
+        try:
+            from vllm.utils import flashinfer as fi
+
+            _ = fi.mm_mxfp8
+            return Mxfp8LinearBackend.FLASHINFER_CUTLASS
+        except Exception:
+            logger.warning(
+                "FlashInfer mm_mxfp8 not available, "
+                "falling back to MXFP8 emulation backend."
+            )
+            return Mxfp8LinearBackend.EMULATION
+
+    def create_weights(
+        self,
+        layer: torch.nn.Module,
+        input_size_per_partition: int,
+        output_partition_sizes: list[int],
+        input_size: int,
+        output_size: int,
+        params_dtype: torch.dtype,
+        **extra_weight_attrs,
+    ):
+        if input_size_per_partition % MXFP8_BLOCK_SIZE != 0:
+            raise ValueError(
+                f"MXFP8 requires input_size_per_partition "
+                f"({input_size_per_partition}) to be divisible by "
+                f"{MXFP8_BLOCK_SIZE}."
+            )
+
+        # Reuse the meta-device weight creation / patched-loader pattern
+        # from Fp8OnlineLinearMethod.
+        super().create_weights(
+            layer,
+            input_size_per_partition,
+            output_partition_sizes,
+            input_size,
+            output_size,
+            params_dtype,
+            **extra_weight_attrs,
+        )
+
+    def process_weights_after_loading(self, layer: Module) -> None:
+        if getattr(layer, "_already_called_process_weights_after_loading", False):
+            return
+
+        # Deferred initialization for --load_format dummy
+        if layer.weight.device == torch.device("meta"):
+            weight = ModelWeightParameter(
+                data=torch.empty_like(layer.weight, device=layer._load_device),
+                input_dim=1,
+                output_dim=0,
+                weight_loader=layer.weight.weight_loader,
+            )
+            _copy_missing_attrs(layer.weight, weight)
+            layer.register_parameter("weight", weight)
+            initialize_single_dummy_weight(layer.weight)
+
+        # Quantize bf16/fp16 → MXFP8 (fp8 values + uint8 block-32 scales)
+        weight_fp8, weight_scale = mxfp8_e4m3_quantize(layer.weight.contiguous())
+
+        if self.mxfp8_linear.backend == Mxfp8LinearBackend.FLASHINFER_CUTLASS:
+            N, K = layer.weight.shape[0], layer.weight.shape[1]
+            weight_scale = swizzle_mxfp8_scale(weight_scale, N, K)
+
+        layer.input_scale = None
+        replace_parameter(layer, "weight", weight_fp8.data)
+        replace_parameter(layer, "weight_scale", weight_scale.data)
+
+        layer._already_called_process_weights_after_loading = True
+
+    def apply(
+        self,
+        layer: torch.nn.Module,
+        x: torch.Tensor,
+        bias: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        return self.mxfp8_linear.apply(
+            input=x,
+            weight=layer.weight,
+            weight_scale=layer.weight_scale,
+            out_dtype=self.out_dtype,
+            bias=bias,
+        )
 
 
 class Fp8MoEMethod(FusedMoEMethodBase):
@@ -1497,9 +1604,6 @@ class Mxfp8OnlineMoEMethod(Fp8OnlineMoEMethod):
             w2[expert, :, :], w2_scale[expert, :] = self._quantize_mxfp8_moe_weight(
                 layer.w2_weight[expert, :, :]
             )
-
-        # w13, w13_scale = self._quantize_mxfp8_moe_weight(layer.w13_weight.data)
-        # w2, w2_scale = self._quantize_mxfp8_moe_weight(layer.w2_weight.data)
 
         # Shuffle weights to runtime format and setup kernel.
         self._setup_kernel(
