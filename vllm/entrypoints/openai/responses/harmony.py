@@ -171,10 +171,13 @@ def response_input_to_harmony(
             Author.new(Role.TOOL, f"functions.{call_response.name}"),
             response_msg["output"],
         )
+        msg = msg.with_channel("commentary")
+        msg = msg.with_recipient("assistant")
     elif response_msg["type"] == "reasoning":
         content = response_msg["content"]
         assert len(content) == 1
         msg = Message.from_role_and_content(Role.ASSISTANT, content[0]["text"])
+        msg = msg.with_channel("analysis")
     elif response_msg["type"] == "function_call":
         msg = Message.from_role_and_content(Role.ASSISTANT, response_msg["arguments"])
         msg = msg.with_channel("commentary")
