@@ -81,13 +81,13 @@ def warmup_kernels(model_runner: GPUModelRunner) -> None:
 
         model_runner.sample_tokens(grammar_output)
 
+        # Step 2: Decode all requests with 1 token each.
         cached_req_data = CachedRequestData.make_empty()
         cached_req_data.req_ids = list(req_ids)
         cached_req_data.new_block_ids = [None] * num_reqs
         cached_req_data.num_computed_tokens = [prompt_len] * num_reqs
         cached_req_data.num_output_tokens = [1] * num_reqs
 
-        # Step 2: Decode all requests with 1 token each.
         decode_output = SchedulerOutput.make_empty()
         decode_output.scheduled_cached_reqs = cached_req_data
         decode_output.num_scheduled_tokens = {rid: 1 for rid in req_ids}
