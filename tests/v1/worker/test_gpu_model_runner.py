@@ -48,17 +48,6 @@ NUM_BLOCKS = 10
 DEVICE = current_platform.device_type
 
 
-class _DummyMetadataBuilder:
-
-    supports_update_block_table = False
-
-    def build(self, *args, **kwargs):
-        return SimpleNamespace()
-
-    def build_for_cudagraph_capture(self, common_attn_metadata):
-        return SimpleNamespace()
-
-
 def initialize_kv_cache(runner: GPUModelRunner):
     """
     Only perform necessary steps in GPUModelRunner.initialize_kv_cache()
@@ -323,7 +312,12 @@ def test_build_attention_metadata_applies_mm_prefix_left_padding(
         num_reqs_padded=1,
         num_tokens_unpadded=3,
     )
-    model_runner.attn_groups[0][0].metadata_builders = [_DummyMetadataBuilder()]
+    _dummy_builder = SimpleNamespace(
+        supports_update_block_table=False,
+        build=lambda *a, **kw: SimpleNamespace(),
+        build_for_cudagraph_capture=lambda cm: SimpleNamespace(),
+    )
+    model_runner.attn_groups[0][0].metadata_builders = [_dummy_builder]
 
     attn_metadata, _ = model_runner._build_attention_metadata(
         num_tokens=3,
