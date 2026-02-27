@@ -292,10 +292,8 @@ class LongcatMoe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
-        assert config.zero_expert_num is not None
         assert config.zero_expert_type is not None
         self.experts = ZeroExpertFusedMoE(
-            zero_expert_num=config.zero_expert_num,
             zero_expert_type=config.zero_expert_type,
             e_score_correction_bias=self.router.e_score_correction_bias,
             num_experts=num_experts,

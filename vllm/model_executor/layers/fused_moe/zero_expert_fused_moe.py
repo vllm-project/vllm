@@ -20,7 +20,6 @@ class ZeroExpertFusedMoE(FusedMoE):
 
     def __init__(
         self,
-        zero_expert_num: int,
         zero_expert_type: str,
         e_score_correction_bias: torch.Tensor | None = None,
         **kwargs,
@@ -55,9 +54,3 @@ class ZeroExpertFusedMoE(FusedMoE):
         # for compatibility with monolithic kernels that read it directly.
         if e_score_correction_bias is not None:
             self.e_score_correction_bias = e_score_correction_bias[:num_real_experts]
-
-        # Expose zero_expert_num=0 and zero_expert_type=None for
-        # compatibility with quantization methods that check these attributes.
-        # The actual zero expert handling is done by ZeroExpertRouter.
-        self.zero_expert_num = 0
-        self.zero_expert_type = None

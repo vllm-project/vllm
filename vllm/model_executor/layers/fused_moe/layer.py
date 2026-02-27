@@ -36,9 +36,6 @@ from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
 from vllm.model_executor.layers.fused_moe.rocm_aiter_fused_moe import (
     init_aiter_topK_meta_data,
 )
-from vllm.model_executor.layers.fused_moe.router.fused_moe_router import (
-    FusedMoERouter,
-)
 from vllm.model_executor.layers.fused_moe.router.router_factory import (
     create_fused_moe_router,
 )
@@ -341,7 +338,6 @@ class FusedMoE(CustomOp):
         gate: torch.nn.Module | None = None,
         shared_experts: torch.nn.Module | None = None,
         routed_input_transform: torch.nn.Module | None = None,
-        router: FusedMoERouter | None = None,
         zero_expert_type: str | None = None,
     ):
         super().__init__()
@@ -515,29 +511,26 @@ class FusedMoE(CustomOp):
 
         # TODO(bnell): we should not have to create a router if the kernel is
         # monolithic.
-        if router is not None:
-            self.router = router
-        else:
-            self.router = create_fused_moe_router(
-                top_k=top_k,
-                global_num_experts=self.global_num_experts,
-                eplb_state=self.eplb_state,
-                renormalize=renormalize,
-                use_grouped_topk=use_grouped_topk,
-                num_expert_group=num_expert_group,
-                topk_group=topk_group,
-                custom_routing_function=custom_routing_function,
-                scoring_func=scoring_func,
-                routed_scaling_factor=routed_scaling_factor,
-                e_score_correction_bias=e_score_correction_bias,
-                num_fused_shared_experts=self.num_fused_shared_experts,
-                enable_eplb=enable_eplb,
-                # TODO(bnell): once we can construct the MK at init time, we
-                # can make this a value.
-                indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
-                zero_expert_type=zero_expert_type,
-                num_logical_experts=self.logical_num_experts,
-            )
+        self.router = create_fused_moe_router(
+            top_k=top_k,
+            global_num_experts=self.global_num_experts,
+            eplb_state=self.eplb_state,
+            renormalize=renormalize,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
+            custom_routing_function=custom_routing_function,
+            scoring_func=scoring_func,
+            routed_scaling_factor=routed_scaling_factor,
+            e_score_correction_bias=e_score_correction_bias,
+            num_fused_shared_experts=self.num_fused_shared_experts,
+            enable_eplb=enable_eplb,
+            # TODO(bnell): once we can construct the MK at init time, we
+            # can make this a value.
+            indices_type_getter=lambda: self.quant_method.topk_indices_dtype,
+            zero_expert_type=zero_expert_type,
+            num_logical_experts=self.logical_num_experts,
+        )
         self.routing_method_type: RoutingMethodType = self.router.routing_method_type
 
         # Round up hidden size before creating moe_config.
