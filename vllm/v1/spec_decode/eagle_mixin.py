@@ -9,9 +9,10 @@ class EagleMixin:
     compute_logits: Any
 
     def sample_chain(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits = self.compute_logits(hidden_states)
-        draft_token_ids = logits.argmax(dim=-1)
-        return draft_token_ids
+        """Greedy-sample draft tokens from hidden states."""
+        if self.use_local_argmax_reduction:
+            return self.get_top_tokens(hidden_states)
+        return self.compute_logits(hidden_states).argmax(dim=-1)
 
 
 class Eagle3Mixin:
@@ -54,12 +55,19 @@ class Eagle3Mixin:
         return logits_new
 
     def sample_chain(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        logits = self.compute_draft_logits(hidden_states)
-        draft_token_ids = logits.argmax(dim=-1)
+        if (
+            self.use_local_argmax_reduction
+            and not (hasattr(self, "draft_id_to_target_id")
+            and self.draft_id_to_target_id is not None)
+        ):
+            return self.logits_processor.get_top_tokens(self.lm_head, hidden_states)
+        else:
+            logits = self.compute_draft_logits(hidden_states)
+            draft_token_ids = logits.argmax(dim=-1)
 
-        if self.draft_id_to_target_id is None:
+            if self.draft_id_to_target_id is None:
+                return draft_token_ids
+
+            offset = self.draft_id_to_target_id[draft_token_ids]
+            draft_token_ids += offset
             return draft_token_ids
-
-        offset = self.draft_id_to_target_id[draft_token_ids]
-        draft_token_ids += offset
-        return draft_token_ids
