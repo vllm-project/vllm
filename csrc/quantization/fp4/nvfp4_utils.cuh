@@ -294,7 +294,7 @@ __inline__ __device__ PackedVec<Type, CVT_FP4_PACK16> compute_silu_mul(
 #pragma unroll
   for (int i = 0; i < CVT_FP4_ELTS_PER_THREAD / 2; ++i) {
     // silu_mul in float32
-    using packed_t = typename TypeConverter<Type>::Type;
+    using packed_t = typename PackedTypeConverter<Type>::Type;
     float2 silu_vec = silu2(cast_to_float2(x_vec.elts[i]));
     float2 y_f2 = cast_to_float2(y_vec.elts[i]);
     result.elts[i] = cast_to_packed<packed_t>(

@@ -5,21 +5,25 @@
 
 #include <c10/util/BFloat16.h>
 #include <c10/util/Half.h>
-#include <cuda_bf16.h>
-#include <cuda_fp16.h>
-#include <cuda_runtime.h>
+#include <cassert>
+
+#ifdef USE_ROCM
+  #include <hip/hip_runtime.h>
+#else
+  #include <cuda_bf16.h>
+  #include <cuda_fp16.h>
+  #include <cuda_runtime.h>
+#endif
 
 // Device-side: SM100+ architecture with CUDA 12.9+ toolkit, which
 // together enable 256-bit (v8.u32) PTX load/store instructions.
 // Use for PTX instruction selection with architecture fallback paths.
-#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
+#if !defined(USE_ROCM) && defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 1000 && \
     defined(CUDA_VERSION) && CUDA_VERSION >= 12090
   #define VLLM_256B_PTX_ENABLED 1
 #else
   #define VLLM_256B_PTX_ENABLED 0
 #endif
-
-#ifndef USE_ROCM
 
 namespace vllm {
 
@@ -49,50 +53,51 @@ struct VecTraits<false> {
   using vec_t = int4;
 };
 
-// TypeConverter — map between CUDA scalar and packed types
+// PackedTypeConverter — map between CUDA scalar and packed types
 //   half  <-> half2,  __nv_bfloat16 <-> __nv_bfloat162, etc.
 template <typename T>
-struct TypeConverter {
-  using Type = half2;
+struct PackedTypeConverter {
+  static_assert(sizeof(T) == 0,
+                "PackedTypeConverter is not specialized for this type.");
 };
 
 template <>
-struct TypeConverter<half2> {
+struct PackedTypeConverter<half2> {
   using Type = half;
 };
 
 template <>
-struct TypeConverter<half> {
+struct PackedTypeConverter<half> {
   using Type = half2;
 };
 
 template <>
-struct TypeConverter<__nv_bfloat162> {
+struct PackedTypeConverter<__nv_bfloat162> {
   using Type = __nv_bfloat16;
 };
 
 template <>
-struct TypeConverter<__nv_bfloat16> {
+struct PackedTypeConverter<__nv_bfloat16> {
   using Type = __nv_bfloat162;
 };
 
 template <>
-struct TypeConverter<float> {
+struct PackedTypeConverter<float> {
   using Type = float2;
 };
 
 template <>
-struct TypeConverter<float2> {
+struct PackedTypeConverter<float2> {
   using Type = float;
 };
 
 template <>
-struct TypeConverter<c10::Half> {
+struct PackedTypeConverter<c10::Half> {
   using Type = half2;
 };
 
 template <>
-struct TypeConverter<c10::BFloat16> {
+struct PackedTypeConverter<c10::BFloat16> {
   using Type = __nv_bfloat162;
 };
 
@@ -118,36 +123,39 @@ struct CUDATypeConverter<c10::BFloat16> {
 //   Type is the CUDA scalar type (e.g. half, __nv_bfloat16).
 template <class Type, bool use_256b>
 struct alignas(VecTraits<use_256b>::ARCH_MAX_VEC_SIZE) PackedVec {
-  static constexpr int NUM_ELTS = VecTraits<use_256b>::ARCH_MAX_VEC_SIZE /
-                                  sizeof(typename TypeConverter<Type>::Type);
-  typename TypeConverter<Type>::Type elts[NUM_ELTS];
+  static constexpr int NUM_ELTS =
+      VecTraits<use_256b>::ARCH_MAX_VEC_SIZE /
+      sizeof(typename PackedTypeConverter<Type>::Type);
+  typename PackedTypeConverter<Type>::Type elts[NUM_ELTS];
 };
 
 // ============================================================
 // Load / store primitives
 // ============================================================
 
-// 256-bit load / store with architecture fallback.
-// SM100+  : PTX v8 instructions (.nc / default hint)
-// Older   : two uint4 loads via __ldg
+// 256-bit load / store — SM100+ only (PTX v8 instructions).
 __device__ __forceinline__ void ld256(u32x8_t& val, const u32x8_t* ptr) {
-  #if VLLM_256B_PTX_ENABLED
+#if VLLM_256B_PTX_ENABLED
   asm volatile("ld.global.nc.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];\n"
                : "=r"(val.d[0]), "=r"(val.d[1]), "=r"(val.d[2]), "=r"(val.d[3]),
                  "=r"(val.d[4]), "=r"(val.d[5]), "=r"(val.d[6]), "=r"(val.d[7])
                : "l"(ptr));
-  #endif
+#else
+  assert(false && "ld256 requires SM100+ with CUDA 12.9+");
+#endif
 }
 
 __device__ __forceinline__ void st256(u32x8_t& val, u32x8_t* ptr) {
-  #if VLLM_256B_PTX_ENABLED
+#if VLLM_256B_PTX_ENABLED
   asm volatile("st.global.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};\n"
                :
                : "l"(ptr), "r"(val.d[0]), "r"(val.d[1]), "r"(val.d[2]),
                  "r"(val.d[3]), "r"(val.d[4]), "r"(val.d[5]), "r"(val.d[6]),
                  "r"(val.d[7])
                : "memory");
-  #endif
+#else
+  assert(false && "st256 requires SM100+ with CUDA 12.9+");
+#endif
 }
 
 // Generic ld256 / st256 for any 32-byte aligned type (e.g. PackedVec).
@@ -179,36 +187,55 @@ __device__ __forceinline__ void st128(T& val, T* ptr) {
 
 // 256-bit cache-streaming (.cs) load / store  — SM100+ only.
 __forceinline__ __device__ u32x8_t ld256_cs(const u32x8_t* addr) {
+#if VLLM_256B_PTX_ENABLED
   u32x8_t val;
   asm volatile("ld.global.cs.v8.u32 {%0,%1,%2,%3,%4,%5,%6,%7}, [%8];"
                : "=r"(val.d[0]), "=r"(val.d[1]), "=r"(val.d[2]), "=r"(val.d[3]),
                  "=r"(val.d[4]), "=r"(val.d[5]), "=r"(val.d[6]), "=r"(val.d[7])
                : "l"(addr));
   return val;
+#else
+  assert(false && "ld256_cs requires SM100+ with CUDA 12.9+");
+  return {};
+#endif
 }
 
 __forceinline__ __device__ void st256_cs(u32x8_t* addr, u32x8_t val) {
+#if VLLM_256B_PTX_ENABLED
   asm volatile(
       "st.global.cs.v8.u32 [%0], {%1,%2,%3,%4,%5,%6,%7,%8};" ::"l"(addr),
       "r"(val.d[0]), "r"(val.d[1]), "r"(val.d[2]), "r"(val.d[3]), "r"(val.d[4]),
       "r"(val.d[5]), "r"(val.d[6]), "r"(val.d[7]));
+#else
+  assert(false && "st256_cs requires SM100+ with CUDA 12.9+");
+#endif
 }
 
 // 32-bit cache-streaming (.cs) load / store  — SM100+ only.
 __forceinline__ __device__ int ld32_cs(const int* addr) {
+#if VLLM_256B_PTX_ENABLED
   int val;
   asm volatile("ld.global.cs.b32 %0, [%1];" : "=r"(val) : "l"(addr));
   return val;
+#else
+  assert(false && "ld32_cs requires SM100+ with CUDA 12.9+");
+  return 0;
+#endif
 }
 
 __forceinline__ __device__ void st32_cs(int* addr, int val) {
+#if VLLM_256B_PTX_ENABLED
   asm volatile("st.global.cs.b32 [%0], %1;" ::"l"(addr), "r"(val));
+#else
+  assert(false && "st32_cs requires SM100+ with CUDA 12.9+");
+#endif
 }
 
 // Predicated 256-bit / 128-bit cache-global (.cg) loads.
 // Returns zero if pred is false.  SM100+ only.
 __device__ __forceinline__ void ld256_cg_or_zero(u32x8_t& val, const void* ptr,
                                                  bool pred) {
+#if VLLM_256B_PTX_ENABLED
   asm volatile(
       "{\n"
       "  .reg .pred pr;\n"
@@ -226,10 +253,14 @@ __device__ __forceinline__ void ld256_cg_or_zero(u32x8_t& val, const void* ptr,
       : "=r"(val.d[0]), "=r"(val.d[1]), "=r"(val.d[2]), "=r"(val.d[3]),
         "=r"(val.d[4]), "=r"(val.d[5]), "=r"(val.d[6]), "=r"(val.d[7])
       : "r"((int)pred), "l"(ptr));
+#else
+  assert(false && "ld256_cg_or_zero requires SM100+ with CUDA 12.9+");
+#endif
 }
 
 __device__ __forceinline__ void ld128_cg_or_zero(uint4& val, const void* ptr,
                                                  bool pred) {
+#if VLLM_256B_PTX_ENABLED
   uint32_t r0, r1, r2, r3;
 
   asm volatile(
@@ -246,6 +277,9 @@ __device__ __forceinline__ void ld128_cg_or_zero(uint4& val, const void* ptr,
       : "r"((int)pred), "l"(ptr));
 
   val = uint4{r0, r1, r2, r3};
+#else
+  assert(false && "ld128_cg_or_zero requires SM100+ with CUDA 12.9+");
+#endif
 }
 
 // ============================================================
@@ -298,5 +332,3 @@ __device__ __forceinline__ packed_t packed_mul(const packed_t& x,
 }
 
 }  // namespace vllm
-
-#endif  // !USE_ROCM
