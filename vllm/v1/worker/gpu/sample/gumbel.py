@@ -110,7 +110,7 @@ def gumbel_sample(
     expanded_idx_mapping: torch.Tensor,  # [num_tokens]
     temperature: torch.Tensor,  # [max_num_reqs]
     seed: torch.Tensor,  # [max_num_reqs]
-    pos: torch.Tensor,  # [num_reqs]
+    pos: torch.Tensor,  # [num_tokens]
     apply_temperature: bool,
 ) -> torch.Tensor:
     num_tokens, vocab_size = logits.shape
