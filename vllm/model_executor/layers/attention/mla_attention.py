@@ -915,7 +915,6 @@ direct_register_custom_op(
     op_name="unified_mla_kv_cache_update",
     op_func=unified_mla_kv_cache_update,
     fake_impl=unified_mla_kv_cache_update_fake,
-    mutates_args=[],
 )
 
 
