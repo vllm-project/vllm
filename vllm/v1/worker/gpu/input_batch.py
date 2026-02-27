@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import Any
 
 import numpy as np
 import torch
@@ -60,20 +59,15 @@ class InputBatch:
     query_start_loc_np: np.ndarray
     # [num_reqs]
     seq_lens: torch.Tensor
+    # [num_reqs]
+    dcp_local_seq_lens: torch.Tensor | None
 
     # [num_tokens_after_padding]
     input_ids: torch.Tensor
     # [num_tokens_after_padding]
     positions: torch.Tensor
-    # [3, num_tokens_after_padding]
-    mrope_positions: torch.Tensor | None
     # [num_tokens_after_padding, hidden_size]
     inputs_embeds: torch.Tensor | None
-
-    # layer_name -> Metadata
-    attn_metadata: dict[str, Any]
-    # layer_name -> slot_mapping
-    slot_mappings: dict[str, torch.Tensor]
 
     # [total_num_logits]
     logits_indices: torch.Tensor
@@ -141,12 +135,10 @@ class InputBatch:
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
+            dcp_local_seq_lens=None,
             input_ids=input_ids,
             positions=positions,
-            mrope_positions=None,
             inputs_embeds=None,
-            attn_metadata=None,  # type: ignore
-            slot_mappings=None,  # type: ignore
             logits_indices=logits_indices,
             cu_num_logits=cu_num_logits,
             cu_num_logits_np=cu_num_logits_np,

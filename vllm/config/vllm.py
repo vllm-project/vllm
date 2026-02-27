@@ -126,6 +126,9 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
         # tp-dp combination broken:
         # https://github.com/vllm-project/vllm/issues/34458
         and cfg.parallel_config.data_parallel_size == 1
+        # tp-pp combination broken:
+        # https://github.com/vllm-project/vllm/issues/35426
+        and cfg.parallel_config.pipeline_parallel_size == 1
     )
 
 
@@ -808,6 +811,8 @@ class VllmConfig:
             custom_ops = self.compilation_config.custom_ops
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
+
+        current_platform.apply_config_platform_defaults(self)
 
         if self.compilation_config.mode is None:
             if self.optimization_level > OptimizationLevel.O0:
