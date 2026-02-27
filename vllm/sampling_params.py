@@ -678,9 +678,9 @@ class SamplingParams(
             return
 
         # Some sampling parameters are not yet compatible with spec decoding.
-        if self.min_tokens > 1 or self.min_p > _SAMPLING_EPS or self.logit_bias:
+        if self.min_p > _SAMPLING_EPS or self.logit_bias:
             raise ValueError(
-                "The min_tokens, min_p, and logit_bias sampling parameters "
+                "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
             )
 
@@ -838,6 +838,24 @@ class SamplingParams(
             f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})"
+        )
+
+    @staticmethod
+    def for_sampler_warmup() -> "SamplingParams":
+        """Set parameters to exercise all sampler logic."""
+        return SamplingParams(
+            temperature=0.9,
+            top_p=0.9,
+            top_k=50,
+            min_p=0.1,
+            frequency_penalty=0.5,
+            presence_penalty=0.5,
+            repetition_penalty=1.2,
+            min_tokens=2,
+            logit_bias={0: -1.0, 1: 0.5},
+            _bad_words_token_ids=[[0], [1, 2]],
+            logprobs=5,
+            prompt_logprobs=1,
         )
 
 

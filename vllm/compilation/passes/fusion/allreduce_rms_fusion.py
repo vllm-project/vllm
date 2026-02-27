@@ -22,7 +22,9 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
-from vllm.utils.torch_utils import direct_register_custom_op
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+)
 
 from ..inductor_pass import enable_fake_mode
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
@@ -43,8 +45,6 @@ if find_spec("flashinfer"):
             flashinfer_comm = _flashinfer_comm
     except ImportError:
         pass
-
-logger = init_logger(__name__)
 
 if hasattr(torch.ops._C, "scaled_fp4_quant"):
     STATIC_FP4_QUANT_OP = torch.ops._C.scaled_fp4_quant.default
@@ -82,7 +82,16 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
 
 
 if flashinfer_comm is not None:
-    _FI_WORKSPACE = None
+    from vllm.distributed.device_communicators.flashinfer_all_reduce import (
+        destroy_fi_ar_workspace,
+        get_fi_ar_quant_workspace,
+        get_fi_ar_workspace,
+        initialize_fi_ar_quant_workspace,
+        initialize_fi_ar_workspace,
+    )
+
+    ar_fusion_patterns = flashinfer_comm.AllReduceFusionPattern
+
     MiB = 1024 * 1024
 
     def call_trtllm_fused_allreduce_norm(
@@ -122,9 +131,19 @@ if flashinfer_comm is not None:
             max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
         )
 
-        assert _FI_WORKSPACE is not None, (
-            "Flashinfer must be enabled when using flashinfer"
+        # Select workspace based on pattern: quant patterns use the
+        # trtllm quant workspace, non-quant patterns use the primary workspace.
+        if pattern_code in (
+            ar_fusion_patterns.kARResidualRMSNormFP8Quant,
+            ar_fusion_patterns.kARResidualRMSNormFP4Quant,
+        ):
+            workspace = get_fi_ar_quant_workspace()
+        else:
+            workspace = get_fi_ar_workspace()
+        assert workspace is not None, (
+            "Flashinfer workspace must be initialized when using flashinfer"
         )
+        assert flashinfer_comm is not None
         if norm_out is None:
             norm_out = allreduce_in
             residual_out = residual
@@ -133,25 +152,30 @@ if flashinfer_comm is not None:
             # as flashinfer does not support rms_norm
             # and allreduce_out together
             residual_out = allreduce_in
-        # For the sizes that are smaller than the max size,
-        # we only use flashinfer one shot allreduce
+
+        layout_code = None
+        # layout_code only supported by trtllm backend
+        if workspace.backend == "trtllm":
+            # in vllm we only support swizzled layout
+            layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
+
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
-            workspace=_FI_WORKSPACE,
+            workspace=workspace,
             pattern=pattern_code,
-            residual_in=residual,
+            launch_with_pdl=launch_with_pdl,
+            output=None,
             residual_out=residual_out,
             norm_out=norm_out,
-            rms_gamma=rms_gamma,
-            rms_eps=rms_eps,
-            launch_with_pdl=launch_with_pdl,
-            use_oneshot=use_oneshot,
-            fp32_acc=fp32_acc,
             quant_out=quant_out,
             scale_out=scale_out,
-            # in vllm we only support swizzled layout
-            layout_code=flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4,
+            residual_in=residual,
+            rms_gamma=rms_gamma,
+            rms_eps=rms_eps,
             scale_factor=scale_factor,
+            layout_code=layout_code,
+            use_oneshot=use_oneshot,
+            fp32_acc=fp32_acc,
         )
 
     def call_trtllm_fused_allreduce_norm_fake(
@@ -729,29 +753,36 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
             scope="global",
         )
 
-        try:
-            self.workspace = flashinfer_comm.create_allreduce_fusion_workspace(
-                backend="trtllm",
-                world_size=self.tp_size,
-                rank=rank,
-                max_token_num=self.max_token_num,
-                hidden_dim=self.hidden_dim,
-                dtype=self.model_dtype,
-            )
-        except RuntimeError as e:
-            if "multicast" not in str(e).lower():
-                raise
-            logger.warning_once(
-                "AllReduce fusion pass is disabled: flashinfer workspace "
-                "creation failed: %s. This is expected on GPUs without "
-                "NVSwitch (e.g., NVLink bridge-only or PCIe topologies). "
-                "Falling back to non-fused allreduce.",
-                str(e),
-            )
-            return
+        for workspace_init_fn in [
+            initialize_fi_ar_workspace,
+            initialize_fi_ar_quant_workspace,
+        ]:
+            try:
+                workspace_init_fn(
+                    world_size=self.tp_size,
+                    rank=rank,
+                    max_token_num=self.max_token_num,
+                    hidden_dim=self.hidden_dim,
+                    dtype=self.model_dtype,
+                    group=self.group,
+                )
+            except Exception as e:
+                if "multicast" in str(e).lower():
+                    logger.warning(
+                        "AllReduce fusion pass is disabled: flashinfer workspace "
+                        "creation failed: %s. This is expected on GPUs without "
+                        "NVSwitch (e.g., NVLink bridge-only or PCIe topologies). "
+                        "Falling back to non-fused allreduce.",
+                        str(e),
+                    )
+                else:
+                    logger.warning(
+                        "Failed to initialize FlashInfer All Reduce workspace: %s. "
+                        "AllReduce fusion pass will be disabled.",
+                        e,
+                    )
+                return
 
-        global _FI_WORKSPACE
-        _FI_WORKSPACE = self.workspace
         self.allreduce_params = FlashInferFusedAllReduceParams(
             world_size=self.tp_size,
             max_token_num=self.max_token_num,
@@ -762,32 +793,34 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
 
     @enable_fake_mode
     def register_patterns(self) -> None:
+        supports_quantization = get_fi_ar_quant_workspace() is not None
         for epsilon in [1e-5, 1e-6]:
-            AllReduceFusedRMSNormStaticQuantFP8Pattern(
-                epsilon,
-                self.model_dtype,
-                self.device,
-                self.allreduce_params,
-            ).register(self.patterns)
-            AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
-                epsilon,
-                self.model_dtype,
-                self.device,
-                self.allreduce_params,
-            ).register(self.patterns)
-            if current_platform.has_device_capability(100):
-                AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
+            if supports_quantization:
+                AllReduceFusedRMSNormStaticQuantFP8Pattern(
                     epsilon,
                     self.model_dtype,
                     self.device,
                     self.allreduce_params,
                 ).register(self.patterns)
-                AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(
+                AllReduceFusedAddRMSNormStaticQuantFP8Pattern(
                     epsilon,
                     self.model_dtype,
                     self.device,
                     self.allreduce_params,
                 ).register(self.patterns)
+                if current_platform.has_device_capability(100):
+                    AllReduceFusedRMSNormStaticQuantNVFP4Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        self.allreduce_params,
+                    ).register(self.patterns)
+                    AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(
+                        epsilon,
+                        self.model_dtype,
+                        self.device,
+                        self.allreduce_params,
+                    ).register(self.patterns)
             AllReduceRMSNormPattern(
                 epsilon,
                 self.model_dtype,
@@ -825,6 +858,5 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
     def __del__(self) -> None:
         if getattr(self, "disabled", True):
             return
-        if getattr(self, "workspace", None) is not None:
-            with contextlib.suppress(Exception):
-                self.workspace.destroy()
+        with contextlib.suppress(Exception):
+            destroy_fi_ar_workspace()

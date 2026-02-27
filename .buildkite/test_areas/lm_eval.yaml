@@ -73,3 +73,29 @@ steps:
   num_devices: 2
   commands:
     - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=evals/gsm8k/configs/moe-refactor-dp-ep/config-b200.txt
+
+- label: GPQA Eval (GPT-OSS) (H100)
+  timeout_in_minutes: 120
+  device: h100
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-h100.txt
+
+- label: GPQA Eval (GPT-OSS) (B200)
+  timeout_in_minutes: 120
+  device: b200
+  optional: true
+  num_devices: 2
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  - tests/evals/gpt_oss/
+  commands:
+    - uv pip install --system 'gpt-oss[eval]==0.0.5'
+    - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-b200.txt

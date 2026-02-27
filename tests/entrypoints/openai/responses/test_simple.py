@@ -6,6 +6,7 @@ import pytest_asyncio
 from openai import OpenAI
 
 from ....utils import RemoteOpenAIServer
+from .conftest import validate_streaming_event_stack
 
 MODEL_NAME = "Qwen/Qwen3-8B"
 
@@ -219,3 +220,23 @@ async def test_extra_sampling_params(client: OpenAI, model_name: str):
     assert response.status in ["completed", "incomplete"]
     assert len(response.output) > 0
     assert response.output[0].content[0].text  # Has text output
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_types(
+    pairs_of_event_types: dict[str, str], client: OpenAI, model_name: str
+):
+    stream = await client.responses.create(
+        model=model_name,
+        input="tell me a story about a cat in 20 words",
+        reasoning={"effort": "low"},
+        tools=[],
+        stream=True,
+        background=False,
+    )
+    events = []
+    async for event in stream:
+        events.append(event)
+
+    validate_streaming_event_stack(events, pairs_of_event_types)

@@ -829,16 +829,31 @@ class Ernie4_5_VLProcessingInfo(BaseProcessingInfo):
         spatial_conv_size = hf_config.spatial_conv_size
         temporal_conv_size = hf_config.temporal_conv_size
 
+        if self.ctx.model_config.trust_remote_code:
+            # Defined in HF Hub repo
+            min_pixels_key = "min_pixels"
+            max_pixels_key = "max_pixels"
+        else:
+            # Defined in Transformers library (requires v5.0 or above)
+            min_pixels_key = "shortest_edge"
+            max_pixels_key = "longest_edge"
+
         mm_kwargs = self.ctx.get_merged_mm_kwargs(mm_kwargs)
-        size = mm_kwargs.get("size", image_processor.size)
+        size = image_processor.size
+        if override_size := mm_kwargs.get("size"):
+            size = size | override_size
+        if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
+            size = size | {min_pixels_key: override_min_pixels}
+        if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
+            size = size | {max_pixels_key: override_max_pixels}
 
         if do_resize:
             resized_height, resized_width = smart_resize(
                 height=image_height,
                 width=image_width,
                 factor=patch_size * spatial_conv_size,
-                min_pixels=size["min_pixels"],
-                max_pixels=size["max_pixels"],
+                min_pixels=size[min_pixels_key],
+                max_pixels=size[max_pixels_key],
             )
             preprocessed_size = ImageSize(width=resized_width, height=resized_height)
         else:

@@ -159,7 +159,7 @@ class EplbModelState:
 
     NOTE: The expert_load_view now records load for all physical experts
     rather than just local experts. This ensures consistent load statistics
-    across different dispatch methods (naive all-to-all, DeepEP, pplx-kernels).
+    across different dispatch methods (naive all-to-all, DeepEP).
     The recorded load will be multiplied by dp_size when using naive all-to-all
     due to each DP rank contributing the same token set to the calculation.
     See:

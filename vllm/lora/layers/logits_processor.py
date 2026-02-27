@@ -88,10 +88,8 @@ class LogitsProcessorWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         # TODO: Verify if this condition can be further relaxed
-        if self.base_layer.vocab_size <= 32000 or self.base_layer.vocab_size > 258048:
-            raise ValueError(
-                "When using LoRA, vocab size must be > 32000 and <= 258048"
-            )
+        if self.base_layer.vocab_size > 258048:
+            raise ValueError("When using LoRA, vocab size must be <= 258048")
         self.lora_a_stacked = torch.zeros(
             (
                 max_loras,

@@ -7,11 +7,6 @@ from vllm.logger import init_logger
 
 logger = init_logger(__name__)
 
-try:
-    import intel_extension_for_pytorch as ipex
-except ImportError as e:
-    raise e
-
 
 def bgmv_shrink(
     inputs: torch.Tensor,
@@ -20,8 +15,8 @@ def bgmv_shrink(
     lora_indices_tensor: torch.Tensor,
     scaling: float = 1.0,
 ) -> None:
-    ipex.llm.functional.bgmv_shrink(
-        inputs, lora_a_weights, output_tensor, lora_indices_tensor, scaling
+    torch.ops._xpu_C.bgmv_shrink(
+        output_tensor, inputs, lora_a_weights, lora_indices_tensor, scaling
     )
 
 
@@ -32,8 +27,8 @@ def bgmv_expand(
     lora_indices_tensor: torch.Tensor,
     add_inputs: bool = True,
 ) -> None:
-    ipex.llm.functional.bgmv_expand(
-        inputs, lora_b_weights, output_tensor, lora_indices_tensor, add_inputs
+    torch.ops._xpu_C.bgmv_expand(
+        output_tensor, inputs, lora_b_weights, lora_indices_tensor, add_inputs
     )
 
 
@@ -46,10 +41,12 @@ def bgmv_expand_slice(
     slice_size: int,
     add_inputs: bool = True,
 ) -> None:
-    ipex.llm.functional.bgmv_expand_slice(
+    assert slice_size == lora_b_weights.size(-2)
+    assert slice_offset + slice_size <= output_tensor.size(1)
+    torch.ops._xpu_C.bgmv_expand_slice(
+        output_tensor,
         inputs,
         lora_b_weights,
-        output_tensor,
         lora_indices_tensor,
         slice_offset,
         slice_size,
