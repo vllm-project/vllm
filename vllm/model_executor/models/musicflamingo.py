@@ -10,13 +10,12 @@ and processor classes when available.
 
 from collections.abc import Mapping
 
-from transformers.models.audioflamingo3 import (
-    AudioFlamingo3Config,
-    AudioFlamingo3Processor,
-)
-
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.processing import BaseProcessingInfo
+from vllm.transformers_utils.configs.musicflamingo import (
+    MusicFlamingoConfig,
+    MusicFlamingoProcessor,
+)
 
 from .audioflamingo3 import (
     AudioFlamingo3DummyInputsBuilder,
@@ -25,30 +24,13 @@ from .audioflamingo3 import (
     AudioFlamingo3MultiModalProcessor,
 )
 
-try:
-    # Optional dependency: use MusicFlamingo classes when transformers provides them.
-    from transformers.models.musicflamingo import (
-        MusicFlamingoConfig,
-        MusicFlamingoProcessor,
-    )
-except Exception:  # pragma: no cover - optional dependency
-    MusicFlamingoConfig = None
-    MusicFlamingoProcessor = None
-
 
 class MusicFlamingoProcessingInfo(BaseProcessingInfo):
     def get_hf_config(self):
-        if MusicFlamingoConfig is None:
-            return self.ctx.get_hf_config(AudioFlamingo3Config)
-        return self.ctx.get_hf_config((MusicFlamingoConfig, AudioFlamingo3Config))
+        return self.ctx.get_hf_config(MusicFlamingoConfig)
 
     def get_hf_processor(self, **kwargs: object):
-        if MusicFlamingoProcessor is None:
-            return self.ctx.get_hf_processor(AudioFlamingo3Processor, **kwargs)
-        # Tuple triggers AutoProcessor path and accepts either processor class.
-        return self.ctx.get_hf_processor(
-            (MusicFlamingoProcessor, AudioFlamingo3Processor), **kwargs
-        )
+        return self.ctx.get_hf_processor(MusicFlamingoProcessor, **kwargs)
 
     def get_feature_extractor(self, **kwargs: object):
         hf_processor = self.get_hf_processor(**kwargs)
