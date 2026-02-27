@@ -334,8 +334,3 @@ def test_fix_functionalization(
                     found[op] = True
         assert all(found[op] for op in model.ops_in_model(do_fusion))
         assert all(not found.get(op) for op in model.ops_not_in_model())
-
-        # TODO (Rohan138): compare the outputs from model_func and model_no_func
-        # currently runs into errors while comparing `TestFusedAddRMSNorm`
-        # Linked issue: https://github.com/vllm-project/vllm/issues/34996
-        # torch.testing.assert_close(outputs_func, outputs_no_func)
