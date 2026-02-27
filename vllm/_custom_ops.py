@@ -1120,7 +1120,6 @@ def gptq_marlin_repack(
 
 if hasattr(torch.ops._C, "gptq_marlin_repack"):
 
-    @register_fake("_C::gptq_marlin_repack")
     def _gptq_marlin_repack_fake(
         b_q_weight: torch.Tensor,
         perm: torch.Tensor,
@@ -1153,7 +1152,6 @@ def awq_marlin_repack(
 
 if hasattr(torch.ops._C, "awq_marlin_repack"):
 
-    @register_fake("_C::awq_marlin_repack")
     def _awq_marlin_repack_fake(
         b_q_weight: torch.Tensor,
         size_k: torch.SymInt,
