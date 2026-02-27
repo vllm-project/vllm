@@ -150,18 +150,12 @@ def check_interleaved_audio_video(
     # Density check: for true use_audio_in_video interleaving every position
     # in the combined span is a video or audio token.  Batched non-interleaved
     # requests have text/image tokens between the per-request V and A blocks.
+    # combined_start/end encompass all V/A tokens, so num_video + num_audio
+    # equals the number of V/A tokens in range; compare directly to span size.
     combined_start = min(video_pos[0].item(), audio_pos[0].item())
     combined_end = max(video_pos[-1].item(), audio_pos[-1].item())
     total_in_range = combined_end - combined_start + 1
-    va_in_range = (
-        (
-            is_video[combined_start : combined_end + 1]
-            | is_audio[combined_start : combined_end + 1]
-        )
-        .sum()
-        .item()
-    )
-    return va_in_range == total_in_range
+    return (num_video + num_audio) == total_in_range
 
 
 def merge_interleaved_embeddings(
