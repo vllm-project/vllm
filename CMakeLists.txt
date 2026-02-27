@@ -941,6 +941,15 @@ if (VLLM_GPU_LANG STREQUAL "HIP")
 endif()
 
 message(STATUS "Enabling C extension.")
+
+# Link cuBLAS for CUDA builds (required for kernels, e.g. GPTQ kernels in q_gemm.cu)
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  find_package(CUDAToolkit REQUIRED)
+  set(VLLM_C_LIBRARIES CUDA::cublas)
+else()
+  set(VLLM_C_LIBRARIES)
+endif()
+
 define_extension_target(
   _C
   DESTINATION vllm
@@ -948,6 +957,7 @@ define_extension_target(
   SOURCES ${VLLM_EXT_SRC}
   COMPILE_FLAGS ${VLLM_GPU_FLAGS}
   ARCHITECTURES ${VLLM_GPU_ARCHES}
+  LIBRARIES ${VLLM_C_LIBRARIES}
   INCLUDE_DIRECTORIES ${CUTLASS_INCLUDE_DIR}
   INCLUDE_DIRECTORIES ${CUTLASS_TOOLS_UTIL_INCLUDE_DIR}
   USE_SABI 3
