@@ -6,16 +6,10 @@ from typing import Any, cast
 import torch
 
 from vllm.config import VllmConfig, get_layers_from_vllm_config
-from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
-from vllm.v1.attention.backend import (
-    AttentionBackend,
-    AttentionType,
-    CommonAttentionMetadata,
-)
+from vllm.v1.attention.backend import AttentionBackend, CommonAttentionMetadata
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
-    EncoderOnlyAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
     UniformTypeKVCacheSpecs,
@@ -218,61 +212,4 @@ def build_attn_metadata(
             )
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
-    return attn_metadata
-
-
-def build_encoder_only_attn_metadata(
-    vllm_config: VllmConfig,
-    device: torch.device,
-    num_reqs: int,
-    num_tokens: int,
-    query_start_loc_gpu: torch.Tensor,
-    query_start_loc_cpu: torch.Tensor,
-    max_query_len: int,
-    seq_lens: torch.Tensor,
-) -> dict[str, Any]:
-    attn_layers = get_layers_from_vllm_config(vllm_config, Attention)
-    encoder_layers = {
-        name: layer
-        for name, layer in attn_layers.items()
-        if layer.attn_type == AttentionType.ENCODER_ONLY
-    }
-    if not encoder_layers:
-        return {}
-
-    block_table_tensor = torch.empty((num_reqs, 0), dtype=torch.int32, device=device)
-    slot_mapping = torch.empty((0, num_tokens), dtype=torch.int64, device=device)
-
-    common_attn_metadata = CommonAttentionMetadata(
-        query_start_loc=query_start_loc_gpu,
-        query_start_loc_cpu=query_start_loc_cpu,
-        seq_lens=seq_lens[:num_reqs],
-        max_seq_len=vllm_config.model_config.max_model_len,
-        num_reqs=num_reqs,
-        num_actual_tokens=num_tokens,
-        max_query_len=max_query_len,
-        block_table_tensor=block_table_tensor,
-        slot_mapping=slot_mapping,
-        causal=False,
-    )
-
-    attn_metadata: dict[str, Any] = {}
-    block_size = vllm_config.cache_config.block_size
-    for layer_name, layer in encoder_layers.items():
-        attn_backend = layer.get_attn_backend()
-        kv_cache_spec: AttentionSpec = EncoderOnlyAttentionSpec(
-            block_size=block_size,
-            num_kv_heads=layer.num_kv_heads,
-            head_size=layer.head_size,
-            dtype=getattr(
-                layer, "kv_cache_torch_dtype", vllm_config.model_config.dtype
-            ),
-        )
-        builder = attn_backend.get_builder_cls()(
-            kv_cache_spec, [layer_name], vllm_config, device
-        )
-        attn_metadata[layer_name] = builder.build(
-            common_prefix_len=0, common_attn_metadata=common_attn_metadata
-        )
-
     return attn_metadata

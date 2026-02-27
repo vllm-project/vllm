@@ -81,8 +81,6 @@ class EagleCudaGraphManager:
             attn_groups,
             self.max_model_len,
             kv_cache_config,
-            self.vllm_config,
-            self.device,
             uniform_decode_query_len=1,
         )
         num_tokens_across_dp = make_num_tokens_across_dp(self.dp_size, num_tokens)

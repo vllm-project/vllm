@@ -17,7 +17,6 @@ from vllm.utils.math_utils import cdiv
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import (
     build_attn_metadata,
-    build_encoder_only_attn_metadata,
     build_slot_mappings_by_layer,
 )
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -133,8 +132,6 @@ class CudaGraphManager:
             attn_groups,
             self.max_model_len,
             kv_cache_config,
-            self.vllm_config,
-            self.device,
             uniform_decode_query_len=(
                 self.uniform_decode_query_len if uniform_decode else 0
             ),
@@ -407,8 +404,6 @@ def prepare_inputs_to_capture(
     attn_groups: list[list[AttentionGroup]],
     max_model_len: int,
     kv_cache_config: KVCacheConfig,
-    vllm_config: VllmConfig,
-    device: torch.device,
     uniform_decode_query_len: int = 0,
 ) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     if uniform_decode_query_len > 0:
@@ -451,17 +446,4 @@ def prepare_inputs_to_capture(
         kv_cache_config=kv_cache_config,
         dcp_local_seq_lens=input_buffers.dcp_local_seq_lens,
     )
-    if vllm_config.model_config.runner_type == "pooling":
-        encoder_attn_metadata = build_encoder_only_attn_metadata(
-            vllm_config=vllm_config,
-            device=device,
-            num_reqs=num_reqs,
-            num_tokens=num_tokens,
-            query_start_loc_gpu=query_start_loc,
-            query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=num_tokens_per_req,
-            seq_lens=input_buffers.seq_lens,
-        )
-        if encoder_attn_metadata:
-            attn_metadata.update(encoder_attn_metadata)
     return attn_metadata, slot_mappings_by_layer
