@@ -300,14 +300,24 @@ class Base(
             for child_name, child_module in module.named_children():
                 new_module = child_module
                 qual_name = maybe_prefix(prefix, child_name)
-                # Populate Eagle3 attrs
                 if (
                     isinstance(module, nn.ModuleList)
                     and len(module) == self.text_config.num_hidden_layers
                 ):
+                    # Populate Eagle3 attrs
                     self._target_class = type(child_module)
                     layer_name = qual_name.removeprefix("model.")
                     self._layer_names[int(child_name)] = layer_name
+                    # Ignore MTP weights when num_nextn_predict_layers=0
+                    num_nextn = getattr(
+                        self.text_config,
+                        "num_nextn_predict_layers",
+                        None,
+                    )
+                    if num_nextn == 0:
+                        mtp_prefix = f"{prefix}.{self.text_config.num_hidden_layers}."
+                        if mtp_prefix not in self.ignore_unexpected_prefixes:
+                            self.ignore_unexpected_prefixes.append(mtp_prefix)
                 # Replace modules as needed
                 if isinstance(child_module, nn.Linear):
                     generator = (p for p in tp_plan if re.match(p, qual_name))
