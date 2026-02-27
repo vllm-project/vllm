@@ -1062,6 +1062,19 @@ class FusedMoE(CustomOp):
         return_success: bool = False,
     ) -> bool | None:
         if self.quant_config and self.quant_config.get_name() == "mxfp4":
+            # Guard: reject non-uint8 weights (e.g. BF16 from unquantized
+            # checkpoints).  Bias params are always BF16 — skip those.
+            if "bias" not in weight_name and loaded_weight.dtype != torch.uint8:
+                raise ValueError(
+                    f"MXFP4 quantization expects pre-quantized uint8 "
+                    f"weights, but got dtype={loaded_weight.dtype} for "
+                    f"'{weight_name}'. This typically means a BF16/FP16 "
+                    f"checkpoint was loaded with --quantization mxfp4. "
+                    f"MXFP4 does not yet support online quantization of "
+                    f"unquantized checkpoints. Please use a checkpoint "
+                    f"that is already quantized to MXFP4 format."
+                )
+
             if loaded_weight.dim() >= 3:
                 # Combined format (gpt-oss): all experts pre-stacked,
                 # already TP-sharded by the model's weight loader.

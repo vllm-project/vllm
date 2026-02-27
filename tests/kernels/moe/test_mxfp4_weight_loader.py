@@ -70,6 +70,14 @@ def _simulate_mxfp4_weight_loader(
     tp_rank: int,
 ):
     """Simulate the MXFP4 per-expert 2-D branch of weight_loader."""
+    # Dtype guard (mirrors production weight_loader).
+    if "bias" not in weight_name and loaded_weight.dtype != torch.uint8:
+        raise ValueError(
+            f"MXFP4 quantization expects pre-quantized uint8 "
+            f"weights, but got dtype={loaded_weight.dtype} for "
+            f"'{weight_name}'."
+        )
+
     expert_data = param[expert_id]
     shard_dim = 0 if shard_id in ("w1", "w3") else 1
 
@@ -326,3 +334,52 @@ class TestMxfp4PerExpertWeightLoader:
 
         assert torch.equal(param_bias[:, :1536], loaded_bias)
         assert param_bias[:, 1536:].sum() == 0
+
+    def test_bf16_weight_rejected(self):
+        """Loading BF16 weights into MXFP4 params raises ValueError.
+
+        Regression test: prevents silent data corruption when a user
+        passes --quantization mxfp4 with an unquantized BF16 checkpoint.
+        """
+        num_experts = 4
+        intermediate_size, hidden_size = 1024, 2048
+        tp_size, tp_rank = 1, 0
+        params = _build_mxfp4_params(
+            num_experts, intermediate_size, hidden_size, tp_size
+        )
+
+        # BF16 checkpoint weight (NOT pre-quantized)
+        w1_ckpt_bf16 = torch.randn(intermediate_size, hidden_size, dtype=torch.bfloat16)
+
+        with pytest.raises(ValueError, match="MXFP4 quantization expects"):
+            _simulate_mxfp4_weight_loader(
+                params["w13_weight"],
+                w1_ckpt_bf16,
+                "w13_weight",
+                "w1",
+                expert_id=0,
+                tp_size=tp_size,
+                tp_rank=tp_rank,
+            )
+
+    def test_bf16_bias_accepted(self):
+        """BF16 bias loading should still work (bias is always BF16)."""
+        num_experts = 4
+        intermediate_size, hidden_size = 1024, 2048
+        tp_size, tp_rank = 1, 0
+        params = _build_mxfp4_params(
+            num_experts, intermediate_size, hidden_size, tp_size
+        )
+
+        w1_bias = torch.randn(intermediate_size, dtype=torch.bfloat16)
+
+        # Should NOT raise — bias is BF16 in both checkpoint and params
+        _simulate_mxfp4_weight_loader(
+            params["w13_bias"],
+            w1_bias,
+            "w13_bias",
+            "w1",
+            expert_id=0,
+            tp_size=tp_size,
+            tp_rank=tp_rank,
+        )
