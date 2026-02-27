@@ -219,11 +219,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
 
         # Pooling models.
-        self.is_pooling_model = False
-        self.pooling_runner = None
-        if self.model_config.runner_type == "pooling":
-            self.is_pooling_model = True
-            self.pooling_runner = PoolingRunner()
+        self.is_pooling_model = self.model_config.runner_type == "pooling"
+        self.pooling_runner: PoolingRunner | None = None
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: tuple | None = None
@@ -272,11 +269,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         prepare_communication_buffer_for_model(self.model)
         if self.speculator is not None:
             prepare_communication_buffer_for_model(self.speculator)
-        if self.pooling_runner is not None:
-            self.pooling_runner.set_model(self.model)
 
         # Initialize the components that require the model.
         self.model_state = ModelState(self.vllm_config, self.model, self.device)
+        if self.is_pooling_model:
+            self.pooling_runner = PoolingRunner(self.model)
 
     def get_model(self) -> nn.Module:
         return self.model
@@ -1121,10 +1118,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.execute_model_state = None
 
         if not self.is_last_pp_rank:
+            # TODO: Update num_computed_tokens and num_computed_prefill_tokens.
             return None
 
         assert self.pooling_runner is not None
         pooler_output = self.pooling_runner.pool(hidden_states, input_batch)
+
+        # Build the model runner output.
         model_runner_output = ModelRunnerOutput(
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},

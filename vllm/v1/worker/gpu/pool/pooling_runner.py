@@ -3,6 +3,7 @@
 from typing import cast
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
 
 from vllm.model_executor.models import VllmModelForPooling, is_pooling_model
@@ -11,12 +12,11 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
 class PoolingRunner:
-    def __init__(self):
+    def __init__(self, model: nn.Module):
+        self.model = cast(VllmModelForPooling, model)
+
         # req_id -> list of hidden states
         self.hidden_states: dict[str, list[torch.Tensor]] = {}
-
-    def set_model(self, model) -> None:
-        self.model = cast(VllmModelForPooling, model)
 
     def get_supported_pooling_tasks(self) -> list[PoolingTask]:
         if not is_pooling_model(self.model):
@@ -36,4 +36,5 @@ class PoolingRunner:
         return list(last_hidden_states.unbind(dim=0))
 
     def dummy_pooler_run(self, hidden_states: torch.Tensor) -> None:
+        F.normalize(hidden_states, p=2, dim=-1)
         return
