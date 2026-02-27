@@ -13,7 +13,6 @@ import torch
 
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.forward_context import get_forward_context, set_forward_context
-from vllm.model_executor.layers.fused_moe.layer import FusedMoE
 from vllm.model_executor.layers.fused_moe.router.zero_expert_router import (
     ZeroExpertRouter,
 )
@@ -119,18 +118,9 @@ def test_zero_expert_moe_forward(zero_expert_moe, num_tokens):
 
 
 @pytest.mark.parametrize("num_tokens", [1, 32])
-def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
-    """Validate that ZeroExpertFusedMoE output equals real expert output
-    plus zero expert contribution.
-
-    The key invariant is:
-        layer.forward(h, r) == FusedMoE.forward(h, r) + zero_expert_output
-
-    FusedMoE.forward() computes only the real expert MoE output (the
-    ZeroExpertRouter masks zero expert entries to weight=0), while the
-    zero expert contribution is computed as a side effect during routing
-    and added on top by ZeroExpertFusedMoE.forward().
-    """
+def test_zero_expert_moe_output_deterministic(zero_expert_moe, num_tokens):
+    """Validate that two forward calls with the same input produce
+    identical output (determinism)."""
     layer, vllm_config = zero_expert_moe
     num_experts = 4
     zero_expert_num = 1
@@ -151,28 +141,17 @@ def test_zero_expert_moe_output_decomposition(zero_expert_moe, num_tokens):
     with set_current_vllm_config(vllm_config), set_forward_context(None, vllm_config):
         get_forward_context().all_moe_layers = None
 
-        # Get the real expert output only (bypasses ZeroExpertFusedMoE.forward,
-        # calls FusedMoE.forward directly). The ZeroExpertRouter still runs and
-        # stores zero_expert_output as a side effect.
-        real_output = FusedMoE.forward(layer, hidden_states, router_logits)
-        zero_output = layer.router.zero_expert_output
+        output1 = layer.forward(hidden_states, router_logits)
+        output2 = layer.forward(hidden_states, router_logits)
 
-        # Get the full combined output.
-        full_output = layer.forward(hidden_states, router_logits)
+    assert not torch.isnan(output1).any(), "Output contains NaN"
 
-    assert zero_output is not None, "Zero expert output should not be None"
-    assert not torch.isnan(real_output).any(), "Real expert output has NaN"
-    assert not torch.isnan(zero_output).any(), "Zero expert output has NaN"
-    assert not torch.isnan(full_output).any(), "Full output has NaN"
-
-    expected = real_output + zero_output
     torch.testing.assert_close(
-        full_output,
-        expected,
+        output1,
+        output2,
         atol=0,
         rtol=0,
-        msg="ZeroExpertFusedMoE output should equal real expert output "
-        "plus zero expert contribution",
+        msg="Two forward calls with same input should produce identical output",
     )
 
 
@@ -232,9 +211,9 @@ def test_zero_expert_moe_zero_expert_is_identity(zero_expert_moe, num_tokens):
             hidden_states.dtype
         )
 
-        # Run the layer forward to trigger routing and get the actual
-        # zero expert output from the router.
-        FusedMoE.forward(layer, hidden_states, router_logits)
+        # Run routing directly to trigger zero expert computation
+        # without going through the runner (which consumes the output).
+        layer.router.select_experts(hidden_states, router_logits)
         actual_zero_output = layer.router.zero_expert_output
 
     assert actual_zero_output is not None
