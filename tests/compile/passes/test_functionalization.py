@@ -309,13 +309,12 @@ def test_fix_functionalization(
         model = model_class()
         inputs_func = model.example_inputs()
         inputs_no_func = copy.deepcopy(inputs_func)
-        model_func = model_class()
-        model_no_func = copy.deepcopy(model_func)
+        model_func = copy.deepcopy(model)
+        model_no_func = copy.deepcopy(model)
         model_func = torch.compile(model_func, backend=backend_func)
         model_no_func = torch.compile(model_no_func, backend=backend_no_func)
-        outputs_func = model_func(*inputs_func)
-        outputs_no_func = model_no_func(*inputs_no_func)
-
+        outputs_func = model_func(*copy.deepcopy(inputs_func))
+        outputs_no_func = model_no_func(*copy.deepcopy(inputs_no_func))
         torch.testing.assert_close(outputs_func, outputs_no_func)
 
         # check if the functionalization pass is applied
