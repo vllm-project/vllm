@@ -100,16 +100,16 @@ class AnthropicServingMessages(OpenAIServingChat):
         source_type = source.get("type")
         if source_type == "url":
             return source.get("url", "")
-        else:
-            # Default to base64 processing if type is "base64"
-            # or missing, ensuring a proper data URI is always
-            # constructed for non-URL sources.
-            media_type = source.get("media_type", "image/jpeg")
-            data = source.get("data", "")
-            return f"data:{media_type};base64,{data}"
+        # Default to base64 processing if type is "base64"
+        # or missing, ensuring a proper data URI is always
+        # constructed for non-URL sources.
+        media_type = source.get("media_type", "image/jpeg")
+        data = source.get("data", "")
+        return f"data:{media_type};base64,{data}"
 
+    @classmethod
     def _convert_anthropic_to_openai_request(
-        self, anthropic_request: AnthropicMessagesRequest
+        cls, anthropic_request: AnthropicMessagesRequest
     ) -> ChatCompletionRequest:
         """Convert Anthropic message format to OpenAI format"""
         openai_messages = []
@@ -141,7 +141,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                     if block.type == "text" and block.text:
                         content_parts.append({"type": "text", "text": block.text})
                     elif block.type == "image" and block.source:
-                        image_url = self._convert_image_source_to_url(block.source)
+                        image_url = cls._convert_image_source_to_url(block.source)
                         content_parts.append(
                             {
                                 "type": "image_url",
@@ -180,7 +180,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                         text_parts.append(item.get("text", ""))
                                     elif item_type == "image":
                                         source = item.get("source", {})
-                                        url = self._convert_image_source_to_url(source)
+                                        url = cls._convert_image_source_to_url(source)
                                         if url:
                                             tool_image_urls.append(url)
                                 tool_text = "\n".join(text_parts)
