@@ -10,7 +10,7 @@ from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import FastAPI, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
@@ -209,6 +209,29 @@ async def stream_service_response(
             yield chunk
 
 
+async def no_stream_service_response(
+    client_info: dict, endpoint: str, req_data: dict, request_id: str
+):
+    """
+    Send a non-streaming request to a service using a client from the pool.
+    Returns the complete JSON response.
+    """
+    headers = {
+        "Authorization": f"Bearer {os.environ.get('OPENAI_API_KEY')}",
+        "X-Request-Id": request_id,
+    }
+
+    response = await client_info["client"].post(
+        endpoint, json=req_data, headers=headers
+    )
+    response.raise_for_status()
+
+    result = response.json()
+    await response.aclose()
+
+    return result
+
+
 async def _handle_completions(api: str, request: Request):
     try:
         req_data = await request.json()
@@ -241,7 +264,17 @@ async def _handle_completions(api: str, request: Request):
             ):
                 yield chunk
 
-        return StreamingResponse(generate_stream(), media_type="application/json")
+        async def generate_no_stream():
+            return await no_stream_service_response(
+                decode_client_info, api, req_data, request_id=request_id
+            )
+
+        is_streaming = req_data.get("stream", False)
+
+        if is_streaming:
+            return StreamingResponse(generate_stream(), media_type="text/event-stream")
+        result = await generate_no_stream()
+        return JSONResponse(content=result)
 
     except Exception as e:
         import sys
