@@ -3,7 +3,6 @@
 
 import itertools
 from abc import abstractmethod
-from typing import Any
 
 import torch
 from torch.nn.parameter import Parameter, UninitializedParameter
@@ -131,44 +130,6 @@ def adjust_scalar_to_fused_array(
         loaded_weight = loaded_weight[0]
 
     return param_data[shard_id], loaded_weight
-
-
-# TODO(Isotr0py): We might need a more flexible structure to handle
-# bitsandbytes shard offsets.
-def left_shift_bitsandbytes_4bit_shard(
-    bnb_weight_attrs: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any]]:
-    """
-    Separate the BitsAndBytes 4-bit shard.
-
-    For example, given bnb weight attributes as below:
-    {
-        'bnb_shard_offsets': array([0, 4, 8, 16]),
-        'bnb_quant_state': {0: ..., 1: ..., 2: ...},
-    }
-
-    The function will return:
-    {
-        'bnb_shard_offsets': array([0, 4]),
-        'bnb_quant_state': {0: ...},
-    }
-    and
-    {
-        'bnb_shard_offsets': array([0, 4, 12]),
-        'bnb_quant_state': {0: ..., 1: ...},
-    }
-    """
-    shard_offsets = bnb_weight_attrs["bnb_shard_offsets"]
-    offset_l = shard_offsets[:2]
-    offset_r = shard_offsets[1:] - shard_offsets[1]
-    quant_state_l = {0: bnb_weight_attrs["bnb_quant_state"][0]}
-    quant_state_r = {
-        i - 1: bnb_weight_attrs["bnb_quant_state"][i]
-        for i in range(1, len(shard_offsets) - 1)
-    }
-    left = dict(bnb_shard_offsets=offset_l, bnb_quant_state=quant_state_l)
-    right = dict(bnb_shard_offsets=offset_r, bnb_quant_state=quant_state_r)
-    return left, right
 
 
 class LinearMethodBase(QuantizeMethodBase):
