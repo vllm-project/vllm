@@ -4,6 +4,7 @@ Deploying vLLM on Kubernetes is a scalable and efficient way to serve machine le
 
 - [Deployment with CPUs](#deployment-with-cpus)
 - [Deployment with GPUs](#deployment-with-gpus)
+- [Deployment with GPUs using Dynamic Resource Allocation (DRA)](#deployment-with-gpus-using-dynamic-resource-allocation-dra)
 - [Troubleshooting](#troubleshooting)
     - [Startup Probe or Readiness Probe Failure, container log contains "KeyboardInterrupt: terminated"](#startup-probe-or-readiness-probe-failure-container-log-contains-keyboardinterrupt-terminated)
 - [Conclusion](#conclusion)
@@ -385,6 +386,122 @@ INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
       ```
 
       If the service is correctly deployed, you should receive a response from the vLLM model.
+
+## Deployment with GPUs using Dynamic Resource Allocation (DRA)
+
+**Pre-requisite**: Kubernetes 1.31+ with [Dynamic Resource Allocation](https://kubernetes.io/docs/concepts/scheduling-eviction/dynamic-resource-allocation/) enabled and a DRA driver installed for your GPU vendor (e.g., [NVIDIA DRA driver](https://github.com/NVIDIA/k8s-dra-driver)). The core of DRA [graduated to stable](https://kubernetes.io/blog/2025/08/27/kubernetes-v1-34-release/#stable-the-core-of-dra-is-ga) in Kubernetes 1.34.
+
+DRA provides a more flexible alternative to the traditional `nvidia.com/gpu` resource limits for GPU allocation. Instead of requesting GPUs via resource limits, you create `ResourceClaimTemplate` objects that describe GPU requirements and reference them from your pod spec.
+
+1. Create a PVC, Secret, ResourceClaimTemplate, and Deployment for vLLM
+
+      The PVC and Secret are the same as in [Deployment with GPUs](#deployment-with-gpus).
+
+      Create a `ResourceClaimTemplate` that describes the GPU request:
+
+      <details>
+      <summary>Yaml</summary>
+
+      ```yaml
+      apiVersion: resource.k8s.io/v1
+      kind: ResourceClaimTemplate
+      metadata:
+        name: vllm-gpu
+        namespace: default
+      spec:
+        spec:
+          devices:
+            requests:
+            - name: gpu
+              deviceClassName: gpu.nvidia.com
+      ```
+
+      </details>
+
+      Create the Deployment. The key differences from the traditional approach are:
+
+      - `nvidia.com/gpu` is **removed** from `resources.requests` and `resources.limits`
+      - `resources.claims` references the GPU claim by name
+      - `resourceClaims` at the pod spec level binds the claim to the `ResourceClaimTemplate`
+
+      <details>
+      <summary>Yaml</summary>
+
+      ```yaml
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: mistral-7b
+        namespace: default
+        labels:
+          app: mistral-7b
+      spec:
+        replicas: 1
+        selector:
+          matchLabels:
+            app: mistral-7b
+        template:
+          metadata:
+            labels:
+              app: mistral-7b
+          spec:
+            containers:
+            - name: mistral-7b
+              image: vllm/vllm-openai:latest
+              command: ["/bin/sh", "-c"]
+              args: [
+                "vllm serve mistralai/Ministral-3-14B-Instruct-2512 --trust-remote-code --enable-chunked-prefill --max_num_batched_tokens 1024"
+              ]
+              env:
+              - name: HF_TOKEN
+                valueFrom:
+                  secretKeyRef:
+                    name: hf-token-secret
+                    key: token
+              ports:
+              - containerPort: 8000
+              resources:
+                limits:
+                  cpu: "10"
+                  memory: 20G
+                requests:
+                  cpu: "2"
+                  memory: 6G
+                claims:
+                - name: gpu
+              volumeMounts:
+              - mountPath: /root/.cache/huggingface
+                name: cache-volume
+              - name: shm
+                mountPath: /dev/shm
+              livenessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                initialDelaySeconds: 60
+                periodSeconds: 10
+              readinessProbe:
+                httpGet:
+                  path: /health
+                  port: 8000
+                initialDelaySeconds: 60
+                periodSeconds: 5
+            volumes:
+            - name: cache-volume
+              persistentVolumeClaim:
+                claimName: mistral-7b
+            - name: shm
+              emptyDir:
+                medium: Memory
+                sizeLimit: "2Gi"
+            resourceClaims:
+            - name: gpu
+              resourceClaimTemplateName: vllm-gpu
+      ```
+
+      </details>
+
+2. The Service and testing steps are the same as in [Deployment with GPUs](#deployment-with-gpus).
 
 ## Troubleshooting
 
