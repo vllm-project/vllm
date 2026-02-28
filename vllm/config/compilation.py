@@ -669,7 +669,7 @@ class CompilationConfig:
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
         "vllm::gdn_attention_core",
-        "vllm::olmo3_2_hybrid_gdn_attention_core",
+        "vllm::olmo_hybrid_gdn_attention_core",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
