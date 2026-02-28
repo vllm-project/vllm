@@ -330,26 +330,19 @@ def resolve_kv_cache_dtype_string(
     if kv_cache_dtype != "auto":
         return kv_cache_dtype
 
-    # 1) Prefer vLLM parsed model arch quantization config
-    model_arch_cfg = getattr(model_config, "model_arch_config", None)
-    if model_arch_cfg is not None:
-        quant_cfg = getattr(model_arch_cfg, "quantization_config", None)
+    # Check potential configuration sources in order of priority
+    sources = [
+        getattr(model_config, "model_arch_config", None),  # vLLM parsed config
+        getattr(model_config, "hf_config", None),  # HF fallback
+    ]
+
+    for cfg in sources:
+        quant_cfg = getattr(cfg, "quantization_config", None)
         if quant_cfg is not None:
             kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-            # Only return if we resolved to a real dtype string
-            if kv_algo_str is not None and kv_algo_str != "auto":
+            if kv_algo_str and kv_algo_str != "auto":
                 return kv_algo_str
 
-    # 2) Fallback to HF config quantization_config
-    hf_cfg = getattr(model_config, "hf_config", None)
-    if hf_cfg is not None:
-        quant_cfg = getattr(hf_cfg, "quantization_config", None)
-        if quant_cfg is not None:
-            kv_algo_str = get_kv_cache_quant_algo_string(quant_cfg)
-            if kv_algo_str is not None and kv_algo_str != "auto":
-                return kv_algo_str
-
-    # Default to auto (downstream will handle fallback to model dtype)
     return "auto"
 
 
