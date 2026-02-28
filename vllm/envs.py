@@ -243,6 +243,7 @@ if TYPE_CHECKING:
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
+    VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS: bool = False
 
 
 def get_default_cache_root():
@@ -1616,6 +1617,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Path to the CUDA compatibility libraries when CUDA compatibility is enabled.
     "VLLM_CUDA_COMPATIBILITY_PATH": lambda: os.environ.get(
         "VLLM_CUDA_COMPATIBILITY_PATH", None
+    ),
+    # If set to 1, enable CUDA graph memory estimation during memory profiling.
+    # This profiles CUDA graph memory usage to provide more accurate KV cache
+    # memory allocation. Disabled by default to preserve existing behavior.
+    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
+        int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0"))
     ),
 }
 

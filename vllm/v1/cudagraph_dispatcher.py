@@ -336,8 +336,11 @@ class CudagraphDispatcher:
         for mode in [CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]:
             descs = list(self.cudagraph_keys[mode])
             if descs:
-                # Sort by num_tokens descending (largest first)
-                descs.sort(key=lambda d: d.num_tokens, reverse=True)
+                # Sort by (num_tokens, num_active_loras) descending
+                descs.sort(
+                    key=lambda d: (d.num_tokens, d.num_active_loras),
+                    reverse=True,
+                )
                 result.append((mode, descs))
 
         return result

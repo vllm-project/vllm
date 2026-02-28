@@ -46,6 +46,7 @@ from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -371,8 +372,22 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
+            # Profile CUDA graph memory if graphs will be captured.
+            first_capture_memory = 0
+            graph_memory = 0
+            if (
+                not self.model_config.enforce_eager
+                and envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
+            ):
+                first_capture_memory, graph_memory = (
+                    self.model_runner.profile_cudagraph_memory()
+                )
+
         self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = profile_result.torch_peak_increase
+        self.peak_activation_memory = (
+            profile_result.torch_peak_increase + first_capture_memory
+        )
+        self.cudagraph_memory_estimate = first_capture_memory + graph_memory
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -387,7 +402,10 @@ class Worker(WorkerBase):
             "isolate vLLM in its own container."
         )
         self.available_kv_cache_memory_bytes = (
-            self.requested_memory - profile_result.non_kv_cache_memory
+            self.requested_memory
+            - profile_result.non_kv_cache_memory
+            - first_capture_memory
+            - graph_memory
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -502,6 +520,22 @@ class Worker(WorkerBase):
         cuda_graph_memory_bytes = 0
         if not self.model_config.enforce_eager:
             cuda_graph_memory_bytes = self.model_runner.capture_model()
+
+        # Compare actual vs estimated CUDA graph memory (if we did profiling)
+        if (
+            hasattr(self, "cudagraph_memory_estimate")
+            and self.cudagraph_memory_estimate > 0
+        ):
+            GiB = lambda b: round(b / GiB_bytes, 2)
+            diff = abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
+            logger.info(
+                "CUDA graph pool memory: %s GiB (actual), %s GiB (estimated), "
+                "difference: %s GiB (%.1f%%).",
+                GiB(cuda_graph_memory_bytes),
+                GiB(self.cudagraph_memory_estimate),
+                GiB(diff),
+                100 * diff / max(cuda_graph_memory_bytes, 1),
+            )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
