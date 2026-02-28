@@ -3,7 +3,7 @@
 """
 GPU integration tests for the Responses API WebSocket mode.
 
-These tests start a real vLLM server on GPU with facebook/opt-125m model
+These tests start a real vLLM server on GPU with Qwen/Qwen2-0.5B-Instruct model
 and exercise the WebSocket endpoint end-to-end: real GPU inference,
 real streaming events, real connection lifecycle.
 
@@ -15,7 +15,7 @@ Run:
 Requirements:
     - CUDA-capable GPU with >= 4GB VRAM
     - vLLM installed with CUDA support
-    - facebook/opt-125m model downloaded
+    - Qwen/Qwen2-0.5B-Instruct model downloaded
 
 Environment:
     CUDA_VISIBLE_DEVICES=0 pytest tests/entrypoints/openai/responses/test_websocket_gpu.py -v -s
@@ -383,9 +383,9 @@ async def test_warmup_then_real_request(server):
 async def test_response_has_usage(server):
     """Completed response includes usage with token counts."""
     ws_url = _get_ws_url(server)
-    async with websockets.connect(ws_url) as _ws:
-        await _send(_ws, _make_create_event(max_output_tokens=20))
-        events = await _collect_until_done(_ws)
+    async with websockets.connect(ws_url) as ws:
+        await _send(ws, _make_create_event(max_output_tokens=20))
+        events = await _collect_until_done(ws)
 
     completed = events[-1]
     assert completed["type"] == "response.completed"
