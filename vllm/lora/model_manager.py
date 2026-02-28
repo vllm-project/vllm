@@ -397,12 +397,16 @@ class LoRAModelManager:
                     ),
                 )
 
-            # In some models, especially multimodal ones, layers with the same
-            # name may have different types, such as nn.Linear and
-            # ReplicatedLinear. The nn.Linear layers cannot be replaced with
-            # LoRA layers, leading to assertion error. The following check
-            # aims to prevent this error
-            if self.supports_mm and not isinstance(new_module, BaseLayerWithLoRA):
+            # Some matched modules can be unsupported by LoRA wrappers
+            # (e.g. subclasses with specialized forward behavior). Skip them
+            # instead of asserting.
+            if not isinstance(new_module, BaseLayerWithLoRA):
+                logger.debug_once(
+                    "LoRA is not supported for module %s (%s). It will be ignored.",
+                    module_name,
+                    type(module).__name__,
+                    scope="local",
+                )
                 continue
             self.register_module(module_name, new_module)
 
