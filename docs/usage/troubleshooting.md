@@ -155,13 +155,14 @@ If you are testing with a single node, adjust `--nproc-per-node` to the number o
 NCCL_DEBUG=TRACE torchrun --nproc-per-node=<number-of-GPUs> test.py
 ```
 
-If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address of the master node, reachable from all nodes. Then, run:
+If you are testing with multi-nodes, adjust `--nproc-per-node` and `--nnodes` according to your setup and set `MASTER_ADDR` to the correct IP address of the master node, reachable from all nodes. Then, run on each node with the appropriate `--node_rank` (0 for master, 1 for the first worker, etc.):
 
 ```bash
 NCCL_DEBUG=TRACE torchrun --nnodes 2 \
     --nproc-per-node=2 \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=$MASTER_ADDR test.py
+    --rdzv_backend=static \
+    --rdzv_endpoint=$MASTER_ADDR:29500 \
+    --node_rank=$NODE_RANK test.py
 ```
 
 If the script runs successfully, you should see the message `sanity check is successful!`.
