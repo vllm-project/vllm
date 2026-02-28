@@ -40,7 +40,6 @@ from vllm.entrypoints.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.elastic_ep.middleware import (
     ScalingMiddleware,
 )
-from vllm.entrypoints.serve.fault_tolerance.middleware import FaultToleranceMiddleware
 from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
 from vllm.entrypoints.utils import (
     cli_env_setup,
@@ -264,11 +263,6 @@ def build_app(
 
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
-
-    if args.enable_fault_tolerance:
-        # Add fault-tolerance middleware to short-circuit requests when the
-        # engine's ClientSentinel reports a faulted state.
-        app.add_middleware(FaultToleranceMiddleware)
 
     if envs.VLLM_DEBUG_LOG_API_SERVER_RESPONSE:
         logger.warning(

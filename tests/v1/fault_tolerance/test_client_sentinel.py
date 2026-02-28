@@ -6,7 +6,6 @@ import socket
 import threading
 import time
 import traceback
-import uuid
 from queue import Queue
 
 import msgspec
@@ -16,12 +15,7 @@ import zmq
 from vllm.config import FaultToleranceConfig, ParallelConfig, VllmConfig
 from vllm.v1.engine import EngineStatusType
 from vllm.v1.fault_tolerance import ClientSentinel
-from vllm.v1.fault_tolerance.utils import (
-    FaultInfo,
-    FaultToleranceRequest,
-    FaultToleranceResult,
-    FaultToleranceZmqAddresses,
-)
+from vllm.v1.fault_tolerance.utils import FaultInfo, FaultToleranceZmqAddresses
 
 
 def _find_free_port() -> int:
@@ -32,12 +26,10 @@ def _find_free_port() -> int:
 
 @pytest.fixture
 def ft_addr():
-    ports = [_find_free_port() for _ in range(4)]
+    ports = [_find_free_port() for _ in range(2)]
     return FaultToleranceZmqAddresses(
         fault_state_pub_socket_addr=f"tcp://127.0.0.1:{ports[0]}",
-        client_sentinel_request_addr=f"tcp://127.0.0.1:{ports[1]}",
-        engine_core_sentinel_cmd_addr=f"tcp://127.0.0.1:{ports[2]}",
-        engine_fault_socket_addr=f"tcp://127.0.0.1:{ports[3]}",
+        engine_fault_socket_addr=f"tcp://127.0.0.1:{ports[1]}",
         engine_core_sentinel_identities={0: b"engine_sentinel_identity"},
     )
 
@@ -70,12 +62,10 @@ def send_error_message(
 
 def create_client_sentinel(num_engines: int = 2, ft_addr=None):
     if ft_addr is None:
-        ports = [_find_free_port() for _ in range(4)]
+        ports = [_find_free_port() for _ in range(2)]
         ft_addr = FaultToleranceZmqAddresses(
             fault_state_pub_socket_addr=f"tcp://127.0.0.1:{ports[0]}",
-            client_sentinel_request_addr=f"tcp://127.0.0.1:{ports[1]}",
-            engine_core_sentinel_cmd_addr=f"tcp://127.0.0.1:{ports[2]}",
-            engine_fault_socket_addr=f"tcp://127.0.0.1:{ports[3]}",
+            engine_fault_socket_addr=f"tcp://127.0.0.1:{ports[1]}",
             engine_core_sentinel_identities={
                 i: f"engine_sentinel_identity_{i}".encode() for i in range(num_engines)
             },
@@ -91,7 +81,11 @@ def create_client_sentinel(num_engines: int = 2, ft_addr=None):
         fault_tolerance_config=FaultToleranceConfig(enable_fault_tolerance=True),
     )
 
-    return ClientSentinel(vllm_config=vconfig, fault_tolerance_addresses=ft_addr)
+    return ClientSentinel(
+        vllm_config=vconfig,
+        fault_tolerance_addresses=ft_addr,
+        shutdown_callback=lambda: None,
+    )
 
 
 def test_client_sentinel_initialization(ft_addr):
@@ -104,7 +98,6 @@ def test_client_sentinel_initialization(ft_addr):
     assert not sentinel.sentinel_dead
     assert sentinel.engine_status_dict[0]["status"] == EngineStatusType.HEALTHY
     assert sentinel.fault_receiver_socket.type == zmq.ROUTER
-    assert sentinel.downstream_cmd_socket.type == zmq.ROUTER
     assert sentinel.fault_state_pub_socket.type == zmq.PUB
 
     sentinel.shutdown()
@@ -132,13 +125,11 @@ def test_client_sentinel_receives_faults_and_publishes_status(ft_addr):
             )
             # Consume the first published status update (after the first fault)
             # without validating it here; this test only asserts on the final state
-            decode_published_message(sub_socket)
             prefix, status_dict = decode_published_message(sub_socket)
             sub_socket.close()
             ctx.term()
             assert prefix == sentinel.ft_config.fault_state_pub_topic
             assert status_dict[1]["status"] == EngineStatusType.DEAD
-            assert status_dict[0]["status"] == EngineStatusType.UNHEALTHY
         except Exception:
             thread_excs.put(traceback.format_exc())
 
@@ -152,18 +143,12 @@ def test_client_sentinel_receives_faults_and_publishes_status(ft_addr):
         daemon=True,
     ).start()
     time.sleep(0.1)
-    threading.Thread(
-        target=send_error_message,
-        args=(ft_addr.engine_fault_socket_addr, "0", "RuntimeError", thread_excs),
-        daemon=True,
-    ).start()
 
     t1.join()
     fail_on_thread_exceptions(thread_excs)
 
     # Verify engine_status_dict updated
     assert sentinel.engine_status_dict[1]["status"] == EngineStatusType.DEAD
-    assert sentinel.engine_status_dict[0]["status"] == EngineStatusType.UNHEALTHY
 
     sentinel.shutdown()
 
@@ -172,9 +157,7 @@ def test_shutdown_sentinel(ft_addr):
     sentinel = create_client_sentinel(ft_addr=ft_addr)
 
     original_fault_sock = sentinel.fault_receiver_socket
-    original_cmd_sock = sentinel.downstream_cmd_socket
     original_pub_sock = sentinel.fault_state_pub_socket
-    original_ctx = sentinel.ctx
 
     sentinel.shutdown()
 
@@ -183,82 +166,4 @@ def test_shutdown_sentinel(ft_addr):
     with pytest.raises(zmq.ZMQError):
         original_fault_sock.recv()
     with pytest.raises(zmq.ZMQError):
-        original_cmd_sock.recv()
-    with pytest.raises(zmq.ZMQError):
         original_pub_sock.send(b"test")
-
-    assert original_ctx.closed
-
-
-@pytest.mark.parametrize("instruction", ["pause", "retry"])
-def test_handle_fault_roundtrip(instruction, ft_addr):
-    """Test the full FaultToleranceRequest -> engine -> FaultToleranceResult flow
-    by talking to the sentinel's ROUTER endpoints using msgpack-encoded
-    FaultToleranceRequest/Result messages.
-    """
-    sentinel = create_client_sentinel(num_engines=1, ft_addr=ft_addr)
-    thread_excs: Queue = Queue()
-
-    # Start a DEALER that will act as the downstream engine sentinel.
-    engine_ctx = zmq.Context()
-    engine_socket = engine_ctx.socket(zmq.DEALER)
-    engine_socket.setsockopt(zmq.IDENTITY, ft_addr.engine_core_sentinel_identities[0])
-    engine_socket.connect(ft_addr.engine_core_sentinel_cmd_addr)
-
-    # Create a client DEALER that will send the FaultToleranceRequest to ClientSentinel
-    client_ctx = zmq.Context()
-    client_socket = client_ctx.socket(zmq.DEALER)
-    client_socket.setsockopt(zmq.IDENTITY, b"test_client")
-    client_socket.connect(ft_addr.client_sentinel_request_addr)
-
-    # Prepare the fault tolerance request
-    req_id = str(uuid.uuid4())
-    params = {"timeout": 3}
-    if instruction == "pause":
-        params["soft_pause"] = True
-    else:
-        params["new_stateless_dp_group_port"] = 12568
-
-    ft_req = FaultToleranceRequest(
-        request_id=req_id, instruction=instruction, params=params
-    )
-
-    def engine_loop():
-        try:
-            if not engine_socket.poll(timeout=2000):
-                raise TimeoutError(
-                    "Timeout waiting for FaultToleranceRequest from client sentinel"
-                )
-            parts = engine_socket.recv_multipart()
-            received = msgspec.msgpack.decode(parts[-1], type=FaultToleranceRequest)
-            assert received.instruction in ("pause", "retry")
-            # reply with success
-            res = FaultToleranceResult(
-                request_id=received.request_id, success=True, reason=None
-            )
-            engine_socket.send_multipart([b"", msgspec.msgpack.encode(res)])
-        except Exception:
-            thread_excs.put(traceback.format_exc())
-
-    threading.Thread(target=engine_loop, daemon=True).start()
-    client_socket.send_multipart([b"", msgspec.msgpack.encode(ft_req)])
-
-    # Wait for reply from ClientSentinel on client_socket
-    if not client_socket.poll(timeout=2000):
-        pytest.fail("Timeout waiting for FaultToleranceResult from client sentinel.")
-    parts = client_socket.recv_multipart()
-    ft_res = msgspec.msgpack.decode(parts[-1], type=FaultToleranceResult)
-    assert ft_res.request_id == req_id
-    assert ft_res.success is True
-    if instruction == "pause":
-        assert sentinel.engine_status_dict[0]["status"] == EngineStatusType.PAUSED
-    elif instruction == "retry":
-        assert sentinel.engine_status_dict[0]["status"] == EngineStatusType.HEALTHY
-
-    fail_on_thread_exceptions(thread_excs)
-    client_socket.close()
-    client_ctx.term()
-    engine_socket.close()
-    engine_ctx.term()
-
-    sentinel.shutdown()

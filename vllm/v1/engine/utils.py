@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import contextlib
 import os
 import uuid
@@ -415,7 +416,6 @@ class CoreEngineActorManager:
                     local_dp_rank=local_index,
                 )
             )
-
             if local_client:
                 self.local_engine_actors.append(actor)
             else:
@@ -932,7 +932,7 @@ def launch_core_engines(
 
     if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
         addresses.fault_tolerance_addresses = FaultToleranceZmqAddresses.build(
-            host, local_engines_only, dp_size, vllm_config.fault_tolerance_config
+            host, dp_size, vllm_config.fault_tolerance_config
         )
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.

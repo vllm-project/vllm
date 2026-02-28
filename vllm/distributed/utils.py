@@ -28,7 +28,6 @@ from torch.distributed.distributed_c10d import (
 from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
-from vllm.config import FaultToleranceConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_tcp_uri
 from vllm.utils.system_utils import suppress_stdout
@@ -449,12 +448,7 @@ def init_gloo_process_group(
 
 
 def stateless_init_torch_distributed_process_group(
-    host: str,
-    port: int,
-    rank: int,
-    world_size: int,
-    backend: str,
-    fault_tolerance_config: FaultToleranceConfig | None = None,
+    host: str, port: int, rank: int, world_size: int, backend: str
 ) -> ProcessGroup:
     """
     A replacement for `torch.distributed.init_process_group` that does not
@@ -489,14 +483,7 @@ def stateless_init_torch_distributed_process_group(
     """
     init_method = get_tcp_uri(host, port)
     backend = Backend(backend)  # it is basically string
-
-    if (
-        fault_tolerance_config is not None
-        and fault_tolerance_config.enable_fault_tolerance
-    ):
-        timeout = timedelta(seconds=fault_tolerance_config.gloo_comm_timeout)
-    else:
-        timeout = _get_default_timeout(backend)
+    timeout = _get_default_timeout(backend)
 
     store, rank, world_size = next(
         rendezvous(init_method, rank, world_size, timeout=timeout)

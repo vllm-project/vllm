@@ -16,12 +16,3 @@ class EngineDeadError(Exception):
         # Make stack trace clearer when using with LLMEngine by
         # silencing irrelevant ZMQError.
         self.__suppress_context__ = suppress_context
-
-
-class EngineLoopPausedError(Exception):
-    """
-    Raised when the EngineCore loop is temporarily paused on purpose,
-    e.g., to handle fault-tolerance.
-    """
-
-    pass

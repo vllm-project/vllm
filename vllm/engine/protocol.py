@@ -19,11 +19,8 @@ from vllm.pooling_params import PoolingParams
 from vllm.renderers import BaseRenderer
 from vllm.sampling_params import SamplingParams
 from vllm.tasks import SupportedTask
-from vllm.v1.engine import (
-    EngineCoreRequest,
-)
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.input_processor import InputProcessor
-from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 
 if TYPE_CHECKING:
     from vllm.v1.engine import PauseMode
@@ -217,12 +214,6 @@ class EngineClient(ABC):
         kwargs: dict | None = None,
     ):
         """Perform a collective RPC call to the given path."""
-        raise NotImplementedError
-
-    async def handle_fault(
-        self, fault_tolerance_request: FaultToleranceRequest
-    ) -> FaultToleranceResult:
-        """send fault tolerance instruction to the engine"""
         raise NotImplementedError
 
     async def get_fault_info(self):
