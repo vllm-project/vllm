@@ -85,7 +85,7 @@ class CPUWorker(Worker):
             self.local_omp_cpuid = omp_cpuids_list[self.rank]
 
         if self.local_omp_cpuid != "nobind":
-            ret = torch.ops._C_utils.init_cpu_threads_env(self.local_omp_cpuid)
+            ret = torch.ops._C.init_cpu_threads_env(self.local_omp_cpuid)
             if ret:
                 logger.info(ret)
 
