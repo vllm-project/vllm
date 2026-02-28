@@ -19,7 +19,9 @@ ENV PT_HPU_ENABLE_LAZY_COLLECTIVES=true
 
 RUN bash -c 'pip install -r <(sed "/^torch/d" requirements/build.txt)'
 RUN VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
-RUN pip install git+https://github.com/vllm-project/vllm-gaudi.git
+RUN pip install \
+    git+https://github.com/vllm-project/vllm-gaudi.git \
+    --no-deps torchaudio
 
 # install development dependencies (for testing)
 RUN python3 -m pip install -e tests/vllm_test_utils
