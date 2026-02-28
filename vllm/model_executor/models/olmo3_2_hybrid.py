@@ -1,3 +1,6 @@
+
+
+
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
@@ -66,6 +69,8 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.mamba.abstract import MambaBase
 from vllm.model_executor.layers.mamba.mamba_utils import (
+    MambaStateCopyFunc,
+    MambaStateCopyFuncCalculator,
     MambaStateDtypeCalculator,
     MambaStateShapeCalculator,
 )
@@ -308,6 +313,10 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
                 device=current_platform.current_device(),
                 dtype=config.torch_dtype if hasattr(config, "torch_dtype") else None,
             )
+            # RMSNormGated.forward_cuda references self.activation but __init__
+            # doesn't define it; set it here to match the default in rmsnorm_fn.
+            self.o_norm.activation = "swish"
+            self.o_norm.forward_cuda = self.o_norm.forward_native
         else:
             self.o_norm = RMSNorm(
                 self.head_v_dim,
@@ -591,7 +600,6 @@ class Olmo3_2HybridGatedDeltaNet(nn.Module, MambaBase):
                 initial_state=initial_state,
                 output_final_state=True,
                 cu_seqlens=non_spec_query_start_loc,
-                head_first=False,
                 use_qk_l2norm_in_kernel=False,
             )
             ssm_state[non_spec_state_indices_tensor] = last_recurrent_state.to(
@@ -856,7 +864,6 @@ class Olmo3_2HybridDecoderLayer(nn.Module):
             hidden_states = self.mlp(hidden_states)
             hidden_states = self.post_feedforward_layernorm(hidden_states)
             hidden_states = residual + hidden_states
-
         return hidden_states
 
 
@@ -1075,6 +1082,10 @@ class Olmo3_2HybridForCausalLM(
             hf_config.linear_conv_kernel_dim,
             num_spec,
         )
+
+    @classmethod
+    def get_mamba_state_copy_func(cls) -> tuple[MambaStateCopyFunc, MambaStateCopyFunc]:
+        return MambaStateCopyFuncCalculator.gated_delta_net_state_copy_func()
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
         loader = AutoWeightsLoader(
