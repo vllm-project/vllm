@@ -168,6 +168,7 @@ class RenderServicer(render_pb2_grpc.RenderServiceServicer):
             )
 
         except Exception as e:
+            logger.exception("RenderChat failed")
             await context.abort(
                 grpc.StatusCode.INTERNAL,
                 f"RenderChat failed: {e}",
