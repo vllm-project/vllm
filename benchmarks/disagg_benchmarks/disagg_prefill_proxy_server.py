@@ -132,7 +132,7 @@ def main():
         payload: dict,
         headers: dict[str, str],
         request_id: str,
-    ):
+    ) -> dict:
         url = f"{PREFILL_BASE}{request_path}"
         start_ts = time.perf_counter()
         logger.info("[prefill] start request_id=%s url=%s", request_id, url)
@@ -146,13 +146,14 @@ def main():
                     raise RuntimeError(
                         f"Prefill backend error {resp.status}: {error_text}"
                     )
-                await resp.read()
+                response_data = await resp.json()
                 logger.info(
                     "[prefill] done request_id=%s status=%s elapsed=%.2fs",
                     request_id,
                     resp.status,
                     time.perf_counter() - start_ts,
                 )
+                return response_data
         except asyncio.TimeoutError as exc:
             raise RuntimeError(f"Prefill service timeout at {url}") from exc
         except aiohttp.ClientError as exc:
@@ -203,29 +204,31 @@ def main():
         try:
             original_request_data = await request.get_json()
 
-            # Create prefill request (max_tokens=1)
             prefill_request = original_request_data.copy()
             prefill_request["max_tokens"] = 1
+            prefill_request["stream"] = False
             if "max_completion_tokens" in prefill_request:
                 prefill_request["max_completion_tokens"] = 1
+            prefill_request["kv_transfer_params"] = {
+                "remote_kv_addr": DECODE_KV_ADDR,
+            }
 
-            # Execute prefill stage
-            # The request id encodes both KV socket addresses so the backend can
-            # shuttle tensors directly via NCCL once the prefill response
-            # completes.
-            request_id = (
-                f"___prefill_addr_{PREFILL_KV_ADDR}___decode_addr_"
-                f"{DECODE_KV_ADDR}_{uuid.uuid4().hex}"
-            )
+            request_id = str(uuid.uuid4())
 
             headers = _build_headers(request_id)
-            await _run_prefill(request.path, prefill_request, headers, request_id)
+            prefill_response = await _run_prefill(
+                request.path, prefill_request, headers, request_id
+            )
 
-            # Execute decode stage and stream response
-            # Pass the unmodified user request so the decode phase can continue
-            # sampling with the already-populated KV cache.
+            kv_transfer_params = prefill_response.get("kv_transfer_params", {})
+            logger.info("[proxy] kv_transfer_params: %s", kv_transfer_params)
+
+            decode_request = original_request_data.copy()
+            if kv_transfer_params:
+                decode_request["kv_transfer_params"] = kv_transfer_params
+
             generator = _stream_decode(
-                request.path, original_request_data, headers, request_id
+                request.path, decode_request, headers, request_id
             )
             response = await make_response(generator)
             response.timeout = None  # Disable timeout for streaming response
