@@ -984,6 +984,7 @@ class rocm_aiter_ops:
     _AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
     _LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
     _RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
+    _SAMPLING_ENABLED = envs.VLLM_ROCM_USE_AITER_SAMPLING
     _FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
     _MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
     _MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -1012,6 +1013,7 @@ class rocm_aiter_ops:
         cls._AITER_ENABLED = envs.VLLM_ROCM_USE_AITER
         cls._LINEAR_ENABLED = envs.VLLM_ROCM_USE_AITER_LINEAR
         cls._RMSNORM_ENABLED = envs.VLLM_ROCM_USE_AITER_RMSNORM
+        cls._SAMPLING_ENABLED = envs.VLLM_ROCM_USE_AITER_SAMPLING
         cls._FMOE_ENABLED = envs.VLLM_ROCM_USE_AITER_MOE
         cls._MLA_ENABLED = envs.VLLM_ROCM_USE_AITER_MLA
         cls._MHA_ENABLED = envs.VLLM_ROCM_USE_AITER_MHA
@@ -1107,6 +1109,11 @@ class rocm_aiter_ops:
     @if_aiter_supported
     def is_rmsnorm_enabled(cls) -> bool:
         return cls._AITER_ENABLED and cls._RMSNORM_ENABLED
+
+    @classmethod
+    @if_aiter_supported
+    def is_sampling_enabled(cls) -> bool:
+        return cls._AITER_ENABLED and cls._SAMPLING_ENABLED
 
     @classmethod
     @if_aiter_supported
