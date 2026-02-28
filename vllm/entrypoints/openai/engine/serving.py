@@ -95,7 +95,7 @@ from vllm.entrypoints.serve.tokenize.protocol import (
     TokenizeResponse,
 )
 from vllm.entrypoints.utils import get_max_tokens, sanitize_message
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMContentTooLargeError, VLLMValidationError
 from vllm.inputs.data import (
     ProcessorInputs,
     PromptType,
@@ -620,9 +620,11 @@ class OpenAIServing:
         if isinstance(message, Exception):
             exc = message
 
-            from vllm.exceptions import VLLMValidationError
-
-            if isinstance(exc, VLLMValidationError):
+            if isinstance(exc, VLLMContentTooLargeError):
+                err_type = "ContentTooLargeError"
+                status_code = HTTPStatus.REQUEST_ENTITY_TOO_LARGE
+                param = exc.parameter
+            elif isinstance(exc, VLLMValidationError):
                 err_type = "BadRequestError"
                 status_code = HTTPStatus.BAD_REQUEST
                 param = exc.parameter
@@ -843,7 +845,7 @@ class OpenAIServing:
                     ClassificationChatRequest: "classification",
                 }
                 operation = operations.get(type(request), "embedding generation")
-                raise VLLMValidationError(
+                raise VLLMContentTooLargeError(
                     f"This model's maximum context length is "
                     f"{max_model_len} tokens. However, you requested "
                     f"{token_num} tokens in the input for {operation}. "
@@ -871,7 +873,7 @@ class OpenAIServing:
         # Note: input length can be up to model context length - 1 for
         # completion-like requests.
         if token_num >= max_model_len:
-            raise VLLMValidationError(
+            raise VLLMContentTooLargeError(
                 f"This model's maximum context length is "
                 f"{max_model_len} tokens. However, your request has "
                 f"{token_num} input tokens. Please reduce the length of "
@@ -881,7 +883,7 @@ class OpenAIServing:
             )
 
         if max_tokens is not None and token_num + max_tokens > max_model_len:
-            raise VLLMValidationError(
+            raise VLLMContentTooLargeError(
                 "'max_tokens' or 'max_completion_tokens' is too large: "
                 f"{max_tokens}. This model's maximum context length is "
                 f"{max_model_len} tokens and your request has "
