@@ -69,7 +69,7 @@ In addition, we have the following custom APIs:
 - [Pooling API](#pooling-api) (`/pooling`)
     - Applicable to all [pooling models](../models/pooling_models.md).
 - [Classification API](#classification-api) (`/classify`)
-    - Only applicable to [classification models](../models/pooling/classfiy.md).
+    - Only applicable to [classification models](../models/pooling/classify.md).
 - [Score API](#score-api) (`/score`)
     - Applicable to [embedding models and cross-encoder models](../models/pooling_models.md).
 - [Re-rank API](#re-rank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
