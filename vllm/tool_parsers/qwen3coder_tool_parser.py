@@ -62,8 +62,10 @@ class Qwen3CoderToolParser(ToolParser):
         self.tool_call_function_regex = re.compile(
             r"<function=(.*?)</function>|<function=(.*)$", re.DOTALL
         )
+        # Match parameters using structural boundaries instead of </parameter> tag
+        # This allows </parameter> to appear in parameter content
         self.tool_call_parameter_regex = re.compile(
-            r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)",
+            r"<parameter=(.*?)(?:(?=<parameter=)|(?=</function>)|$)",
             re.DOTALL,
         )
 
@@ -247,16 +249,24 @@ class Qwen3CoderToolParser(ToolParser):
         function_name = function_call_str[:end_index]
         param_config = self._get_arguments_config(function_name, tools)
         parameters = function_call_str[end_index + 1 :]
+
         param_dict = {}
-        for match_text in self.tool_call_parameter_regex.findall(parameters):
+        matches = self.tool_call_parameter_regex.findall(parameters)
+
+        for match_text in matches:
             idx = match_text.index(">")
             param_name = match_text[:idx]
             param_value = str(match_text[idx + 1 :])
-            # Remove prefix and trailing \n
+
+            # Remove prefix and trailing \n first
             if param_value.startswith("\n"):
                 param_value = param_value[1:]
             if param_value.endswith("\n"):
                 param_value = param_value[:-1]
+
+            # Strip trailing </parameter> tag if present (since we use structural boundaries)
+            # Use regex to handle any whitespace around it
+            param_value = re.sub(r'\s*</parameter>\s*$', '', param_value)
 
             param_dict[param_name] = self._convert_param_value(
                 param_value, param_name, param_config, function_name
@@ -527,55 +537,8 @@ class Qwen3CoderToolParser(ToolParser):
             if not self.json_started:
                 self.json_started = True
 
-            # Check for function end in accumulated text
-            if not self.json_closed and self.function_end_token in tool_text:
-                # Close JSON
-                self.json_closed = True
-
-                # Extract complete tool call to update
-                # prev_tool_call_arr with final arguments
-                # Find the function content
-                func_start = tool_text.find(self.tool_call_prefix) + len(
-                    self.tool_call_prefix
-                )
-                func_content_end = tool_text.find(self.function_end_token, func_start)
-                if func_content_end != -1:
-                    func_content = tool_text[func_start:func_content_end]
-                    # Parse to get the complete arguments
-                    try:
-                        parsed_tool = self._parse_xml_function_call(
-                            func_content,
-                            self.streaming_request.tools
-                            if self.streaming_request
-                            else None,
-                        )
-                        if parsed_tool:
-                            # Update existing entry in
-                            # prev_tool_call_arr with complete args
-                            for i, tool in enumerate(self.prev_tool_call_arr):
-                                if tool.get("name") == parsed_tool.function.name:
-                                    args = parsed_tool.function.arguments
-                                    self.prev_tool_call_arr[i]["arguments"] = args
-                                    break
-                    except Exception:
-                        pass  # Ignore parsing errors during streaming
-
-                result = DeltaMessage(
-                    tool_calls=[
-                        DeltaToolCall(
-                            index=self.current_tool_index,
-                            function=DeltaFunctionCall(arguments="}"),
-                        )
-                    ]
-                )
-
-                # Reset state for next tool
-                self.in_function = False
-                self.json_closed = True
-                self.accumulated_params = {}
-
-                return result
-
+            # Process parameters BEFORE checking for function end,
+            # so that parameters are emitted before the closing '}'
             # Look for parameters
             # Find all parameter starts
             param_starts = []
@@ -609,41 +572,96 @@ class Qwen3CoderToolParser(ToolParser):
                     if value_text.startswith("\n"):
                         value_text = value_text[1:]
 
-                    # Find where this parameter ends
-                    param_end_idx = value_text.find(self.parameter_end_token)
+                    # Find where this parameter ends using lookahead
+                    # to distinguish real </parameter> from embedded ones.
+                    # A real closing tag is followed by a structural
+                    # boundary (<parameter=, </function>, </tool_call>).
+                    # An embedded one is followed by more content.
+                    param_end_idx = -1
+                    search_pos = 0
+                    while True:
+                        candidate = value_text.find(
+                            self.parameter_end_token, search_pos
+                        )
+                        if candidate == -1:
+                            break
+
+                        after = candidate + len(self.parameter_end_token)
+                        remainder = value_text[after:].lstrip()
+
+                        if not remainder:
+                            # Nothing after this tag yet
+                            if (
+                                self.function_end_token in tool_text
+                                or self.tool_call_end_token in tool_text
+                            ):
+                                # Function/tool is complete, so this
+                                # must be the real closing tag
+                                param_end_idx = candidate
+                                break
+                            else:
+                                # Still streaming, can't confirm yet
+                                return None
+                        elif (
+                            remainder.startswith(self.parameter_prefix)
+                            or remainder.startswith(self.function_end_token)
+                            or remainder.startswith(
+                                self.tool_call_end_token
+                            )
+                        ):
+                            # Followed by structural boundary - real tag
+                            param_end_idx = candidate
+                            break
+                        else:
+                            # Followed by more content - embedded tag
+                            search_pos = after
+                            continue
+
                     if param_end_idx == -1:
-                        # No closing tag, look for next parameter or
-                        # function end
-                        next_param_idx = value_text.find(self.parameter_prefix)
-                        func_end_idx = value_text.find(self.function_end_token)
+                        # No confirmed </parameter>, use structural
+                        # boundaries as fallback
+                        next_param_idx = value_text.find(
+                            self.parameter_prefix
+                        )
+                        func_end_idx = value_text.find(
+                            self.function_end_token
+                        )
 
                         if next_param_idx != -1 and (
-                            func_end_idx == -1 or next_param_idx < func_end_idx
+                            func_end_idx == -1
+                            or next_param_idx < func_end_idx
                         ):
                             param_end_idx = next_param_idx
                         elif func_end_idx != -1:
                             param_end_idx = func_end_idx
                         else:
-                            # Neither found, check if tool call is complete
+                            # Neither found, check if tool call
+                            # is complete
                             if self.tool_call_end_token in tool_text:
-                                # Tool call is complete, so parameter
-                                # must be complete too. Use all
-                                # remaining text before function end
                                 param_end_idx = len(value_text)
                             else:
-                                # Still streaming, wait for more content
+                                # Still streaming, wait for more
                                 return None
 
                     if param_end_idx != -1:
                         # Complete parameter found
                         param_value = value_text[:param_end_idx]
+
+                        # Strip trailing </parameter> if present
+                        param_value = re.sub(
+                            r'\s*</parameter>\s*$', '', param_value
+                        )
+
                         if param_value.endswith("\n"):
                             param_value = param_value[:-1]
 
                         # Store raw value for later processing
-                        self.accumulated_params[self.current_param_name] = param_value
+                        self.accumulated_params[
+                            self.current_param_name
+                        ] = param_value
 
-                        # Get parameter configuration for type conversion
+                        # Get parameter configuration for type
+                        # conversion
                         param_config = self._get_arguments_config(
                             self.current_function_name or "",
                             self.streaming_request.tools
@@ -659,19 +677,20 @@ class Qwen3CoderToolParser(ToolParser):
                             self.current_function_name or "",
                         )
 
-                        # Build JSON fragment based on the converted type
-                        # Use json.dumps to properly serialize the value
+                        # Build JSON fragment
                         serialized_value = json.dumps(
                             converted_value, ensure_ascii=False
                         )
 
                         if self.param_count == 0:
                             json_fragment = (
-                                f'"{self.current_param_name}": {serialized_value}'
+                                f'"{self.current_param_name}":'
+                                f" {serialized_value}"
                             )
                         else:
                             json_fragment = (
-                                f', "{self.current_param_name}": {serialized_value}'
+                                f', "{self.current_param_name}":'
+                                f" {serialized_value}"
                             )
 
                         self.param_count += 1
@@ -680,10 +699,66 @@ class Qwen3CoderToolParser(ToolParser):
                             tool_calls=[
                                 DeltaToolCall(
                                     index=self.current_tool_index,
-                                    function=DeltaFunctionCall(arguments=json_fragment),
+                                    function=DeltaFunctionCall(
+                                        arguments=json_fragment
+                                    ),
                                 )
                             ]
                         )
+
+            # Check for function end AFTER parameter processing
+            if not self.json_closed and self.function_end_token in tool_text:
+                # Close JSON
+                self.json_closed = True
+
+                # Extract complete tool call to update
+                # prev_tool_call_arr with final arguments
+                func_start = tool_text.find(self.tool_call_prefix) + len(
+                    self.tool_call_prefix
+                )
+                func_content_end = tool_text.find(
+                    self.function_end_token, func_start
+                )
+                if func_content_end != -1:
+                    func_content = tool_text[func_start:func_content_end]
+                    try:
+                        parsed_tool = self._parse_xml_function_call(
+                            func_content,
+                            self.streaming_request.tools
+                            if self.streaming_request
+                            else None,
+                        )
+                        if parsed_tool:
+                            for i, tool in enumerate(
+                                self.prev_tool_call_arr
+                            ):
+                                if (
+                                    tool.get("name")
+                                    == parsed_tool.function.name
+                                ):
+                                    args = parsed_tool.function.arguments
+                                    self.prev_tool_call_arr[i][
+                                        "arguments"
+                                    ] = args
+                                    break
+                    except Exception as e:
+                        logger.debug("Failed to re-parse function call for final arguments: %s", e)
+
+                result = DeltaMessage(
+                    tool_calls=[
+                        DeltaToolCall(
+                            index=self.current_tool_index,
+                            function=DeltaFunctionCall(arguments="}"),
+                        )
+                    ]
+                )
+
+                # Reset state for next tool
+                self.in_function = False
+                self.json_closed = True
+                self.accumulated_params = {}
+
+                return result
 
             # Continue parameter value - Not used in the current implementation
             # since we process complete parameters above
