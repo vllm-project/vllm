@@ -8,6 +8,8 @@ from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from vllm.entrypoints.anthropic.protocol import (
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicError,
     AnthropicErrorResponse,
     AnthropicMessagesRequest,
@@ -86,6 +88,58 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
         return JSONResponse(content=resp)
 
     return StreamingResponse(content=generator, media_type="text/event-stream")
+
+
+@router.post(
+    "/v1/messages/count_tokens",
+    dependencies=[Depends(validate_json_request)],
+    responses={
+        HTTPStatus.OK.value: {"model": AnthropicCountTokensResponse},
+        HTTPStatus.BAD_REQUEST.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.NOT_FOUND.value: {"model": AnthropicErrorResponse},
+        HTTPStatus.INTERNAL_SERVER_ERROR.value: {"model": AnthropicErrorResponse},
+    },
+)
+@load_aware_call
+@with_cancellation
+async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Request):
+    def translate_error_response(response: ErrorResponse) -> JSONResponse:
+        anthropic_error = AnthropicErrorResponse(
+            error=AnthropicError(
+                type=response.error.type,
+                message=response.error.message,
+            )
+        )
+        return JSONResponse(
+            status_code=response.error.code, content=anthropic_error.model_dump()
+        )
+
+    handler = messages(raw_request)
+    if handler is None:
+        base_server = raw_request.app.state.openai_serving_tokenization
+        error = base_server(raw_request).create_error_response(
+            message="The model does not support Messages API"
+        )
+        return translate_error_response(error)
+
+    try:
+        response = await handler.count_tokens(request, raw_request)
+    except Exception as e:
+        logger.exception("Error in count_tokens: %s", e)
+        return JSONResponse(
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+            content=AnthropicErrorResponse(
+                error=AnthropicError(
+                    type="internal_error",
+                    message=str(e),
+                )
+            ).model_dump(),
+        )
+
+    if isinstance(response, ErrorResponse):
+        return translate_error_response(response)
+
+    return JSONResponse(content=response.model_dump(exclude_none=True))
 
 
 def attach_router(app: FastAPI):

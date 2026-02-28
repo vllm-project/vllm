@@ -12,11 +12,15 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
+import jinja2
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicContentBlock,
+    AnthropicContextManagement,
+    AnthropicCountTokensRequest,
+    AnthropicCountTokensResponse,
     AnthropicDelta,
     AnthropicError,
     AnthropicMessagesRequest,
@@ -670,3 +674,36 @@ class AnthropicServingMessages(OpenAIServingChat):
             data = error_response.model_dump_json(exclude_unset=True)
             yield wrap_data_with_event(data, "error")
             yield "data: [DONE]\n\n"
+
+    async def count_tokens(
+        self,
+        request: AnthropicCountTokensRequest,
+        raw_request: Request | None = None,
+    ) -> AnthropicCountTokensResponse | ErrorResponse:
+        """Implements Anthropic's messages.count_tokens endpoint."""
+
+        chat_req = self._convert_anthropic_to_openai_request(request)
+        chat_req.stream = False
+        chat_req.stream_options = None
+        chat_req.max_tokens = None
+        chat_req.max_completion_tokens = None
+        result = await self.render_chat_request(chat_req)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        _, engine_prompts = result
+
+        input_tokens = sum(
+            len(prompt["prompt_token_ids"])
+            for prompt in engine_prompts
+            if "prompt_token_ids" in prompt
+        )
+
+        response = AnthropicCountTokensResponse(
+            input_tokens=input_tokens,
+            context_management=AnthropicContextManagement(
+                original_input_tokens=input_tokens
+            ),
+        )
+
+        return response
