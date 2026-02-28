@@ -6,7 +6,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from tests.utils import multi_gpu_test
+from tests.utils import ensure_current_vllm_config, multi_gpu_test
 from vllm.distributed import get_tensor_model_parallel_world_size
 from vllm.distributed.parallel_state import (
     init_distributed_environment,
@@ -117,7 +117,8 @@ def run_dp_sharded_vision_model_vs_direct(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # Create a test input tensor
     image_input = torch.randn(batch_size, 3, 224, 224)
@@ -302,7 +303,8 @@ def run_dp_sharded_mrope_vision_model_vs_direct(
 
     # initialize distributed
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # Create test data
     grid_thw_list = []
@@ -377,7 +379,8 @@ def run_dp_sharded_mrope_vision_model_empty_input_worker(
     )
 
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # Create empty inputs
     pixel_values = torch.empty((0, 768))
@@ -425,7 +428,8 @@ def run_dp_sharded_mrope_vision_model_uneven_load_worker(
     )
 
     init_distributed_environment()
-    initialize_model_parallel(tensor_model_parallel_size=world_size)
+    with ensure_current_vllm_config():
+        initialize_model_parallel(tensor_model_parallel_size=world_size)
 
     # Create images with very different sizes
     grid_thw_list = [
