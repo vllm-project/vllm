@@ -213,6 +213,7 @@ class RenderServicer(render_pb2_grpc.RenderServiceServicer):
             )
 
         except Exception as e:
+            logger.exception("RenderCompletion failed")
             await context.abort(
                 grpc.StatusCode.INTERNAL,
                 f"RenderCompletion failed: {e}",
