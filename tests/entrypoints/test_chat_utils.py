@@ -1458,6 +1458,35 @@ def test_parse_chat_messages_context_text_format(
     assert mm_uuids is None
 
 
+def test_parse_chat_messages_openai_format_image_url(
+    phi3v_model_config,
+    image_url,
+):
+    content = [
+        {"type": "image_url", "image_url": {"url": image_url}},
+        {"type": "text", "text": "What's in the image?"},
+    ]
+    conversation, mm_data, mm_uuids = parse_chat_messages(
+        [
+            {
+                "role": "user",
+                "content": content,
+            }
+        ],
+        phi3v_model_config,
+        content_format="openai",
+    )
+
+    assert conversation == [
+        {
+            "role": "user",
+            "content": content,
+        }
+    ]
+    _assert_mm_data_is_image_input(mm_data, 1)
+    _assert_mm_uuids(mm_uuids, 1, expected_uuids=[None])
+
+
 def test_parse_chat_messages_rejects_too_many_images_in_one_message(
     phi3v_model_config,
     image_url,
