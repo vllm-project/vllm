@@ -20,6 +20,7 @@ from tests.v1.sample.utils import (
 from vllm import SamplingParams
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.platforms import current_platform
 
 from ...conftest import HfRunner, VllmRunner
 
@@ -30,6 +31,23 @@ NONE = BatchLogprobsComposition.NONE
 SAMPLE = BatchLogprobsComposition.SAMPLE
 PROMPT = BatchLogprobsComposition.PROMPT
 SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
+
+# On ROCm, floating-point reductions in attention and GEMM kernels are
+# non-associative and sensitive to batch geometry. The ref LLM (no spec
+# decode, default scheduling) and the spec-decode LLM (chunked prefill,
+# different effective batch sizes) follow different reduction orders,
+# producing numerically divergent logprobs that get mis-attributed to
+# spec-decode incorrectness.
+#
+# Force LLM instances into an identical, deterministic execution
+# mode so the test isolates spec-decode correctness only:
+ROCM_DETERMINISM_KWARGS: dict = (
+    dict(
+        max_num_seqs=1,
+    )
+    if current_platform.is_rocm()
+    else {}
+)
 
 
 @pytest.fixture(
@@ -52,7 +70,7 @@ def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
         # TODO: enable this once we support it for
         # prompt logprobs.
         enable_prefix_caching=request.param,
-        gpu_memory_utilization=0.4,  # up to 2 alive concurrently
+        gpu_memory_utilization=0.4,
     ) as vllm_model:
         yield vllm_model
 
@@ -366,21 +384,20 @@ def test_max_logprobs():
     Should also fail for `prompt_logprobs > max_logprobs`
     APC should not matter as this test checks basic request validation.
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=1,
         enable_prefix_caching=False,
-        # 2 other llms alive during whole session
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
-    vllm_sampling_params = SamplingParams(logprobs=1)
-    # should pass
-    runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
+    ) as runner:
+        vllm_sampling_params = SamplingParams(logprobs=1)
+        # should pass
+        runner.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
-    bad_sampling_params = SamplingParams(logprobs=2)
-    with pytest.raises(ValueError):
-        runner.generate(["Hello world"], sampling_params=bad_sampling_params)
+        bad_sampling_params = SamplingParams(logprobs=2)
+        with pytest.raises(ValueError):
+            runner.generate(["Hello world"], sampling_params=bad_sampling_params)
 
 
 def test_none_logprobs(vllm_model, example_prompts):
@@ -449,33 +466,31 @@ def test_all_logprobs(example_prompts):
     Args:
       example_prompts: list of example prompts (test fixture)
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=-1,
         enable_prefix_caching=False,
-        # 2 other llms alive during whole session
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
+    ) as runner:
+        sampling_params_logprobs_all = SamplingParams(
+            max_tokens=5, logprobs=-1, prompt_logprobs=-1
+        )
+        results_logprobs_all = runner.llm.generate(
+            example_prompts, sampling_params=sampling_params_logprobs_all
+        )
+        vocab_size = runner.llm.llm_engine.model_config.get_vocab_size()
 
-    sampling_params_logprobs_all = SamplingParams(
-        max_tokens=5, logprobs=-1, prompt_logprobs=-1
-    )
-    results_logprobs_all = runner.llm.generate(
-        example_prompts, sampling_params=sampling_params_logprobs_all
-    )
-    vocab_size = runner.llm.llm_engine.model_config.get_vocab_size()
-
-    for i in range(len(results_logprobs_all)):
-        logprobs = results_logprobs_all[i].outputs[0].logprobs
-        prompt_logprobs = results_logprobs_all[i].prompt_logprobs
-        assert logprobs is not None
-        for logprob in logprobs:
-            assert len(logprob) == vocab_size
-        assert prompt_logprobs is not None
-        assert prompt_logprobs[0] is None
-        for prompt_logprob in prompt_logprobs[1:]:
-            assert len(prompt_logprob) == vocab_size
+        for i in range(len(results_logprobs_all)):
+            logprobs = results_logprobs_all[i].outputs[0].logprobs
+            prompt_logprobs = results_logprobs_all[i].prompt_logprobs
+            assert logprobs is not None
+            for logprob in logprobs:
+                assert len(logprob) == vocab_size
+            assert prompt_logprobs is not None
+            assert prompt_logprobs[0] is None
+            for prompt_logprob in prompt_logprobs[1:]:
+                assert len(prompt_logprob) == vocab_size
 
 
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
@@ -495,24 +510,28 @@ def test_logprobs_mode(logprobs_mode: LogprobsMode):
         max_model_len=16,
         logprobs_mode=logprobs_mode,
     )
-    vllm_sampling_params = SamplingParams(logprobs=1)
-    results = llm.generate(["Hello world"], sampling_params=vllm_sampling_params)
+    try:
+        vllm_sampling_params = SamplingParams(logprobs=1)
+        results = llm.generate(["Hello world"], sampling_params=vllm_sampling_params)
 
-    total_token_with_logprobs = 0
-    positive_values = 0
-    for output in results[0].outputs:
-        for logprobs in output.logprobs:
-            for token_id in logprobs:
-                logprob = logprobs[token_id]
-                if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
-                    assert logprob.logprob <= 0
-                if logprob.logprob > 0:
-                    positive_values = positive_values + 1
-                total_token_with_logprobs = total_token_with_logprobs + 1
-    assert total_token_with_logprobs >= len(results[0].outputs)
-    if logprobs_mode in ("raw_logits", "processed_logits"):
-        assert positive_values > 0
-    del llm
+        total_token_with_logprobs = 0
+        positive_values = 0
+        for output in results[0].outputs:
+            for logprobs in output.logprobs:
+                for token_id in logprobs:
+                    logprob = logprobs[token_id]
+                    if logprobs_mode in ("raw_logprobs", "processed_logprobs"):
+                        assert logprob.logprob <= 0
+                    if logprob.logprob > 0:
+                        positive_values = positive_values + 1
+                    total_token_with_logprobs = total_token_with_logprobs + 1
+        assert total_token_with_logprobs >= len(results[0].outputs)
+        if logprobs_mode in ("raw_logits", "processed_logits"):
+            assert positive_values > 0
+    finally:
+        del llm
+        torch.cuda.empty_cache()
+        cleanup_dist_env_and_memory()
 
 
 class TestCorrectDecodedToken:
@@ -767,7 +786,7 @@ class TestCorrectDecodedToken:
             # Simulate cases where individual tokens decode to "�"
             # but combinations decode correctly
             if len(ids) == 1:
-                if ids[0] == 3 or ids[0] == 4 or ids[0] == 8 or ids[0] == 9:
+                if ids[0] in (3, 4, 8, 9):
                     return "�"
             elif len(ids) == 2:
                 if ids == [2, 3]:
@@ -809,42 +828,41 @@ def test_verify_tokens_integration():
     corrects tokens ending with the replacement character "�".
     Uses facebook/opt-125m which is known to produce these issues.
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=0,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
+    ) as runner:
+        # Use a prompt that triggers multi-byte UTF-8 issues
+        # Based on user's example: "In this example,"
+        test_prompts = ["In this example,"]
 
-    # Use a prompt that triggers multi-byte UTF-8 issues
-    # Based on user's example: "In this example,"
-    test_prompts = ["In this example,"]
+        sampling_params = SamplingParams(
+            max_tokens=16,
+            temperature=0,
+            logprobs=0,
+        )
 
-    sampling_params = SamplingParams(
-        max_tokens=16,
-        temperature=0,
-        logprobs=0,
-    )
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
-    results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
-
-    # Verify that decoded tokens don't contain replacement characters
-    for result in results:
-        assert result.outputs[0].logprobs is not None
-        for logprob_dict in result.outputs[0].logprobs:
-            for token_id, logprob_info in logprob_dict.items():
-                decoded_token = logprob_info.decoded_token
-                # Decoded tokens should not end with replacement character
-                # They should either be corrected or empty string
-                assert not decoded_token.endswith("�"), (
-                    f"Token {token_id} decoded to '{decoded_token}' which "
-                    f"ends with replacement character"
-                )
-                # Decoded tokens should not contain lone replacement characters
-                assert decoded_token != "�", (
-                    f"Token {token_id} is a lone replacement character"
-                )
+        # Verify that decoded tokens don't contain replacement characters
+        for result in results:
+            assert result.outputs[0].logprobs is not None
+            for logprob_dict in result.outputs[0].logprobs:
+                for token_id, logprob_info in logprob_dict.items():
+                    decoded_token = logprob_info.decoded_token
+                    # Decoded tokens should not end with replacement character
+                    # They should either be corrected or empty string
+                    assert not decoded_token.endswith("�"), (
+                        f"Token {token_id} decoded to '{decoded_token}' which "
+                        f"ends with replacement character"
+                    )
+                    # Decoded tokens should not contain lone replacement characters
+                    assert decoded_token != "�", (
+                        f"Token {token_id} is a lone replacement character"
+                    )
 
 
 def test_utf8_edge_cases_with_real_model():
@@ -853,45 +871,44 @@ def test_utf8_edge_cases_with_real_model():
     Tests prompts that are likely to trigger byte-fallback tokenization
     and multi-byte UTF-8 splitting.
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=1,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
+    ) as runner:
+        # Prompts with various multi-byte UTF-8 characters
+        test_prompts = [
+            'Smart quotes: "Hello"',  # Curly quotes
+            "Em dash — test",  # Em dash
+            "Ellipsis… continues",  # Ellipsis
+            "Chinese: 你好",  # Chinese characters
+            "Emoji: 😀 🎉",  # Emojis
+            'Mixed: "quoted" — with symbols',  # Mixed
+        ]
 
-    # Prompts with various multi-byte UTF-8 characters
-    test_prompts = [
-        'Smart quotes: "Hello"',  # Curly quotes
-        "Em dash — test",  # Em dash
-        "Ellipsis… continues",  # Ellipsis
-        "Chinese: 你好",  # Chinese characters
-        "Emoji: 😀 🎉",  # Emojis
-        'Mixed: "quoted" — with symbols',  # Mixed
-    ]
+        sampling_params = SamplingParams(
+            max_tokens=10,
+            temperature=0,
+            logprobs=1,
+        )
 
-    sampling_params = SamplingParams(
-        max_tokens=10,
-        temperature=0,
-        logprobs=1,
-    )
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
-    results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
+        for i, result in enumerate(results):
+            prompt = test_prompts[i]
+            assert result.outputs[0].logprobs is not None
 
-    for i, result in enumerate(results):
-        prompt = test_prompts[i]
-        assert result.outputs[0].logprobs is not None
-
-        # Check that no decoded tokens end with replacement character
-        for logprob_dict in result.outputs[0].logprobs:
-            for token_id, logprob_info in logprob_dict.items():
-                decoded_token = logprob_info.decoded_token
-                assert not decoded_token.endswith("�"), (
-                    f"Prompt: '{prompt}'\n"
-                    f"Token {token_id} decoded to '{decoded_token}' which "
-                    f"ends with replacement character"
-                )
+            # Check that no decoded tokens end with replacement character
+            for logprob_dict in result.outputs[0].logprobs:
+                for token_id, logprob_info in logprob_dict.items():
+                    decoded_token = logprob_info.decoded_token
+                    assert not decoded_token.endswith("�"), (
+                        f"Prompt: '{prompt}'\n"
+                        f"Token {token_id} decoded to '{decoded_token}' which "
+                        f"ends with replacement character"
+                    )
 
 
 def test_correct_decoded_token_preserves_valid_tokens():
@@ -901,36 +918,35 @@ def test_correct_decoded_token_preserves_valid_tokens():
     ending with "�", but this test verifies the broader _verify_tokens
     logic doesn't affect valid tokens.
     """
-    runner = VllmRunner(
+    with VllmRunner(
         "facebook/opt-125m",
         max_logprobs=2,
         enable_prefix_caching=False,
         gpu_memory_utilization=0.15,
         max_model_len=256,
-    )
+    ) as runner:
+        # Simple prompt with standard ASCII characters
+        test_prompts = ["Hello world, this is a test."]
 
-    # Simple prompt with standard ASCII characters
-    test_prompts = ["Hello world, this is a test."]
+        sampling_params = SamplingParams(
+            max_tokens=10,
+            temperature=0,
+            logprobs=2,
+        )
 
-    sampling_params = SamplingParams(
-        max_tokens=10,
-        temperature=0,
-        logprobs=2,
-    )
+        results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
 
-    results = runner.llm.generate(test_prompts, sampling_params=sampling_params)
+        for result in results:
+            assert result.outputs[0].logprobs is not None
 
-    for result in results:
-        assert result.outputs[0].logprobs is not None
-
-        # All decoded tokens should be valid strings
-        for logprob_dict in result.outputs[0].logprobs:
-            for token_id, logprob_info in logprob_dict.items():
-                decoded_token = logprob_info.decoded_token
-                # Valid tokens should be non-empty strings (or empty if corrected)
-                assert isinstance(decoded_token, str)
-                # Should not contain replacement character
-                assert "�" not in decoded_token
+            # All decoded tokens should be valid strings
+            for logprob_dict in result.outputs[0].logprobs:
+                for token_id, logprob_info in logprob_dict.items():
+                    decoded_token = logprob_info.decoded_token
+                    # Valid tokens should be non-empty strings (or empty if corrected)
+                    assert isinstance(decoded_token, str)
+                    # Should not contain replacement character
+                    assert "�" not in decoded_token
 
 
 @pytest.mark.parametrize("logprobs_mode", get_args(LogprobsMode))
@@ -985,15 +1001,32 @@ def test_correct_decoded_token_preserves_valid_tokens():
 def test_spec_decode_logprobs(
     logprobs_mode: LogprobsMode,
     model_setup: tuple[str, str, dict, int],
+    monkeypatch,
 ):
     """Spec decode logprobs should match those of the base model.
+
+    Runs the base model and spec decode model sequentially, ensuring
+    only one LLM instance is alive at a time to avoid GPU memory
+    contention. Both use identical chunked prefill settings and eager
+    mode to control for infrastructure differences.
 
     Args:
         logprobs_mode: logprobs mode.
         model_setup: Tuple of (method, base model name,
             speculative_config dict, top_logprobs).
+        monkeypatch: pytest fixture for setting env vars.
     """
     from vllm import LLM
+
+    # The ROCm skinny GEMM kernels (gemm_kernels.cu) are
+    # non-deterministic across LLM instantiations due to persistent
+    # workgroup scheduling and wave-level shuffle reductions, which
+    # causes logprob differences that get misattributed to spec decode.
+    # Disable them so this test isolates spec decode correctness only.
+    # TODO(akaratza): Remove this workaround once the follow-up to
+    # https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+    # lands with a determinism fix for wvSplitK kernels.
+    monkeypatch.setenv("VLLM_ROCM_USE_SKINNY_GEMM", "0")
 
     method, model_name, spec_config, top_logprobs = model_setup
 
@@ -1020,6 +1053,7 @@ def test_spec_decode_logprobs(
         logprobs_mode=logprobs_mode,
         gpu_memory_utilization=0.4,
         enable_prefix_caching=False,
+        **ROCM_DETERMINISM_KWARGS,
     )
     ref_results = ref_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
@@ -1049,6 +1083,7 @@ def test_spec_decode_logprobs(
         enable_chunked_prefill=True,
         max_num_batched_tokens=32,
         enable_prefix_caching=False,
+        **ROCM_DETERMINISM_KWARGS,
     )
     spec_results = spec_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
@@ -1068,8 +1103,17 @@ def test_spec_decode_logprobs(
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
         assert math.isclose(
             ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
+        ), (
+            f"Logprob mismatch: ref={ref_logprob.logprob} "
+            f"spec={spec_logprob.logprob} "
+            f"diff={abs(ref_logprob.logprob - spec_logprob.logprob)} "
+            f"(token={ref_logprob.decoded_token!r})"
         )
-        assert ref_logprob.rank == spec_logprob.rank
+        assert ref_logprob.rank == spec_logprob.rank, (
+            f"Rank mismatch: ref={ref_logprob.rank} "
+            f"spec={spec_logprob.rank} "
+            f"(token={ref_logprob.decoded_token!r})"
+        )
         assert ref_logprob.decoded_token == spec_logprob.decoded_token
 
 

@@ -814,6 +814,14 @@ class MambaManager(SingleTypeKVCacheManager):
 
     def remove_skipped_blocks(self, request_id: str, num_computed_tokens: int) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
+
+        # NOTE (tdoublep) with async scheduling, the num_computed_tokens can contain
+        # draft tokens from the previous step that may or may not be rejected later.
+        # This can make us think we are further ahead in the sequence than we actually
+        # are, so let's assume that all tokens are rejected so we don't free blocks
+        # that we might actually need.
+        num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
+
         super().remove_skipped_blocks(request_id, num_computed_tokens)
         if self.mamba_cache_mode == "align":
             # `last_state_block_idx` refers to the block index allocated two steps ago.
@@ -879,6 +887,9 @@ class MambaManager(SingleTypeKVCacheManager):
             # We can ignore lookahead tokens because current draft models don't have
             # mamba layers.
             num_tokens = num_tokens_main_model
+
+            # NOTE(tdouble): this is an over-estimate of how many blocks we need because
+            # num_tokens can include draft tokens that will later be rejected.
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )
@@ -922,6 +933,8 @@ class MambaManager(SingleTypeKVCacheManager):
             # mamba layers.
             num_tokens = num_tokens_main_model
             req_blocks: list[KVCacheBlock] = self.req_to_blocks[request_id]
+            # NOTE(tdouble): this is an over-estimate of how many blocks we need because
+            # num_tokens can include draft tokens that will later be rejected.
             num_required_blocks = (
                 cdiv(num_tokens, self.block_size) + self.num_speculative_blocks
             )

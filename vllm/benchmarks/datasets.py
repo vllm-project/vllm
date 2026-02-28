@@ -60,6 +60,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_NUM_PROMPTS = 1000
+
 # -----------------------------------------------------------------------------
 # Data Classes
 # -----------------------------------------------------------------------------
@@ -1338,7 +1340,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
     parser.add_argument(
         "--num-prompts",
         type=int,
-        default=1000,
+        default=DEFAULT_NUM_PROMPTS,
         help="Number of prompts to process.",
     )
     parser.add_argument(
@@ -2627,22 +2629,26 @@ class VisionArenaDataset(HuggingFaceDataset):
         no_oversample: bool = False,
         **kwargs,
     ) -> list:
+        parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
+        if parser_fn is None:
+            raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+
         sampled_requests = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
-            if parser_fn is None:
-                raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+
             prompt = parser_fn(item)
             mm_content = process_image(item["images"][0])
-            prompt_len = len(tokenizer(prompt).input_ids)
+            prompt_len = len(tokenizer.encode(prompt))
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
                 # actual prompt len
                 prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -2652,6 +2658,7 @@ class VisionArenaDataset(HuggingFaceDataset):
                     request_id=request_id_prefix + str(i),
                 )
             )
+
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )
@@ -2681,22 +2688,26 @@ class MMVUDataset(HuggingFaceDataset):
         no_oversample: bool = False,
         **kwargs,
     ) -> list:
+        parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
+        if parser_fn is None:
+            raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+
         output_len = output_len if output_len is not None else self.DEFAULT_OUTPUT_LEN
+
         sampled_requests = []
         for i, item in enumerate(self.data):
             if len(sampled_requests) >= num_requests:
                 break
-            parser_fn = self.SUPPORTED_DATASET_PATHS.get(self.hf_name)
-            if parser_fn is None:
-                raise ValueError(f"Unsupported dataset path: {self.hf_name}")
+
             prompt = parser_fn(item)
             mm_content = process_video(item["video"])
-            prompt_len = len(tokenizer(prompt).input_ids)
+            prompt_len = len(tokenizer.encode(prompt))
             if enable_multimodal_chat:
                 # Note: when chat is enabled the request prompt_len is no longer
                 # accurate and we will be using request output to count the
                 # actual prompt len
                 prompt = self.apply_multimodal_chat_transformation(prompt, mm_content)
+
             sampled_requests.append(
                 SampleRequest(
                     prompt=prompt,
@@ -2706,6 +2717,7 @@ class MMVUDataset(HuggingFaceDataset):
                     request_id=request_id_prefix + str(i),
                 )
             )
+
         self.maybe_oversample_requests(
             sampled_requests, num_requests, request_id_prefix, no_oversample
         )

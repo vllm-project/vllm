@@ -83,7 +83,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ):
         if envs.VLLM_TUNED_CONFIG_FOLDER:
             hidden_size = layer.hidden_size
-            intermediate_size = layer.intermediate_size_per_partition
+            intermediate_size = (
+                self.w2_lora_a_stacked[0].shape[-1]
+                if op_prefix == "w2"
+                else self.w13_lora_b_stacked[0].shape[-2]
+            )
             shrink_config = get_lora_op_configs(
                 op_type=f"fused_moe_lora_{op_prefix}_shrink",
                 max_loras=num_loras,
@@ -133,15 +137,19 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
             # Use the existing modular kernel from the quant method
             m_fused_moe_fn = self.base_layer.quant_method.moe_mk
+            # Don't let the kernel own shared experts so the runner can
+            # overlap them with routed experts via a separate CUDA stream.
+            m_fused_moe_fn.shared_experts = None
         else:
-            # Create a new modular kernel via select_gemm_impl
+            # Create a new modular kernel via select_gemm_impl.
+            # Don't pass shared_experts to the kernel so the runner can
+            # overlap them with routed experts via a separate CUDA stream.
             prepare_finalize = MoEPrepareAndFinalizeNoEP()
             m_fused_moe_fn = FusedMoEModularKernel(
                 prepare_finalize,
                 self.base_layer.quant_method.select_gemm_impl(
                     prepare_finalize, self.base_layer
                 ),
-                self.base_layer.shared_experts,
             )
 
         if quant_config.use_mxfp4_w4a16:
@@ -338,8 +346,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         fused_experts.moe_sum = moe_sum_decorator(
             self.base_layer, fused_experts.moe_sum
         )
-        self.base_layer.quant_method = FusedMoEModularMethod(
-            self.base_layer.quant_method, m_fused_moe_fn
+        # TODO(bnell): find a less intrusive way to handle this.
+        self.base_layer._replace_quant_method(
+            FusedMoEModularMethod(self.base_layer.quant_method, m_fused_moe_fn)
         )
 
     def _create_lora_a_weights(

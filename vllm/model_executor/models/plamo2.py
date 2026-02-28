@@ -266,7 +266,8 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
             # conv_state = (..., dim, width-1) yet contiguous along 'dim'
             conv_state = self_kv_cache[0].transpose(-1, -2)
             ssm_state = self_kv_cache[1]
-            state_indices_tensor = attn_metadata.state_indices_tensor
+            state_indices_tensor_p = attn_metadata.state_indices_tensor_p
+            state_indices_tensor_d = attn_metadata.state_indices_tensor_d
             has_initial_states_p = attn_metadata.has_initial_states_p
             prep_initial_states = attn_metadata.prep_initial_states
             chunk_size = attn_metadata.chunk_size
@@ -309,13 +310,6 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
         gate_d, gate_p = torch.split(
             gate[:num_actual_tokens], [num_decodes, num_prefill_tokens], dim=0
         )
-        # Split along batch dimension
-        state_indices_tensor_d, state_indices_tensor_p = torch.split(
-            state_indices_tensor,
-            [num_decodes, num_prefills],
-            dim=0,
-        )
-
         # Preallocate output tensor to avoid memcpy cost for merging prefill
         # and decode outputs
         preallocated_ssm_out = torch.empty(
@@ -336,7 +330,7 @@ class Plamo2MambaMixer(MambaBase, PluggableLayer):
         if has_prefill:
             # 2. Convolution sequence transformation
             # - "cache_indices" updates the conv_state cache in positions
-            #   pointed to by "state_indices_tensor"
+            #   pointed to by "state_indices_tensor_p"
             x = hidden_states_p.transpose(0, 1)  # this is the form that causal-conv see
             hidden_states_p = causal_conv1d_fn(
                 x,
@@ -748,7 +742,6 @@ class Plamo2Model(torch.nn.Module):
         config = vllm_config.model_config.hf_config
 
         self.config = config
-        self.padding_idx = config.pad_token_id
         self.vocab_size = config.vocab_size
 
         self.embed_tokens = VocabParallelEmbedding(
