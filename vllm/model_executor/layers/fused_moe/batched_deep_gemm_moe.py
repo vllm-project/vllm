@@ -350,7 +350,7 @@ class BatchedDeepGemmExperts(mk.FusedMoEPermuteExpertsUnpermute):
         num_experts = local_num_experts
         max_num_tokens = M if self.max_num_tokens is None else self.max_num_tokens
         activation_out_dim = self.adjust_N_for_activation(N, activation)
-        workspace13 = (num_experts, max_num_tokens * num_dispatchers, max(K, N))
+        workspace13 = (num_experts, max_num_tokens * num_dispatchers, N)
         workspace2 = (num_experts, max_num_tokens * num_dispatchers, activation_out_dim)
         output = (num_experts, max_num_tokens * num_dispatchers, K)
         return (workspace13, workspace2, output)
