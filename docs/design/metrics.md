@@ -25,6 +25,10 @@ In v1, an extensive set of metrics are exposed via a Prometheus-compatible `/met
 
 - `vllm:num_requests_running` (Gauge) - Number of requests currently running.
 - `vllm:kv_cache_usage_perc` (Gauge) - Fraction of used KV cache blocks (0–1).
+- `vllm:num_kv_cache_total_blocks` (Gauge) - Total number of KV cache blocks available.
+- `vllm:num_prefix_cached_blocks` (Gauge) - Number of blocks currently in the prefix cache.
+- `vllm:num_prefix_cached_tokens` (Gauge) - Number of tokens currently in the prefix cache.
+- `vllm:prefix_cache_usage_perc` (Gauge) - Prefix cache usage as fraction of total KV cache (0–1).
 - `vllm:prefix_cache_queries` (Counter) - Number of prefix cache queries.
 - `vllm:prefix_cache_hits` (Counter) - Number of prefix cache hits.
 - `vllm:prompt_tokens_total` (Counter) - Total number of prompt tokens processed.
@@ -53,6 +57,10 @@ The subset of metrics exposed in the Grafana dashboard gives us an indication of
 - `vllm:time_to_first_token_seconds` - Time to First Token (TTFT) latency in seconds.
 - `vllm:num_requests_running` (also, `_swapped` and `_waiting`) - Number of requests in the RUNNING, WAITING, and SWAPPED states.
 - `vllm:kv_cache_usage_perc` - Percentage of used cache blocks by vLLM.
+- `vllm:num_kv_cache_total_blocks` - Total number of KV cache blocks available.
+- `vllm:num_prefix_cached_blocks` - Number of blocks in the prefix cache.
+- `vllm:num_prefix_cached_tokens` - Number of tokens in the prefix cache.
+- `vllm:prefix_cache_usage_perc` - Prefix cache usage as fraction of total.
 - `vllm:request_prompt_tokens` - Request prompt length.
 - `vllm:request_generation_tokens` - Request generation length.
 - `vllm:request_success` - Number of finished requests by their finish reason: either an EOS token was generated or the max sequence length was reached.
@@ -429,6 +437,45 @@ rate(cache_query_hit[5m]) / rate(cache_query_total[5m])
 
 To achieve this, we should record the queries and hits as counters in
 Prometheus, rather than recording the hit rate as a gauge.
+
+#### Prefix Cache State Metrics
+
+In addition to hit rate metrics, we expose the current state of the prefix cache:
+
+- `vllm:num_kv_cache_total_blocks` (Gauge) - Total number of KV cache blocks available.
+- `vllm:num_prefix_cached_blocks` (Gauge) - Number of blocks currently stored in the prefix cache.
+- `vllm:num_prefix_cached_tokens` (Gauge) - Number of tokens currently stored in the prefix cache.
+- `vllm:prefix_cache_usage_perc` (Gauge) - Prefix cache usage as a fraction of total KV cache (0-1).
+
+These metrics allow users to understand how much of the KV cache is being used
+for prefix caching versus active request processing.
+
+#### Calculating Derived KV Cache Metrics
+
+The following PromQL queries can be used to derive additional useful metrics:
+
+```text
+# Active KV cache usage as percentage (blocks serving requests, excluding idle prefix cache)
+vllm:kv_cache_usage_perc - vllm:prefix_cache_usage_perc
+
+# Active blocks count
+(vllm:kv_cache_usage_perc * vllm:num_kv_cache_total_blocks) - vllm:num_prefix_cached_blocks
+
+# Free blocks available for new allocations
+vllm:num_kv_cache_total_blocks * (1 - vllm:kv_cache_usage_perc)
+
+# Available token capacity (tokens that can be stored in free blocks)
+# Note: block_size is derived from prefix cache when available
+vllm:num_kv_cache_total_blocks * (1 - vllm:kv_cache_usage_perc) * (vllm:num_prefix_cached_tokens / vllm:num_prefix_cached_blocks)
+```
+
+This distinction is useful for capacity planning:
+
+- **Total KV cache usage** (`kv_cache_usage_perc`) shows overall memory pressure
+- **Prefix cache usage** (`prefix_cache_usage_perc`) shows cached blocks available for reuse
+- **Active usage** (calculated) shows blocks actively serving requests
+- **Free blocks** shows available capacity for new requests
+- **Available token capacity** shows how many tokens can be stored in the remaining free space
 
 ## Deprecated Metrics
 
