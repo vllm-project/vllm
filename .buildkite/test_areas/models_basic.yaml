@@ -39,7 +39,7 @@ steps:
     - pytest -v -s models/test_transformers.py models/test_registry.py
 
 - label: Model strategy test
-  num_devices: 4
+  device: b200
   source_file_dependencies: []
   commands:
     - pytest -v -s models/nightly/guidellm/gptoss_gllm.py
