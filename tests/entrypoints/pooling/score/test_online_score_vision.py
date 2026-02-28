@@ -109,8 +109,12 @@ def server(request):
         json.dumps({"backend": backend}),
     ] + ROCM_EXTRA_ARGS
 
+    env = dict(ROCM_ENV_OVERRIDES)
+    if backend != "ROCM_AITER_FA":
+        env["VLLM_ROCM_USE_AITER"] = "0"
+
     with RemoteOpenAIServer(
-        MODEL_NAME, args, override_hf_configs=HF_OVERRIDES, env_dict=ROCM_ENV_OVERRIDES
+        MODEL_NAME, args, override_hf_configs=HF_OVERRIDES, env_dict=env
     ) as remote_server:
         print(f"=== Server ready with backend: {backend} ===")
         yield remote_server, backend
