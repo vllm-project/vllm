@@ -46,6 +46,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backend import AttentionMetadata
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadata
+from vllm.utils.math_utils import cdiv
 
 # Added by the IBM Team, 2024
 
@@ -736,9 +737,9 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             if is_mamba_cache_all:
                 # The chunk_stride is the number of chunks per mamba block
-                # e.g., if mamba_block_size = 512 and chunk_size = 256,
+                # e.g., if mamba_block_size = 400 and chunk_size = 256,
                 # then chunk_stride = 2
-                chunk_stride = mamba_block_size // chunk_size
+                chunk_stride = cdiv(mamba_block_size, chunk_size)
 
                 # Save state for sequences with more than just final state
                 for seq_idx in range(num_prefills):
