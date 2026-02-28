@@ -116,9 +116,9 @@ def pad_fp8(weight):
 @pytest.mark.parametrize("m", M_FACTORS_WVSPLITKRC)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("seed", SEEDS)
-@pytest.mark.parametrize("bias_mode", BIAS_MODES)
+@pytest.mark.parametrize("bias_mode", [0, 1, 2, 3])
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
-@pytest.mark.skipif(not on_gfx950(), reason="only meant for gfx950")
+@pytest.mark.skipif(not on_gfx950(), reason="wvSplitKrc is gfx950-only")
 def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
     torch.manual_seed(seed)
     cu_count = num_compute_units()
@@ -150,6 +150,8 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, bias_mode):
         BIAS = torch.rand(m, dtype=dtype, device="cuda") * 2 - 1
     elif bias_mode == 2:
         BIAS = torch.rand(n, m, dtype=dtype, device="cuda") * 2 - 1
+    elif bias_mode == 3:
+        BIAS = torch.rand(1, m, dtype=dtype, device="cuda") * 2 - 1
 
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitKrc(B, A.view(-1, A.size(-1)), cu_count, BIAS)
@@ -194,7 +196,9 @@ def test_rocm_wvsplitk_kernel(n, k, m, dtype, seed):
     ref_out = torch.nn.functional.linear(A, B)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+    # Accumulation error in fp16 GEMM scales with sqrt(K)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
@@ -213,7 +217,8 @@ def test_rocm_wvsplitk_bias1D_kernel(n, k, m, dtype, seed):
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
 @pytest.mark.parametrize("n,k,m", NKM_FACTORS_WVSPLITK)
@@ -232,7 +237,8 @@ def test_rocm_wvsplitk_bias2D_kernel(n, k, m, dtype, seed):
     ref_out = torch.nn.functional.linear(A, B, BIAS)
     out = ops.wvSplitK(B, A.view(-1, A.size(-1)), cu_count, BIAS)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
 
 
 @pytest.mark.parametrize("xnorm", [False, True])
