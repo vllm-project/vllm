@@ -251,7 +251,6 @@ Higher concurrency or batch size can raise GPU efficiency (per-GPU), but can add
 Example:
 
 ```bash
-# Name of the directory that stores the results
 EXPERIMENT_DIR=${1:-"benchmarks/results/demo"}
 
 vllm bench sweep plot_pareto $EXPERIMENT_DIR \
