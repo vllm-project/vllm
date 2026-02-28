@@ -7,7 +7,7 @@ import json as json_mod
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Annotated, Any
+from typing import Any
 
 import msgspec
 from pydantic.dataclasses import dataclass
@@ -209,10 +209,6 @@ class SamplingParams(
     """Whether to add spaces between special tokens in the output."""
     include_stop_str_in_output: bool = False
     """Whether to include the stop strings in output text."""
-    truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None
-    """If set to -1, will use the truncation size supported by the model. If
-    set to an integer k, will use only the last k tokens from the prompt
-    (i.e., left truncation). If set to `None`, truncation is disabled."""
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
     skip_clone: bool = False
     """Internal flag indicating that this SamplingParams instance is safe to
@@ -273,7 +269,6 @@ class SamplingParams(
         detokenize: bool = True,
         skip_special_tokens: bool = True,
         spaces_between_special_tokens: bool = True,
-        truncate_prompt_tokens: Annotated[int, msgspec.Meta(ge=-1)] | None = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
         structured_outputs: StructuredOutputsParams | None = None,
         logit_bias: dict[int, float] | dict[str, float] | None = None,
@@ -313,7 +308,6 @@ class SamplingParams(
             detokenize=detokenize,
             skip_special_tokens=skip_special_tokens,
             spaces_between_special_tokens=spaces_between_special_tokens,
-            truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
             structured_outputs=structured_outputs,
             logit_bias=logit_bias,
@@ -448,15 +442,6 @@ class SamplingParams(
                 f"{self.prompt_logprobs}.",
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
-            )
-        if self.truncate_prompt_tokens is not None and (
-            self.truncate_prompt_tokens == 0 or self.truncate_prompt_tokens < -1
-        ):
-            raise VLLMValidationError(
-                f"truncate_prompt_tokens must be an integer >= 1 or -1, "
-                f"got {self.truncate_prompt_tokens}",
-                parameter="truncate_prompt_tokens",
-                value=self.truncate_prompt_tokens,
             )
         assert isinstance(self.stop_token_ids, list)
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
@@ -835,7 +820,6 @@ class SamplingParams(
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
             f"structured_outputs={self.structured_outputs}, "
             f"extra_args={self.extra_args})"
         )
