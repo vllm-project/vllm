@@ -39,8 +39,9 @@ class CacheConfig:
     """Configuration for the KV cache."""
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
+    _BLOCK_SIZE_UNSET: ClassVar[int] = -1
 
-    block_size: int = Field(default=DEFAULT_BLOCK_SIZE)
+    block_size: int = Field(default=_BLOCK_SIZE_UNSET)
     """Size of a contiguous cache block in number of tokens.
 
     Defaults to DEFAULT_BLOCK_SIZE and may be overridden by the platform
@@ -203,6 +204,7 @@ class CacheConfig:
             "prefix_caching_hash_algo",
             "cpu_kvcache_space_bytes",
             "mamba_page_size_padded",
+            "user_specified_block_size",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
@@ -222,8 +224,9 @@ class CacheConfig:
 
     @model_validator(mode="after")
     def _detect_user_specified_block_size(self) -> "CacheConfig":
-        fields_set = getattr(self, "__pydantic_fields_set__", set())
-        if "block_size" in fields_set:
+        if self.block_size == self._BLOCK_SIZE_UNSET:
+            object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
+        else:
             object.__setattr__(self, "user_specified_block_size", True)
         object.__setattr__(self, "_init_complete", True)
         return self
