@@ -668,6 +668,20 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+            # torch_shm uses a single IPC queue to rank 0; DP>1 is
+            # incompatible because API servers can't know which
+            # CoreEngine the scheduler will assign work to.
+            if (
+                self.model_config.multimodal_config is not None
+                and self.model_config.multimodal_config.multimodal_tensor_ipc
+                == "torch_shm"
+                and self.parallel_config.data_parallel_size > 1
+            ):
+                raise ValueError(
+                    "multimodal_tensor_ipc='torch_shm' is not supported "
+                    "with data_parallel_size > 1."
+                )
+
         self.cache_config.verify_with_parallel_config(self.parallel_config)
 
         if self.lora_config is not None:

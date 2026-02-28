@@ -278,3 +278,90 @@ def test_custom_class_serialization_disallowed_without_pickle():
     with pytest.raises(TypeError):
         # Attempt to encode the custom class
         encoder.encode(obj)
+
+
+@dataclass
+class RequestWithTensor:
+    """Mock request with non-multimodal tensor field like EngineCoreRequest."""
+
+    prompt_embeds: torch.Tensor | None
+    data: str
+
+
+def test_non_multimodal_tensor_with_ipc():
+    """Test that non-multimodal tensor fields work correctly with IPC enabled.
+
+    This reproduces the bug where fields like prompt_embeds: torch.Tensor | None
+    would fail to decode when IPC is enabled because _decode_tensor expected a tuple
+    but received a TensorIpcHandle dict.
+    """
+    import torch.multiprocessing as torch_mp
+
+    from vllm.v1.engine.tensor_ipc import TensorIpcReceiver, TensorIpcSender
+
+    # Create tensor queues for IPC
+    tensor_queues = [torch_mp.Queue()]
+
+    # Create encoder with IPC sender
+    sender = TensorIpcSender(tensor_queues)
+    sender.set_target_engine(0)
+    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+    encoder.set_request_context("test_request_123")
+
+    # Create decoder with IPC receiver
+    receiver = TensorIpcReceiver(tensor_queues[0])
+    decoder = MsgpackDecoder(RequestWithTensor, tensor_ipc_receiver=receiver)
+
+    # Create a request with a non-multimodal tensor
+    original_tensor = torch.randn(5, 10, dtype=torch.float32)
+    request = RequestWithTensor(prompt_embeds=original_tensor, data="test_data")
+
+    # Encode the request - this should send the tensor via IPC
+    encoded = encoder.encode(request)
+
+    # Verify encoding succeeded
+    assert len(encoded) > 0
+
+    # Decode the request - this should retrieve the tensor from IPC queue
+    # Previously this would fail with: TypeError: cannot unpack non-iterable dict object
+    decoded = decoder.decode(encoded)
+
+    # Verify the decoded request matches the original
+    assert isinstance(decoded, RequestWithTensor)
+    assert decoded.data == "test_data"
+    assert decoded.prompt_embeds is not None
+    assert torch.allclose(decoded.prompt_embeds, original_tensor), (
+        "Decoded tensor does not match the original tensor."
+    )
+
+
+def test_non_multimodal_tensor_with_ipc_none_value():
+    """Test that None values for tensor fields work correctly with IPC enabled."""
+    import torch.multiprocessing as torch_mp
+
+    from vllm.v1.engine.tensor_ipc import TensorIpcReceiver, TensorIpcSender
+
+    # Create tensor queues for IPC
+    tensor_queues = [torch_mp.Queue()]
+
+    # Create encoder with IPC sender
+    sender = TensorIpcSender(tensor_queues)
+    sender.set_target_engine(0)
+    encoder = MsgpackEncoder(tensor_ipc_sender=sender)
+    encoder.set_request_context("test_request_456")
+
+    # Create decoder with IPC receiver
+    receiver = TensorIpcReceiver(tensor_queues[0])
+    decoder = MsgpackDecoder(RequestWithTensor, tensor_ipc_receiver=receiver)
+
+    # Create a request with None for the tensor field
+    request = RequestWithTensor(prompt_embeds=None, data="test_data_with_none")
+
+    # Encode and decode the request
+    encoded = encoder.encode(request)
+    decoded = decoder.decode(encoded)
+
+    # Verify the decoded request matches the original
+    assert isinstance(decoded, RequestWithTensor)
+    assert decoded.data == "test_data_with_none"
+    assert decoded.prompt_embeds is None

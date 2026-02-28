@@ -55,6 +55,7 @@ from vllm.v1.engine import (
     UtilityOutput,
     UtilityResult,
 )
+from vllm.v1.engine.tensor_ipc import TensorIpcReceiver
 from vllm.v1.engine.utils import (
     EngineHandshakeMetadata,
     EngineZmqAddresses,
@@ -401,7 +402,18 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        # Cleanup tensors for finished requests
+        self._cleanup_finished_request_tensors(scheduler_output.finished_req_ids)
+
         return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+
+    def _cleanup_finished_request_tensors(self, finished_req_ids: set[str]) -> None:
+        """Cleanup any orphaned tensors for finished requests.
+
+        This is a no-op in the base class but can be overridden in subclasses
+        to perform actual cleanup (e.g., for IPC tensor queues).
+        """
+        pass
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -503,6 +515,9 @@ class EngineCore:
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output
         )
+
+        # Cleanup tensors for finished requests
+        self._cleanup_finished_request_tensors(scheduler_output.finished_req_ids)
 
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
@@ -769,6 +784,7 @@ class EngineCoreProc(EngineCore):
         client_handshake_address: str | None = None,
         *,
         engine_index: int = 0,
+        tensor_queues: list[Any] | None = None,
     ):
         self.input_queue = queue.Queue[tuple[EngineCoreRequestType, Any]]()
         self.output_queue = queue.Queue[tuple[int, EngineCoreOutputs] | bytes]()
@@ -780,6 +796,9 @@ class EngineCoreProc(EngineCore):
         identity = self.engine_index.to_bytes(length=2, byteorder="little")
         self.engines_running = False
 
+        # Receiver for tensor IPC cleanup (set by process_input_sockets thread)
+        self.tensor_ipc_receiver: TensorIpcReceiver | None = None
+
         with self._perform_handshakes(
             handshake_address,
             identity,
@@ -788,6 +807,16 @@ class EngineCoreProc(EngineCore):
             client_handshake_address,
         ) as addresses:
             self.client_count = len(addresses.outputs)
+
+            # Get this engine's tensor IPC queue for receiving multimodal tensors
+            # Queues are passed directly via constructor since they can't be serialized
+            self.tensor_queue = None
+            if tensor_queues and addresses.tensor_queue_index is not None:
+                self.tensor_queue = tensor_queues[addresses.tensor_queue_index]
+                logger.info(
+                    "Engine %d using tensor IPC queue for multimodal tensor sharing",
+                    self.engine_index,
+                )
 
             # Set up data parallel environment.
             self.has_coordinator = addresses.coordinator_output is not None
@@ -996,10 +1025,20 @@ class EngineCoreProc(EngineCore):
             for key, value in init_message.parallel_config.items():
                 setattr(parallel_config, key, value)
 
-        return init_message.addresses
+        # Store tensor_queue_index for engine to access
+        addresses = init_message.addresses
+        addresses.tensor_queue_index = init_message.tensor_queue_index
+
+        return addresses
 
     @staticmethod
-    def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
+    def run_engine_core(
+        *args,
+        dp_rank: int = 0,
+        local_dp_rank: int = 0,
+        tensor_queues: list[Any] | None = None,
+        **kwargs,
+    ):
         """Launch EngineCore busy loop in background process."""
 
         # Signal handler used for graceful termination.
@@ -1057,7 +1096,7 @@ class EngineCoreProc(EngineCore):
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
-                engine_core = DPEngineCoreProc(*args, **kwargs)
+                engine_core = DPEngineCoreProc(**kwargs, tensor_queues=tensor_queues)
             else:
                 # Non-MoE DP ranks are completely independent, so treat like DP=1.
                 # Note that parallel_config.data_parallel_index will still reflect
@@ -1065,7 +1104,9 @@ class EngineCoreProc(EngineCore):
                 parallel_config.data_parallel_size = 1
                 parallel_config.data_parallel_size_local = 1
                 parallel_config.data_parallel_rank = 0
-                engine_core = EngineCoreProc(*args, engine_index=dp_rank, **kwargs)
+                engine_core = EngineCoreProc(
+                    **kwargs, engine_index=dp_rank, tensor_queues=tensor_queues
+                )
 
             assert engine_core is not None
             engine_core.run_busy_loop()
@@ -1149,6 +1190,22 @@ class EngineCoreProc(EngineCore):
             time.sleep(0.001)
 
         return model_executed
+
+    def abort_requests(self, request_ids: list[str]):
+        """Abort requests and cleanup any orphaned tensors."""
+        # First, abort the requests in the scheduler
+        super().abort_requests(request_ids)
+
+        # Then cleanup any orphaned tensors for these requests
+        if self.tensor_ipc_receiver is not None:
+            for request_id in request_ids:
+                self.tensor_ipc_receiver.cleanup_request_tensors(request_id)
+
+    def _cleanup_finished_request_tensors(self, finished_req_ids: set[str]) -> None:
+        """Cleanup any orphaned tensors for finished requests."""
+        if self.tensor_ipc_receiver is not None:
+            for request_id in finished_req_ids:
+                self.tensor_ipc_receiver.cleanup_request_tensors(request_id)
 
     def _notify_idle_state_callbacks(self) -> None:
         while self._idle_state_callbacks:
@@ -1242,9 +1299,17 @@ class EngineCoreProc(EngineCore):
     ):
         """Input socket IO thread."""
 
-        # Msgpack serialization decoding.
-        add_request_decoder = MsgpackDecoder(EngineCoreRequest)
-        generic_decoder = MsgpackDecoder()
+        # Create TensorIpcReceiver when queue is available.
+        receiver: TensorIpcReceiver | None = None
+        if self.tensor_queue is not None:
+            receiver = TensorIpcReceiver(self.tensor_queue)
+        self.tensor_ipc_receiver = receiver
+
+        # Msgpack serialization decoding with tensor IPC receiver.
+        add_request_decoder = MsgpackDecoder(
+            EngineCoreRequest, tensor_ipc_receiver=receiver
+        )
+        generic_decoder = MsgpackDecoder(tensor_ipc_receiver=receiver)
 
         with ExitStack() as stack, zmq.Context() as ctx:
             input_sockets = [
@@ -1477,6 +1542,7 @@ class DPEngineCoreProc(EngineCoreProc):
         executor_class: type[Executor],
         log_stats: bool,
         client_handshake_address: str | None = None,
+        tensor_queues: list[Any] | None = None,
     ):
         assert vllm_config.model_config.is_moe, (
             "DPEngineCoreProc should only be used for MoE models"
@@ -1498,6 +1564,7 @@ class DPEngineCoreProc(EngineCoreProc):
             log_stats,
             client_handshake_address,
             engine_index=dp_rank,
+            tensor_queues=tensor_queues,
         )
 
     def _init_data_parallel(self, vllm_config: VllmConfig):
