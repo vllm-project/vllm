@@ -87,8 +87,12 @@ class CUDAGraphMode(enum.Enum):
     def separate_routine(self) -> bool:
         return isinstance(self.value, tuple)
 
-    def valid_runtime_modes(self) -> bool:
-        return self in [CUDAGraphMode.NONE, CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL]
+    @classmethod
+    def valid_runtime_modes(cls) -> frozenset["CUDAGraphMode"]:
+        return frozenset({cls.NONE, cls.PIECEWISE, cls.FULL})
+
+    def is_valid_runtime_mode(self) -> bool:
+        return self in CUDAGraphMode.valid_runtime_modes()
 
     def __str__(self) -> str:
         return self.name
@@ -1046,7 +1050,7 @@ class CompilationConfig:
                 "are optimized for prefill and are incompatible with CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
                 "use --all2all-backend with another option, such as "
-                "deepep_low_latency, pplx, or allgather_reducescatter."
+                "deepep_low_latency or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 
