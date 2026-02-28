@@ -905,7 +905,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 block_tables = None
                 slot_mappings = None
 
-
         attn_metadata = None
         slot_mappings_by_layer = None
         if not (dummy_run and skip_attn_for_dummy_run):
