@@ -341,6 +341,10 @@ class KVCacheManager:
             new_computed_block_list is not self.empty_kv_cache_blocks.blocks
             or num_external_computed_tokens > 0
         ):
+            # Touch the new computed blocks before allocating blocks for external
+            # computed tokens to avoid them being evicted.
+            for new_computed_blocks_one_group in new_computed_block_list:
+                self.block_pool.touch(new_computed_blocks_one_group)
             # Append the new computed blocks to the request blocks until now to
             # avoid the case where the new blocks cannot be allocated.
             self.coordinator.allocate_new_computed_blocks(
