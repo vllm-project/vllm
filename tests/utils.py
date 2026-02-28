@@ -65,6 +65,8 @@ from vllm.utils.torch_utils import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
+    import threading
+
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
         amdsmi_get_processor_handles,
@@ -72,13 +74,16 @@ if current_platform.is_rocm():
         amdsmi_shut_down,
     )
 
+    _amdsmi_lock = threading.Lock()
+
     @contextmanager
     def _nvml():
-        try:
-            amdsmi_init()
-            yield
-        finally:
-            amdsmi_shut_down()
+        with _amdsmi_lock:
+            try:
+                amdsmi_init()
+                yield
+            finally:
+                amdsmi_shut_down()
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
