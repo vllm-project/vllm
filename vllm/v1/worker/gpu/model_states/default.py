@@ -87,6 +87,7 @@ class DefaultModelState(ModelState):
         if mm_kwargs:
             # Execute the multimodal encoder.
             encoder_outputs = self.encoder_runner.execute_mm_encoder(mm_kwargs)
+            # Cache the encoder outputs by mm_hash
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
         mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
