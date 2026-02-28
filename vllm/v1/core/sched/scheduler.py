@@ -1351,6 +1351,34 @@ class Scheduler(SchedulerInterface):
             kv_transfer_params = None
             status_before_stop = request.status
 
+            # If reasoning ends in this step and content tokens were emitted,
+            # drop those content tokens so constrained decoding can start
+            # in the next step. This prevents unconstrained prefixes like
+            # markdown fences when structured output is requested.
+            reasoner = self.structured_output_manager.reasoner
+            in_unconstraint_reasoning = (
+                request.structured_output_request is not None
+                and not request.structured_output_request.reasoning_ended
+                and not self.structured_output_manager.enable_in_reasoning
+            )
+            if (
+                new_token_ids
+                and reasoner is not None
+                and in_unconstraint_reasoning
+                and reasoner.is_reasoning_end_streaming(
+                    request.all_token_ids, new_token_ids
+                )
+            ):
+                content_ids = reasoner.extract_content_ids(new_token_ids)
+                if (
+                    content_ids
+                    and len(content_ids) <= len(new_token_ids)
+                    and new_token_ids[-len(content_ids) :] == content_ids
+                ):
+                    new_token_ids = new_token_ids[: -len(content_ids)]
+                    # we've accepted the reasoning end token
+                    request.structured_output_request.reasoning_ended = True  # type: ignore[union-attr]
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
@@ -1610,8 +1638,25 @@ class Scheduler(SchedulerInterface):
                     request.spec_token_ids = []
                 continue
 
+            # For non-reasoning case or when reasoning has ended, validate all tokens,
+            # when reasoning end is deteted within spec tokens, clear them and
+            # allow grammar to activate cleanly for non-reasoning tokens
+            should_validate = self.structured_output_manager.should_advance(request)
+            reasoner = self.structured_output_manager.reasoner
+            if (
+                not should_validate
+                and request.use_structured_output
+                and reasoner is not None
+            ):
+                for i, token_id in enumerate(spec_token_ids):
+                    if reasoner.is_reasoning_end_streaming(
+                        request.all_token_ids, spec_token_ids[: i + 1]
+                    ):
+                        spec_token_ids = []
+                        break
+
             # Add newly generated spec token ids to the request.
-            if self.structured_output_manager.should_advance(request):
+            if should_validate and spec_token_ids:
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
             request.spec_token_ids = spec_token_ids
