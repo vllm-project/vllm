@@ -145,6 +145,7 @@ _TEXT_GENERATION_MODELS = {
     "Lfm2ForCausalLM": ("lfm2", "Lfm2ForCausalLM"),
     "Lfm2MoeForCausalLM": ("lfm2_moe", "Lfm2MoeForCausalLM"),
     "LlamaForCausalLM": ("llama", "LlamaForCausalLM"),
+    "HybridLlamaForCausalLM": ("llama_hybrid", "HybridLlamaForCausalLM"),
     "Llama4ForCausalLM": ("llama4", "Llama4ForCausalLM"),
     # For decapoda-research/llama-*
     "LLaMAForCausalLM": ("llama", "LlamaForCausalLM"),
@@ -187,6 +188,7 @@ _TEXT_GENERATION_MODELS = {
     "QWenLMHeadModel": ("qwen", "QWenLMHeadModel"),
     "Qwen2ForCausalLM": ("qwen2", "Qwen2ForCausalLM"),
     "Qwen2MoeForCausalLM": ("qwen2_moe", "Qwen2MoeForCausalLM"),
+    "HybridQwen2ForCausalLM": ("qwen2_5_vl_hybrid", "HybridQwen2ForCausalLM"),
     "Qwen3ForCausalLM": ("qwen3", "Qwen3ForCausalLM"),
     "Qwen3MoeForCausalLM": ("qwen3_moe", "Qwen3MoeForCausalLM"),
     "RWForCausalLM": ("falcon", "FalconForCausalLM"),
@@ -455,6 +457,10 @@ _MULTIMODAL_MODELS = {
     "Qwen2_5_VLForConditionalGeneration": (
         "qwen2_5_vl",
         "Qwen2_5_VLForConditionalGeneration",
+    ),
+    "HybridQwen2_5_VLForConditionalGeneration": (
+        "qwen2_5_vl_hybrid",
+        "HybridQwen2_5_VLForConditionalGeneration",
     ),
     "Qwen2AudioForConditionalGeneration": (
         "qwen2_audio",
