@@ -10,8 +10,6 @@ from vllm.v1.attention.backends.utils import (
 
 PADDING_SLOT_ID = -1
 
-PADDING_SLOT_ID = -1
-
 
 @triton.jit
 def eagle_step_slot_mapping_metadata_kernel(
