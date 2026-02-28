@@ -6,6 +6,26 @@
 # Multi-node detection: Instead of matching on fragile group names, we detect
 # multi-node jobs structurally by looking for the bracket command syntax
 # "[node0_cmds] && [node1_cmds]" or via the NUM_NODES environment variable.
+#
+###############################################################################
+# QUOTING / COMMAND PASSING
+#
+# Passing commands as positional arguments ($*) is fragile when the command
+# string itself contains double quotes, e.g.:
+#
+#   bash run-amd-test.sh "export FLAGS="value" && pytest -m "not slow""
+#
+# The outer shell resolves the nested quotes *before* this script runs, so
+# the script receives mangled input it cannot fully recover.
+#
+# Preferred: pass commands via the VLLM_TEST_COMMANDS environment variable:
+#
+#   export VLLM_TEST_COMMANDS='export FLAGS="value" && pytest -m "not slow"'
+#   bash run-amd-test.sh
+#
+# Single-quoted assignment preserves all inner double quotes verbatim.
+# The $* path is kept for backward compatibility but callers should migrate.
+###############################################################################
 set -o pipefail
 
 # Export Python path
@@ -80,25 +100,140 @@ is_multi_node() {
 }
 
 ###############################################################################
-# Pytest marker re-quoting
+# Pytest marker/keyword re-quoting
 #
 # When commands are passed through Buildkite -> shell -> $* -> bash -c,
-# quotes around pytest -m marker expressions get stripped:
+# quotes around multi-word pytest -m/-k expressions get stripped:
 #   pytest -v -s -m 'not cpu_test' v1/core
 # becomes:
 #   pytest -v -s -m not cpu_test v1/core
 #
 # pytest then interprets "cpu_test" as a file path, not part of the marker.
-# This function detects unquoted multi-word marker expressions and re-quotes
-# them so they survive the final bash -c expansion.
+#
+# This function detects unquoted expressions after -m/-k and re-quotes them
+# by collecting tokens until a recognizable boundary is reached:
+#   - test path (contains '/')
+#   - test file (ends with '.py')
+#   - another pytest flag (--xxx or -x single-char flags)
+#   - command separator (&& || ; |)
+#   - environment variable assignment (FOO=bar)
+#
+# Single-word markers (e.g. -m cpu_test, -m hybrid_model) pass through
+# unquoted since they have no spaces and work fine.
+#
+# Already-quoted expressions (containing literal single quotes) are passed
+# through untouched to avoid double-quoting values injected by
+# apply_rocm_test_overrides.
+#
+# NOTE: This ONLY fixes -m/-k flags. It cannot recover arbitrary inner
+# double-quotes stripped by the calling shell (see header comment).
+# Use VLLM_TEST_COMMANDS to avoid the problem entirely.
 ###############################################################################
-
 re_quote_pytest_markers() {
-  local cmds="$1"
-  # Pattern: -m not <identifier>  ->  -m 'not <identifier>'
-  # Handles the common cases: 'not cpu_test', 'not slow_test', etc.
-  cmds=$(echo "$cmds" | sed -E "s/-m not ([a-zA-Z_][a-zA-Z0-9_]*)/-m 'not \1'/g")
-  echo "$cmds"
+  local input="$1"
+  local output=""
+  local collecting=false
+  local marker_buf=""
+
+  # Flatten newlines for consistent tokenization
+  local flat="${input//$'\n'/ }"
+
+  # Disable globbing to prevent *.py etc. from expanding during read -ra
+  local restore_glob
+  restore_glob="$(shopt -p -o noglob 2>/dev/null || true)"
+  set -o noglob
+  local -a words
+  read -ra words <<< "$flat"
+  eval "$restore_glob"
+
+  for word in "${words[@]}"; do
+    if $collecting; then
+      # If the token we're about to collect already contains a literal
+      # single quote, the expression was already quoted upstream.
+      # Flush and stop collecting.
+      if [[ "$word" == *"'"* ]]; then
+        if [[ -n "$marker_buf" ]]; then
+          # Should not normally happen (partial buf + quote), flush raw
+          output+="${marker_buf} "
+          marker_buf=""
+        fi
+        output+="${word} "
+        collecting=false
+        continue
+      fi
+
+      local is_boundary=false
+      case "$word" in
+        # Command separators
+        "&&"|"||"|";"|"|")
+          is_boundary=true ;;
+        # Long flags (--ignore, --shard-id, etc.)
+        --*)
+          is_boundary=true ;;
+        # Short flags (-v, -s, -x, etc.) but NOT negative marker tokens
+        # like "not" which don't start with "-". Also skip -k/-m which
+        # would start a new marker (handled below).
+        -[a-zA-Z])
+          is_boundary=true ;;
+        # Test path (contains /)
+        */*)
+          is_boundary=true ;;
+        # Test file (ends with .py, possibly with ::method)
+        *.py|*.py::*)
+          is_boundary=true ;;
+        # Environment variable assignment preceding a command (FOO=bar)
+        *=*)
+          # Only treat as boundary if it looks like VAR=value, not
+          # pytest filter expressions like num_gpus=2 inside markers
+          if [[ "$word" =~ ^[A-Z_][A-Z0-9_]*= ]]; then
+            is_boundary=true
+          fi
+          ;;
+      esac
+
+      if $is_boundary; then
+        # Flush the collected marker expression
+        if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
+          output+="'${marker_buf}' "
+        else
+          output+="${marker_buf} "
+        fi
+        collecting=false
+        marker_buf=""
+        # Check if this boundary word itself starts a new -m/-k
+        if [[ "$word" == "-m" || "$word" == "-k" ]]; then
+          output+="${word} "
+          collecting=true
+        else
+          output+="${word} "
+        fi
+      else
+        # Accumulate into marker buffer
+        if [[ -n "$marker_buf" ]]; then
+          marker_buf+=" ${word}"
+        else
+          marker_buf="${word}"
+        fi
+      fi
+    elif [[ "$word" == "-m" || "$word" == "-k" ]]; then
+      output+="${word} "
+      collecting=true
+      marker_buf=""
+    else
+      output+="${word} "
+    fi
+  done
+
+  # Flush any trailing marker expression (marker at end of command)
+  if $collecting && [[ -n "$marker_buf" ]]; then
+    if [[ "$marker_buf" == *" "* || "$marker_buf" == *"("* ]]; then
+      output+="'${marker_buf}'"
+    else
+      output+="${marker_buf}"
+    fi
+  fi
+
+  echo "${output% }"
 }
 
 ###############################################################################
@@ -231,11 +366,35 @@ HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
 
-commands="$*"
+# ---- Command source selection ----
+# Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
+# Fall back to $* for backward compatibility, but warn that inner
+# double-quotes will have been stripped by the calling shell.
+if [[ -n "${VLLM_TEST_COMMANDS:-}" ]]; then
+  commands="${VLLM_TEST_COMMANDS}"
+  echo "Commands sourced from VLLM_TEST_COMMANDS (quoting preserved)"
+else
+  commands="$*"
+  if [[ -z "$commands" ]]; then
+    echo "Error: No test commands provided." >&2
+    echo "Usage:" >&2
+    echo "  Preferred:  VLLM_TEST_COMMANDS='...' bash $0" >&2
+    echo "  Legacy:     bash $0 \"commands here\"" >&2
+    exit 1
+  fi
+  echo "Commands sourced from positional args (legacy mode)"
+  echo "WARNING: Inner double-quotes in the command string may have been"
+  echo "  stripped by the calling shell. If you see syntax errors, switch to:"
+  echo "  export VLLM_TEST_COMMANDS='your commands here'"
+  echo "  bash $0"
+fi
+
 echo "Raw commands: $commands"
 
 # Fix quoting before ROCm overrides (so overrides see correct structure)
 commands=$(re_quote_pytest_markers "$commands")
+echo "After re-quoting: $commands"
+
 commands=$(apply_rocm_test_overrides "$commands")
 echo "Final commands: $commands"
 
@@ -246,6 +405,18 @@ render_gid=$(getent group render | cut -d: -f3)
 if [[ -z "$render_gid" ]]; then
   echo "Error: 'render' group not found. This is required for GPU access." >&2
   exit 1
+fi
+
+# --- RDMA device passthrough (conditional) ---
+# If the host has RDMA devices, pass them through so tests like
+# test_moriio_connector can access ibverbs. On hosts without RDMA
+# hardware the tests will gracefully skip via _rdma_available().
+RDMA_FLAGS=""
+if [ -d /dev/infiniband ]; then
+  echo "RDMA devices detected on host, enabling passthrough"
+  RDMA_FLAGS="--device /dev/infiniband --cap-add=IPC_LOCK"
+else
+  echo "No RDMA devices found on host, RDMA tests will be skipped"
 fi
 
 # --- Route: multi-node vs single-node ---
@@ -295,6 +466,7 @@ else
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
   docker run \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
+    $RDMA_FLAGS \
     --network=host \
     --shm-size=16gb \
     --group-add "$render_gid" \
