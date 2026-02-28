@@ -745,6 +745,11 @@ def supports_xccl() -> bool:
     return torch.distributed.is_xccl_available()
 
 
+# Supports XPU Graph with PyTorch versions >= 2.11.0.dev for XPU platform
+def supports_xpu_graph() -> bool:
+    return is_torch_equal_or_newer("2.11.0.dev")
+
+
 # create a library to hold the custom op
 vllm_lib = Library("vllm", "FRAGMENT")  # noqa
 

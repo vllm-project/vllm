@@ -42,11 +42,9 @@ from vllm.distributed import (
 )
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.entrypoints.cli.serve import ServeSubcommand
-from vllm.model_executor.layers.quantization.kernels.scaled_mm import (
-    init_fp8_linear_kernel,
-)
-from vllm.model_executor.layers.quantization.kernels.scaled_mm.ScaledMMLinearKernel import (  # noqa: E501
+from vllm.model_executor.kernels.linear import (
     FP8ScaledMMLinearKernel,
+    init_fp8_linear_kernel,
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import W8A8BlockFp8LinearOp
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -67,6 +65,8 @@ from vllm.utils.torch_utils import (
 FP8_DTYPE = current_platform.fp8_dtype()
 
 if current_platform.is_rocm():
+    import threading
+
     from amdsmi import (
         amdsmi_get_gpu_vram_usage,
         amdsmi_get_processor_handles,
@@ -74,13 +74,16 @@ if current_platform.is_rocm():
         amdsmi_shut_down,
     )
 
+    _amdsmi_lock = threading.Lock()
+
     @contextmanager
     def _nvml():
-        try:
-            amdsmi_init()
-            yield
-        finally:
-            amdsmi_shut_down()
+        with _amdsmi_lock:
+            try:
+                amdsmi_init()
+                yield
+            finally:
+                amdsmi_shut_down()
 elif current_platform.is_cuda():
     from vllm.third_party.pynvml import (
         nvmlDeviceGetHandleByIndex,
@@ -897,6 +900,36 @@ def compare_all_settings(
                     )
 
 
+@contextmanager
+def ensure_current_vllm_config():
+    """Ensures a vllm config is set for the duration of the context.
+
+    If a config is already set, this is a no-op. Otherwise, it creates a default
+    VllmConfig and sets it for the duration of the context.
+
+    Used for tests that call functions which require a vllm config but don't
+    need a specific config.
+
+    Example:
+        with ensure_current_vllm_config():
+            init_distributed_environment(...)
+            ensure_model_parallel_initialized(...)
+    """
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
+    )
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, just yield
+        yield
+    else:
+        # No config set, create a default one for the duration
+        with set_current_vllm_config(VllmConfig()):
+            yield
+
+
 def init_test_distributed_environment(
     tp_size: int,
     pp_size: int,
@@ -923,6 +956,7 @@ def init_test_distributed_environment(
             distributed_init_method=distributed_init_method,
             local_rank=local_rank,
         )
+        ensure_model_parallel_initialized(tp_size, pp_size)
     else:
         # No config set, create a default one for the test
         with set_current_vllm_config(VllmConfig()):
@@ -932,7 +966,7 @@ def init_test_distributed_environment(
                 distributed_init_method=distributed_init_method,
                 local_rank=local_rank,
             )
-    ensure_model_parallel_initialized(tp_size, pp_size)
+            ensure_model_parallel_initialized(tp_size, pp_size)
 
 
 def multi_process_parallel(
@@ -1325,6 +1359,57 @@ def multi_gpu_test(*, num_gpus: int):
             func = mark(func)
 
         return func
+
+    return wrapper
+
+
+def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
+    """
+    Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
+
+    Examples:
+        @gpu_tier_mark(min_gpus=2)          # only on multi-GPU
+        @gpu_tier_mark(max_gpus=1)          # only on single-GPU
+        @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
+    """
+    gpu_count = cuda_device_count_stateless()
+    marks = []
+
+    if min_gpus > 1:
+        marks.append(pytest.mark.distributed(num_gpus=min_gpus))
+
+    reasons = []
+    if gpu_count < min_gpus:
+        reasons.append(f"Need at least {min_gpus} GPUs (have {gpu_count})")
+    if max_gpus is not None and gpu_count > max_gpus:
+        reasons.append(f"Need at most {max_gpus} GPUs (have {gpu_count})")
+
+    if reasons:
+        marks.append(pytest.mark.skipif(True, reason="; ".join(reasons)))
+
+    return marks
+
+
+def single_gpu_only(f=None):
+    """Skip this test when running in a multi-GPU environment."""
+    marks = gpu_tier_mark(max_gpus=1)
+
+    def wrapper(func):
+        for mark in reversed(marks):
+            func = mark(func)
+        return func
+
+    return wrapper(f) if f is not None else wrapper
+
+
+def multi_gpu_only(*, num_gpus: int = 2):
+    """Skip this test when running on fewer than num_gpus GPUs."""
+    marks = gpu_tier_mark(min_gpus=num_gpus)
+
+    def wrapper(f):
+        for mark in reversed(marks):
+            f = mark(f)
+        return f
 
     return wrapper
 
