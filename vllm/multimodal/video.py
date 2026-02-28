@@ -431,6 +431,33 @@ class OpenCVDynamicVideoBackend(OpenCVVideoBackend):
         return frames, metadata
 
 
+@VIDEO_LOADER_REGISTRY.register("nemotron_vl")
+class NemotronVLVideoBackend(OpenCVVideoBackend):
+    @classmethod
+    def load_bytes(
+        cls,
+        data: bytes,
+        num_frames: int = -1,
+        fps: int = -1,
+        max_duration: int = 300,
+        frame_recovery: bool = False,
+        keep_video_bytes: bool = False,
+        **kwargs,
+    ) -> tuple[npt.NDArray, dict[str, Any]]:
+        frames, metadata = OpenCVVideoBackend.load_bytes(
+            data,
+            num_frames=num_frames,
+            fps=fps,
+            max_duration=max_duration,
+            frame_recovery=frame_recovery,
+            **kwargs,
+        )
+        if keep_video_bytes:
+            metadata = dict(metadata)
+            metadata["original_video_bytes"] = data
+        return frames, metadata
+
+
 @VIDEO_LOADER_REGISTRY.register("molmo2")
 class Molmo2VideoBackend(VideoLoader):
     def get_cv2_video_api(self):
