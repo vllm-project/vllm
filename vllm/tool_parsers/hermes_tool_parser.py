@@ -280,33 +280,53 @@ class Hermes2ProToolParser(ToolParser):
                 if self.prev_tool_call_arr is None or len(self.prev_tool_call_arr) == 0:
                     logger.debug("attempting to close tool call, but no tool call")
                     return None
-                diff = self.prev_tool_call_arr[self.current_tool_id].get("arguments")
-                if diff:
-                    diff = (
-                        diff.encode("utf-8").decode("unicode_escape")
-                        if diff is str
-                        else diff
-                    )
-                    if '"}' not in delta_text:
-                        return None
-                    end_loc = delta_text.rindex('"}')
-                    diff = delta_text[:end_loc] + '"}'
-                    logger.debug(
-                        "Finishing tool and found diff that had not "
-                        "been streamed yet: %s",
-                        diff,
-                    )
-                    self.streamed_args_for_tool[self.current_tool_id] += diff
-                    return DeltaMessage(
-                        tool_calls=[
-                            DeltaToolCall(
-                                index=self.current_tool_id,
-                                function=DeltaFunctionCall(arguments=diff).model_dump(
-                                    exclude_none=True
-                                ),
-                            )
-                        ]
-                    )
+
+                # When the tool call is being closed, we need to ensure all
+                # arguments have been streamed. The previous code only handled
+                # string-ending arguments (checking for '"}'), but arguments
+                # can end with numbers, booleans, objects, arrays, etc.
+                # (fixes issue #22885)
+                prev_args = self.prev_tool_call_arr[self.current_tool_id].get(
+                    "arguments"
+                )
+                if prev_args is not None:
+                    # Serialize to get the expected complete arguments string
+                    expected_args_json = json.dumps(prev_args, ensure_ascii=False)
+                    already_streamed = self.streamed_args_for_tool[self.current_tool_id]
+
+                    # Calculate remaining content that needs to be streamed
+                    if expected_args_json.startswith(already_streamed):
+                        remaining = expected_args_json[len(already_streamed) :]
+                    else:
+                        # Fallback: compute remaining by counting unstreamed
+                        # closing braces. This handles cases where whitespace
+                        # or formatting differences exist between the streamed
+                        # content and the serialized JSON.
+                        expected_close_braces = expected_args_json.count("}")
+                        streamed_close_braces = already_streamed.count("}")
+                        remaining_braces = expected_close_braces - streamed_close_braces
+                        remaining = (
+                            "}" * remaining_braces if remaining_braces > 0 else ""
+                        )
+
+                    if remaining:
+                        logger.debug(
+                            "Finishing tool and found diff that had not "
+                            "been streamed yet: %s",
+                            remaining,
+                        )
+                        self.streamed_args_for_tool[self.current_tool_id] += remaining
+                        return DeltaMessage(
+                            tool_calls=[
+                                DeltaToolCall(
+                                    index=self.current_tool_id,
+                                    function=DeltaFunctionCall(
+                                        arguments=remaining
+                                    ).model_dump(exclude_none=True),
+                                )
+                            ]
+                        )
+                return None
 
             # case -- otherwise we're just generating text
             else:
@@ -387,13 +407,15 @@ class Hermes2ProToolParser(ToolParser):
             logger.debug("against new ones: %s", cur_arguments)
 
             # case -- no arguments have been created yet. skip sending a delta.
-            if not cur_arguments and not prev_arguments:
+            # Note: Use 'is None' checks instead of truthiness to correctly
+            # handle empty dicts {} for parameterless tools (issue #22885)
+            if cur_arguments is None and prev_arguments is None:
                 logger.debug("Skipping text %s - no arguments", delta_text)
                 delta = None
 
-            # case -- prev arguments are defined, but non are now.
+            # case -- prev arguments are defined, but none are now.
             #   probably impossible, but not a fatal error - just keep going
-            elif not cur_arguments and prev_arguments:
+            elif cur_arguments is None and prev_arguments is not None:
                 logger.error(
                     "should be impossible to have arguments reset "
                     "mid-call. skipping streaming anything."
@@ -402,7 +424,7 @@ class Hermes2ProToolParser(ToolParser):
 
             # case -- we now have the first info about arguments available from
             #   autocompleting the JSON
-            elif cur_arguments and not prev_arguments:
+            elif cur_arguments is not None and prev_arguments is None:
                 # extract the content after {"name": ..., "arguments":
                 #   directly from tool_call_portion as cur_arguments_json,
                 #   since cur_arguments may differ from the original text
@@ -450,7 +472,7 @@ class Hermes2ProToolParser(ToolParser):
                 self.streamed_args_for_tool[self.current_tool_id] += arguments_delta
 
             # last case -- we have an update to existing arguments.
-            elif cur_arguments and prev_arguments:
+            elif cur_arguments is not None and prev_arguments is not None:
                 # judge whether the tool_call_portion is a complete JSON
                 try:
                     json.loads(tool_call_portion)
