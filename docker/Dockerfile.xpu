@@ -119,20 +119,52 @@ RUN uv pip install -e tests/vllm_test_utils
 ARG UCX_VERSION=e5d98879705239d254ede40b4a52891850cb5349
 ARG NIXL_VERSION=0.7.0
 
-RUN set -eux; \
-    git clone https://github.com/openucx/ucx /tmp/ucx_source; \
-    cd /tmp/ucx_source; \
-    git checkout "${UCX_VERSION}"; \
-    bash autogen.sh; \
-    ./configure --prefix=/tmp/ucx_install --with-ze=yes --enable-examples --enable-mt; \
-    make CFLAGS="-Wno-error=incompatible-pointer-types"; \
-    make install; \
-    git clone https://github.com/ai-dynamo/nixl /tmp/nixl_source; \
-    cd /tmp/nixl_source; \
-    git checkout "${NIXL_VERSION}"
+RUN apt-get update && apt-get install -y \
+    pciutils \
+    net-tools \
+    iproute2 \
+    hwloc \
+    numactl \
+    wget \
+    curl \
+    git \
+    build-essential 
 
-ENV PKG_CONFIG_PATH=/tmp/ucx_install/lib/pkgconfig:/tmp/nixl_install/lib/pkgconfig:${PKG_CONFIG_PATH}
-ENV LD_LIBRARY_PATH=/tmp/nixl_install/lib:${LD_LIBRARY_PATH}
+RUN apt-get install -y \
+    autoconf \
+    automake \
+    libtool \
+    pkg-config
+
+RUN apt-get update && apt-get install -y \
+    rdma-core \
+    libibverbs-dev \
+    ibverbs-utils \
+    libibverbs1 \
+    ibverbs-providers \
+    librdmacm-dev \
+    librdmacm1 \
+    libibumad-dev \
+    libibumad3 \
+    libibmad-dev \
+    libibmad5 \
+    infiniband-diags \
+    perftest \
+    ibutils \
+    libmlx5-1 \
+    libmlx4-1 \
+    ibverbs-providers \
+    librdmacm1t64
+
+RUN git clone https://github.com/openucx/ucx /tmp/ucx_source && \
+    cd /tmp/ucx_source && git checkout "${UCX_VERSION}" && \
+    bash autogen.sh && \
+    ./configure --prefix=/tmp/ucx_install --with-ze=yes --enable-examples --enable-mt && \
+    make CFLAGS="-Wno-error=incompatible-pointer-types" -j8 && make install && \
+    git clone https://github.com/ai-dynamo/nixl /tmp/nixl_source && \
+    cd /tmp/nixl_source && git checkout "${NIXL_VERSION}"
+
+ENV PKG_CONFIG_PATH=/tmp/ucx_install/lib/pkgconfig:${PKG_CONFIG_PATH}
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     cd /tmp/nixl_source && \
