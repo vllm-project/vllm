@@ -732,6 +732,14 @@ class WorkerProc:
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
 
+        # Set early process title and log prefix using rank (before full
+        # initialization). This helps with debugging during startup.
+        # The title will be updated later with full parallelism info.
+        rank = kwargs.get("rank", 0)
+        early_name = f"Worker_{rank}"
+        set_process_title(name=early_name)
+        decorate_logs(early_name)
+
         worker = None
         # tuple[Connection, Connection]
         reader, ready_writer = kwargs.pop("ready_pipe")
