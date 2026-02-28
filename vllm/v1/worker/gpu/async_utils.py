@@ -83,8 +83,6 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
         self.is_valid = is_valid
-        self.main_stream = main_stream
-        self.copy_stream = copy_stream
         self.copy_event = copy_event
 
         with stream(copy_stream, main_stream):
