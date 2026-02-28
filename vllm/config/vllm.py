@@ -1234,6 +1234,10 @@ class VllmConfig:
         self._post_init_kv_transfer_config()
 
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
+        if envs.VLLM_ENABLE_SP_RAGGED:
+            # Ragged SP supports non-TP-multiple token counts.
+            return possible_sizes
+
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism
         removed_sizes = [

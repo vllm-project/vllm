@@ -15,17 +15,21 @@ def tensor_model_parallel_all_reduce(input_: torch.Tensor) -> torch.Tensor:
 
 
 def tensor_model_parallel_all_gather(
-    input_: torch.Tensor, dim: int = -1
+    input_: torch.Tensor,
+    dim: int = -1,
+    sizes: list[int] | None = None,
 ) -> torch.Tensor:
     """All-gather the input tensor across model parallel group."""
-    return get_tp_group().all_gather(input_, dim)
+    return get_tp_group().all_gather(input_, dim, sizes=sizes)
 
 
 def tensor_model_parallel_reduce_scatter(
-    input_: torch.Tensor, dim: int = -1
+    input_: torch.Tensor,
+    dim: int = -1,
+    sizes: list[int] | None = None,
 ) -> torch.Tensor:
     """Reduce-Scatter the input tensor across model parallel group."""
-    return get_tp_group().reduce_scatter(input_, dim)
+    return get_tp_group().reduce_scatter(input_, dim, sizes=sizes)
 
 
 def tensor_model_parallel_gather(

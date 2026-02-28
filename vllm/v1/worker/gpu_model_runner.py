@@ -181,7 +181,10 @@ from vllm.v1.worker.ubatch_utils import (
     maybe_create_ubatch_slices,
     split_attn_metadata,
 )
-from vllm.v1.worker.utils import is_residual_scattered_for_sp
+from vllm.v1.worker.utils import (
+    get_local_tokens_for_sp,
+    is_residual_scattered_for_sp,
+)
 from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
@@ -2676,7 +2679,9 @@ class GPUModelRunner(
         assert self.intermediate_tensors is not None
 
         tp = self.vllm_config.parallel_config.tensor_parallel_size
+        tp_rank = get_tp_group().rank_in_group
         is_rs = is_residual_scattered_for_sp(self.vllm_config, num_tokens)
+        local_tokens = get_local_tokens_for_sp(num_tokens, tp, tp_rank)
 
         # When sequence parallelism is enabled, the "residual" tensor is sharded
         # across tensor parallel ranks, so each rank only needs its own slice.
@@ -2684,16 +2689,14 @@ class GPUModelRunner(
             assert intermediate_tensors is not None
             for k, v in intermediate_tensors.items():
                 is_scattered = k == "residual" and is_rs
-                copy_len = num_tokens // tp if is_scattered else num_tokens
+                copy_len = local_tokens if is_scattered else num_tokens
                 self.intermediate_tensors[k][:copy_len].copy_(
                     v[:copy_len], non_blocking=True
                 )
 
         return IntermediateTensors(
             {
-                k: v[: num_tokens // tp]
-                if k == "residual" and is_rs
-                else v[:num_tokens]
+                k: v[:local_tokens] if k == "residual" and is_rs else v[:num_tokens]
                 for k, v in self.intermediate_tensors.items()
             }
         )
@@ -2774,7 +2777,11 @@ class GPUModelRunner(
         # Pad tokens to multiple of tensor_parallel_size when
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
-        if self.compilation_config.pass_config.enable_sp and tp_size > 1:
+        if (
+            self.compilation_config.pass_config.enable_sp
+            and tp_size > 1
+            and not envs.VLLM_ENABLE_SP_RAGGED
+        ):
             return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
@@ -3189,7 +3196,10 @@ class GPUModelRunner(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
-        if self.compilation_config.pass_config.enable_sp:
+        if (
+            self.compilation_config.pass_config.enable_sp
+            and not envs.VLLM_ENABLE_SP_RAGGED
+        ):
             assert (
                 batch_descriptor.num_tokens
                 % self.vllm_config.parallel_config.tensor_parallel_size

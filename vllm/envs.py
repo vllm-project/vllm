@@ -234,6 +234,7 @@ if TYPE_CHECKING:
     VLLM_DISABLE_SHARED_EXPERTS_STREAM: bool = False
     VLLM_SHARED_EXPERTS_STREAM_TOKEN_THRESHOLD: int = 256
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
+    VLLM_ENABLE_SP_RAGGED: bool = False
     VLLM_USE_V2_MODEL_RUNNER: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
@@ -1580,6 +1581,8 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_COMPILE_CACHE_SAVE_FORMAT": env_with_choices(
         "VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary", ["binary", "unpacked"]
     ),
+    # Enable ragged sequence parallelism path.
+    "VLLM_ENABLE_SP_RAGGED": lambda: bool(int(os.getenv("VLLM_ENABLE_SP_RAGGED", "0"))),
     # Flag to enable v2 model runner.
     "VLLM_USE_V2_MODEL_RUNNER": lambda: bool(
         int(os.getenv("VLLM_USE_V2_MODEL_RUNNER", "0"))

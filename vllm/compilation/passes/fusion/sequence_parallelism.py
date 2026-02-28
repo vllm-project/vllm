@@ -10,6 +10,7 @@ import torch._inductor.pattern_matcher as pm
 import torch.fx as fx
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
@@ -20,7 +21,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-from ..inductor_pass import enable_fake_mode
+from ..inductor_pass import enable_fake_mode, get_pass_context
 from ..utility.noop_elimination import NoOpEliminationPass
 from ..vllm_inductor_pass import VllmInductorPass, VllmPatternMatcherPass
 from .matcher_utils import MatcherFusedAddRMSNorm, MatcherQuantFP8, MatcherRMSNorm
@@ -113,12 +114,44 @@ class _SequenceParallelPatternHelper:
     def _all_reduce(self, x: torch.Tensor) -> torch.Tensor:
         return tensor_model_parallel_all_reduce(x)
 
+    def _compute_split_sizes(self, num_tokens: int) -> list[int] | None:
+        if not envs.VLLM_ENABLE_SP_RAGGED or num_tokens % self.tp_size == 0:
+            return None
+        base = num_tokens // self.tp_size
+        remainder = num_tokens % self.tp_size
+        return [base + (1 if rank < remainder else 0) for rank in range(self.tp_size)]
+
+    def _get_num_tokens(self, x: torch.Tensor) -> int:
+        try:
+            compile_range = get_pass_context().compile_range
+        except AssertionError:
+            return x.size(0)
+        if compile_range.is_single_size():
+            return compile_range.end
+        return x.size(0)
+
     def _reduce_scatter(self, x: torch.Tensor) -> torch.Tensor:
+        split_sizes = self._compute_split_sizes(self._get_num_tokens(x))
+        if split_sizes is not None:
+            return torch.ops.vllm.reduce_scatterv.default(
+                x,
+                dim=0,
+                sizes=split_sizes,
+                group_name=self.tp_group.unique_name,
+            )
         return torch.ops.vllm.reduce_scatter.default(
             x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
         )
 
     def _all_gather(self, x: torch.Tensor) -> torch.Tensor:
+        split_sizes = self._compute_split_sizes(self._get_num_tokens(x))
+        if split_sizes is not None:
+            return torch.ops.vllm.all_gatherv.default(
+                x,
+                dim=0,
+                sizes=split_sizes,
+                group_name=self.tp_group.unique_name,
+            )
         return torch.ops.vllm.all_gather.default(
             x, dim=0, world_size=self.tp_size, group_name=self.tp_group.unique_name
         )
@@ -432,9 +465,16 @@ class SequenceParallelismPass(VllmPatternMatcherPass):
             not self.compilation_config.use_inductor_graph_partition
             and self.compilation_config.splitting_ops
         ):
-            tp_size = get_tensor_model_parallel_world_size()
-            if not compile_range.is_single_size() or compile_range.end % tp_size != 0:
-                return False
+            if envs.VLLM_ENABLE_SP_RAGGED:
+                if not compile_range.is_single_size():
+                    return False
+            else:
+                tp_size = get_tensor_model_parallel_world_size()
+                if (
+                    not compile_range.is_single_size()
+                    or compile_range.end % tp_size != 0
+                ):
+                    return False
 
         # min_token_num is None when SP is disabled for this device/config
         # (e.g., non-CUDA platform, unsupported GPU, or small hidden_size)
