@@ -500,6 +500,38 @@ def post_update(
 
 
 @triton.jit
+def _post_update_pool_kernel(
+    idx_mapping_ptr,
+    num_computed_tokens_ptr,
+    query_start_loc_ptr,
+):
+    batch_id = tl.program_id(0)
+    query_start = tl.load(query_start_loc_ptr + batch_id)
+    query_end = tl.load(query_start_loc_ptr + batch_id + 1)
+    query_len = query_end - query_start
+
+    req_state_idx = tl.load(idx_mapping_ptr + batch_id)
+    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+    tl.store(num_computed_tokens_ptr + req_state_idx, num_computed + query_len)
+
+
+def post_update_pool(
+    # [num_reqs]
+    idx_mapping: torch.Tensor,
+    # [max_num_reqs]
+    num_computed_tokens: torch.Tensor,
+    # [num_reqs + 1]
+    query_start_loc: torch.Tensor,
+) -> None:
+    num_reqs = idx_mapping.shape[0]
+    _post_update_pool_kernel[(num_reqs,)](
+        idx_mapping,
+        num_computed_tokens,
+        query_start_loc,
+    )
+
+
+@triton.jit
 def _expand_idx_mapping_kernel(
     idx_mapping_ptr,
     expanded_idx_mapping_ptr,
