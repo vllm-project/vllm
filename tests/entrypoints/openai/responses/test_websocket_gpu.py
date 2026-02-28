@@ -18,7 +18,8 @@ Requirements:
     - Qwen/Qwen2-0.5B-Instruct model downloaded
 
 Environment:
-    CUDA_VISIBLE_DEVICES=0 pytest tests/entrypoints/openai/responses/test_websocket_gpu.py -v -s
+    CUDA_VISIBLE_DEVICES=0 pytest \
+        tests/entrypoints/openai/responses/test_websocket_gpu.py -v -s
 """
 
 import asyncio
