@@ -194,6 +194,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "ArcticForCausalLM": _HfExamplesInfo(
         "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
     ),
+    "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
     "BaiChuanForCausalLM": _HfExamplesInfo(
         "baichuan-inc/Baichuan-7B", trust_remote_code=True
     ),
@@ -205,6 +206,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     ),
     "BailingMoeV2ForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-mini-2.0", trust_remote_code=True
+    ),
+    "BailingMoeV2_5ForCausalLM": _HfExamplesInfo(
+        "inclusionAI/Ring-2.5-1T", trust_remote_code=True
     ),
     "BambaForCausalLM": _HfExamplesInfo(
         "ibm-ai-platform/Bamba-9B-v1",
@@ -594,6 +598,9 @@ _EMBEDDING_EXAMPLE_MODELS = {
     "CLIPModel": _HfExamplesInfo("openai/clip-vit-base-patch32"),
     "ColModernVBertForRetrieval": _HfExamplesInfo(
         "ModernVBERT/colmodernvbert-merged",
+    ),
+    "LlamaNemotronVLModel": _HfExamplesInfo(
+        "nvidia/llama-nemotron-embed-vl-1b-v2", trust_remote_code=True
     ),
     "LlavaNextForConditionalGeneration": _HfExamplesInfo("royokong/e5-v"),
     "Phi3VForCausalLM": _HfExamplesInfo(

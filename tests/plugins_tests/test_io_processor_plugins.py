@@ -39,7 +39,7 @@ def _compute_image_hash(base64_data: str) -> str:
 def test_loading_missing_plugin():
     vllm_config = VllmConfig()
     with pytest.raises(ValueError):
-        get_io_processor(vllm_config, "wrong_plugin")
+        get_io_processor(vllm_config, None, "wrong_plugin")
 
 
 @pytest.fixture(scope="function")

@@ -122,8 +122,17 @@ def check_interleaved_audio_video(
     """
     Check if video and audio positions are interleaved in the multimodal region.
 
-    Returns:
-        True if video and audio tokens are interleaved, False otherwise.
+    Returns True only for the use_audio_in_video=True case, where video and
+    audio tokens alternate within a single contiguous region with no gaps.
+
+    A simple range-overlap check produces false positives when multiple
+    non-interleaved requests are batched together: audio tokens from request N
+    fall between video tokens from request N and request N+1, making the
+    global ranges overlap even though each individual request is non-interleaved.
+
+    To distinguish true interleaving from this batching artefact we require
+    that every position in the combined [first_VA, last_VA] range is occupied
+    by either a video or an audio token (no text/image gaps).
     """
     if num_video == 0 or num_audio == 0:
         return False
@@ -131,10 +140,22 @@ def check_interleaved_audio_video(
     video_pos = is_video.nonzero(as_tuple=True)[0]
     audio_pos = is_audio.nonzero(as_tuple=True)[0]
 
-    return (
+    # Quick range-overlap pre-check (necessary but not sufficient).
+    if not (
         video_pos[0].item() < audio_pos[-1].item()
         and audio_pos[0].item() < video_pos[-1].item()
-    )
+    ):
+        return False
+
+    # Density check: for true use_audio_in_video interleaving every position
+    # in the combined span is a video or audio token.  Batched non-interleaved
+    # requests have text/image tokens between the per-request V and A blocks.
+    # combined_start/end encompass all V/A tokens, so num_video + num_audio
+    # equals the number of V/A tokens in range; compare directly to span size.
+    combined_start = min(video_pos[0].item(), audio_pos[0].item())
+    combined_end = max(video_pos[-1].item(), audio_pos[-1].item())
+    total_in_range = combined_end - combined_start + 1
+    return (num_video + num_audio) == total_in_range
 
 
 def merge_interleaved_embeddings(
@@ -1376,23 +1397,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         is_multimodal: torch.Tensor | None = None,
         handle_oov_mm_token: bool = False,
     ) -> torch.Tensor:
-        from .utils import _merge_multimodal_embeddings
-
         if multimodal_embeddings is None or is_multimodal is None:
             return super().embed_input_ids(input_ids)
 
-        inputs_embeds = self._embed_text_input_ids(
-            input_ids,
-            self.get_language_model().embed_input_ids,
-            is_multimodal=is_multimodal,
-            handle_oov_mm_token=handle_oov_mm_token,
-        )
-
-        if len(multimodal_embeddings) == 0:
-            return inputs_embeds
-
         # Check for audio-in-video: interleaved video and audio tokens
-        # in the multimodal region.
+        # in the multimodal region. Only use the interleaved path when
+        # needed; otherwise fall back to the default parent implementation.
         video_token_id = self.config.video_token_index
         audio_token_id = self.config.audio_token_index
 
@@ -1403,6 +1413,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         num_audio = is_audio.sum().item()
 
         if check_interleaved_audio_video(is_video, is_audio, num_video, num_audio):
+            inputs_embeds = self._embed_text_input_ids(
+                input_ids,
+                self.get_language_model().embed_input_ids,
+                is_multimodal=is_multimodal,
+                handle_oov_mm_token=handle_oov_mm_token,
+            )
             return merge_interleaved_embeddings(
                 inputs_embeds,
                 multimodal_embeddings,
@@ -1413,9 +1429,12 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 num_audio,
             )
 
-        # Default: standard merge (no interleaving)
-        return _merge_multimodal_embeddings(
-            inputs_embeds, multimodal_embeddings, is_multimodal
+        # Default: standard merge (no interleaving), same as parent class
+        return super().embed_input_ids(
+            input_ids,
+            multimodal_embeddings=multimodal_embeddings,
+            is_multimodal=is_multimodal,
+            handle_oov_mm_token=handle_oov_mm_token,
         )
 
     def forward(

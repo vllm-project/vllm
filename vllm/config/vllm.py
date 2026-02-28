@@ -126,6 +126,9 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
         # tp-dp combination broken:
         # https://github.com/vllm-project/vllm/issues/34458
         and cfg.parallel_config.data_parallel_size == 1
+        # tp-pp combination broken:
+        # https://github.com/vllm-project/vllm/issues/35426
+        and cfg.parallel_config.pipeline_parallel_size == 1
     )
 
 
@@ -809,6 +812,8 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        current_platform.apply_config_platform_defaults(self)
+
         if self.compilation_config.mode is None:
             if self.optimization_level > OptimizationLevel.O0:
                 self.compilation_config.mode = CompilationMode.VLLM_COMPILE
@@ -855,7 +860,7 @@ class VllmConfig:
                 self.compilation_config.pass_config.fuse_gemm_comms = False
             else:
                 # Compute SP threshold early; disable if None (model too
-                # small) before +rms_norm gets forced into custom_ops.
+                # small for SP to be beneficial).
                 pass_config = self.compilation_config.pass_config
                 if pass_config.sp_min_token_num is None:
                     from vllm.compilation.passes.fusion.sequence_parallelism import (
@@ -877,14 +882,6 @@ class VllmConfig:
                     )
                     self.compilation_config.pass_config.enable_sp = False
                     self.compilation_config.pass_config.fuse_gemm_comms = False
-
-        if self.compilation_config.pass_config.enable_sp:
-            if "-rms_norm" in self.compilation_config.custom_ops:
-                logger.warning(
-                    "RMS norm force disabled, sequence parallelism might break"
-                )
-            else:
-                self.compilation_config.custom_ops.append("+rms_norm")
 
         if self.compilation_config.fast_moe_cold_start is None:
             # resolve default behavior: try to be as safe as possible
