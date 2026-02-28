@@ -473,17 +473,6 @@ steps:
     - pytest -v -s v1/determinism/test_batch_invariance.py
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
-- label: V1 Test attention (B200) # 10min
-  timeout_in_minutes: 30
-  gpu: b200
-  source_file_dependencies:
-    - vllm/config/attention.py
-    - vllm/model_executor/layers/attention
-    - vllm/v1/attention
-    - tests/v1/attention
-  commands:
-    - pytest -v -s v1/attention
-
 - label: V1 Test others (CPU) # 5 mins
   mirror_hardwares: [amdexperimental, amdproduction, amdtentative]
   agent_pool: mi325_1
@@ -1141,48 +1130,6 @@ steps:
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
-- label: Blackwell Test # 21 min
-  timeout_in_minutes: 30
-  working_dir: "/vllm-workspace/"
-  gpu: b200
-  # optional: true
-  source_file_dependencies:
-  - csrc/quantization/fp4/
-  - csrc/attention/mla/
-  - csrc/quantization/cutlass_w8a8/moe/
-  - vllm/model_executor/layers/fused_moe/cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_cutlass_moe.py
-  - vllm/model_executor/layers/fused_moe/flashinfer_a2a_prepare_finalize.py
-  - vllm/model_executor/layers/quantization/utils/flashinfer_utils.py
-  - vllm/v1/attention/backends/flashinfer.py
-  - vllm/v1/attention/backends/mla/cutlass_mla.py
-  - vllm/v1/attention/backends/mla/flashinfer_mla.py
-  - vllm/v1/attention/selector.py
-  - vllm/platforms/cuda.py
-  commands:
-    - nvidia-smi
-    - python3 examples/offline_inference/basic/chat.py
-    # Attention
-    # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
-    - pytest -v -s tests/kernels/attention/test_attention_selector.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer.py -k 'not num_heads2'
-    - pytest -v -s tests/kernels/attention/test_flashinfer_trtllm_attention.py
-    - pytest -v -s tests/kernels/attention/test_cutlass_mla_decode.py
-    - pytest -v -s tests/kernels/attention/test_flashinfer_mla_decode.py
-    # Quantization
-    - pytest -v -s tests/kernels/quantization/test_cutlass_scaled_mm.py -k 'fp8'
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_silu_mul_nvfp4_quant.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_flashinfer_nvfp4_scaled_mm.py
-    - pytest -v -s tests/kernels/quantization/test_nvfp4_qutlass.py
-    - pytest -v -s tests/kernels/quantization/test_mxfp4_qutlass.py
-    - pytest -v -s tests/kernels/moe/test_nvfp4_moe.py
-    - pytest -v -s tests/kernels/moe/test_ocp_mx_moe.py
-    - pytest -v -s tests/kernels/moe/test_flashinfer.py
-    - pytest -v -s tests/kernels/moe/test_cutedsl_moe.py
-
 - label: Blackwell Fusion and Compile Tests # 30 min
   timeout_in_minutes: 40
   working_dir: "/vllm-workspace/"
@@ -1248,16 +1195,6 @@ steps:
   - vllm/v1/attention/backends/flashinfer.py
   commands:
     - pytest -s -v tests/quantization/test_blackwell_moe.py
-
-- label: Blackwell LM Eval Small Models
-  timeout_in_minutes: 120
-  gpu: b200
-  optional: true # run on nightlies
-  source_file_dependencies:
-  - csrc/
-  - vllm/model_executor/layers/quantization
-  commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -1668,16 +1605,6 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
-  timeout_in_minutes: 60
-  gpu: b200
-  optional: true
-  num_gpus: 2
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
-
-
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
   timeout_in_minutes: 60
   mirror_hardwares: [amdexperimental, amdproduction]
@@ -2073,19 +2000,6 @@ steps:
 
 # TODO: Add the "V1 Test attetion (MI300)" test group
 
-- label: V1 Test attention (H100) # 10min
-  mirror_hardwares: [amdexperimental]
-  agent_pool: mi355_1
-  timeout_in_minutes: 30
-  gpu: h100
-  source_file_dependencies:
-    - vllm/config/attention.py
-    - vllm/model_executor/layers/attention
-    - vllm/v1/attention
-    - tests/v1/attention
-  commands:
-    - pytest -v -s v1/attention
-
 - label: Batch Invariance Tests (H100) # 10min
   mirror_hardwares: [amdexperimental]
   agent_pool: mi355_1
@@ -2102,6 +2016,8 @@ steps:
     - pytest -v -s v1/determinism/test_rms_norm_batch_invariant.py
 
 - label: V1 Test attention (B200) # 10min
+  mirror_hardwares: [amdexperimental, amdmi355]
+  agent_pool: mi355_1
   timeout_in_minutes: 30
   gpu: b200
   source_file_dependencies:
@@ -2726,7 +2642,9 @@ steps:
     # Whisper needs spawn method to avoid deadlock
     - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
 
-- label: Blackwell Test # 21 min
+- label: Blackwell Test (MI355) # 21 min
+  mirror_hardwares: [amdexperimental, amdmi355]
+  agent_pool: mi355_1
   timeout_in_minutes: 30
   working_dir: "/vllm-workspace/"
   gpu: b200
@@ -2745,7 +2663,7 @@ steps:
   - vllm/v1/attention/selector.py
   - vllm/platforms/cuda.py
   commands:
-    - nvidia-smi
+    # rocm-smi
     - python3 examples/offline_inference/basic/chat.py
     # Attention
     # num_heads2 broken by https://github.com/flashinfer-ai/flashinfer/issues/1353
@@ -2836,13 +2754,15 @@ steps:
 
 - label: Blackwell LM Eval Small Models
   timeout_in_minutes: 120
+  mirror_hardwares: [amdexperimental, amdproduction, amdmi355]
+  agent_pool: mi355_2
   gpu: b200
   optional: true # run on nightlies
   source_file_dependencies:
   - csrc/
   - vllm/model_executor/layers/quantization
   commands:
-  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-blackwell.txt
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-mi355.txt
 
 #####  1 GPU test  #####
 #####  multi gpus test  #####
@@ -3219,18 +3139,9 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/deepseek_v2_lite_ep_eplb.sh 0.25 200 8010
 
-- label: Qwen3-30B-A3B-FP8-block Accuracy (H100)
-  mirror_hardwares: [amdexperimental, amdproduction]
-  agent_pool: mi355_4
-  timeout_in_minutes: 60
-  gpu: h100
-  optional: true
-  num_gpus: 4
-  working_dir: "/vllm-workspace"
-  commands:
-  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
-
-- label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
+- label: Qwen3-30B-A3B-FP8-block Accuracy (B200/MI355)
+  mirror_hardwares: [amdexperimental, amdproduction, amdmi355]
+  agent_pool: mi355_2
   timeout_in_minutes: 60
   gpu: b200
   optional: true
@@ -3238,7 +3149,6 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
-
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
   timeout_in_minutes: 60
@@ -3249,3 +3159,18 @@ steps:
   working_dir: "/vllm-workspace"
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen3_next_mtp_async_eplb.sh 0.8 1319 8040
+
+- label: Attention Benchmarks Smoke Test (B200/MI355)
+  device: b200
+  mirror_hardwares: [amdexperimental, amdmi355]
+  agent_pool: mi355_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/"
+  timeout_in_minutes: 10
+  source_file_dependencies:
+  - benchmarks/attention_benchmarks/
+  - vllm/v1/attention/
+  commands:
+  - python3 benchmarks/attention_benchmarks/benchmark.py --backends ROCM_ATTN ROCM_AITER_FA ROCM_AITER_UNIFIED_ATTN --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
+
