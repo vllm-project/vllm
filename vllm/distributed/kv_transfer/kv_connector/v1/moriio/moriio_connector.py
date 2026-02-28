@@ -382,7 +382,7 @@ class MoRIIOConnectorScheduler:
                 for tp_index in range(self.tp_size):
                     target_port = request.kv_transfer_params[
                         "remote_notify_port"
-                    ] + get_port_offset(remote_dp_rank, tp_index)
+                    ] + get_port_offset(remote_dp_rank, tp_index, self.tp_size)
 
                     self.send_notify_block(
                         req_id=request.request_id,
@@ -591,7 +591,7 @@ class MoRIIOConnectorWorker:
         self._local_rank = get_world_group().local_rank
         self.tp_rank = self.moriio_config.tp_rank
         self.dp_rank = self.moriio_config.dp_rank
-
+        self.tp_size = self.moriio_config.tp_size
         self.local_ip = self.moriio_config.local_ip
         self.local_kv_port = self.moriio_config.local_kv_port
         self.proxy_ip = self.moriio_config.proxy_ip
@@ -672,7 +672,7 @@ class MoRIIOConnectorWorker:
 
         self.side_channel_port: int = (
             self.moriio_config.handshake_port
-            + get_port_offset(self.dp_rank, self.tp_rank)
+            + get_port_offset(self.dp_rank, self.tp_rank, self.tp_size)
         )
         self.engine_id: EngineId = engine_id
 
@@ -945,7 +945,9 @@ class MoRIIOConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
-        port_offset = get_port_offset(remote_dp_rank, self.tp_rank)
+        port_offset = get_port_offset(
+            remote_dp_rank, self.tp_rank, self.moriio_config.tp_size
+        )
         path = make_zmq_path("tcp", host, port + port_offset)
         logger.debug("handshake Querying metadata on path: %s", path)
 
