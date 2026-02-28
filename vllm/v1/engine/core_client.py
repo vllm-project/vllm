@@ -609,13 +609,13 @@ class MPClient(EngineCoreClient):
                     timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
                 ):
                     raise TimeoutError(
-                        "Timed out waiting for engine core processes to "
-                        "start. This is often caused by slow weight loading "
-                        "for large models. Waited "
+                        f"Timed out waiting for engine core processes to "
+                        f"start. This is often caused by slow weight loading "
+                        f"for large models. Waited "
                         f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
-                        "VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
-                        "timeout, set the environment variable: "
-                        "VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
+                        f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
+                        f"timeout, set the environment variable: "
+                        f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                     )
                 identity, _ = sync_input_socket.recv_multipart()
                 identities.remove(identity)
@@ -1591,12 +1591,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                 timeout=VLLM_ENGINE_READY_TIMEOUT_S * 1000  # convert to ms
             ):
                 raise TimeoutError(
-                    "Timed out waiting for new engine core processes to "
-                    "start. Waited "
+                    f"Timed out waiting for new engine core processes to "
+                    f"start. Waited "
                     f"{VLLM_ENGINE_READY_TIMEOUT_S}s (configured by "
-                    "VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
-                    "timeout, set the environment variable: "
-                    "VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
+                    f"VLLM_ENGINE_READY_TIMEOUT_S). To increase the "
+                    f"timeout, set the environment variable: "
+                    f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                 )
             identity, _ = sync_input_socket.recv_multipart()
             new_engine_identities.discard(identity)
