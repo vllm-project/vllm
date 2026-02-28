@@ -5,6 +5,54 @@ import contextlib
 from vllm.v1.request import Request, RequestStatus
 
 
+def check_sequence_repetition(
+    token_ids: list[int],
+    max_repetition_pattern_size: int,
+    min_repetition_pattern_size: int,
+    repetition_min_count: int,
+) -> bool:
+    """Check if a sequence of token IDs has a repetition pattern.
+    Args:
+        token_ids: List of token IDs
+        max_repetition_pattern_size: Maximum size of the repetition pattern.
+        min_repetition_pattern_size: Minimum size of the repetition pattern.
+        repetition_min_count: Minimum number of repetitions to detect.
+    Returns:
+        True if a repetition pattern is found, False otherwise.
+    """
+    if min_repetition_pattern_size <= 0:
+        min_repetition_pattern_size = 1
+
+    if (
+        max_repetition_pattern_size <= 0
+        or repetition_min_count < 2
+        or min_repetition_pattern_size > max_repetition_pattern_size
+    ):
+        return False
+
+    for pattern_len in range(
+        min_repetition_pattern_size, max_repetition_pattern_size + 1
+    ):
+        # Check if the pattern is repeated at least min_repetitions times
+        if pattern_len * repetition_min_count > len(token_ids):
+            return False
+
+        has_repetition = True
+        for n in range(1, pattern_len + 1):
+            for m in range(1, repetition_min_count):
+                if token_ids[-(pattern_len * m + n)] != token_ids[-n]:
+                    has_repetition = False
+                    break
+
+            if not has_repetition:
+                break
+
+        if has_repetition:
+            return True
+
+    return False
+
+
 def remove_all(lst: list, items_to_remove: set) -> list:
     """Remove all items from a list that are in the items_to_remove set.
 
@@ -61,4 +109,15 @@ def check_stop(request: Request, max_model_len: int) -> bool:
     ):
         request.status = RequestStatus.FINISHED_LENGTH_CAPPED
         return True
+
+    if check_sequence_repetition(
+        list(request.output_token_ids),
+        max_repetition_pattern_size=sampling_params.max_repetition_pattern_size,
+        min_repetition_pattern_size=sampling_params.min_repetition_pattern_size,
+        repetition_min_count=sampling_params.repetition_min_count,
+    ):
+        request.status = RequestStatus.FINISHED_REPETITION
+        request.stop_reason = "repetition_detected"
+        return True
+
     return False
