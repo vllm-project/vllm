@@ -61,6 +61,7 @@ from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
+from .gpu.warmup import warmup_kernels
 from .utils import request_memory
 
 logger = init_logger(__name__)
@@ -558,12 +559,15 @@ class Worker(WorkerBase):
 
             logger.debug(msg)
 
-        # Warm up sampler and preallocate memory buffer for logits and other
-        # sampling related tensors of max possible shape to avoid memory
-        # fragmentation issue.
-        # NOTE: This is called after `capture_model` on purpose to prevent
-        # memory buffers from being cleared by `torch.cuda.empty_cache`.
-        if get_pp_group().is_last_rank:
+        if self.use_v2_model_runner:
+            # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.
+            warmup_kernels(self.model_runner)
+        elif get_pp_group().is_last_rank:
+            # V1: Warm up sampler and preallocate memory buffer for logits and other
+            # sampling related tensors of max possible shape to avoid memory
+            # fragmentation issue.
+            # NOTE: This is called after `capture_model` on purpose to prevent
+            # memory buffers from being cleared by `torch.cuda.empty_cache`.
             max_num_reqs = min(
                 self.scheduler_config.max_num_seqs,
                 self.scheduler_config.max_num_batched_tokens,
@@ -696,6 +700,12 @@ class Worker(WorkerBase):
             output = self.model_runner.execute_model(
                 scheduler_output, intermediate_tensors
             )
+            if (
+                self.use_v2_model_runner
+                and self.model_runner.is_pooling_model
+                and output is None
+            ):
+                output = self.model_runner.pool()  # type: ignore
             if isinstance(
                 output, ModelRunnerOutput | AsyncModelRunnerOutput | NoneType
             ):
@@ -744,7 +754,8 @@ class Worker(WorkerBase):
 
             # Create the profiler wrapper only on the first start call
             if self.profiler is None:
-                if self.profiler_config.profiler == "torch":
+                profiler_type = self.profiler_config.profiler
+                if profiler_type == "torch":
                     self.profiler = TorchProfilerWrapper(
                         self.profiler_config,
                         worker_name=trace_name,
@@ -754,9 +765,12 @@ class Worker(WorkerBase):
                     logger.debug(
                         "Starting torch profiler with trace name: %s", trace_name
                     )
-                elif self.profiler_config.profiler == "cuda":
+                elif profiler_type == "cuda":
                     self.profiler = CudaProfilerWrapper(self.profiler_config)
                     logger.debug("Starting CUDA profiler")
+                else:
+                    logger.warning("Unrecognized profiler: %s", profiler_type)
+                    return
                 self.profiler.start()
             else:
                 # Profiler already initialized. Restart profiling but keep
