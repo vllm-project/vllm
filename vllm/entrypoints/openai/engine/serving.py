@@ -40,6 +40,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
+    ErrorType,
     FunctionCall,
     FunctionDefinition,
 )
@@ -611,7 +612,7 @@ class OpenAIServing:
     def create_error_response(
         self,
         message: str | Exception,
-        err_type: str = "BadRequestError",
+        err_type: ErrorType = ErrorType.BAD_REQUEST_ERROR,
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> ErrorResponse:
@@ -623,25 +624,25 @@ class OpenAIServing:
             from vllm.exceptions import VLLMValidationError
 
             if isinstance(exc, VLLMValidationError):
-                err_type = "BadRequestError"
+                err_type = ErrorType.BAD_REQUEST_ERROR
                 status_code = HTTPStatus.BAD_REQUEST
                 param = exc.parameter
             elif isinstance(exc, (ValueError, TypeError, RuntimeError, OverflowError)):
                 # Common validation errors from user input
-                err_type = "BadRequestError"
+                err_type = ErrorType.BAD_REQUEST_ERROR
                 status_code = HTTPStatus.BAD_REQUEST
                 param = None
             elif isinstance(exc, NotImplementedError):
-                err_type = "NotImplementedError"
+                err_type = ErrorType.NOT_IMPLEMENTED_ERROR
                 status_code = HTTPStatus.NOT_IMPLEMENTED
                 param = None
             elif exc.__class__.__name__ == "TemplateError":
                 # jinja2.TemplateError (avoid importing jinja2)
-                err_type = "BadRequestError"
+                err_type = ErrorType.BAD_REQUEST_ERROR
                 status_code = HTTPStatus.BAD_REQUEST
                 param = None
             else:
-                err_type = "InternalServerError"
+                err_type = ErrorType.INTERNAL_SERVER_ERROR
                 status_code = HTTPStatus.INTERNAL_SERVER_ERROR
                 param = None
 
@@ -666,7 +667,7 @@ class OpenAIServing:
     def create_streaming_error_response(
         self,
         message: str | Exception,
-        err_type: str = "BadRequestError",
+        err_type: ErrorType = ErrorType.BAD_REQUEST_ERROR,
         status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
         param: str | None = None,
     ) -> str:
@@ -695,7 +696,7 @@ class OpenAIServing:
         """Convert GenerationError to ErrorResponse."""
         return self.create_error_response(
             str(e),
-            err_type="InternalServerError",
+            err_type=ErrorType.INTERNAL_SERVER_ERROR,
             status_code=e.status_code,
         )
 
@@ -705,7 +706,7 @@ class OpenAIServing:
         """Convert GenerationError to streaming error response."""
         return self.create_streaming_error_response(
             str(e),
-            err_type="InternalServerError",
+            err_type=ErrorType.INTERNAL_SERVER_ERROR,
             status_code=e.status_code,
         )
 
@@ -734,7 +735,7 @@ class OpenAIServing:
 
         return error_response or self.create_error_response(
             message=f"The model `{request.model}` does not exist.",
-            err_type="NotFoundError",
+            err_type=ErrorType.NOT_FOUND,
             status_code=HTTPStatus.NOT_FOUND,
             param="model",
         )

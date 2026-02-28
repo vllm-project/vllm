@@ -9,6 +9,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
     ErrorResponse,
+    ErrorType,
     ModelCard,
     ModelList,
     ModelPermission,
@@ -152,10 +153,10 @@ class OpenAIServingModels:
             try:
                 await self.engine_client.add_lora(lora_request)
             except Exception as e:
-                error_type = "BadRequestError"
+                error_type = ErrorType.BAD_REQUEST_ERROR
                 status_code = HTTPStatus.BAD_REQUEST
                 if "No adapter found" in str(e):
-                    error_type = "NotFoundError"
+                    error_type = ErrorType.NOT_FOUND
                     status_code = HTTPStatus.NOT_FOUND
 
                 return create_error_response(
@@ -191,7 +192,7 @@ class OpenAIServingModels:
         if not request.lora_name or not request.lora_path:
             return create_error_response(
                 message="Both 'lora_name' and 'lora_path' must be provided.",
-                err_type="InvalidUserInput",
+                err_type=ErrorType.INVALID_USER_INPUT,
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
@@ -202,7 +203,7 @@ class OpenAIServingModels:
                 message=f"The lora adapter '{request.lora_name}' has already been "
                 "loaded. If you want to load the adapter in place, set 'load_inplace'"
                 " to True.",
-                err_type="InvalidUserInput",
+                err_type=ErrorType.INVALID_USER_INPUT,
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
@@ -215,7 +216,7 @@ class OpenAIServingModels:
         if not request.lora_name:
             return create_error_response(
                 message="'lora_name' needs to be provided to unload a LoRA adapter.",
-                err_type="InvalidUserInput",
+                err_type=ErrorType.INVALID_USER_INPUT,
                 status_code=HTTPStatus.BAD_REQUEST,
             )
 
@@ -223,7 +224,7 @@ class OpenAIServingModels:
         if request.lora_name not in self.lora_requests:
             return create_error_response(
                 message=f"The lora adapter '{request.lora_name}' cannot be found.",
-                err_type="NotFoundError",
+                err_type=ErrorType.NOT_FOUND,
                 status_code=HTTPStatus.NOT_FOUND,
             )
 
@@ -282,21 +283,21 @@ class OpenAIServingModels:
                     message=(
                         f"LoRA adapter '{lora_name}' was found but could not be loaded."
                     ),
-                    err_type="BadRequestError",
+                    err_type=ErrorType.BAD_REQUEST_ERROR,
                     status_code=HTTPStatus.BAD_REQUEST,
                 )
             else:
                 # No adapter was found
                 return create_error_response(
                     message=f"LoRA adapter {lora_name} does not exist",
-                    err_type="NotFoundError",
+                    err_type=ErrorType.NOT_FOUND,
                     status_code=HTTPStatus.NOT_FOUND,
                 )
 
 
 def create_error_response(
     message: str,
-    err_type: str = "BadRequestError",
+    err_type: ErrorType = ErrorType.BAD_REQUEST_ERROR,
     status_code: HTTPStatus = HTTPStatus.BAD_REQUEST,
 ) -> ErrorResponse:
     return ErrorResponse(
