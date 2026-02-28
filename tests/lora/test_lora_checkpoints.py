@@ -95,6 +95,61 @@ def test_load_checkpoints(
             )
 
 
+def test_lora_module_prefix_mismatch_detected(baichuan_lora_files):
+    """LoRA adapters with mismatched module name prefixes should raise
+    ValueError instead of silently being ignored (issue #34186)."""
+    peft_helper = PEFTHelper.from_local_dir(
+        baichuan_lora_files, max_position_embeddings=4096
+    )
+    # Simulate a model that wraps the LM in a language_model submodule:
+    # the LoRA adapter has "model.layers.0..." keys but the model expects
+    # "language_model.model.layers.0..." full paths.
+    model_module_names = {
+        "language_model.model.layers.0.self_attn.W_pack",
+        "language_model.model.layers.0.self_attn.o_proj",
+        "language_model.model.layers.0.mlp.gate_proj",
+        "language_model.model.layers.0.mlp.up_proj",
+        "language_model.model.layers.0.mlp.down_proj",
+    }
+    expected_error = "none of the LoRA adapter's module names matched"
+    with pytest.raises(ValueError, match=expected_error):
+        LoRAModel.from_local_checkpoint(
+            baichuan_lora_files,
+            {"W_pack", "o_proj", "gate_proj", "up_proj", "down_proj"},
+            peft_helper=peft_helper,
+            lora_model_id=1,
+            device="cpu",
+            model_vocab_size=64000,
+            model_module_names=model_module_names,
+        )
+
+
+def test_lora_module_prefix_match_passes(baichuan_lora_files):
+    """LoRA adapters with matching module name prefixes should load fine."""
+    peft_helper = PEFTHelper.from_local_dir(
+        baichuan_lora_files, max_position_embeddings=4096
+    )
+    # The baichuan adapter keys parse to "model.layers.N.self_attn.W_pack"
+    # etc. Provide model_module_names that match.
+    model_module_names = {
+        "model.layers.0.self_attn.W_pack",
+        "model.layers.0.self_attn.o_proj",
+        "model.layers.0.mlp.gate_proj",
+        "model.layers.0.mlp.up_proj",
+        "model.layers.0.mlp.down_proj",
+    }
+    # Should not raise
+    LoRAModel.from_local_checkpoint(
+        baichuan_lora_files,
+        {"W_pack", "o_proj", "gate_proj", "up_proj", "down_proj"},
+        peft_helper=peft_helper,
+        lora_model_id=1,
+        device="cpu",
+        model_vocab_size=64000,
+        model_module_names=model_module_names,
+    )
+
+
 def test_lora_weights_mapping(baichuan_lora_files):
     packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
 

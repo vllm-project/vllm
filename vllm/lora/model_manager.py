@@ -624,6 +624,8 @@ class LoRAModelManager:
             if isinstance(module, FusedMoE3DWithLoRA):
                 self._stack_moe_lora_weights(lora_model, module, module_name)
 
+        if not lora_model.loras:
+            return
         first_lora: LoRALayerWeights = next(iter(lora_model.loras.values()))
         assert first_lora.lora_a is not None
         if isinstance(first_lora.lora_a, list):

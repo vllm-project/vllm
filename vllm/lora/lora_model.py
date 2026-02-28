@@ -134,6 +134,7 @@ class LoRAModel:
         weights_mapper: WeightsMapper | None = None,
         tensorizer_config_dict: dict | None = None,
         skip_prefixes: list[str] | None = None,
+        model_module_names: set[str] | None = None,
     ) -> "LoRAModel":
         """Create a LoRAModel from a local checkpoint.
 
@@ -149,6 +150,11 @@ class LoRAModel:
             skip_prefixes: List of module name prefixes to skip during loading.
                 Models can define this to skip modules not used in inference
                 (e.g., MTP layers). Format: ["mtp."]
+            model_module_names: Full module paths from the model that are
+                valid LoRA targets. When provided, validates that at least
+                one adapter module matches a model module path. This catches
+                prefix mismatches (e.g., adapter trained on GemmaForCausalLM
+                loaded into Gemma3ForConditionalGeneration).
 
         Returns:
             Loaded LoRA Model.
@@ -161,6 +167,7 @@ class LoRAModel:
         unexpected_modules: list[list[str] | str] = []
 
         def check_unexpected_modules(modules: dict):
+            parsed_module_names: list[str] = []
             for lora_module in modules.keys():  # noqa
                 if is_base_embeddding_weights(lora_module):
                     continue
@@ -174,6 +181,7 @@ class LoRAModel:
                 ):
                     continue
                 module_name, _ = parse_fine_tuned_lora_name(lora_module, weights_mapper)
+                parsed_module_names.append(module_name)
                 # Case for expert lora weights
                 if ".experts" in module_name:
                     expert_idx = module_name.find(".experts")
@@ -191,6 +199,31 @@ class LoRAModel:
                     f" but received {unexpected_modules}."
                     f" Please verify that the loaded LoRA module is correct"
                 )
+
+            # Full-path validation: check that at least one parsed module
+            # name matches the model's registered module paths. This catches
+            # prefix mismatches where the module type is correct (e.g.,
+            # q_proj) but the full path differs (e.g., model.layers.0...
+            # vs language_model.model.layers.0...).
+            if model_module_names:
+                matched = any(
+                    name in model_module_names for name in parsed_module_names
+                )
+                if not matched:
+                    lora_sample = sorted(set(parsed_module_names))[:3]
+                    model_sample = sorted(model_module_names)[:3]
+                    raise ValueError(
+                        f"While loading {lora_dir}, none of the LoRA "
+                        f"adapter's module names matched the model's "
+                        f"module paths. The adapter may have been trained "
+                        f"on a different model architecture.\n"
+                        f"  LoRA module names (sample): {lora_sample}\n"
+                        f"  Model module paths (sample): {model_sample}\n"
+                        f"Hint: Ensure the LoRA was trained for the same "
+                        f"model architecture, or add an hf_to_vllm_mapper "
+                        f"to the model class to translate module name "
+                        f"prefixes."
+                    )
 
         if tensorizer_config_dict:
             from tensorizer import TensorDeserializer
