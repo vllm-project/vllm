@@ -7,7 +7,6 @@ import torch
 import torch.distributed
 
 import vllm.envs as envs
-from vllm.config import get_current_vllm_config_or_none
 
 from .parallel_state import get_tp_group
 
@@ -36,6 +35,9 @@ def _infer_sp_ragged_sizes_for_all_gather(
 ) -> list[int] | None:
     if not envs.VLLM_ENABLE_SP_RAGGED or dim != 0:
         return None
+
+    # Avoid circular import at module import time.
+    from vllm.config import get_current_vllm_config_or_none
 
     config = get_current_vllm_config_or_none()
     if config is None or not config.parallel_config.use_sequence_parallel_moe:
