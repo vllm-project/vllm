@@ -6,6 +6,7 @@ Contains helpers that are applied to collections.
 This is similar in concept to the `collections` module.
 """
 
+import threading
 from collections import defaultdict
 from collections.abc import Callable, Generator, Hashable, Iterable, Mapping, Sequence
 from typing import Generic, Literal, TypeVar
@@ -132,3 +133,81 @@ def swap_dict_values(obj: dict[_K, _V], key1: _K, key2: _K) -> None:
         obj[key1] = v2
     else:
         obj.pop(key1, None)
+
+
+# Define type variables for generic key and value types
+KT = TypeVar("KT")  # Key type variable
+VT = TypeVar("VT")  # Value type variable
+
+
+class ThreadSafeDict(Generic[KT, VT]):
+    """Thread-safe dictionary with basic operations and synchronization."""
+
+    def __init__(self) -> None:
+        self._storage: dict[KT, VT] = {}
+        self._lock = threading.RLock()
+
+    def __setitem__(self, key: KT, value: VT) -> None:
+        with self._lock:
+            self._storage[key] = value
+
+    def __getitem__(self, key: KT) -> VT:
+        with self._lock:
+            return self._storage[key]
+
+    def __delitem__(self, key: KT) -> None:
+        with self._lock:
+            del self._storage[key]
+
+    def get(self, key: KT, default: VT | None = None) -> VT | None:
+        with self._lock:
+            return self._storage.get(key, default)
+
+    def update(self, items: Iterable[tuple[KT, VT]]) -> None:
+        with self._lock:
+            self._storage.update(items)
+
+    def pop(self, key: KT, default: VT | None = None) -> VT | None:
+        with self._lock:
+            return self._storage.pop(key, default)
+
+    def __contains__(self, key: KT) -> bool:
+        with self._lock:
+            return key in self._storage
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._storage)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._storage.clear()
+
+    def keys(self) -> list[KT]:
+        with self._lock:
+            return list(self._storage.keys())
+
+    def values(self) -> list[VT]:
+        with self._lock:
+            return list(self._storage.values())
+
+    def items(self) -> list[tuple[KT, VT]]:
+        with self._lock:
+            return list(self._storage.items())
+
+    def __str__(self) -> str:
+        with self._lock:
+            return str(self._storage)
+
+    def __repr__(self) -> str:
+        with self._lock:
+            return f"ThreadSafeDict({self._storage!r})"
+
+    def to_dict(self) -> dict[KT, VT]:
+        with self._lock:
+            return self._storage.copy()
+
+    def set_from_dict(self, new_dict: dict[KT, VT]) -> None:
+        with self._lock:
+            self._storage.clear()
+            self._storage.update(new_dict)

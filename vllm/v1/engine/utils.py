@@ -2,17 +2,20 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import contextlib
+import multiprocessing
 import os
+import uuid
 import weakref
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from enum import Enum, auto
 from multiprocessing import Process, connection
 from multiprocessing.process import BaseProcess
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import patch
 
 import msgspec
+import regex as re
 import zmq
 
 from vllm import envs
@@ -20,9 +23,14 @@ from vllm.config import CacheConfig, ParallelConfig, VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.ray.ray_env import get_env_vars_to_copy
-from vllm.utils.network_utils import get_open_zmq_ipc_path, zmq_socket_ctx
+from vllm.utils.network_utils import (
+    get_open_zmq_ipc_path,
+    make_zmq_socket,
+    zmq_socket_ctx,
+)
 from vllm.utils.system_utils import get_mp_context
 from vllm.v1.engine.coordinator import DPCoordinator
+from vllm.v1.engine.exceptions import FaultInfo
 from vllm.v1.executor import Executor
 from vllm.v1.utils import get_engine_client_zmq_addr, shutdown
 
@@ -64,6 +72,14 @@ class EngineZmqAddresses:
     # Not used by engine, just relayed to front-end in handshake response.
     # Only required for external DP LB case.
     frontend_stats_publish_address: str | None = None
+    # ZMQ fault_state_pub_socket address of client sentinel
+    fault_state_pub_socket_addr: str | None = None
+    # ZMQ engine_fault socket address of EngineCoreSentinel
+    engine_fault_socket_addr: str | None = None
+    # Identities of engine core DEALER sockets, keyed by engine index.
+    # These identities are used by the ClientSentinel (ROUTER) to route
+    # messages to the corresponding engine core.
+    engine_core_sentinel_identities: dict[int, bytes] | None = None
 
 
 @dataclass
@@ -104,7 +120,23 @@ class CoreEngineProcManager:
             "executor_class": executor_class,
             "log_stats": log_stats,
         }
-
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            zmq_ctx = zmq.Context()
+            identity = generate_identity_group(
+                "core_engine_proc_manager", "client_sentinel", "report", 1
+            )[0]
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+            )
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=zmq_addr,
+                socket_type=zmq.DEALER,
+                bind=False,
+                identity=identity,
+            )
         if client_handshake_address:
             common_kwargs["client_handshake_address"] = client_handshake_address
 
@@ -129,6 +161,9 @@ class CoreEngineProcManager:
             )
 
         self._finalizer = weakref.finalize(self, shutdown, self.processes)
+        self.shutdown_monitor = False
+
+        self.vllm_config = vllm_config
 
         data_parallel = vllm_config.parallel_config.data_parallel_size > 1
         try:
@@ -153,9 +188,55 @@ class CoreEngineProcManager:
             if self.finished_procs():
                 self.close()
 
+    def _report_engine_dead(self, dead_message):
+        """Send engine dead message to ClientSentinel"""
+        try:
+            self.engine_down_socket.send_multipart(
+                [
+                    b"",  # Empty frame separator
+                    dead_message.encode("utf-8"),
+                ]
+            )
+            logger.info("Sent message to ClientSentinel: %s", dead_message)
+        except Exception as e:
+            logger.error("Failed to send message: %s", e)
+
     def close(self):
         """Shutdown all procs."""
         self._finalizer()
+
+    def notify_engine_down(self, engine_rank, died_proc):
+        """
+        Send fault notification to the engine_down_socket
+        and log the failure event.
+        """
+        fault_info = FaultInfo(
+            type="engine_core dead",
+            message=f"Engine core proc {died_proc.name} died unexpectedly.",
+            engine_id=engine_rank,
+            additional_info=None,
+        )
+
+        self.engine_down_socket.send_multipart(
+            [b"", fault_info.serialize().encode("utf-8")]
+        )
+        logger.error("Engine core proc %s died unexpectedly", died_proc.name)
+
+    def monitor_engine_liveness(self, engine_down_callback):
+        """
+        Monitor engine core process liveness.
+        """
+        sentinels = [proc.sentinel for proc in self.processes]
+        while sentinels and not self.shutdown_monitor:
+            died = multiprocessing.connection.wait(sentinels)
+            for sentinel in died:
+                sentinel = cast(int, sentinel)
+                died_proc = next(
+                    proc for proc in self.processes if proc.sentinel == sentinel
+                )
+                engine_rank = re.match(r"EngineCore_DP(\d+)", died_proc.name).group(1)
+                engine_down_callback(engine_rank, died_proc)
+                sentinels.remove(sentinel)
 
     def join_first(self):
         """Wait for any process to exit."""
@@ -256,7 +337,7 @@ class CoreEngineActorManager:
             if dp_size > 1 and vllm_config.model_config.is_moe
             else EngineCoreActor
         )
-
+        self.vllm_config = vllm_config
         self.local_engine_actors: list[ray.ActorHandle] = []
         self.remote_engine_actors: list[ray.ActorHandle] = []
 
@@ -271,6 +352,24 @@ class CoreEngineActorManager:
         self.log_stats = log_stats
         local_engine_count = vllm_config.parallel_config.data_parallel_size_local
         world_size = vllm_config.parallel_config.world_size
+
+        if vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            zmq_ctx = zmq.Context()
+            zmq_addr = get_engine_client_zmq_addr(
+                local_only=False,
+                host=vllm_config.parallel_config.data_parallel_master_ip,
+                port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+            )
+            identity = generate_identity_group(
+                "core_engine_actor_manager", "client_sentinel", "report", 1
+            )[0]
+            self.engine_down_socket = make_zmq_socket(
+                ctx=zmq_ctx,
+                path=zmq_addr,
+                socket_type=zmq.DEALER,
+                bind=False,
+                identity=identity,
+            )
 
         if ray.is_initialized():
             logger.info("Ray is already initialized. Skipping Ray initialization.")
@@ -353,6 +452,7 @@ class CoreEngineActorManager:
 
         ray.get(refs)
         self.run_refs = []
+        self.shutdown_monitor = False
         for actor in self.local_engine_actors + self.remote_engine_actors:
             self.run_refs.append(actor.run.remote())
 
@@ -764,6 +864,44 @@ class CoreEngineActorManager:
     def get_run_refs(self):
         return self.run_refs
 
+    def notify_engine_down(self, engine_rank, actor_ref):
+        fault_info = FaultInfo(
+            type="engine_actor dead",
+            message="Engine_actor died unexpectedly.",
+            engine_id=str(engine_rank),
+            additional_info=None,
+        )
+
+        self.engine_down_socket.send_multipart(
+            [b"", fault_info.serialize().encode("utf-8")]
+        )
+        logger.error("Engine actor %s died unexpectedly", engine_rank)
+
+    def monitor_engine_liveness(self, engine_down_callback):
+        import ray
+
+        processed_done_refs = set()
+        while not self.shutdown_monitor:
+            actor_run_refs = self.get_run_refs()
+            if not actor_run_refs:
+                logger.info(
+                    "There are no actors to monitor currently."
+                    " The monitoring function is about to terminate."
+                )
+                return
+            ref_to_index_mapping = {
+                ref: index for index, ref in enumerate(actor_run_refs)
+            }
+            actor_done_refs, _ = ray.wait(actor_run_refs, timeout=5)
+            if not actor_done_refs:
+                continue
+            for actor_ref in actor_done_refs:
+                if actor_ref in processed_done_refs:
+                    continue
+                error_engine_id = ref_to_index_mapping[actor_ref]
+                engine_down_callback(error_engine_id, actor_ref)
+                processed_done_refs.add(actor_ref)
+
     def close(self):
         import ray
 
@@ -818,6 +956,27 @@ def launch_core_engines(
             for _ in range(num_api_servers)
         ],
     )
+
+    if vllm_config.fault_tolerance_config.enable_fault_tolerance is True:
+        addresses.engine_fault_socket_addr = get_engine_client_zmq_addr(
+            local_only=False,
+            host=vllm_config.parallel_config.data_parallel_master_ip,
+            port=vllm_config.fault_tolerance_config.internal_fault_report_port,
+        )
+        identity_group = generate_identity_group(
+            peer1="client",
+            peer2="engine_core_sentinel",
+            use="report and cmd",
+            n=dp_size,
+        )
+        addresses.engine_core_sentinel_identities = {
+            rank: identity for rank, identity in enumerate(identity_group)
+        }
+        addresses.fault_state_pub_socket_addr = get_engine_client_zmq_addr(
+            local_only=False,
+            host=host,
+            port=vllm_config.fault_tolerance_config.external_fault_notify_port,
+        )
 
     # Run the DP Coordinator process with rank 0 when in online DP mode.
     # The coordinator is needed for:
@@ -1088,3 +1247,18 @@ def wait_for_engine_startup(
             "local" if local else "remote",
             eng_index,
         )
+
+
+def generate_identity_group(peer1, peer2, use, n):
+    """
+    Generate n unique identities for ZMQ ROUTER nodes
+
+    Format: peer1_peer2_use_random number
+    Return: list with identities in byte type as elements
+    """
+    identities = list()
+    uuids = [uuid.uuid4() for _ in range(n)]
+    for identity_uuid in uuids:
+        identity_str = f"{peer1}_{peer2}_{use}_{identity_uuid}".encode()
+        identities.append(identity_str)
+    return identities

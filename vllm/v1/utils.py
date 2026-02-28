@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import argparse
 import contextlib
+import json
 import multiprocessing
 import time
 import weakref
@@ -10,6 +11,7 @@ from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from multiprocessing import connection
 from multiprocessing.process import BaseProcess
+from threading import Thread
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -173,6 +175,9 @@ class APIServerProcessManager:
         input_addresses: list[str],
         output_addresses: list[str],
         stats_update_address: str | None = None,
+        engine_fault_socket_addr: str | None = None,
+        engine_core_sentinel_identities: dict[int, bytes] | None = None,
+        fault_state_pub_socket_addr: str | None = None,
     ):
         """Initialize and start API server worker processes.
 
@@ -205,6 +210,19 @@ class APIServerProcessManager:
             }
             if stats_update_address is not None:
                 client_config["stats_update_address"] = stats_update_address
+            if engine_fault_socket_addr is not None:
+                assert engine_core_sentinel_identities is not None
+                assert fault_state_pub_socket_addr is not None
+                client_config["engine_fault_socket_addr"] = engine_fault_socket_addr
+                client_config["engine_core_sentinel_identities"] = json.dumps(
+                    {
+                        k: v.decode("utf-8")
+                        for k, v in engine_core_sentinel_identities.items()
+                    }
+                )
+                client_config["fault_state_pub_socket_addr"] = (
+                    fault_state_pub_socket_addr
+                )
 
             proc = spawn_context.Process(
                 target=target_server_fn,
@@ -256,11 +274,22 @@ def wait_for_completion_or_failure(
             sentinel_to_proc[coordinator.proc.sentinel] = coordinator.proc
 
         actor_run_refs = []
-        if isinstance(engine_manager, CoreEngineProcManager):
-            for proc in engine_manager.processes:
-                sentinel_to_proc[proc.sentinel] = proc
-        elif isinstance(engine_manager, CoreEngineActorManager):
-            actor_run_refs = engine_manager.get_run_refs()
+        assert engine_manager is not None
+        if engine_manager.vllm_config.fault_tolerance_config.enable_fault_tolerance:
+            # Start a thread to monitor engine liveness.
+            # Do not exit when engine is down.
+            Thread(
+                target=engine_manager.monitor_engine_liveness,
+                args=(engine_manager.notify_engine_down,),
+                daemon=True,
+                name="ClientEngineMonitor",
+            ).start()
+        else:
+            if isinstance(engine_manager, CoreEngineProcManager):
+                for proc in engine_manager.processes:
+                    sentinel_to_proc[proc.sentinel] = proc
+            elif isinstance(engine_manager, CoreEngineActorManager):
+                actor_run_refs = engine_manager.get_run_refs()
 
         # Check if any process terminates
         while sentinel_to_proc or actor_run_refs:

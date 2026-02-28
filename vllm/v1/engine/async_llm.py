@@ -1000,6 +1000,10 @@ class AsyncLLM(EngineClient):
                 custom_stat_loggers=None,
             )
 
+    async def get_fault_info(self):
+        """report exception in engine core"""
+        return await self.engine_core.fault_reporter()
+
     @property
     def is_running(self) -> bool:
         # Is None before the loop is started.
