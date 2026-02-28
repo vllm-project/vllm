@@ -1,6 +1,6 @@
 # Classification
 
-These models primarily support the `classify` task.
+Classification is the task of predicting which of predefined categories or classes or labels the input data belongs to.
 
 ## Supported Models
 
@@ -15,6 +15,22 @@ These models primarily support the `classify` task.
 
 If your model is not in the above list, we will try to automatically convert the model using
 [as_seq_cls_model][vllm.model_executor.models.adapters.as_seq_cls_model]. By default, the class probabilities are extracted from the softmaxed hidden state corresponding to the last token.
+
+## Supported Features
+
+### Enable/disable activation
+
+You can enable or disable activation via use_activation.
+
+### Problem type (e.g. multi_label_classification)
+
+You can modify the problem_type via problem_type in the Hugging Face config. The supported problem types are: single_label_classification, multi_label_classification, and regression.
+
+Implement alignment with transformers [ForSequenceClassificationLoss](https://github.com/huggingface/transformers/blob/57bb6db6ee4cfaccc45b8d474dfad5a17811ca60/src/transformers/loss/loss_utils.py#L92).
+
+### logit_bias (sigmoid_normalize)
+
+You can modify the logit_bias through the logit_bias parameter in `vllm.config.PoolerConfig`.
 
 ## Offline Inference
 
@@ -207,6 +223,7 @@ curl -v "http://127.0.0.1:8000/classify" \
       }
     }
     ```
+
 ## Deprecated Features
 
 ### Remove softmax from PoolingParams

@@ -631,7 +631,7 @@ The input format is the same as [Embeddings API](#embeddings-api), but the outpu
 
 Code example: [examples/pooling/pooling/pooling_online.py](../../examples/pooling/pooling/pooling_online.py)
 
-### [Classification API](../models/pooling/classfiy.md#offline_inference)
+### [Classification API](../models/pooling/classify.md#offline_inference)
 
 ### Score API
 
