@@ -1,0 +1,267 @@
+ARG BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-complete
+ARG ROCSHMEM_BRANCH="55aab4d6"
+ARG ROCSHMEM_REPO="https://github.com/ROCm/rocm-systems.git"
+ARG DEEPEP_BRANCH="a8a40bd13"
+ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
+ARG DEEPEP_GPU_ARCH="gfx942"
+ARG DEEPEP_NIC_TYPE=cx7
+ARG RIXL_BRANCH="f33a5599"
+ARG RIXL_REPO="https://github.com/ROCm/RIXL.git"
+ARG UCX_BRANCH="da3fac2a"
+ARG UCX_REPO="https://github.com/ROCm/ucx.git"
+ARG ETCD_BRANCH="7c6e714"
+ARG ETCD_REPO="https://github.com/etcd-cpp-apiv3/etcd-cpp-apiv3.git"
+
+
+FROM ${BASE_IMAGE} AS base
+
+ARG CACHE_BUSTER
+RUN if [ -n "${CACHE_BUSTER}" ]; then \
+        echo "$CACHE_BUSTER" > /tmp/builder-buster; \
+    fi;
+
+ENV ROCM_PATH=/opt/rocm
+ENV PATH=${ROCM_PATH}/llvm/bin:${ROCM_PATH}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ENV LD_LIBRARY_PATH=${ROCM_PATH}/lib:/usr/local/lib:
+
+ENV ETC_CPP_PATH=/usr/local/etcd-cpp
+ENV UCX_PATH=/usr/local/ucx
+ENV RIXL_PATH=/usr/local/rixl
+ENV RIXL_BENCH_PATH=/usr/local/rixl_bench
+
+# Build-time dependencies: UCX toolchain (autotools, verbs), RIXL (meson/ninja), etcd, etcd-cpp-apiv3
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y \
+    ccache build-essential autoconf automake pkg-config cmake git wget curl ca-certificates \
+    libsqlite3-dev libfmt-dev libmsgpack-dev libsuitesparse-dev \
+    libibverbs-dev ibverbs-providers ibverbs-utils libtool libboost-all-dev \
+    libgrpc-dev libgrpc++-dev protobuf-compiler-grpc protobuf-compiler libprotobuf-dev \
+    libaio1 libaio-dev liburing-dev pybind11-dev ninja-build libgflags-dev \
+    libcpprest-dev rdma-core infiniband-diags perftest python3.11 flex bison librdmacm-dev \
+    python3 python3-pip python3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip3 install --upgrade pip setuptools wheel meson pybind11
+
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+ENV CCACHE_DIR=/root/.cache/ccache
+
+
+
+###
+### ROCShmem Build
+###
+FROM base AS build_rocshmem
+
+ARG ROCSHMEM_BRANCH
+ARG ROCSHMEM_REPO
+RUN git clone --no-checkout --filter=blob:none ${ROCSHMEM_REPO}
+RUN mkdir -p /app/install
+RUN cd rocm-systems \
+    && git sparse-checkout init --cone \
+    && git sparse-checkout set projects/rocshmem \
+    && git checkout ${ROCSHMEM_BRANCH} \
+    && cd projects/rocshmem \
+    && mkdir -p ./build \
+    && cd ./build \
+    && INSTALL_PREFIX=/app/install/rocSHMEM ../scripts/build_configs/all_backends -DUSE_EXTERNAL_MPI=OFF
+RUN mkdir -p /app/install && \
+    tar -czf /tmp/rocSHMEM.tar.gz -C /app/install rocSHMEM && \
+    cp /tmp/rocSHMEM.tar.gz /app/install
+
+###
+### DeepEP Build
+###
+FROM base AS build_deepep
+
+ARG DEEPEP_BRANCH
+ARG DEEPEP_REPO
+ARG DEEPEP_GPU_ARCH
+ARG DEEPEP_GPU_ARCH
+ARG DEEPEP_NIC_TYPE
+ENV ROCSHMEM_DIR=/opt/rocSHMEM/
+RUN --mount=type=bind,from=build_rocshmem,src=/app/install/,target=/install \
+    tar -xzf /install/rocSHMEM.tar.gz -C /opt
+RUN git clone ${DEEPEP_REPO}
+RUN mkdir -p /app/install
+RUN cd DeepEP \
+    && git checkout ${DEEPEP_BRANCH} \
+    && git submodule update --init --recursive \
+    && if [ "$DEEPEP_NIC_TYPE" = "thor2" ]; then \
+            PYTORCH_ROCM_ARCH=$DEEPEP_GPU_ARCH  CFLAGS="-O3 -fPIC" \
+            CXXFLAGS="-O3 -fPIC --offload-arch=$DEEPEP_GPU_ARCH" HIP_CXX_FLAGS="-O3 -fPIC" \
+            python3 setup.py --nic thor2 --variant rocm build bdist_wheel; \
+       else \
+            PYTORCH_ROCM_ARCH=$DEEPEP_GPU_ARCH  CFLAGS="-O3 -fPIC" \
+            CXXFLAGS="-O3 -fPIC --offload-arch=$DEEPEP_GPU_ARCH" HIP_CXX_FLAGS="-O3 -fPIC" \
+            python3 setup.py --variant rocm build bdist_wheel; \
+       fi
+
+RUN mkdir -p /app/install && cp /app/DeepEP/dist/*.whl /app/install
+
+
+###
+### RIXL + dependences build (until upstream rocm/vllm provides it in nightly or wheels become available)
+###
+
+FROM base AS build_rixl
+
+ARG UCX_BRANCH
+ARG UCX_REPO
+ARG RIXL_BRANCH
+ARG RIXL_REPO
+ARG ETCD_BRANCH
+ARG ETCD_REPO
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv pip install --system -U packaging 'cmake<4' ninja wheel 'setuptools<80' pybind11 meson auditwheel patchelf tomlkit
+
+# ETCD API For RIXL benchmarks binary interacting with ETCD
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    git clone ${ETCD_REPO} && \
+    cd etcd-cpp-apiv3 && \
+    git checkout ${ETCD_BRANCH} && \
+    mkdir build && cd build && \
+    cmake .. -DCMAKE_INSTALL_PREFIX=${ETC_CPP_PATH} && \
+    make -j$(nproc) && \
+    make install
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd /usr/local/src && \
+    git clone ${UCX_REPO} &&  \
+    cd ucx && \
+    git checkout ${UCX_BRANCH} && \
+    ./autogen.sh && \
+    mkdir build && cd build && \
+    ../configure \
+        --prefix=${UCX_PATH} \
+        --enable-shared \
+        --disable-static \
+        --disable-doxygen-doc \
+        --enable-optimizations \
+        --enable-devel-headers \
+        --with-rocm=${ROCM_PATH} \
+        --with-verbs \
+        --with-dm \
+        --enable-mt && \
+    make -j && \
+    make install
+
+ENV PATH=/usr/local/ucx/bin:$PATH
+ENV LD_LIBRARY_PATH=${UCX_PATH}/lib:${LD_LIBRARY_PATH}
+
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    git clone ${RIXL_REPO} /opt/rixl && \
+    cd /opt/rixl && \
+    git checkout ${RIXL_BRANCH} && \
+    meson setup build --prefix=${RIXL_PATH} \
+                     -Ducx_path=${UCX_PATH} \
+                     -Drocm_path=${ROCM_PATH} && \
+    cd build && \
+    ninja && \
+    ninja install
+
+# Generate RIXL wheel
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd /opt/rixl && mkdir -p /app/install && \
+    ./contrib/build-wheel.sh \
+        --python-version ${PYTHON_VERSION} \
+        --output-dir /app/install \
+        --rocm-dir ${ROCM_PATH} \
+        --ucx-plugins-dir ${UCX_PATH}/lib/ucx \
+        --nixl-plugins-dir ${RIXL_PATH}/lib/x86_64-linux-gnu/plugins
+
+# Nixl Bench; not strictly necessary but handy for KV-transfer performance validation
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    cd /opt/rixl/benchmark/nixlbench &&  \
+    meson setup build                    \
+        -Dnixl_path=${RIXL_PATH}         \
+        -Drocm_path=${ROCM_PATH}         \
+        --prefix=${RIXL_BENCH_PATH} &&   \
+    cd build && \
+    ninja && \
+    ninja install
+
+RUN tar -czf /tmp/etcd-cpp.tar.gz -C /usr/local etcd-cpp
+RUN tar -czf /tmp/ucx.tar.gz -C /usr/local ucx
+RUN tar -czf /tmp/rixl.tar.gz -C /usr/local rixl
+RUN tar -czf /tmp/nixlbench.tar.gz -C /usr/local rixl_bench
+
+RUN mkdir -p /app/install && \
+    cp /tmp/etcd-cpp.tar.gz /app/install && \
+    cp /tmp/ucx.tar.gz /app/install && \
+    cp /tmp/rixl.tar.gz /app/install && \
+    cp /tmp/nixlbench.tar.gz /app/install 
+
+
+###
+### Wheel release stage
+###
+FROM base AS package_release
+RUN mkdir -p /app/wheels /app/packages
+
+# rocSHMEM tarball
+RUN --mount=type=bind,from=build_rocshmem,src=/app/install/,target=/install \
+    cp /install/*.tar.gz /app/packages
+# DeepEP wheel
+RUN --mount=type=bind,from=build_deepep,src=/app/install/,target=/install \
+    cp /install/*.whl /app/wheels
+
+# RIXL tarball 
+RUN --mount=type=bind,from=build_rixl,src=/app/install/,target=/install \
+    cp /install/*.whl /app/wheels
+RUN --mount=type=bind,from=build_rixl,src=/app/install/,target=/tars \
+    cp /tars/*.tar.gz /app/packages
+
+###
+### Full debs stage
+###
+FROM base AS packages
+RUN mkdir -p /app/wheels /app/packages
+
+RUN --mount=type=bind,from=build_rocshmem,src=/app/install/,target=/install \
+    cp /install/*.tar.gz /app/packages
+RUN --mount=type=bind,from=build_deepep,src=/app/install/,target=/install \
+    cp /install/*.whl /app/wheels
+
+RUN --mount=type=bind,from=build_rixl,src=/app/install/,target=/install \
+    cp /install/*.whl /app/wheels
+RUN --mount=type=bind,from=build_rixl,src=/app/install/,target=/install \
+    cp /install/*.tar.gz /app/packages
+
+###
+### Final stage
+###
+FROM base AS final
+
+RUN --mount=type=bind,from=packages,src=/app/wheels,target=/install \
+    pip3 install /install/*.whl
+
+RUN --mount=type=bind,from=packages,src=/app/packages,target=/install \
+    set -eux; \
+    [ -f /install/rocSHMEM.tar.gz ] && tar -xzf /install/rocSHMEM.tar.gz -C /opt; \
+    [ -f /install/etcd-cpp.tar.gz ] && tar -xzf /install/etcd-cpp.tar.gz -C /opt; \
+    [ -f /install/ucx.tar.gz ] && tar -xzf /install/ucx.tar.gz -C /opt; \
+    [ -f /install/rixl.tar.gz ] && tar -xzf /install/rixl.tar.gz -C /opt; \
+    [ -f /install/nixlbench.tar.gz ] && tar -xzf /install/nixlbench.tar.gz -C /opt
+
+    
+# Install it for rixlbench
+RUN ETCD_RELEASE=$(curl -s https://api.github.com/repos/etcd-io/etcd/releases/latest | grep tag_name | cut -d '"' -f 4) && \
+    echo $ETCD_RELEASE && \
+    wget https://github.com/etcd-io/etcd/releases/download/${ETCD_RELEASE}/etcd-${ETCD_RELEASE}-linux-amd64.tar.gz && \
+    tar xvf etcd-${ETCD_RELEASE}-linux-amd64.tar.gz && \
+    cd etcd-${ETCD_RELEASE}-linux-amd64 && \
+    mv etcd* /usr/local/bin/ && \
+    cd .. && \
+    rm -rf etcd-${ETCD_RELEASE}-linux-amd64 etcd-${ETCD_RELEASE}-linux-amd64.tar.gz
+
+ENV PATH=/opt/ucx/bin:$PATH
+ENV LD_LIBRARY_PATH=/opt/ucx/lib:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/opt/rixl/lib/x86_64-linux-gnu:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/opt/etcd-cpp/lib:${LD_LIBRARY_PATH}
+
+RUN --mount=type=cache,target=/root/.cache/uv 

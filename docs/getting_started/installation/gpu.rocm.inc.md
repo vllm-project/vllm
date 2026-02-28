@@ -270,6 +270,20 @@ To build vllm on ROCm 7.0 for MI200 and MI300 series, you can use the default (w
 ```bash
 DOCKER_BUILDKIT=1 docker build -f docker/Dockerfile.rocm -t vllm/vllm-openai-rocm .
 ```
+To build an image with support for DeepEP and NixlConnector, please follow the below steps.
+```
+# Build the base image with ROCm 7.2
+cd  vllm/docker
+docker build --progress=plain  --target final   -t rocm/dev-ubuntu-22.04:7.2-vllm-base   -f Dockerfile.rocm_base . --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-complete
+
+# Build DeepEP and NIXL Connectors
+cd  vllm/docker
+DOCKER_BUILDKIT=1 docker build   --target final -t rocm/dev-ubuntu-22.04:7.2-vllm-eppd  -f Dockerfile.rocm_deepep . --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-vllm-base
+
+# Build final image
+cd  vllm
+DOCKER_BUILDKIT=1 docker build --progress=plain -t  vllm/vllm-openai-rocm  -f ./docker/Dockerfile.rocm --build-arg BASE_IMAGE=rocm/dev-ubuntu-22.04:7.2-vllm-eppd   .
+```
 
 
 To run vLLM with the custom-built Docker image:
