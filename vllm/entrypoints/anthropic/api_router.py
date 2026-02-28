@@ -33,6 +33,18 @@ def messages(request: Request) -> AnthropicServingMessages:
     return request.app.state.anthropic_serving_messages
 
 
+def translate_error_response(response: ErrorResponse) -> JSONResponse:
+    anthropic_error = AnthropicErrorResponse(
+        error=AnthropicError(
+            type=response.error.type,
+            message=response.error.message,
+        )
+    )
+    return JSONResponse(
+        status_code=response.error.code, content=anthropic_error.model_dump()
+    )
+
+
 @router.post(
     "/v1/messages",
     dependencies=[Depends(validate_json_request)],
@@ -46,16 +58,6 @@ def messages(request: Request) -> AnthropicServingMessages:
 @with_cancellation
 @load_aware_call
 async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
-    def translate_error_response(response: ErrorResponse) -> JSONResponse:
-        anthropic_error = AnthropicErrorResponse(
-            error=AnthropicError(
-                type=response.error.type,
-                message=response.error.message,
-            )
-        )
-        return JSONResponse(
-            status_code=response.error.code, content=anthropic_error.model_dump()
-        )
 
     handler = messages(raw_request)
     if handler is None:
@@ -103,21 +105,10 @@ async def create_messages(request: AnthropicMessagesRequest, raw_request: Reques
 @load_aware_call
 @with_cancellation
 async def count_tokens(request: AnthropicCountTokensRequest, raw_request: Request):
-    def translate_error_response(response: ErrorResponse) -> JSONResponse:
-        anthropic_error = AnthropicErrorResponse(
-            error=AnthropicError(
-                type=response.error.type,
-                message=response.error.message,
-            )
-        )
-        return JSONResponse(
-            status_code=response.error.code, content=anthropic_error.model_dump()
-        )
-
     handler = messages(raw_request)
     if handler is None:
         base_server = raw_request.app.state.openai_serving_tokenization
-        error = base_server(raw_request).create_error_response(
+        error = base_server.create_error_response(
             message="The model does not support Messages API"
         )
         return translate_error_response(error)

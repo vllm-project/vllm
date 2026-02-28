@@ -681,19 +681,11 @@ class AnthropicServingMessages(OpenAIServingChat):
         raw_request: Request | None = None,
     ) -> AnthropicCountTokensResponse | ErrorResponse:
         """Implements Anthropic's messages.count_tokens endpoint."""
-        req = AnthropicMessagesRequest(
-            model=request.model,
-            messages=request.messages,
-            system=request.system,
-            stop_sequences=request.stop_sequences,
-            tool_choice=request.tool_choice,
-            tools=request.tools,
-            temperature=request.temperature,
-            top_k=request.top_k,
-            top_p=request.top_p,
+        dummy_messages_request = AnthropicMessagesRequest(
+            **request.model_dump(),
             max_tokens=1,
         )
-        chat_req = self._convert_anthropic_to_openai_request(req)
+        chat_req = self._convert_anthropic_to_openai_request(dummy_messages_request)
         result = await self.render_chat_request(chat_req)
         if isinstance(result, ErrorResponse):
             return result
