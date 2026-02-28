@@ -81,14 +81,9 @@ class OutlinesBackend(StructuredOutputBackend):
                 f"Invalid request type for Outlines backend ({request_type!s})"
             )
         index = self._compile_index(regex, self.vocabulary)
-        max_rollback_tokens = (
-            self.vllm_config.speculative_config.num_speculative_tokens
-            if self.vllm_config.speculative_config is not None
-            else 0
-        )
         return OutlinesGrammar(
             vocab_size=self.vocab_size,
-            guide=oc.Guide(index, max_rollback=max_rollback_tokens),
+            guide=oc.Guide(index, max_rollback=self.max_num_spec_tokens),
         )
 
     def allocate_token_bitmask(self, max_num_seqs: int) -> torch.Tensor:
