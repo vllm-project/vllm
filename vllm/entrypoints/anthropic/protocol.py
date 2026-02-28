@@ -180,24 +180,17 @@ class AnthropicMessagesResponse(BaseModel):
 class AnthropicContextManagement(BaseModel):
     """Context management information for token counting."""
 
-    cache_creation_input_tokens: int | None = None
-    cache_read_input_tokens: int | None = None
-    original_input_tokens: int | None = None
+    original_input_tokens: int
 
 
 class AnthropicCountTokensRequest(BaseModel):
     """Anthropic messages.count_tokens request"""
 
     model: str
-    messages: list[AnthropicMessage]
     metadata: dict[str, Any] | None = None
-    stop_sequences: list[str] | None = None
     system: str | list[AnthropicContentBlock] | None = None
-    temperature: float | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
-    top_k: int | None = None
-    top_p: float | None = None
 
     @field_validator("model")
     @classmethod
@@ -211,5 +204,4 @@ class AnthropicCountTokensResponse(BaseModel):
     """Anthropic messages.count_tokens response"""
 
     input_tokens: int
-    output_tokens: int | None = None
     context_management: AnthropicContextManagement | None = None
