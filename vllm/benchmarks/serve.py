@@ -1707,6 +1707,13 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         args.spec_bench_output_len = args.output_len
         args.prefix_repetition_output_len = args.output_len
 
+    # For serving benchmarks that use the ShareGPT dataset, never oversample.
+    # This preserves the legacy behavior where the number of evaluated prompts
+    # is simply the number of surviving samples after filtering, without
+    # duplicating any requests.
+    if getattr(args, "dataset_name", None) == "sharegpt":
+        args.no_oversample = True
+
     # when using random datasets, default to ignoring EOS
     # so generation runs to the requested length
     if (
