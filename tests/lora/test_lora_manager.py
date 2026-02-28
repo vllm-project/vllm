@@ -13,6 +13,7 @@ from vllm.config.lora import LoRAConfig
 from vllm.lora.layers import (
     ColumnParallelLinearWithLoRA,
     MergedColumnParallelLinearWithLoRA,
+    ReplicatedLinearWithLoRA,
     RowParallelLinearWithLoRA,
 )
 from vllm.lora.lora_model import LoRAModel
@@ -130,6 +131,58 @@ def test_replace_submodules(default_vllm_config, dist_init, dummy_model):
     )
     assert isinstance(model.get_submodule("dense2"), RowParallelLinearWithLoRA)
     assert isinstance(model.get_submodule("layer1.dense2"), RowParallelLinearWithLoRA)
+
+
+def test_wrap_replicated_linear_subclasses(default_vllm_config, dist_init, dummy_model):
+    from vllm.model_executor.layers.linear import ReplicatedLinear
+
+    class CustomReplicatedLinear(ReplicatedLinear):
+        pass
+
+    model = dummy_model
+    model.add_module("custom_gate", CustomReplicatedLinear(10, 10, bias=False))
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    assert isinstance(
+        manager.model.get_submodule("custom_gate"), ReplicatedLinearWithLoRA
+    )
+
+
+def test_skip_unsupported_matched_modules(default_vllm_config, dist_init, dummy_model):
+    class UnsupportedContainer(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # This name matches a supported target suffix ("dense1"),
+            # but nn.Linear is not currently a LoRA-wrappable layer type.
+            self.dense1 = nn.Linear(10, 10, bias=False)
+
+    model = dummy_model
+    model.add_module("unsupported", UnsupportedContainer())
+
+    manager = LoRAModelManager(
+        model,
+        1,
+        1,
+        1,
+        LoRAConfig(
+            max_lora_rank=8, max_cpu_loras=8, max_loras=8, lora_dtype=DEFAULT_DTYPE
+        ),
+        torch.device(DEVICES[0]),
+    )
+
+    # Should not crash and should keep unsupported matched modules unchanged.
+    assert isinstance(manager.model.get_submodule("unsupported.dense1"), nn.Linear)
+    assert "unsupported.dense1" not in manager.modules
 
 
 @pytest.mark.parametrize("device", DEVICES)
