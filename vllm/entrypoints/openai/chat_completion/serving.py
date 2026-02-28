@@ -40,6 +40,7 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
     extract_harmony_streaming_delta,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokensDetails,
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
@@ -1321,6 +1322,21 @@ class OpenAIServingChat(OpenAIServing):
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
+            # Count reasoning tokens from accumulated token IDs.
+            num_reasoning_tokens = 0
+            if reasoning_parser and all_previous_token_ids:
+                for token_ids in all_previous_token_ids:
+                    num_reasoning_tokens += reasoning_parser.count_reasoning_tokens(
+                        token_ids
+                    )
+            completion_tokens_details = (
+                CompletionTokensDetails(
+                    reasoning_tokens=num_reasoning_tokens,
+                )
+                if num_reasoning_tokens > 0
+                else None
+            )
+
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
             if include_usage:
@@ -1329,6 +1345,7 @@ class OpenAIServingChat(OpenAIServing):
                     prompt_tokens=num_prompt_tokens,
                     completion_tokens=completion_tokens,
                     total_tokens=num_prompt_tokens + completion_tokens,
+                    completion_tokens_details=completion_tokens_details,
                 )
                 if self.enable_prompt_tokens_details and num_cached_tokens:
                     final_usage.prompt_tokens_details = PromptTokenUsageInfo(
@@ -1354,6 +1371,7 @@ class OpenAIServingChat(OpenAIServing):
                 prompt_tokens=num_prompt_tokens,
                 completion_tokens=num_completion_tokens,
                 total_tokens=num_prompt_tokens + num_completion_tokens,
+                completion_tokens_details=completion_tokens_details,
             )
 
             # Log complete streaming response if output logging is enabled
@@ -1719,11 +1737,21 @@ class OpenAIServingChat(OpenAIServing):
         num_generated_tokens = sum(
             len(output.token_ids) for output in final_res.outputs
         )
+        num_reasoning_tokens = 0
+        if reasoning_parser:
+            for output in final_res.outputs:
+                num_reasoning_tokens += reasoning_parser.count_reasoning_tokens(
+                    output.token_ids
+                )
         usage = UsageInfo(
             prompt_tokens=num_prompt_tokens,
             completion_tokens=num_generated_tokens,
             total_tokens=num_prompt_tokens + num_generated_tokens,
         )
+        if num_reasoning_tokens > 0:
+            usage.completion_tokens_details = CompletionTokensDetails(
+                reasoning_tokens=num_reasoning_tokens,
+            )
         if self.enable_prompt_tokens_details and final_res.num_cached_tokens:
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=final_res.num_cached_tokens
