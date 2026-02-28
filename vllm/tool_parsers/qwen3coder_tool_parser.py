@@ -579,12 +579,19 @@ class Qwen3CoderToolParser(ToolParser):
                     elif func_end_idx != -1:
                         param_end_idx = func_end_idx
                     else:
-                        if self.tool_call_end_token in tool_text:
-                            param_end_idx = len(value_text)
+                        # Fallback for malformed XML where </function>
+                        # is missing. Use </tool_call> as a delimiter
+                        # if present in the value so we don't include
+                        # the closing tag as part of the param value.
+                        tool_end_in_value = value_text.find(
+                            self.tool_call_end_token
+                        )
+                        if tool_end_in_value != -1:
+                            param_end_idx = tool_end_in_value
                         else:
-                            # Parameter incomplete — break instead of
-                            # return so we still emit any fragments
-                            # accumulated by earlier loop iterations.
+                            # Parameter incomplete — break so we still
+                            # emit any fragments accumulated by earlier
+                            # loop iterations.
                             break
 
                 if param_end_idx == -1:
