@@ -386,6 +386,11 @@ class SingleTypeKVCacheManager(ABC):
             removed_blocks.append(blocks[i])
             blocks[i] = self._null_block
         self.block_pool.free_blocks(removed_blocks)
+        # Evict hashes of freed SWA blocks from the prefix cache.
+        # These blocks are outside the sliding window and will never be
+        # looked up again, so keeping their hashes wastes cache capacity
+        # and causes LRU eviction of actually-reusable hashes.
+        self.block_pool.evict_blocks({b.block_id for b in removed_blocks})
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
         """
@@ -581,13 +586,25 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         attention computation since they are outside the sliding window.
         Thus, get_num_skipped_tokens(7) == 4.
 
+        Note: When prefix caching is enabled, we keep one extra block to ensure
+        cache hit compatibility. The lookup uses max_length = num_tokens - 1
+        (from full attention), causing an off-by-one with the eviction boundary.
+        By keeping one extra block, the lookup can find enough contiguous blocks.
+
         Args:
             num_computed_tokens: The number of tokens that have been computed.
 
         Returns:
             The number of tokens that will be skipped for attention computation.
         """
-        return max(0, num_computed_tokens - self.sliding_window + 1)
+        skipped = max(0, num_computed_tokens - self.sliding_window + 1)
+        # Keep one extra block for prefix cache hit compatibility.
+        # Lookup starts at max_num_blocks-1 due to full attention's
+        # max_cache_hit_length = num_tokens-1, creating an off-by-one
+        # with the eviction boundary.
+        if skipped > 0 and self.enable_caching:
+            skipped = max(0, skipped - self.block_size)
+        return skipped
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
