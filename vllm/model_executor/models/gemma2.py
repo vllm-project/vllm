@@ -365,6 +365,10 @@ class Gemma2Model(nn.Module):
                     continue
                 if is_pp_missing_parameter(name, self):
                     continue
+                # Skip parameters not in the model (e.g., GGUF quantization
+                # metadata like qweight_type for embeddings)
+                if name not in params_dict:
+                    continue
                 param = params_dict[name]
                 weight_loader = getattr(param, "weight_loader", default_weight_loader)
                 weight_loader(param, loaded_weight)
