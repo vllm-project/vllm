@@ -28,25 +28,32 @@ except ImportError:
     pd = PlaceholderModule("pandas")
 
 
-SLAVariable = Literal["request_rate", "max_concurrency"]
+WorkloadVariable = Literal["request_rate", "max_concurrency"]
 
 
-def _estimate_sla_value(run_data: dict[str, object], sla_variable: SLAVariable):
+def _estimate_workload_value(
+    run_data: dict[str, object],
+    workload_var: WorkloadVariable,
+):
     request_throughput = float(run_data["request_throughput"])  # type: ignore
-    if sla_variable == "request_rate":
+    if workload_var == "request_rate":
         return request_throughput
-    if sla_variable == "max_concurrency":
+    if workload_var == "max_concurrency":
         mean_latency_ms = float(run_data["mean_e2el_ms"])  # type: ignore
         return request_throughput * mean_latency_ms / 1000
 
-    assert_never(sla_variable)
+    assert_never(workload_var)
 
 
-def _estimate_sla_avg(runs: list[dict[str, object]], sla_variable: SLAVariable):
-    return sum(_estimate_sla_value(run, sla_variable) for run in runs) / len(runs)
+def _estimate_workload_avg(
+    runs: list[dict[str, object]],
+    workload_var: WorkloadVariable,
+):
+    total = sum(_estimate_workload_value(run, workload_var) for run in runs)
+    return total / len(runs)
 
 
-def run_comb_sla(
+def run_comb_workload(
     server: ServerProcess | None,
     bench_cmd: list[str],
     *,
@@ -56,21 +63,21 @@ def run_comb_sla(
     num_runs: int,
     dry_run: bool,
     link_vars: list[tuple[str, str]],
-    sla_variable: SLAVariable,
-    sla_value: int,
+    workload_var: WorkloadVariable,
+    workload_value: int,
 ) -> list[dict[str, object]] | None:
-    bench_comb_sla = bench_comb | {sla_variable: sla_value}
+    bench_comb_workload = bench_comb | {workload_var: workload_value}
 
     return run_comb(
         server,
         bench_cmd,
         serve_comb=serve_comb,
-        bench_comb=bench_comb_sla,
+        bench_comb=bench_comb_workload,
         base_path=_get_comb_base_path(
             output_dir,
             serve_comb,
             bench_comb,
-            extra_parts=("SLA-", f"{sla_variable}={sla_value}"),
+            extra_parts=("WL-", f"{workload_var}={workload_value}"),
         ),
         num_runs=num_runs,
         dry_run=dry_run,
@@ -78,26 +85,26 @@ def run_comb_sla(
     )
 
 
-def explore_sla(
+def explore_workload(
     server: ServerProcess | None,
     bench_cmd: list[str],
     *,
     serve_comb: ParameterSweepItem,
     bench_comb: ParameterSweepItem,
-    sla_variable: SLAVariable,
-    sla_iters: int,
+    workload_var: WorkloadVariable,
+    workload_iters: int,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
     link_vars: list[tuple[str, str]],
 ):
-    print("[SLA START]")
+    print("[WL START]")
     print(f"Serve parameters: {serve_comb.as_text() or '(None)'}")
     print(f"Bench parameters: {bench_comb.as_text() or '(None)'}")
-    print(f"Number of SLA iterations: {sla_iters}")
+    print(f"Number of workload iterations: {workload_iters}")
 
-    if sla_iters < 2:
-        raise ValueError("`sla_iters` should be at least 2")
+    if workload_iters < 2:
+        raise ValueError("`workload_iters` should be at least 2")
 
     dataset_size = DEFAULT_NUM_PROMPTS
     if "num_prompts" in bench_comb:
@@ -113,7 +120,7 @@ def explore_sla(
 
     print(f"Dataset size: {dataset_size}")
 
-    serial_comb_data = run_comb_sla(
+    serial_comb_data = run_comb_workload(
         server,
         bench_cmd,
         serve_comb=serve_comb,
@@ -122,10 +129,10 @@ def explore_sla(
         num_runs=num_runs,
         dry_run=dry_run,
         link_vars=link_vars,
-        sla_variable=sla_variable,
-        sla_value=1,
+        workload_var=workload_var,
+        workload_value=1,
     )
-    batch_comb_data = run_comb_sla(
+    batch_comb_data = run_comb_workload(
         server,
         bench_cmd,
         serve_comb=serve_comb,
@@ -134,32 +141,38 @@ def explore_sla(
         num_runs=num_runs,
         dry_run=dry_run,
         link_vars=link_vars,
-        sla_variable=sla_variable,
-        sla_value=dataset_size,
+        workload_var=workload_var,
+        workload_value=dataset_size,
     )
 
     if serial_comb_data is None or batch_comb_data is None:
         if dry_run:
-            print("Omitting intermediate SLA iterations.")
-            print("[SLA END]")
+            print("Omitting intermediate Workload iterations.")
+            print("[WL END]")
 
         return
 
-    serial_sla_value = math.ceil(_estimate_sla_avg(serial_comb_data, sla_variable))
-    print(f"Serial inference: {sla_variable}={serial_sla_value}")
+    serial_workload_value = math.ceil(
+        _estimate_workload_avg(serial_comb_data, workload_var)
+    )
+    print(f"Serial inference: {workload_var}={serial_workload_value}")
 
-    batch_sla_value = math.floor(_estimate_sla_avg(batch_comb_data, sla_variable))
-    print(f"Batch inference: {sla_variable}={batch_sla_value}")
+    batch_workload_value = math.floor(
+        _estimate_workload_avg(batch_comb_data, workload_var)
+    )
+    print(f"Batch inference: {workload_var}={batch_workload_value}")
 
     # Avoid duplicated runs for intermediate values if the range between
-    # `serial_sla_value` and `batch_sla_value` is small
-    inter_sla_values = np.linspace(serial_sla_value, batch_sla_value, sla_iters)[1:-1]
-    inter_sla_values = sorted(set(map(round, inter_sla_values)))
+    # `serial_workload_value` and `batch_workload_value` is small
+    inter_workload_values = np.linspace(
+        serial_workload_value, batch_workload_value, workload_iters
+    )[1:-1]
+    inter_workload_values = sorted(set(map(round, inter_workload_values)))
 
     inter_combs_data: list[dict[str, object]] = []
-    for inter_sla_value in inter_sla_values:
-        print(f"Exploring: {sla_variable}={inter_sla_value}")
-        inter_comb_data = run_comb_sla(
+    for inter_workload_value in inter_workload_values:
+        print(f"Exploring: {workload_var}={inter_workload_value}")
+        inter_comb_data = run_comb_workload(
             server,
             bench_cmd,
             serve_comb=serve_comb,
@@ -168,18 +181,18 @@ def explore_sla(
             num_runs=num_runs,
             dry_run=dry_run,
             link_vars=link_vars,
-            sla_variable=sla_variable,
-            sla_value=inter_sla_value,
+            workload_var=workload_var,
+            workload_value=inter_workload_value,
         )
         if inter_comb_data is not None:
             inter_combs_data.extend(inter_comb_data)
 
-    print("[SLA END]")
+    print("[WL END]")
 
     return serial_comb_data + inter_combs_data + batch_comb_data
 
 
-def run_slas(
+def run_workloads(
     serve_cmd: list[str],
     bench_cmd: list[str],
     after_bench_cmd: list[str],
@@ -188,17 +201,17 @@ def run_slas(
     server_ready_timeout: int,
     serve_params: ParameterSweep,
     bench_params: ParameterSweep,
-    sla_variable: SLAVariable,
-    sla_iters: int,
+    workload_var: WorkloadVariable,
+    workload_iters: int,
     output_dir: Path,
     num_runs: int,
     dry_run: bool,
     link_vars: list[tuple[str, str]],
 ):
-    if any(bench_comb.has_param(sla_variable) for bench_comb in bench_params):
+    if any(bench_comb.has_param(workload_var) for bench_comb in bench_params):
         raise ValueError(
-            f"You should not override `{sla_variable}` in `bench_params` in SLA mode, "
-            "since it is supposed to be determined automatically."
+            f"You should not override `{workload_var}` in `bench_params` "
+            "since it is supposed to be explored automatically."
         )
 
     all_data = list[dict[str, object]]()
@@ -214,13 +227,13 @@ def run_slas(
             dry_run=dry_run,
         ) as server:
             for bench_comb in bench_params:
-                comb_data = explore_sla(
+                comb_data = explore_workload(
                     server,
                     bench_cmd,
                     serve_comb=serve_comb,
                     bench_comb=bench_comb,
-                    sla_variable=sla_variable,
-                    sla_iters=sla_iters,
+                    workload_var=workload_var,
+                    workload_iters=workload_iters,
                     output_dir=output_dir,
                     num_runs=num_runs,
                     dry_run=dry_run,
@@ -240,13 +253,13 @@ def run_slas(
 
 
 @dataclass
-class SweepServeSLAArgs(SweepServeArgs):
-    sla_variable: SLAVariable
-    sla_iters: int
+class SweepServeWorkloadArgs(SweepServeArgs):
+    workload_var: WorkloadVariable
+    workload_iters: int
 
-    parser_name: ClassVar[str] = "serve_sla"
+    parser_name: ClassVar[str] = "serve_workload"
     parser_help: ClassVar[str] = (
-        "Explore the latency-throughput space for determining SLAs."
+        "Explore the latency-throughput tradeoff for different workload levels."
     )
 
     @classmethod
@@ -256,35 +269,35 @@ class SweepServeSLAArgs(SweepServeArgs):
 
         return cls(
             **asdict(base_args),
-            sla_variable=args.sla_variable,
-            sla_iters=args.sla_iters,
+            workload_var=args.workload_var,
+            workload_iters=args.workload_iters,
         )
 
     @classmethod
     def add_cli_args(cls, parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         parser = super().add_cli_args(parser)
 
-        sla_group = parser.add_argument_group("sla options")
-        sla_group.add_argument(
-            "--sla-variable",
+        workload_group = parser.add_argument_group("workload options")
+        workload_group.add_argument(
+            "--workload-var",
             type=str,
-            choices=get_args(SLAVariable),
+            choices=get_args(WorkloadVariable),
             default="request_rate",
             help="The variable to adjust in each iteration.",
         )
-        sla_group.add_argument(
-            "--sla-iters",
+        workload_group.add_argument(
+            "--workload-iters",
             type=int,
             default=10,
-            help="Number of iterations used to explore the latency-throughput space. "
+            help="Number of workload levels to explore. "
             "This includes the first two iterations used to interpolate the value of "
-            "`sla_variable` for remaining iterations.",
+            "`workload_var` for remaining iterations.",
         )
 
         return parser
 
 
-def run_main(args: SweepServeSLAArgs):
+def run_main(args: SweepServeWorkloadArgs):
     timestamp = args.resume or datetime.now().strftime("%Y%m%d_%H%M%S")
     output_dir = args.output_dir / timestamp
 
@@ -292,7 +305,7 @@ def run_main(args: SweepServeSLAArgs):
         raise ValueError(f"Cannot resume from non-existent directory ({output_dir})")
 
     try:
-        return run_slas(
+        return run_workloads(
             serve_cmd=args.serve_cmd,
             bench_cmd=args.bench_cmd,
             after_bench_cmd=args.after_bench_cmd,
@@ -300,8 +313,8 @@ def run_main(args: SweepServeSLAArgs):
             server_ready_timeout=args.server_ready_timeout,
             serve_params=args.serve_params,
             bench_params=args.bench_params,
-            sla_variable=args.sla_variable,
-            sla_iters=args.sla_iters,
+            workload_var=args.workload_var,
+            workload_iters=args.workload_iters,
             output_dir=output_dir,
             num_runs=args.num_runs,
             dry_run=args.dry_run,
@@ -315,11 +328,11 @@ def run_main(args: SweepServeSLAArgs):
 
 
 def main(args: argparse.Namespace):
-    run_main(SweepServeSLAArgs.from_cli_args(args))
+    run_main(SweepServeWorkloadArgs.from_cli_args(args))
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=SweepServeSLAArgs.parser_help)
-    SweepServeSLAArgs.add_cli_args(parser)
+    parser = argparse.ArgumentParser(description=SweepServeWorkloadArgs.parser_help)
+    SweepServeWorkloadArgs.add_cli_args(parser)
 
     main(parser.parse_args())
