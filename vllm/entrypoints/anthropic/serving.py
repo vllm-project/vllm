@@ -114,187 +114,277 @@ class AnthropicServingMessages(OpenAIServingChat):
     def _convert_anthropic_to_openai_request(
         cls, anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest
     ) -> ChatCompletionRequest:
-        """Convert Anthropic message format to OpenAI format"""
+        """Convert Anthropic message format to OpenAI format."""
+        openai_messages = self._convert_system_message(anthropic_request.system)
+        openai_messages.extend(self._convert_messages(anthropic_request.messages))
+
+        req = self._create_chat_completion_request(anthropic_request, openai_messages)
+        self._convert_tool_choice(anthropic_request, req)
+        self._convert_tools(anthropic_request, req)
+
+        return req
+
+    def _convert_system_message(
+        self, system: str | list[AnthropicContentBlock] | None
+    ) -> list[dict[str, Any]]:
+        """Convert Anthropic system message to OpenAI format."""
+        if not system:
+            return []
+
+        if isinstance(system, str):
+            return [{"role": "system", "content": system}]
+
+        # Handle complex content blocks
+        system_prompt = "".join(
+            block.text for block in system if block.type == "text" and block.text
+        )
+        return [{"role": "system", "content": system_prompt}]
+
+    def _convert_messages(self, messages: list[Any]) -> list[dict[str, Any]]:
+        """Convert Anthropic messages to OpenAI format."""
         openai_messages = []
 
-        # Add system message if provided
-        if anthropic_request.system:
-            if isinstance(anthropic_request.system, str):
-                openai_messages.append(
-                    {"role": "system", "content": anthropic_request.system}
-                )
-            else:
-                system_prompt = ""
-                for block in anthropic_request.system:
-                    if block.type == "text" and block.text:
-                        system_prompt += block.text
-                openai_messages.append({"role": "system", "content": system_prompt})
+        for msg in messages:
+            main_msg, tool_result_msgs = self._convert_single_message(msg)
 
-        for msg in anthropic_request.messages:
-            openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
-            if isinstance(msg.content, str):
-                openai_msg["content"] = msg.content
-            else:
-                # Handle complex content blocks
-                content_parts: list[dict[str, Any]] = []
-                tool_calls: list[dict[str, Any]] = []
-                reasoning_parts: list[str] = []
+            # Add tool result messages first (for user role tool_result)
+            openai_messages.extend(tool_result_msgs)
 
-                for block in msg.content:
-                    if block.type == "text" and block.text:
-                        content_parts.append({"type": "text", "text": block.text})
-                    elif block.type == "image" and block.source:
-                        image_url = cls._convert_image_source_to_url(block.source)
-                        content_parts.append(
-                            {
-                                "type": "image_url",
-                                "image_url": {"url": image_url},
-                            }
-                        )
-                    elif block.type == "thinking" and block.thinking is not None:
-                        reasoning_parts.append(block.thinking)
-                    elif block.type == "tool_use":
-                        # Convert tool use to function call format
-                        tool_call = {
-                            "id": block.id or f"call_{int(time.time())}",
-                            "type": "function",
-                            "function": {
-                                "name": block.name or "",
-                                "arguments": json.dumps(block.input or {}),
-                            },
-                        }
-                        tool_calls.append(tool_call)
-                    elif block.type == "tool_result":
-                        if msg.role == "user":
-                            # Parse tool_result content which can be
-                            # a string or a list of content blocks
-                            # (text, image, etc.)
-                            tool_text = ""
-                            tool_image_urls: list[str] = []
-                            if isinstance(block.content, str):
-                                tool_text = block.content
-                            elif isinstance(block.content, list):
-                                text_parts: list[str] = []
-                                for item in block.content:
-                                    if not isinstance(item, dict):
-                                        continue
-                                    item_type = item.get("type")
-                                    if item_type == "text":
-                                        text_parts.append(item.get("text", ""))
-                                    elif item_type == "image":
-                                        source = item.get("source", {})
-                                        url = cls._convert_image_source_to_url(source)
-                                        if url:
-                                            tool_image_urls.append(url)
-                                tool_text = "\n".join(text_parts)
-                            openai_messages.append(
-                                {
-                                    "role": "tool",
-                                    "tool_call_id": block.tool_use_id or "",
-                                    "content": tool_text or "",
-                                }
-                            )
-                            # OpenAI tool messages only support string
-                            # content, so inject images from tool
-                            # results as a follow-up user message
-                            if tool_image_urls:
-                                openai_messages.append(
-                                    {
-                                        "role": "user",
-                                        "content": [  # type: ignore[dict-item]
-                                            {
-                                                "type": "image_url",
-                                                "image_url": {"url": img},
-                                            }
-                                            for img in tool_image_urls
-                                        ],
-                                    }
-                                )
-                        else:
-                            # Assistant tool result becomes regular text
-                            tool_result_text = (
-                                str(block.content) if block.content else ""
-                            )
-                            content_parts.append(
-                                {
-                                    "type": "text",
-                                    "text": f"Tool result: {tool_result_text}",
-                                }
-                            )
+            # Add the main message if not empty
+            if main_msg is not None:
+                openai_messages.append(main_msg)
 
-                if reasoning_parts:
-                    openai_msg["reasoning"] = "".join(reasoning_parts)
+        return openai_messages
 
-                # Add tool calls to the message if any
-                if tool_calls:
-                    openai_msg["tool_calls"] = tool_calls  # type: ignore
+    def _convert_single_message(
+        self, msg: Any
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Convert a single Anthropic message to OpenAI format.
 
-                # Add content parts if any
-                if content_parts:
-                    if len(content_parts) == 1 and content_parts[0]["type"] == "text":
-                        openai_msg["content"] = content_parts[0]["text"]
-                    else:
-                        openai_msg["content"] = content_parts  # type: ignore
-                elif not tool_calls and not reasoning_parts:
-                    continue
+        Returns:
+            A tuple of (main_message, tool_result_messages).
+        """
+        openai_msg: dict[str, Any] = {"role": msg.role}  # type: ignore
 
-            openai_messages.append(openai_msg)
+        if isinstance(msg.content, str):
+            return (openai_msg, [])
+
+        return self._convert_content_blocks(msg, openai_msg)
+
+    def _convert_content_blocks(
+        self, msg: Any, openai_msg: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        """Convert Anthropic content blocks to OpenAI message format.
+
+        Returns:
+            A tuple of (main_message, tool_result_messages).
+            - main_message: The converted user/assistant message, or None if empty.
+            - tool_result_messages: List of tool result messages (for user role).
+        """
+        content_parts: list[dict[str, Any]] = []
+        tool_calls: list[dict[str, Any]] = []
+        reasoning_parts: list[str] = []
+        tool_result_messages: list[dict[str, Any]] = []
+
+        for block in msg.content:
+            converted = self._convert_content_block(block, msg.role)
+            if converted is None:
+                continue
+
+            block_type, data = converted
+            if block_type == "content":
+                content_parts.append(data)
+            elif block_type == "tool_call":
+                tool_calls.append(data)
+            elif block_type == "reasoning":
+                reasoning_parts.append(data)
+            elif block_type == "tool_result_message":
+                tool_result_messages.append(data)
+
+        # Build the final message
+        if reasoning_parts:
+            openai_msg["reasoning"] = "".join(reasoning_parts)
+
+        if tool_calls:
+            openai_msg["tool_calls"] = tool_calls  # type: ignore
+
+        if content_parts:
+            openai_msg["content"] = self._simplify_content(content_parts)
+        elif not tool_calls and not reasoning_parts:
+            return (None, tool_result_messages)
+
+        return (openai_msg, tool_result_messages)
+
+    def _convert_content_block(
+        self, block: AnthropicContentBlock, msg_role: str
+    ) -> tuple[str, Any] | None:
+        """Convert a single Anthropic content block to OpenAI format.
+
+        Returns:
+            Tuple of (block_type, converted_data) or None if block should be skipped.
+            block_type can be: "content", "tool_call", "reasoning",
+            "tool_result_message"
+        """
+        if block.type == "text" and block.text:
+            return ("content", {"type": "text", "text": block.text})
+
+        if block.type == "image" and block.source:
+            image_url = self._convert_image_source_to_url(block.source)
+            return (
+                "content",
+                {
+                    "type": "image_url",
+                    "image_url": {"url": image_url},
+                },
+            )
+
+        if block.type == "thinking" and block.thinking is not None:
+            return ("reasoning", block.thinking)
+
+        if block.type == "tool_use":
+            tool_call = {
+                "id": block.id or f"call_{int(time.time())}",
+                "type": "function",
+                "function": {
+                    "name": block.name or "",
+                    "arguments": json.dumps(block.input or {}),
+                },
+            }
+            return ("tool_call", tool_call)
+
+        if block.type == "tool_result":
+            return self._convert_tool_result(block, msg_role)
+
+        return None
+
+    def _convert_tool_result(
+        self, block: AnthropicContentBlock, msg_role: str
+    ) -> tuple[str, Any] | None:
+        """Convert Anthropic tool_result block to OpenAI format."""
+        if msg_role == "user":
+            # Parse tool_result content which can be
+            # a string or a list of content blocks
+            # (text, image, etc.)
+            tool_text = ""
+            tool_image_urls: list[str] = []
+            if isinstance(block.content, str):
+                tool_text = block.content
+            elif isinstance(block.content, list):
+                text_parts: list[str] = []
+                for item in block.content:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = item.get("type")
+                    if item_type == "text":
+                        text_parts.append(item.get("text", ""))
+                    elif item_type == "image":
+                        source = item.get("source", {})
+                        url = self._convert_image_source_to_url(source)
+                        if url:
+                            tool_image_urls.append(url)
+                tool_text = "\n".join(text_parts)
+            return (
+                "tool_result_message",
+                {
+                    "role": "tool",
+                    "tool_call_id": block.tool_use_id or "",
+                    "content": tool_text or "",
+                },
+            )
+
+        # Assistant tool result becomes regular text
+        tool_result_text = str(block.content) if block.content else ""
+        return (
+            "content",
+            {"type": "text", "text": f"Tool result: {tool_result_text}"},
+        )
+
+    @staticmethod
+    def _simplify_content(
+        content_parts: list[dict[str, Any]],
+    ) -> str | list[dict[str, Any]]:
+        """Simplify content: return string if single text block, else return list."""
+        if len(content_parts) == 1 and content_parts[0]["type"] == "text":
+            return content_parts[0]["text"]
+        return content_parts  # type: ignore
+
+    @staticmethod
+    def _create_chat_completion_request(
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        messages: list[dict[str, Any]],
+    ) -> ChatCompletionRequest:
+        """Create ChatCompletionRequest from Anthropic request."""
         if isinstance(anthropic_request, AnthropicCountTokensRequest):
-            req = ChatCompletionRequest(
+            return ChatCompletionRequest(
                 model=anthropic_request.model,
-                messages=openai_messages,
+                messages=messages,
             )
-        else:
-            req = ChatCompletionRequest(
-                model=anthropic_request.model,
-                messages=openai_messages,
-                max_tokens=anthropic_request.max_tokens,
-                max_completion_tokens=anthropic_request.max_tokens,
-                stop=anthropic_request.stop_sequences,
-                temperature=anthropic_request.temperature,
-                top_p=anthropic_request.top_p,
-                top_k=anthropic_request.top_k,
-            )
-            if anthropic_request.stream:
-                req.stream = anthropic_request.stream
-                req.stream_options = StreamOptions.model_validate(
-                    {"include_usage": True, "continuous_usage_stats": True}
-                )
 
-        if anthropic_request.tool_choice is None:
+        req = ChatCompletionRequest(
+            model=anthropic_request.model,
+            messages=messages,
+            max_tokens=anthropic_request.max_tokens,
+            max_completion_tokens=anthropic_request.max_tokens,
+            stop=anthropic_request.stop_sequences,
+            temperature=anthropic_request.temperature,
+            top_p=anthropic_request.top_p,
+            top_k=anthropic_request.top_k,
+        )
+
+        if anthropic_request.stream:
+            req.stream = anthropic_request.stream
+            req.stream_options = StreamOptions.model_validate(
+                {"include_usage": True, "continuous_usage_stats": True}
+            )
+
+        return req
+
+    @staticmethod
+    def _convert_tool_choice(
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        req: ChatCompletionRequest,
+    ) -> None:
+        """Convert Anthropic tool_choice to OpenAI format."""
+        tool_choice = anthropic_request.tool_choice
+        if tool_choice is None:
             req.tool_choice = None
-        elif anthropic_request.tool_choice.type == "auto":
+        elif tool_choice.type == "auto":
             req.tool_choice = "auto"
-        elif anthropic_request.tool_choice.type == "any":
+        elif tool_choice.type == "any":
             req.tool_choice = "required"
-        elif anthropic_request.tool_choice.type == "tool":
+        elif tool_choice.type == "tool":
             req.tool_choice = ChatCompletionNamedToolChoiceParam.model_validate(
                 {
                     "type": "function",
-                    "function": {"name": anthropic_request.tool_choice.name},
+                    "function": {"name": tool_choice.name},
                 }
             )
 
-        tools = []
+    @staticmethod
+    def _convert_tools(
+        anthropic_request: AnthropicMessagesRequest | AnthropicCountTokensRequest,
+        req: ChatCompletionRequest,
+    ) -> None:
+        """Convert Anthropic tools to OpenAI format."""
         if anthropic_request.tools is None:
-            return req
-        for tool in anthropic_request.tools:
-            tools.append(
-                ChatCompletionToolsParam.model_validate(
-                    {
-                        "type": "function",
-                        "function": {
-                            "name": tool.name,
-                            "description": tool.description,
-                            "parameters": tool.input_schema,
-                        },
-                    }
-                )
+            return
+
+        req.tools = [
+            ChatCompletionToolsParam.model_validate(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.input_schema,
+                    },
+                }
             )
+            for tool in anthropic_request.tools
+        ]
+
         if req.tool_choice is None:
             req.tool_choice = "auto"
-        req.tools = tools
-        return req
 
     async def create_messages(
         self,

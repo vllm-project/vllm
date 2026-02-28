@@ -187,7 +187,7 @@ class AnthropicCountTokensRequest(BaseModel):
     """Anthropic messages.count_tokens request"""
 
     model: str
-    metadata: dict[str, Any] | None = None
+    messages: list[AnthropicMessage]
     system: str | list[AnthropicContentBlock] | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
