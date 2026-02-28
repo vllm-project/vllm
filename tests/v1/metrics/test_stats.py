@@ -1,7 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
-from vllm.v1.metrics.stats import IterationStats, PromptTokenStats, RequestStateStats
+import pytest
+
+from vllm.v1.engine import EngineCoreOutput, FinishReason
+from vllm.v1.metrics.stats import (
+    IterationStats,
+    LoRARequestStates,
+    PromptTokenStats,
+    RequestStateStats,
+)
 
 
 def test_iteration_stats_repr():
@@ -209,3 +216,114 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.local_cache_hit == 0
     assert stats.external_kv_transfer == 1000
     assert stats.recomputed_tokens == 1
+
+
+def _apply_decode_step(
+    req_stats, draft_tokens=0, accepted_tokens=0, num_new_tokens=1, ts=2.0
+):
+    """Feed one decode step into IterationStats and return updated req_stats."""
+    output = EngineCoreOutput(
+        request_id="req-0",
+        new_token_ids=list(range(num_new_tokens)),
+        spec_decode_num_draft_tokens=draft_tokens,
+        spec_decode_num_accepted_tokens=accepted_tokens,
+    )
+    IterationStats().update_from_output(
+        output=output,
+        engine_core_timestamp=ts,
+        is_prefilling=False,
+        prompt_len=100,
+        req_stats=req_stats,
+        lora_states=LoRARequestStates(log_stats=False),
+        lora_name=None,
+    )
+    return req_stats
+
+
+def _fresh_req_stats():
+    rs = RequestStateStats(arrival_time=0.0)
+    rs.last_token_ts = 1.0
+    return rs
+
+
+def test_request_state_stats_spec_decode_defaults():
+    """RequestStateStats initializes spec decode fields to zero."""
+    rs = RequestStateStats()
+    assert (rs.num_spec_decode_steps, rs.num_draft_tokens, rs.num_accepted_tokens) == (
+        0,
+        0,
+        0,
+    )
+
+
+@pytest.mark.parametrize(
+    "draft, accepted, expect_steps, expect_draft, expect_accepted",
+    [
+        (5, 3, 1, 5, 3),  # partial acceptance
+        (4, 0, 1, 4, 0),  # all rejected
+        (5, 5, 1, 5, 5),  # all accepted
+        (0, 0, 0, 0, 0),  # no spec decode
+    ],
+    ids=["partial", "all_rejected", "all_accepted", "no_spec"],
+)
+def test_spec_decode_stats_single_step(
+    draft,
+    accepted,
+    expect_steps,
+    expect_draft,
+    expect_accepted,
+):
+    rs = _apply_decode_step(
+        _fresh_req_stats(), draft_tokens=draft, accepted_tokens=accepted
+    )
+    assert (rs.num_spec_decode_steps, rs.num_draft_tokens, rs.num_accepted_tokens) == (
+        expect_steps,
+        expect_draft,
+        expect_accepted,
+    )
+
+
+def test_spec_decode_stats_accumulate_across_steps():
+    """Stats accumulate correctly across multiple spec decode steps."""
+    rs = _fresh_req_stats()
+    _apply_decode_step(rs, draft_tokens=5, accepted_tokens=3, ts=2.0)
+    _apply_decode_step(rs, draft_tokens=3, accepted_tokens=2, ts=3.0)
+    assert (rs.num_spec_decode_steps, rs.num_draft_tokens, rs.num_accepted_tokens) == (
+        2,
+        8,
+        5,
+    )
+
+
+def test_spec_decode_stats_mixed_with_non_spec_steps():
+    """Non-spec steps interleaved with spec steps only count spec steps."""
+    rs = _fresh_req_stats()
+    _apply_decode_step(rs, ts=2.0)  # normal
+    _apply_decode_step(rs, draft_tokens=3, accepted_tokens=2, ts=3.0)  # spec
+    _apply_decode_step(rs, ts=4.0)  # normal
+    assert (rs.num_spec_decode_steps, rs.num_draft_tokens, rs.num_accepted_tokens) == (
+        1,
+        3,
+        2,
+    )
+    assert rs.num_generation_tokens == 3  # 1 + 1 + 1
+
+
+def test_engine_core_output_spec_decode_fields():
+    """EngineCoreOutput defaults spec decode fields to 0 and stores values."""
+    default = EngineCoreOutput(request_id="r", new_token_ids=[1])
+    assert (
+        default.spec_decode_num_draft_tokens,
+        default.spec_decode_num_accepted_tokens,
+    ) == (0, 0)
+
+    explicit = EngineCoreOutput(
+        request_id="r",
+        new_token_ids=[1, 2, 3],
+        spec_decode_num_draft_tokens=5,
+        spec_decode_num_accepted_tokens=3,
+    )
+    assert (
+        explicit.spec_decode_num_draft_tokens,
+        explicit.spec_decode_num_accepted_tokens,
+    ) == (5, 3)
