@@ -89,7 +89,6 @@ class CudaGraphManager:
         model: nn.Module,
         model_state: ModelState,
         input_buffers: InputBuffers,
-        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -116,9 +115,6 @@ class CudaGraphManager:
         model_inputs = {
             "input_ids": input_buffers.input_ids[:num_tokens],
             "positions": input_buffers.positions[:num_tokens],
-            "inputs_embeds": (
-                inputs_embeds[:num_tokens] if inputs_embeds is not None else None
-            ),
             # NOTE: Values returned by `prepare_dummy_inputs` will override the
             # default values above.
             **model_state.prepare_dummy_inputs(num_reqs, num_tokens),
@@ -255,7 +251,6 @@ class CudaGraphManager:
         model: nn.Module,
         model_state: ModelState,
         input_buffers: InputBuffers,
-        inputs_embeds: torch.Tensor | None,
         block_tables: BlockTables,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
@@ -267,7 +262,6 @@ class CudaGraphManager:
             model=model,
             model_state=model_state,
             input_buffers=input_buffers,
-            inputs_embeds=inputs_embeds,
             block_tables=block_tables,
             attn_groups=attn_groups,
             kv_cache_config=kv_cache_config,
