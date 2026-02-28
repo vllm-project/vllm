@@ -1420,6 +1420,18 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         replace_parameter(layer, "w2_weight_scale_2", w2_scale_2)
         replace_parameter(layer, "w2_input_scale", a2_scale)
 
+        # Pre-compute g1/g2 alphas as registered parameters so EPLB
+        # rearranges them alongside expert weights. Without this, the
+        # quant config caches g1_alphas = a_scale * w_scale_2 once at
+        # init, and EPLB's in-place rearrangement of w_scale_2 leaves
+        # the cached product stale, corrupting dequantization.
+        if self.nvfp4_backend not in (
+            NvFp4MoeBackend.FLASHINFER_TRTLLM,
+            NvFp4MoeBackend.MARLIN,
+        ):
+            replace_parameter(layer, "g1_alphas", a13_scale * w13_scale_2)
+            replace_parameter(layer, "g2_alphas", a2_scale * w2_scale_2)
+
         # Setup modular kernel for TP case and naive DP/EP case.
         # In non-naive DP/EP case, we will create a ModularKernelMethod.
         # TODO(rob): unify these so FP8MoEMethod owns the ModularKernel
@@ -1473,6 +1485,8 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
+            g1_alphas=getattr(layer, "g1_alphas", None),
+            g2_alphas=getattr(layer, "g2_alphas", None),
         )
 
     @property
