@@ -60,6 +60,28 @@ def _create_mtp_proposer(num_speculative_tokens: int) -> EagleProposer:
     return EagleProposer(vllm_config=vllm_config, device=current_platform.device_type)
 
 
+def test_mtp_glm47_fp8_is_blocked_to_avoid_cuda_illegal_access():
+    """Fail fast for the known crashy combo (GLM-4.7-FP8 + MTP) instead of
+    letting it hit a CUDA illegal memory access at runtime."""
+
+    class _DummyTextConfig:
+        model_type = "glm4"
+
+    class _DummyModelConfig:
+        model = "zai-org/GLM-4.7-FP8"
+        hf_text_config = _DummyTextConfig()
+        # Keep this unset; the guard keys off the model id string.
+        quantization = None
+
+    with pytest.raises(ValueError, match=r"vllm-project/vllm#32090"):
+        SpeculativeConfig(
+            target_model_config=_DummyModelConfig(),
+            target_parallel_config=ParallelConfig(),
+            method="mtp",
+            num_speculative_tokens=1,
+        )
+
+
 @mock.patch("vllm.v1.spec_decode.eagle.get_pp_group")
 @mock.patch("vllm.v1.spec_decode.eagle.get_layers_from_vllm_config")
 @mock.patch("vllm.v1.spec_decode.eagle.get_model")
