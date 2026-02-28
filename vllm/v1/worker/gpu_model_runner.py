@@ -1233,8 +1233,7 @@ class GPUModelRunner(
 
             # Add spec_token_ids to token_ids_cpu.
             self.input_batch.update_req_spec_token_ids(req_state, scheduled_spec_tokens)
-            # Restore scheduler-side draft count after ngram trimming,
-            # so next-step num_computed_tokens correction stays accurate.
+            # Restore scheduler-side draft count after ngram trimming.
             if original_num_spec_per_req:
                 orig = original_num_spec_per_req.get(req_id, 0)
                 if orig != req_state.prev_num_draft_len:
@@ -1466,24 +1465,29 @@ class GPUModelRunner(
         max_flattened_index = -1
         total_num_spec_tokens = 0
         scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
-        prev_draft_row_stride = self.num_spec_tokens
-        draft_token_ids = self._draft_token_ids
-        if isinstance(draft_token_ids, torch.Tensor) and draft_token_ids.ndim >= 2:
-            prev_draft_row_stride = draft_token_ids.shape[1]
 
         for req_id, cur_index in self.input_batch.req_id_to_index.items():
             if (prev_index := prev_req_id_to_index.get(req_id)) is not None:
                 prev_common_req_indices.append(prev_index)
-                # Build flattened destination/source indices
-                # for sampled and draft tokens.
+                # We need to compute the flattened input_ids index of the
+                # last token in each common request.
                 draft_len = len(scheduled_spec_tokens.get(req_id, ()))
                 total_num_spec_tokens += draft_len
                 flattened_index = cu_num_tokens[cur_index].item() - 1
+                # example: cu_num_tokens = [2, 5, 8], draft_tokens = [1, 2, 2]
+                # sample_flattened_indices = [0, 2, 5]
+                # spec_flattened_indices = [1,   3, 4,    6, 7]
                 sample_flattened_indices.append(flattened_index - draft_len)
                 spec_flattened_indices.extend(
                     range(flattened_index - draft_len + 1, flattened_index + 1)
                 )
-                start = prev_index * prev_draft_row_stride
+                start = prev_index * self.num_spec_tokens
+                # prev_draft_token_indices is used to find which draft_tokens_id
+                # should be copied to input_ids
+                # example: prev draft_tokens_id [[1,2], [3,4], [5, 6]]
+                # flatten draft_tokens_id [1,2,3,4,5,6]
+                # draft_len of each request [1, 2, 1]
+                # then prev_draft_token_indices is [0,   2, 3,   4]
                 prev_draft_token_indices.extend(range(start, start + draft_len))
                 indices_match &= prev_index == flattened_index
                 max_flattened_index = max(max_flattened_index, flattened_index)
@@ -3883,8 +3887,6 @@ class GPUModelRunner(
                     self._copy_valid_sampled_token_count(
                         next_token_ids, valid_sampled_tokens_count
                     )
-                    # Since we couldn't run the drafter,
-                    # just use zeros for the draft tokens.
                     self._draft_token_ids = torch.zeros(
                         1, device=self.device, dtype=torch.int32
                     ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
