@@ -10,11 +10,13 @@ from humming import dtypes
 from humming.layer import HummingLayerMeta, HummingMethod
 
 from vllm import envs
-from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.batch_invariant import (
     vllm_is_batch_invariant,
 )
-from vllm.model_executor.layers.fused_moe.activation import apply_moe_activation
+from vllm.model_executor.layers.fused_moe.activation import (
+    MoEActivation,
+    apply_moe_activation,
+)
 from vllm.model_executor.layers.fused_moe.layer import (
     FusedMoE,
     FusedMoEConfig,
@@ -769,7 +771,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
             outputs_flat = torch.empty(
                 (inputs_flat.size(0), inputs_flat.size(1) // 2),
                 dtype=inputs_flat.dtype,
-                device=inputs.device
+                device=inputs.device,
             )
         else:
             outputs_flat = torch.empty_like(inputs_flat)
