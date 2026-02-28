@@ -70,6 +70,18 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
 
     reorder_batch_threshold: int = 1
 
+    use_spec_decode: bool
+    use_full_cuda_graph: bool
+    decode_cudagraph_max_bs: int
+    spec_state_indices_tensor: torch.Tensor
+    non_spec_state_indices_tensor: torch.Tensor
+    spec_sequence_masks: torch.Tensor
+    spec_token_indx: torch.Tensor
+    non_spec_token_indx: torch.Tensor
+    spec_query_start_loc: torch.Tensor
+    non_spec_query_start_loc: torch.Tensor
+    num_accepted_tokens: torch.Tensor
+
     def __init__(
         self,
         kv_cache_spec: AttentionSpec,
@@ -321,6 +333,7 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             and num_decodes == 0
             and num_spec_decodes <= self.decode_cudagraph_max_bs
             and num_spec_decode_tokens <= self.decode_cudagraph_max_bs
+            and spec_sequence_masks is not None
         ):
             self.spec_state_indices_tensor[:num_spec_decodes].copy_(
                 spec_state_indices_tensor, non_blocking=True

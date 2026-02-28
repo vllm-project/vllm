@@ -977,6 +977,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Early-out for cascade attention
         if use_cascade:
+            assert num_blocks_np is not None
             # Grab the blocks of the shared prefix from the first request.
             num_common_kv_blocks = common_prefix_len // page_size
 
@@ -1122,6 +1123,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     max_seq_len=max_seq_len,
                 )
             else:
+                assert seq_lens_cpu is not None
                 pure_decode = num_prefills == 0
                 use_cudagraph = (
                     self.enable_cuda_graph
