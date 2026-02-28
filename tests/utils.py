@@ -1107,9 +1107,6 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
 
     @functools.wraps(func)
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
-        # Make the process the leader of its own process group
-        # to avoid sending SIGTERM to the parent process
-        os.setpgrp()
         from _pytest.outcomes import Skipped
 
         # Create a unique temporary file to store exception info from child
@@ -1132,6 +1129,10 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
                 # Parent process responsible for deleting, don't delete
                 # in child.
                 delete_after.pop_all()
+                # Isolate the child process group so killpg() does not target
+                # the parent process group.
+                with suppress(PermissionError):
+                    os.setpgrp()
                 try:
                     func(*args, **kwargs)
                 except Skipped as e:
@@ -1168,12 +1169,13 @@ def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, Non
                 else:
                     os._exit(0)
             else:
-                pgid = os.getpgid(pid)
+                pgid = pid
                 _pid, _exitcode = os.waitpid(pid, 0)
                 # ignore SIGTERM signal itself
                 old_signal_handler = signal.signal(signal.SIGTERM, signal.SIG_IGN)
                 # kill all child processes
-                os.killpg(pgid, signal.SIGTERM)
+                with suppress(ProcessLookupError, PermissionError):
+                    os.killpg(pgid, signal.SIGTERM)
                 # restore the signal handler
                 signal.signal(signal.SIGTERM, old_signal_handler)
                 if _exitcode != 0:
