@@ -548,10 +548,7 @@ class Qwen3CoderToolParser(ToolParser):
             # preceded it. Using a loop with ``break`` instead ensures
             # we emit every complete parameter before yielding control.
             json_fragments = []
-            while (
-                not self.in_param
-                and self.param_count < len(param_starts)
-            ):
+            while not self.in_param and self.param_count < len(param_starts):
                 param_idx = param_starts[self.param_count]
                 param_start = param_idx + len(self.parameter_prefix)
                 remaining = tool_text[param_start:]
@@ -583,9 +580,7 @@ class Qwen3CoderToolParser(ToolParser):
                         # is missing. Use </tool_call> as a delimiter
                         # if present in the value so we don't include
                         # the closing tag as part of the param value.
-                        tool_end_in_value = value_text.find(
-                            self.tool_call_end_token
-                        )
+                        tool_end_in_value = value_text.find(self.tool_call_end_token)
                         if tool_end_in_value != -1:
                             param_end_idx = tool_end_in_value
                         else:
@@ -606,9 +601,7 @@ class Qwen3CoderToolParser(ToolParser):
 
                 param_config = self._get_arguments_config(
                     self.current_function_name or "",
-                    self.streaming_request.tools
-                    if self.streaming_request
-                    else None,
+                    self.streaming_request.tools if self.streaming_request else None,
                 )
 
                 converted_value = self._convert_param_value(
@@ -618,18 +611,12 @@ class Qwen3CoderToolParser(ToolParser):
                     self.current_function_name or "",
                 )
 
-                serialized_value = json.dumps(
-                    converted_value, ensure_ascii=False
-                )
+                serialized_value = json.dumps(converted_value, ensure_ascii=False)
 
                 if self.param_count == 0:
-                    json_fragment = (
-                        f'"{current_param_name}": {serialized_value}'
-                    )
+                    json_fragment = f'"{current_param_name}": {serialized_value}'
                 else:
-                    json_fragment = (
-                        f', "{current_param_name}": {serialized_value}'
-                    )
+                    json_fragment = f', "{current_param_name}": {serialized_value}'
 
                 self.param_count += 1
                 json_fragments.append(json_fragment)
@@ -638,9 +625,7 @@ class Qwen3CoderToolParser(ToolParser):
                 combined = "".join(json_fragments)
 
                 if self.current_tool_index < len(self.streamed_args_for_tool):
-                    self.streamed_args_for_tool[self.current_tool_index] += (
-                        combined
-                    )
+                    self.streamed_args_for_tool[self.current_tool_index] += combined
                 else:
                     logger.warning(
                         "streamed_args_for_tool out of sync: index=%d len=%d",
@@ -669,9 +654,7 @@ class Qwen3CoderToolParser(ToolParser):
                 func_start = tool_text.find(self.tool_call_prefix) + len(
                     self.tool_call_prefix
                 )
-                func_content_end = tool_text.find(
-                    self.function_end_token, func_start
-                )
+                func_content_end = tool_text.find(self.function_end_token, func_start)
                 if func_content_end != -1:
                     func_content = tool_text[func_start:func_content_end]
                     try:
@@ -681,31 +664,24 @@ class Qwen3CoderToolParser(ToolParser):
                             if self.streaming_request
                             else None,
                         )
-                        if parsed_tool:
-                            if self.current_tool_index < len(
-                                self.prev_tool_call_arr
-                            ):
-                                self.prev_tool_call_arr[
-                                    self.current_tool_index
-                                ]["arguments"] = (
-                                    parsed_tool.function.arguments
-                                )
+                        if parsed_tool and self.current_tool_index < len(
+                            self.prev_tool_call_arr
+                        ):
+                            self.prev_tool_call_arr[self.current_tool_index][
+                                "arguments"
+                            ] = parsed_tool.function.arguments
                     except Exception:
                         logger.debug(
-                            "Failed to parse tool call during "
-                            "streaming: %s",
+                            "Failed to parse tool call during streaming: %s",
                             tool_text,
                             exc_info=True,
                         )
 
                 if self.current_tool_index < len(self.streamed_args_for_tool):
-                    self.streamed_args_for_tool[
-                        self.current_tool_index
-                    ] += "}"
+                    self.streamed_args_for_tool[self.current_tool_index] += "}"
                 else:
                     logger.warning(
-                        "streamed_args_for_tool out of sync: "
-                        "index=%d len=%d",
+                        "streamed_args_for_tool out of sync: index=%d len=%d",
                         self.current_tool_index,
                         len(self.streamed_args_for_tool),
                     )
