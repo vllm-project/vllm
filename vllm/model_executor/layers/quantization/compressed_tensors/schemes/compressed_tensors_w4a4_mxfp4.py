@@ -8,19 +8,15 @@ from torch.nn.parameter import Parameter
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
-from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
-    apply_fp4_marlin_linear,
-    prepare_fp4_layer_for_marlin,
-)
 from vllm.model_executor.parameter import (
     GroupQuantScaleParameter,
     ModelWeightParameter,
 )
 
-__all__ = ["CompressedTensorsW4A16Mxfp4"]
+__all__ = ["CompressedTensorsW4A4MXFp4"]
 
 
-class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
+class CompressedTensorsW4A4MXFp4(CompressedTensorsScheme):
     """
     Compressed tensors scheme for MXFP4 weight-only quantization.
 
@@ -33,8 +29,9 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
     - No global scale (unlike NVFP4)
     """
 
-    def __init__(self):
+    def __init__(self, use_marlin: bool = False):
         self.group_size = 32
+        self.use_marlin = use_marlin
 
     @classmethod
     def get_min_capability(cls) -> int:
@@ -82,11 +79,8 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
         layer.register_parameter("weight_scale", weight_scale)
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # Rename weight_packed to weight that marlin expects
         layer.weight = Parameter(layer.weight_packed.data, requires_grad=False)
         del layer.weight_packed
-
-        prepare_fp4_layer_for_marlin(layer)
 
     def apply_weights(
         self,
@@ -94,13 +88,45 @@ class CompressedTensorsW4A16Mxfp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        return apply_fp4_marlin_linear(
-            input=x,
-            weight=layer.weight,
-            weight_scale=layer.weight_scale,
-            weight_global_scale=None,
-            workspace=layer.workspace,
-            size_n=layer.output_size_per_partition,
-            size_k=layer.input_size_per_partition,
-            bias=bias,
+        """
+        if self.use_marlin:
+            return apply_fp4_marlin_linear(
+                input=x,
+                weight=layer.weight,
+                weight_scale=layer.weight_scale,
+                weight_global_scale=None,
+                workspace=layer.workspace,
+                size_n=layer.output_size_per_partition,
+                size_k=layer.input_size_per_partition,
+                bias=bias,
+            )
+        """
+
+        from flashinfer import mxfp4_quantize
+
+        from vllm.utils.flashinfer import flashinfer_scaled_fp4_mm
+
+        input_shape = x.shape
+        x_2d = x.view(-1, input_shape[-1])
+        x_mxfp4_packed, x_scales_e8m0 = mxfp4_quantize(x_2d)
+
+        # mxfp4_quantize returns swizzled scales which cudnn backend expects
+
+        output = flashinfer_scaled_fp4_mm(
+            x_mxfp4_packed,
+            layer.weight,
+            x_scales_e8m0,
+            layer.weight_scale,
+            alpha=None,  # No global scale for MXFP4
+            out_dtype=x.dtype,
+            backend="auto",
+            block_size=self.group_size,
+            use_nvfp4=False,
         )
+
+        # Add bias if present
+        if bias is not None:
+            output = output + bias
+
+        # Reshape output back to original batch dimensions
+        return output.view(*input_shape[:-1], -1)

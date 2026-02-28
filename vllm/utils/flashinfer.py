@@ -454,10 +454,12 @@ if has_flashinfer():
         B: torch.Tensor,
         A_scale: torch.Tensor,
         B_scale: torch.Tensor,
-        g_scale: torch.Tensor,
+        g_scale: torch.Tensor | None,
         dtype: torch.dtype,
         use_8x4_sf_layout: bool,
         backend: str,
+        block_size: int = 16,
+        use_nvfp4: bool = True,
     ) -> torch.Tensor:
         from flashinfer import mm_fp4 as flashinfer_mm_fp4_
 
@@ -468,9 +470,10 @@ if has_flashinfer():
             B_scale,
             g_scale,
             dtype,
-            block_size=16,
+            block_size=block_size,
             use_8x4_sf_layout=use_8x4_sf_layout,
             backend=backend,
+            use_nvfp4=use_nvfp4,
         )
 
     @torch.library.register_fake(
@@ -639,6 +642,8 @@ def flashinfer_scaled_fp4_mm(
     alpha: torch.Tensor,
     out_dtype: torch.dtype,
     backend: str,
+    block_size: int = 16,
+    use_nvfp4: bool = True,
 ) -> torch.Tensor:
     assert a.ndim == 2 and b.ndim == 2
     assert block_scale_a.ndim == 2 and block_scale_b.ndim == 2
@@ -660,6 +665,8 @@ def flashinfer_scaled_fp4_mm(
         out_dtype,
         use_8x4_sf_layout=use_8x4_sf_layout,
         backend=backend,
+        block_size=block_size,
+        use_nvfp4=use_nvfp4,
     )
 
 
