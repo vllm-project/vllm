@@ -1420,6 +1420,25 @@ def init_distributed_environment(
             rank=rank,
             timeout=timeout,
         )
+        if enable_elastic_ep:
+            tp_pp_cpu_group = torch.distributed.new_group(
+                backend="gloo", timeout=timeout
+            )
+            if _node_count(tp_pp_cpu_group) > 1:
+                # NOTE(yongji): StatelessGroupCoordinator uses data_parallel_master_ip
+                # to initialize all DP/EP groups, hence all ranks within TP/PP group
+                # must reside on the same node
+                raise RuntimeError(
+                    "Elastic EP is not yet supported with multi-node TP/PP"
+                )
+
+    # set the local rank
+    # local_rank is not available in torch ProcessGroup,
+    # see https://github.com/pytorch/pytorch/issues/122816
+    if local_rank == -1:
+        # local rank not set, this usually happens in single-node
+        # setting, where we can use rank as local rank
+        local_rank = envs.LOCAL_RANK if distributed_init_method == "env://" else rank
 
     global _WORLD, _NODE_COUNT, _INNER_DP_WORLD
     if enable_elastic_ep:
