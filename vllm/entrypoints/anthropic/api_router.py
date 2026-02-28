@@ -58,7 +58,6 @@ def translate_error_response(response: ErrorResponse) -> JSONResponse:
 @with_cancellation
 @load_aware_call
 async def create_messages(request: AnthropicMessagesRequest, raw_request: Request):
-
     handler = messages(raw_request)
     if handler is None:
         base_server = raw_request.app.state.openai_serving_tokenization

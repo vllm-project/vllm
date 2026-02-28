@@ -12,7 +12,6 @@ import uuid
 from collections.abc import AsyncGenerator
 from typing import Any
 
-import jinja2
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
@@ -692,7 +691,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
         _, engine_prompts = result
 
-        input_tokens = sum(
+        input_tokens = sum(  # type: ignore
             len(prompt["prompt_token_ids"])
             for prompt in engine_prompts
             if "prompt_token_ids" in prompt
