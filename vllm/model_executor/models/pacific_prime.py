@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+# SPDX-FileCopyrightText: Copyright INL Dynamics / Complexity-ML
 """
 Pacific-Prime / Complexity model for vLLM inference.
 
@@ -19,13 +20,10 @@ from collections.abc import Iterable
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from transformers import PretrainedConfig
 
 from vllm.config import CacheConfig, VllmConfig
-from vllm.distributed import (
-    get_tensor_model_parallel_world_size,
-)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -34,9 +32,13 @@ from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
     RowParallelLinear,
 )
+from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
-from vllm.model_executor.layers.token_routed_i64 import TokenRoutedMLP
+from vllm.model_executor.layers.token_routed_i64 import (
+    INLDynamics,
+    TokenRoutedMLP,
+)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -44,86 +46,24 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.sequence import IntermediateTensors
 
-# =============================================================================
-# INL Dynamics
-# =============================================================================
+from .interfaces import SupportsPP
+from .utils import (
+    AutoWeightsLoader,
+    PPMissingLayer,
+    extract_layer_index,
+    make_empty_intermediate_tensors_factory,
+    make_layers,
+    maybe_prefix,
+)
 
-
-class INLDynamics(nn.Module):
-    """
-    INL (Inertial Navigation Layer) Dynamics for numerical stability.
-
-    Implements PID-like control with velocity tracking:
-        mu(h) = mu_base + mu_proj(h)
-        error = h - mu(h)
-        v_next = alpha * v - beta * error
-        h_next = h + dt * gate * v_next
-
-    Parameters alpha, beta, gate are learned via controller MLP
-    and clamped to [0, 1] via sigmoid for training stability.
-    """
-
-    def __init__(
-        self,
-        hidden_size: int,
-        controller_hidden: int = 64,
-        dt: float = 0.1,
-    ):
-        super().__init__()
-        self.hidden_size = hidden_size
-        self.dt = dt
-
-        # Learnable equilibrium
-        self.mu = nn.Parameter(torch.zeros(hidden_size))
-        self.mu_proj = nn.Linear(hidden_size, hidden_size, bias=False)
-        nn.init.zeros_(self.mu_proj.weight)
-
-        # Controller MLP
-        self.controller_in = nn.Linear(hidden_size * 2, controller_hidden)
-        self.controller_out = nn.Linear(controller_hidden, hidden_size * 3)
-
-        with torch.no_grad():
-            bias = self.controller_out.bias
-            bias[:hidden_size].fill_(2.2)
-            bias[hidden_size : hidden_size * 2].fill_(-2.2)
-            bias[hidden_size * 2 :].fill_(0.0)
-            self.controller_out.weight.normal_(0, 0.01)
-
-    def forward(
-        self,
-        h: torch.Tensor,
-        v: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        if v is None:
-            v = torch.zeros_like(h)
-
-        hv = torch.cat([h, v], dim=-1)
-        ctrl = F.silu(self.controller_in(hv))
-        ctrl_out = self.controller_out(ctrl)
-
-        alpha_raw, beta_raw, gate_raw = torch.split(ctrl_out, self.hidden_size, dim=-1)
-        alpha = torch.sigmoid(alpha_raw)
-        beta = torch.clamp(F.softplus(beta_raw), max=2.0)
-        gate = torch.sigmoid(gate_raw)
-
-        mu_contextual = self.mu + self.mu_proj(h)
-        error = h - mu_contextual
-        v_next = alpha * v - beta * error
-        v_next = torch.clamp(v_next, min=-10.0, max=10.0)
-        h_next = h + self.dt * gate * v_next
-
-        return h_next, v_next, mu_contextual
-
-
-# TokenRoutedMLP imported from vllm.model_executor.layers.token_routed_i64
 
 # =============================================================================
-# Standard MLP (fallback)
+# Standard MLP (fallback when token-routed is disabled)
 # =============================================================================
 
 
 class ComplexityMLP(nn.Module):
-    """Standard MLP with SiLU activation."""
+    """Standard SwiGLU MLP using vLLM parallel layers."""
 
     def __init__(
         self,
@@ -164,6 +104,9 @@ class ComplexityMLP(nn.Module):
 class ComplexityAttention(nn.Module):
     """
     Complexity attention with mu-guidance and GQA support.
+
+    Mu-guidance: the mu vector from INL Dynamics biases Q/K/V
+    projections, providing top-down control from previous layers.
     """
 
     def __init__(
@@ -215,7 +158,7 @@ class ComplexityAttention(nn.Module):
             prefix=f"{prefix}.v_proj",
         )
 
-        # Mu-guided projections
+        # Mu-guided projections (output matches TP-sharded Q/K/V sizes)
         self.mu_to_q = nn.Linear(
             hidden_size, self.num_heads * self.head_dim, bias=False
         )
@@ -237,7 +180,7 @@ class ComplexityAttention(nn.Module):
             prefix=f"{prefix}.o_proj",
         )
 
-        # RoPE - vLLM v1 API
+        # RoPE
         self.rotary_emb = get_rope(
             head_size=self.head_dim,
             max_position=max_position_embeddings,
@@ -252,7 +195,7 @@ class ComplexityAttention(nn.Module):
             self.q_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
             self.k_norm = RMSNorm(self.head_dim, eps=rms_norm_eps)
 
-        # Attention
+        # Attention (uses vLLM PagedAttention / FlashAttention)
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -273,7 +216,7 @@ class ComplexityAttention(nn.Module):
         k, _ = self.k_proj(hidden_states)
         v, _ = self.v_proj(hidden_states)
 
-        # Mu-guidance
+        # Mu-guidance: bias Q/K/V with previous layer's equilibrium
         if mu_prev is not None:
             q = q + self.mu_to_q(mu_prev)
             k = k + self.mu_to_k(mu_prev)
@@ -291,10 +234,10 @@ class ComplexityAttention(nn.Module):
         # RoPE
         q, k = self.rotary_emb(positions, q, k)
 
-        # Attention
+        # Attention (PagedAttention via vLLM)
         attn_output = self.attn(q, k, v)
 
-        # Output
+        # Output projection
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -305,7 +248,7 @@ class ComplexityAttention(nn.Module):
 
 
 class ComplexityDecoderLayer(nn.Module):
-    """Complexity decoder layer with INL dynamics."""
+    """Complexity decoder layer: Attention → INL Dynamics → MLP."""
 
     def __init__(
         self,
@@ -400,7 +343,7 @@ class ComplexityDecoderLayer(nn.Module):
 
 
 class ComplexityModel(nn.Module):
-    """Complexity transformer model."""
+    """Complexity transformer model with INL dynamics threading."""
 
     def __init__(
         self,
@@ -416,46 +359,63 @@ class ComplexityModel(nn.Module):
         self.config = config
         self.vocab_size = config.vocab_size
 
-        # Handle prefix correctly (avoid leading dot when prefix is empty)
-        embed_prefix = f"{prefix}.embed_tokens" if prefix else "embed_tokens"
         self.embed_tokens = VocabParallelEmbedding(
             config.vocab_size,
             config.hidden_size,
-            prefix=embed_prefix,
+            prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
-        self.layers = nn.ModuleList(
-            [
-                ComplexityDecoderLayer(
-                    config=config,
-                    cache_config=cache_config,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.layers.{i}" if prefix else f"layers.{i}",
-                )
-                for i in range(config.num_hidden_layers)
-            ]
+        self.start_layer, self.end_layer, self.layers = make_layers(
+            config.num_hidden_layers,
+            lambda prefix: ComplexityDecoderLayer(
+                config=config,
+                cache_config=cache_config,
+                quant_config=quant_config,
+                prefix=prefix,
+            ),
+            prefix=maybe_prefix(prefix, "layers"),
         )
 
         rms_norm_eps = getattr(config, "rms_norm_eps", 1e-6)
-        self.norm = RMSNorm(config.hidden_size, eps=rms_norm_eps)
+        if get_pp_group().is_last_rank:
+            self.norm = RMSNorm(config.hidden_size, eps=rms_norm_eps)
+        else:
+            self.norm = PPMissingLayer()
+
+        self.make_empty_intermediate_tensors = (
+            make_empty_intermediate_tensors_factory(
+                ["hidden_states", "velocity_states", "mu_prev", "mu_residual"],
+                config.hidden_size,
+            )
+        )
 
     def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
-    ) -> torch.Tensor:
-        if inputs_embeds is not None:
-            hidden_states = inputs_embeds
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
+        if get_pp_group().is_first_rank:
+            if inputs_embeds is not None:
+                hidden_states = inputs_embeds
+            else:
+                hidden_states = self.embed_tokens(input_ids)
+            velocity_states = torch.zeros_like(hidden_states)
+            mu_prev = None
+            mu_residual = None
         else:
-            hidden_states = self.embed_tokens(input_ids)
-        velocity_states = torch.zeros_like(hidden_states)
+            assert intermediate_tensors is not None
+            hidden_states = intermediate_tensors["hidden_states"]
+            velocity_states = intermediate_tensors["velocity_states"]
+            mu_prev = intermediate_tensors.get("mu_prev")
+            mu_residual = intermediate_tensors.get("mu_residual")
 
-        mu_prev = None
-        mu_residual = None
+        for i in range(self.start_layer, self.end_layer):
+            layer = self.layers[i]
+            if isinstance(layer, PPMissingLayer):
+                continue
 
-        for layer in self.layers:
             hidden_states, velocity_states, mu_current = layer(
                 positions=positions,
                 hidden_states=hidden_states,
@@ -470,8 +430,19 @@ class ComplexityModel(nn.Module):
                 mu_residual = mu_residual + mu_current
             mu_prev = mu_current + 0.1 * mu_residual
 
+        if not get_pp_group().is_last_rank:
+            return IntermediateTensors({
+                "hidden_states": hidden_states,
+                "velocity_states": velocity_states,
+                "mu_prev": mu_prev,
+                "mu_residual": mu_residual,
+            })
+
         hidden_states = self.norm(hidden_states)
         return hidden_states
+
+    def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
+        return self.embed_tokens(input_ids)
 
 
 # =============================================================================
@@ -479,13 +450,17 @@ class ComplexityModel(nn.Module):
 # =============================================================================
 
 
-class ComplexityForCausalLM(nn.Module):
+class ComplexityForCausalLM(nn.Module, SupportsPP):
     """
     Complexity model for causal language modeling.
-    Compatible with vLLM inference engine.
+
+    Compatible with vLLM inference engine. Uses:
+    - LogitsProcessor for correct TP logits gathering
+    - Pipeline Parallelism via SupportsPP interface
+    - AutoWeightsLoader for standard weight loading
     """
 
-    # No packed modules - Q/K/V are separate, MLP uses TokenRoutedMLP
+    # No packed modules — Q/K/V are separate, MLP uses TokenRoutedMLP
     packed_modules_mapping = {}
 
     supported_lora_modules = [
@@ -515,66 +490,66 @@ class ComplexityForCausalLM(nn.Module):
         self.config = config
         self.quant_config = quant_config
 
-        # Handle prefix correctly (avoid leading dot when prefix is empty)
-        model_prefix = f"{prefix}.model" if prefix else "model"
-
         self.model = ComplexityModel(
             vllm_config=vllm_config,
-            prefix=model_prefix,
+            prefix=maybe_prefix(prefix, "model"),
         )
 
-        if getattr(config, "tie_word_embeddings", True):
-            self.lm_head = self.model.embed_tokens
-        else:
-            lm_head_prefix = f"{prefix}.lm_head" if prefix else "lm_head"
-            self.lm_head = ParallelLMHead(
-                config.vocab_size,
-                config.hidden_size,
-                quant_config=quant_config,
-                prefix=lm_head_prefix,
+        if get_pp_group().is_last_rank:
+            if getattr(config, "tie_word_embeddings", True):
+                self.lm_head = self.model.embed_tokens
+            else:
+                self.lm_head = ParallelLMHead(
+                    config.vocab_size,
+                    config.hidden_size,
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "lm_head"),
+                )
+
+            logit_scale = getattr(config, "logit_scale", 1.0)
+            self.logits_processor = LogitsProcessor(
+                config.vocab_size, scale=logit_scale
             )
+        else:
+            self.lm_head = PPMissingLayer()
+
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
 
     def forward(
         self,
         input_ids: torch.Tensor | None,
         positions: torch.Tensor,
-        inputs_embeds: torch.Tensor | None = None,
         intermediate_tensors: IntermediateTensors | None = None,
-    ) -> torch.Tensor:
+        inputs_embeds: torch.Tensor | None = None,
+    ) -> torch.Tensor | IntermediateTensors:
         hidden_states = self.model(
             input_ids=input_ids,
             positions=positions,
-            inputs_embeds=inputs_embeds,
             intermediate_tensors=intermediate_tensors,
+            inputs_embeds=inputs_embeds,
         )
         return hidden_states
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
-        """Embed input tokens - required for vLLM v1 generate runner."""
-        return self.model.embed_tokens(input_ids)
+        return self.model.embed_input_ids(input_ids)
 
     def compute_logits(
         self,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | None:
-        """Compute logits from hidden states - vLLM v1 API."""
-        # vLLM v1 uses simpler logits computation
-        if isinstance(self.lm_head, VocabParallelEmbedding):
-            # Tied embeddings case
-            logits = F.linear(hidden_states, self.lm_head.weight)
-        else:
-            logits = self.lm_head(hidden_states)
+        logits = self.logits_processor(self.lm_head, hidden_states)
         return logits
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load weights from checkpoint.
 
-        Pacific-Prime checkpoint structure mirrors model exactly:
-        - lm_head.weight -> model.embed_tokens.weight (tied embeddings)
-        - self_attn.q_proj, k_proj, v_proj (separate, not fused)
-        - layers.*.mlp.gate_up_proj -> TokenRoutedMLP expert weights
-        - layers.*.mlp.down_proj -> TokenRoutedMLP expert weights
-        - layers.*.mlp.token_to_expert -> buffer (not a parameter)
+        Handles:
+        - Tied embeddings (lm_head.weight → embed_tokens.weight)
+        - TokenRoutedMLP expert weights with TP sharding
+        - token_to_expert buffer (non-parameter)
+        - Standard vLLM weight loading for all other parameters
         """
         params_dict = dict(self.named_parameters())
         buffers_dict = dict(self.named_buffers())
@@ -583,31 +558,25 @@ class ComplexityForCausalLM(nn.Module):
         for name, loaded_weight in weights:
             orig_name = name
 
-            # Skip rotary_emb.inv_freq - vLLM computes this
+            # Skip rotary_emb.inv_freq — vLLM computes this
             if "rotary_emb.inv_freq" in name:
                 loaded_params.add(orig_name)
                 continue
 
-            # Handle tied embeddings: both lm_head.weight and model.embed_tokens.weight
-            # map to the same parameter (model.embed_tokens.weight)
+            # Handle tied embeddings
             if name == "lm_head.weight":
-                embed_name = "model.embed_tokens.weight"
-                if embed_name in params_dict:
-                    param = params_dict[embed_name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-                    loaded_params.add(orig_name)
-                    # Mark embed_tokens as loaded too (tied embeddings)
-                    loaded_params.add(embed_name)
-                continue
-
-            # Skip model.embed_tokens.weight if already loaded via lm_head.weight (tied)
-            if name == "model.embed_tokens.weight":
-                if name in loaded_params:
+                if getattr(self.config, "tie_word_embeddings", True):
+                    embed_name = "model.embed_tokens.weight"
+                    if embed_name in params_dict:
+                        param = params_dict[embed_name]
+                        weight_loader = getattr(
+                            param, "weight_loader", default_weight_loader
+                        )
+                        weight_loader(param, loaded_weight)
+                        loaded_params.add(orig_name)
+                        loaded_params.add(embed_name)
                     continue
-                # If not yet loaded, load it directly
+                # Untied: load into lm_head directly
                 if name in params_dict:
                     param = params_dict[name]
                     weight_loader = getattr(
@@ -615,6 +584,10 @@ class ComplexityForCausalLM(nn.Module):
                     )
                     weight_loader(param, loaded_weight)
                     loaded_params.add(orig_name)
+                continue
+
+            # Skip embed_tokens if already loaded via tied lm_head
+            if name == "model.embed_tokens.weight" and name in loaded_params:
                 continue
 
             # Handle token_to_expert buffer
@@ -624,16 +597,13 @@ class ComplexityForCausalLM(nn.Module):
                     loaded_params.add(orig_name)
                 continue
 
-            # Handle TokenRoutedMLP weights - TP-aware sharding via I64 layer
+            # Handle TokenRoutedMLP weights — TP-aware sharding
             if ".mlp.gate_up_proj" in name or ".mlp.down_proj" in name:
                 if name in params_dict:
                     param = params_dict[name]
-                    # Find the TokenRoutedMLP module for this layer
-                    # e.g. "model.layers.0.mlp.gate_up_proj" -> layer 0
-                    parts = name.split(".")
-                    layer_idx = int(parts[2])
+                    layer_idx = extract_layer_index(name)
                     mlp = self.model.layers[layer_idx].mlp
-                    param_name = parts[-1]  # "gate_up_proj" or "down_proj"
+                    param_name = name.rsplit(".", 1)[-1]
                     if isinstance(mlp, TokenRoutedMLP):
                         mlp.load_tp_weight(param_name, param, loaded_weight)
                     else:
@@ -642,7 +612,7 @@ class ComplexityForCausalLM(nn.Module):
                     loaded_params.add(orig_name)
                 continue
 
-            # Direct parameter loading (q_proj, k_proj, v_proj, o_proj, norms, etc.)
+            # Standard parameter loading (Q/K/V/O projections, norms, etc.)
             if name not in params_dict:
                 continue
             param = params_dict[name]
@@ -653,5 +623,5 @@ class ComplexityForCausalLM(nn.Module):
         return loaded_params
 
 
-# Alias for HuggingFace compatibility
+# HuggingFace compatibility alias
 DeepForCausalLM = ComplexityForCausalLM

@@ -28,6 +28,9 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
     tensor_model_parallel_all_reduce,
 )
+from vllm.model_executor.layers.token_routed_i64.fused_experts import (
+    fused_token_routed_forward,
+)
 
 
 class TokenRoutedMLP(nn.Module):
@@ -150,45 +153,18 @@ class TokenRoutedMLP(nn.Module):
         """
         Process tokens through LOCAL experts only.
         expert_ids are local (0..local_num_experts-1).
+
+        Uses fused dispatch: BMM for small batches (decode),
+        chunked sort-and-matmul for large batches (prefill).
         """
-        num_tokens = x.shape[0]
-
-        # Sort by expert for coalesced memory access
-        sorted_indices = expert_ids.argsort(stable=True)
-        sorted_x = x[sorted_indices]
-        sorted_expert_ids = expert_ids[sorted_indices]
-
-        # Expert boundaries
-        expert_counts = torch.bincount(
-            sorted_expert_ids, minlength=self.local_num_experts
+        return fused_token_routed_forward(
+            x,
+            self.gate_up_proj,
+            self.down_proj,
+            expert_ids,
+            self.local_num_experts,
+            self.intermediate_per_tp,
         )
-        expert_offsets = torch.zeros(
-            self.local_num_experts + 1, dtype=torch.long, device=x.device
-        )
-        torch.cumsum(expert_counts, dim=0, out=expert_offsets[1:])
-
-        # Expert computation (sorted chunks)
-        output = torch.empty(
-            num_tokens, self.hidden_size, device=x.device, dtype=x.dtype
-        )
-
-        for eid in range(self.local_num_experts):
-            start = expert_offsets[eid].item()
-            end = expert_offsets[eid + 1].item()
-            if start == end:
-                continue
-
-            chunk = sorted_x[start:end]
-            gu = chunk @ self.gate_up_proj[eid]
-            gate = gu[..., : self.intermediate_per_tp]
-            up = gu[..., self.intermediate_per_tp :]
-            inter = F.silu(gate) * up
-            output[start:end] = inter @ self.down_proj[eid]
-
-        # Unsort to input order
-        final_output = torch.empty_like(output)
-        final_output[sorted_indices] = output
-        return final_output
 
     def forward(
         self,
