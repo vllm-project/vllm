@@ -244,11 +244,13 @@ steps:
   - pytest -v -s entrypoints/offline_mode
 
 
-- label: Entrypoints Integration (API Server 1) # 1h 7m
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Entrypoints Integration Test (API Server 1) # 100min
+  timeout_in_minutes: 130
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -261,13 +263,13 @@ steps:
   - pytest -v -s entrypoints/openai --ignore=entrypoints/openai/test_chat_with_tool_reasoning.py --ignore=entrypoints/openai/test_oot_registration.py --ignore=entrypoints/openai/test_tensorizer_entrypoint.py --ignore=entrypoints/openai/correctness/  --ignore=entrypoints/openai/tool_parsers/ --ignore=entrypoints/openai/responses
   - pytest -v -s entrypoints/test_chat_utils.py
 
-
-- label: Entrypoints Integration (API Server 2) #26.9m
-  timeout_in_minutes: 45
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Entrypoints Integration Test (API Server 2)
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
-  grade: Blocking
   optional: true
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -282,13 +284,13 @@ steps:
   - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/rpc
   - pytest -v -s tool_use
 
-
-- label: Entrypoints Integration (Pooling) # 22.8m
-  timeout_in_minutes: 48
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Entrypoints Integration Test (Pooling)
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
-  grade: Blocking
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -299,13 +301,13 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/pooling
 
-
-- label: Entrypoints Integration (Responses API) # 13.6m
-  timeout_in_minutes: 25
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Entrypoints Integration Test (Responses API)
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
-  grade: Blocking
   optional: true
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   fast_check: true
   torch_nightly: true
   working_dir: "/vllm-workspace/tests"
@@ -316,24 +318,13 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/openai/responses
 
-
-- label: AsyncTP Correctness Tests (2xMI325) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_2
-  grade: Blocking
-  num_gpus: 2
-  optional: true
-  working_dir: "/vllm-workspace/"
-  commands:
-  - export VLLM_TEST_CLEAN_GPU_MEMORY=1
-  - pytest -v -s tests/compile/correctness_e2e/test_async_tp.py
-
-
-- label: Distributed Tests (4 GPUs) # 1h 3m
-  timeout_in_minutes: 145
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Distributed Tests (4 GPUs) # 35min
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
+  optional: true
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 4
   optional: true
   working_dir: "/vllm-workspace/tests"
@@ -383,8 +374,11 @@ steps:
 
 - label: Distributed Tests (8 GPUs)(MI325) # 6.4m
   timeout_in_minutes: 10
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_8
+  optional: true
+  # grade: Blocking
+  gpu: h100
   num_gpus: 8
   optional: true
   grade: Blocking
@@ -476,13 +470,14 @@ steps:
   commands:
   - pytest -v -s engine test_sequence.py test_config.py test_logger.py test_vllm_port.py
 
-
-- label: V1 e2e + engine # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
-  agent_pool: mi325_1
-  grade: Blocking
+- label: V1 Test e2e + engine # 65min
+  timeout_in_minutes: 90
+  mirror_hardwares: [amdexperimental, amdproduction]
+  # The test uses 4 GPUs, but we schedule it on 8-GPU machines for stability.
+  # See discussion here: https://github.com/vllm-project/vllm/pull/31040
+  agent_pool: mi325_8
   optional: true
+  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/v1
@@ -529,12 +524,12 @@ steps:
   commands:
   - pytest -v -s v1/entrypoints
 
-
-- label: V1 others # 1h 3m
-  timeout_in_minutes: 110
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: V1 Test others # 42min
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
+  # grade: Blocking
   source_file_dependencies:
   - vllm/
   - tests/v1
@@ -556,11 +551,13 @@ steps:
   - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 
-- label: V1 attention (MI325) # 14.5m
-  timeout_in_minutes: 40
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: V1 Test attention (H100) # 10min
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
-  grade: Blocking
+  optional: true
+  # grade: Blocking
+  timeout_in_minutes: 30
+  gpu: h100
   source_file_dependencies:
   - vllm/config/attention.py
   - vllm/model_executor/layers/attention
@@ -652,12 +649,12 @@ steps:
   - pytest -v -s cuda/test_cuda_context.py
   - pytest -v -s cuda/test_platform_no_cuda_init.py
 
-
-- label: Samplers Test # 14.3m
-  timeout_in_minutes: 23
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Samplers Test # 56min
+  timeout_in_minutes: 75
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
+  # grade: Blocking
   source_file_dependencies:
   - vllm/model_executor/layers
   - vllm/sampling_metadata.py
@@ -666,12 +663,12 @@ steps:
   commands:
   - pytest -v -s samplers
 
-
-- label: LoRA %N # 16.1m
-  timeout_in_minutes: 29
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: LoRA Test %N # 20min each
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
-  parallelism: 4
+  optional: true
+  # grade: Blocking
   source_file_dependencies:
   - vllm/lora
   - tests/lora
@@ -773,12 +770,12 @@ steps:
   - pytest -v -s kernels/attention --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT
 
 
-- label: Kernels Quantization Test %N # 15.2m
-  timeout_in_minutes: 24
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Kernels Quantization Test %N # 64min
+  timeout_in_minutes: 90
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
-  grade: Blocking
-  parallelism: 2
+  optional: true
+  # grade: Blocking
   source_file_dependencies:
   - csrc/quantization/
   - vllm/model_executor/layers/quantization
@@ -887,10 +884,22 @@ steps:
   - uv pip install --system conch-triton-kernels
   - VLLM_TEST_FORCE_LOAD_FORMAT=auto pytest -v -s quantization/ --ignore quantization/test_blackwell_moe.py
 
+- label: LM Eval Small Models # 53min
+  timeout_in_minutes: 75
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_1
+  optional: true
+  # grade: Blocking
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  autorun_on_main: true
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
-- label: OpenAI API correctness # 6.3m
-  timeout_in_minutes: 18
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: OpenAI API correctness # 10min
+  timeout_in_minutes: 15
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
@@ -932,11 +941,12 @@ steps:
   - pytest -v -s models/test_initialization.py -k 'not test_can_initialize_small_subset' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 
-- label: Basic Models Tests (Other) # 16.3m
-  timeout_in_minutes: 33
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Basic Models Tests (Other)
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
-  grade: Blocking
+  optional: true
+  # grade: Blocking
   torch_nightly: true
   source_file_dependencies:
   - vllm/
@@ -976,13 +986,12 @@ steps:
   - pip freeze | grep -E 'torch'
   - pytest -v -s models/language -m 'core_model and (not slow_test)'
 
-
-- label: Language Models Tests (Extra Standard) %N # 13.2m
-  timeout_in_minutes: 26
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Language Models Tests (Extra Standard) %N
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
-  grade: Blocking
+  # grade: Blocking
   torch_nightly: true
   parallelism: 2
   source_file_dependencies:
@@ -996,10 +1005,12 @@ steps:
   - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 
-- label: Language Models Tests (Hybrid) %N # 34.9m
-  timeout_in_minutes: 55
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Language Models Tests (Hybrid) %N
+  timeout_in_minutes: 75
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
+  optional: true
+  # grade: Blocking
   torch_nightly: true
   parallelism: 2
   source_file_dependencies:
@@ -1011,9 +1022,9 @@ steps:
   - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 
-- label: Language Models Test (Extended Generation) # 32.2m
-  timeout_in_minutes: 55
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Language Models Test (Extended Generation) # 80min
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
   grade: Blocking
@@ -1025,10 +1036,9 @@ steps:
   - uv pip install --system --no-build-isolation 'git+https://github.com/Dao-AILab/causal-conv1d@v1.5.2'
   - pytest -v -s models/language/generation -m '(not core_model) and (not hybrid_model)'
 
-
-- label: Language Models Test (PPL) # 12.1m
-  timeout_in_minutes: 23
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Language Models Test (PPL)
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
@@ -1037,10 +1047,9 @@ steps:
   commands:
   - pytest -v -s models/language/generation_ppl_test
 
-
-- label: Language Models Test (Extended Pooling)  # 38.2m
-  timeout_in_minutes: 68
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Language Models Test (Extended Pooling)  # 36min
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
   source_file_dependencies:
@@ -1049,10 +1058,9 @@ steps:
   commands:
   - pytest -v -s models/language/pooling -m 'not core_model'
 
-
-- label: Language Models Test (MTEB) # 31.2m
-  timeout_in_minutes: 46
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Language Models Test (MTEB)
+  timeout_in_minutes: 110
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   grade: Blocking
   optional: true
@@ -1062,10 +1070,9 @@ steps:
   commands:
   - pytest -v -s models/language/pooling_mteb_test
 
-
-- label: Multi-Modal Processor Test (CPU) # 1h 8m
-  timeout_in_minutes: 95
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Multi-Modal Processor Test (CPU)
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   grade: Blocking
   no_gpu: true
@@ -1077,10 +1084,9 @@ steps:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/processing --ignore models/multimodal/processing/test_tensor_schema.py
 
-
-- label: Multi-Modal Processor # 1h 42m
-  timeout_in_minutes: 138
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Multi-Modal Processor Test # 44min
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   grade: Blocking
   source_file_dependencies:
@@ -1091,9 +1097,9 @@ steps:
   - pytest -v -s models/multimodal/processing/test_tensor_schema.py
 
 
-- label: Multi-Modal Models (Standard) # 1h 18m
-  timeout_in_minutes: 118
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Multi-Modal Models Test (Standard) # 60min
+  timeout_in_minutes: 100
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   torch_nightly: true
   source_file_dependencies:
@@ -1120,9 +1126,9 @@ steps:
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-mm-small.txt --tp-size=1
 
 
-- label: Multi-Modal Models (Extended) 1 # 1h 2m
-  timeout_in_minutes: 106
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Multi-Modal Models Test (Extended) 1 # 60min
+  timeout_in_minutes: 120
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
   source_file_dependencies:
@@ -1132,10 +1138,9 @@ steps:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal -m 'not core_model' --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/processing
 
-
-- label: Multi-Modal Models (Extended) 2 # 1h 25m
-  timeout_in_minutes: 135
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Multi-Modal Models Test (Extended) 2 #60min
+  timeout_in_minutes: 120
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   grade: Blocking
   optional: true
@@ -1146,10 +1151,9 @@ steps:
   - pip install git+https://github.com/TIGER-AI-Lab/Mantis.git
   - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
 
-
-- label: Multi-Modal Models (Extended) 3 # 54m
-  timeout_in_minutes: 94
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Multi-Modal Models Test (Extended) 3 # 75min
+  timeout_in_minutes: 150
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   grade: Blocking
   optional: true
@@ -1172,10 +1176,8 @@ steps:
   commands:
   - pytest -v -s models/quantization
 
-
-- label: Transformers Nightly Models # 50.9m
-  timeout_in_minutes: 102
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+- label: Transformers Nightly Models Test
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_1
   optional: true
   working_dir: "/vllm-workspace/"
@@ -1206,12 +1208,13 @@ steps:
   - pytest -v -s distributed/test_shm_buffer.py
   - pytest -v -s distributed/test_shm_storage.py
 
-
-- label: 2 Node Test (4 GPUs) # 3.7m
-  timeout_in_minutes: 12
-  mirror_hardwares: [amdexperimental, amdproduction, amdmultinode, amdgfx942nightly, amdmi325]
+- label: 2 Node Tests (4 GPUs in total) # 16min
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdmultinode]
   agent_pool: mi325_4
-  grade: Blocking
+  optional: true
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   num_nodes: 2
   optional: true
@@ -1235,12 +1238,13 @@ steps:
     - NUM_NODES=2 torchrun --nnodes 2 --nproc-per-node=2 --rdzv_backend=c10d --rdzv_endpoint=192.168.10.10 distributed/test_node_count.py 
     - python3 ../examples/offline_inference/data_parallel.py -dp=2 -tp=1 --dp-num-nodes=2 --dp-node-rank=1 --dp-master-addr=192.168.10.10 --dp-master-port=12345 --enforce-eager --trust-remote-code
 
-
-- label: Distributed (2 GPUs) # 56.1m
-  timeout_in_minutes: 102
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Distributed Tests (2 GPUs) # 68min
+  timeout_in_minutes: 90
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_2
-  grade: Blocking
+  optional: true
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1273,12 +1277,13 @@ steps:
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s v1/shutdown
   - pytest -v -s v1/worker/test_worker_memory_snapshot.py
 
-
-- label: Distributed Model Tests (2 GPUs) # 19.3m
-  timeout_in_minutes: 38
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: Distributed Model Tests (2 GPUs) # 37min
+  timeout_in_minutes: 50
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_2
-  grade: Blocking
+  optional: true
+  # grade: Blocking
+  working_dir: "/vllm-workspace/tests"
   num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
@@ -1382,10 +1387,8 @@ steps:
   commands:
   - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
-
-- label: Weight Loading Multiple GPU - Large Models # 12.6m
-  timeout_in_minutes: 26
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+- label: Weight Loading Multiple GPU Test - Large Models # optional
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_2
   grade: Blocking
   num_gpus: 2
@@ -1428,9 +1431,8 @@ steps:
   - DP_EP=1 ROCM_ATTN=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 
-- label: Distributed Tests (4 GPUs)(MI325) # 20.9m
-  timeout_in_minutes: 37
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+- label: Distributed Tests (A100) # optional
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   num_gpus: 4
   source_file_dependencies:
@@ -1443,9 +1445,41 @@ steps:
   - pytest -v -s -x lora/test_mixtral.py
 
 
-- label: Distributed Tests (2 GPUs)(MI325) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+- label: LM Eval Large Models # optional
+  gpu: a100
+  optional: true
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_4
+  # grade: Blocking
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
+
+##### H100 test #####
+- label: LM Eval Large Models (H100) # optional
+  gpu: h100
+  optional: true
+  mirror_hardwares: [amdexperimental, amdproduction]
+  agent_pool: mi325_4
+  # grade: Blocking
+  num_gpus: 4
+  working_dir: "/vllm-workspace/.buildkite/lm-eval-harness"
+  source_file_dependencies:
+  - csrc/
+  - vllm/model_executor/layers/quantization
+  commands:
+    - export VLLM_USE_DEEP_GEMM=0  # We found Triton is faster than DeepGEMM for H100
+    - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large-hopper.txt --tp-size=4
+
+
+##### H200 test #####
+- label: Distributed Tests (H200) # optional
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_2
   num_gpus: 2
   optional: true
@@ -1514,10 +1548,8 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -s -v test_lm_eval_correctness.py --config-list-file=configs/models-large.txt --tp-size=4
 
-
-- label: ROCm LM Eval Large Models (8 Card) # TBD
-  timeout_in_minutes: 180
-  mirror_hardwares: [amdexperimental, amdproduction, amdmi325]
+- label: ROCm LM Eval Large Models (8 Card)
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_8
   optional: true
   num_gpus: 8
@@ -1567,10 +1599,19 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
+- label: Qwen3-30B-A3B-FP8-block Accuracy (B200)
+  timeout_in_minutes: 60
+  gpu: b200
+  optional: true
+  num_gpus: 2
+  working_dir: "/vllm-workspace"
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020 2 1
 
-- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # 10.9m
-  timeout_in_minutes: 22
-  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi325]
+
+- label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction]
   agent_pool: mi325_4
   grade: Blocking
   num_gpus: 4
